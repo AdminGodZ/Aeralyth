@@ -11,7 +11,7 @@ async fn main() -> std::io::Result<()> {
     let config = config::Config::from_env();
     let bind_addr = config.bind_addr();
 
-    log::info!("starting Aeralith API on {bind_addr}");
+    log::info!("starting Aeralyth API on {bind_addr}");
 
     HttpServer::new(move || {
         App::new()

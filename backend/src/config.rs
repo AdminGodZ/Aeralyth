@@ -10,8 +10,8 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Self {
-        let host = env::var("AERALITH_API_HOST").unwrap_or_else(|_| "0.0.0.0".to_owned());
-        let port = env::var("AERALITH_API_PORT")
+        let host = env::var("AERALYTH_API_HOST").unwrap_or_else(|_| "0.0.0.0".to_owned());
+        let port = env::var("AERALYTH_API_PORT")
             .ok()
             .and_then(|value| value.parse::<u16>().ok())
             .unwrap_or(8080);
@@ -19,7 +19,7 @@ impl Config {
             .ok()
             .filter(|value| !value.trim().is_empty());
         let storage_path =
-            env::var("AERALITH_STORAGE_PATH").unwrap_or_else(|_| "./data/files".to_owned());
+            env::var("AERALYTH_STORAGE_PATH").unwrap_or_else(|_| "./data/files".to_owned());
 
         Self {
             host,
