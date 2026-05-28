@@ -8,8 +8,10 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --font-display: "SF Pro Display", "SF Pro Text", -apple-system, BlinkMacSystemFont,
+    "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "Geist", "Geist Fallback", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "Geist Mono", "Geist Mono Fallback", ui-monospace, monospace;
 }
 
 @media (prefers-color-scheme: dark) {
@@ -22,5 +24,14 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  font-family: var(--font-geist-sans), "Geist", "Geist Fallback", ui-sans-serif,
+    system-ui, sans-serif;
+}
+
+h1,
+h2,
+h3 {
+  font-family: "SF Pro Display", "SF Pro Text", -apple-system,
+    BlinkMacSystemFont, "Geist", "Geist Fallback", ui-sans-serif, system-ui,
+    sans-serif;
 }
