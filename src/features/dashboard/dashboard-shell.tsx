@@ -24,7 +24,12 @@ import {
   type DashboardSectionKey,
 } from "@/features/dashboard/config";
 
-const canViewSystemNavigation = true;
+type CurrentUser = {
+  id: string;
+  username: string;
+  role: "admin" | "user";
+  status: "active" | "disabled";
+};
 
 const fileRows = [
   {
@@ -117,9 +122,13 @@ const systemCards: Partial<Record<DashboardSectionKey, string[]>> = {
 
 type DashboardShellProps = {
   sectionKey: DashboardSectionKey;
+  currentUser: CurrentUser;
 };
 
-export function DashboardShell({ sectionKey }: DashboardShellProps) {
+export function DashboardShell({
+  sectionKey,
+  currentUser,
+}: DashboardShellProps) {
   const section = getDashboardSection(sectionKey) ?? getDashboardSection("files");
 
   if (!section) {
@@ -128,17 +137,25 @@ export function DashboardShell({ sectionKey }: DashboardShellProps) {
 
   return (
     <main className="flex min-h-dvh bg-background text-foreground">
-      <Sidebar activeSectionKey={section.key} />
+      <Sidebar activeSectionKey={section.key} currentUser={currentUser} />
 
       <section className="flex min-w-0 flex-1 flex-col">
         <TopBar section={section} />
-        <DashboardContent section={section} />
+        <DashboardContent section={section} currentUser={currentUser} />
       </section>
     </main>
   );
 }
 
-function Sidebar({ activeSectionKey }: { activeSectionKey: DashboardSectionKey }) {
+function Sidebar({
+  activeSectionKey,
+  currentUser,
+}: {
+  activeSectionKey: DashboardSectionKey;
+  currentUser: CurrentUser;
+}) {
+  const canViewSystemNavigation = currentUser.role === "admin";
+
   return (
     <aside className="hidden w-64 shrink-0 flex-col border-r bg-muted/30 px-4 py-5 lg:flex">
       <div className="flex items-center justify-between gap-3 px-2">
@@ -155,7 +172,14 @@ function Sidebar({ activeSectionKey }: { activeSectionKey: DashboardSectionKey }
             Aeralyth
           </p>
         </Link>
-        <ThemeToggle className="shrink-0" />
+        <Link
+          href="/settings"
+          className="flex size-9 shrink-0 items-center justify-center rounded-md border bg-background text-sm font-semibold text-primary"
+          title={currentUser.username}
+          aria-label={`Open settings for ${currentUser.username}`}
+        >
+          {getInitials(currentUser.username)}
+        </Link>
       </div>
 
       <div className="mt-8 space-y-7">
@@ -266,8 +290,6 @@ function TopBar({ section }: { section: DashboardSection }) {
             {action.label}
           </Button>
         ))}
-
-        <ThemeToggle className="lg:hidden" />
       </div>
     </header>
   );
@@ -296,12 +318,58 @@ function SearchInput({
   );
 }
 
-function DashboardContent({ section }: { section: DashboardSection }) {
+function DashboardContent({
+  section,
+  currentUser,
+}: {
+  section: DashboardSection;
+  currentUser: CurrentUser;
+}) {
+  if (section.key === "settings") {
+    return <SettingsContent currentUser={currentUser} />;
+  }
+
   if (section.content === "system") {
     return <SystemContent section={section} />;
   }
 
   return <FileContent section={section} />;
+}
+
+function SettingsContent({ currentUser }: { currentUser: CurrentUser }) {
+  return (
+    <div className="flex flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
+      <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
+        <div className="rounded-md border p-5">
+          <div className="flex items-center gap-3">
+            <span className="flex size-10 items-center justify-center rounded-md border bg-background text-sm font-semibold text-primary">
+              {getInitials(currentUser.username)}
+            </span>
+            <div className="min-w-0">
+              <p className="truncate font-medium">{currentUser.username}</p>
+              <p className="text-sm capitalize text-muted-foreground">
+                {currentUser.role}
+              </p>
+            </div>
+          </div>
+
+          <form action="/api/auth/logout" method="post" className="mt-5">
+            <Button type="submit" variant="outline" className="rounded-md">
+              Sign out
+            </Button>
+          </form>
+        </div>
+
+        <div className="rounded-md border p-5">
+          <p className="font-medium">Appearance</p>
+          <div className="mt-4 flex items-center justify-between gap-4">
+            <span className="text-sm text-muted-foreground">Dark mode</span>
+            <ThemeToggle className="shrink-0" />
+          </div>
+        </div>
+      </section>
+    </div>
+  );
 }
 
 function FileContent({ section }: { section: DashboardSection }) {
@@ -416,4 +484,15 @@ function Metric({ label, value }: { label: string; value: string }) {
       <p className="mt-2 font-display text-2xl font-semibold">{value}</p>
     </div>
   );
+}
+
+function getInitials(username: string) {
+  const initials = username
+    .split(/[\s._-]+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part[0]?.toUpperCase())
+    .join("");
+
+  return initials || "A";
 }

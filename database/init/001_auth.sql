@@ -8,6 +8,24 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'active';
+
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'users_status_check'
+  ) THEN
+    ALTER TABLE users
+      ADD CONSTRAINT users_status_check CHECK (status IN ('active', 'disabled'));
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
@@ -23,4 +41,6 @@ INSERT INTO users (id, username, password_hash, role)
 VALUES ('usr_admingod', 'admingod', crypt('admingod', gen_salt('bf')), 'admin')
 ON CONFLICT (username) DO UPDATE
 SET password_hash = EXCLUDED.password_hash,
-    role = EXCLUDED.role;
+    role = EXCLUDED.role,
+    status = 'active',
+    updated_at = now();

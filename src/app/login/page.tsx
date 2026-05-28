@@ -7,12 +7,10 @@ import {
 } from "lucide-react";
 import type { Metadata } from "next";
 import Image from "next/image";
+import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
-import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
-import { getCurrentUser } from "@/lib/auth/session";
-import { requestSignIn } from "./actions";
 
 export const metadata: Metadata = {
   title: "Login",
@@ -26,6 +24,55 @@ type LoginPageProps = {
     error?: string;
   }>;
 };
+
+type CurrentUser = {
+  id: string;
+  username: string;
+  role: "admin" | "user";
+  status: "active" | "disabled";
+};
+
+function getApiOrigin(requestHeaders: Headers) {
+  const configuredOrigin = process.env.AERALYTH_API_ORIGIN?.trim();
+
+  if (configuredOrigin) {
+    return configuredOrigin;
+  }
+
+  const host =
+    requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host");
+
+  if (!host) {
+    return "http://127.0.0.1:3000";
+  }
+
+  const proto = requestHeaders.get("x-forwarded-proto") ?? "http";
+
+  return `${proto}://${host}`;
+}
+
+async function getCurrentUser() {
+  const requestHeaders = await headers();
+  const cookie = requestHeaders.get("cookie");
+  const apiOrigin = getApiOrigin(requestHeaders);
+
+  try {
+    const response = await fetch(`${apiOrigin}/api/auth/me`, {
+      headers: cookie ? { cookie } : undefined,
+      cache: "no-store",
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = (await response.json()) as { user: CurrentUser | null };
+
+    return data.user;
+  } catch {
+    return null;
+  }
+}
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
   const user = await getCurrentUser();
@@ -96,10 +143,13 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                     Sign in
                   </h2>
                 </div>
-                <ThemeToggle className="shrink-0" />
               </div>
 
-              <form action={requestSignIn} className="mt-8 space-y-5">
+              <form
+                action="/api/auth/login"
+                method="post"
+                className="mt-8 space-y-5"
+              >
                 <div className="space-y-2">
                   <label htmlFor="username" className="text-sm font-medium">
                     Username
