@@ -20,6 +20,27 @@ npm run build
 cargo build --manifest-path backend/Cargo.toml
 ```
 
+## Local Database
+
+```bash
+docker compose up -d postgres
+docker compose exec -T postgres psql -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/001_auth.sql
+```
+
+In local development, the Next.js app uses this Docker database by default when
+`DATABASE_URL` is not set:
+
+```text
+postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth
+```
+
+The local seed creates one admin user for development:
+
+```text
+username: admingod
+password: admingod
+```
+
 ## Backend Environment
 
 The backend reads these optional environment variables:

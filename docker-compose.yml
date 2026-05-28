@@ -1,0 +1,22 @@
+services:
+  postgres:
+    image: postgres:latest
+    container_name: aeralyth-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: aeralyth
+      POSTGRES_PASSWORD: aeralyth
+      POSTGRES_DB: aeralyth
+    ports:
+      - "5432:5432"
+    volumes:
+      - aeralyth-postgres-data:/var/lib/postgresql
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aeralyth -d aeralyth"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  aeralyth-postgres-data:

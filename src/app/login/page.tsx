@@ -7,20 +7,35 @@ import {
 } from "lucide-react";
 import type { Metadata } from "next";
 import Image from "next/image";
+import { redirect } from "next/navigation";
 
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
+import { getCurrentUser } from "@/lib/auth/session";
+import { requestSignIn } from "./actions";
 
 export const metadata: Metadata = {
-  title: "Login | Aeralyth",
+  title: "Login",
   description: "Sign in to Aeralyth.",
 };
 
-async function requestSignIn() {
-  "use server";
-}
+export const dynamic = "force-dynamic";
 
-export default function LoginPage() {
+type LoginPageProps = {
+  searchParams?: Promise<{
+    error?: string;
+  }>;
+};
+
+export default async function LoginPage({ searchParams }: LoginPageProps) {
+  const user = await getCurrentUser();
+
+  if (user) {
+    redirect("/files");
+  }
+
+  const error = (await searchParams)?.error;
+
   return (
     <main className="min-h-dvh bg-background text-foreground">
       <div className="mx-auto grid min-h-dvh w-full max-w-6xl items-center px-5 py-10 sm:px-8">
@@ -86,8 +101,8 @@ export default function LoginPage() {
 
               <form action={requestSignIn} className="mt-8 space-y-5">
                 <div className="space-y-2">
-                  <label htmlFor="email" className="text-sm font-medium">
-                    Email
+                  <label htmlFor="username" className="text-sm font-medium">
+                    Username
                   </label>
                   <div className="relative">
                     <Mail
@@ -95,11 +110,11 @@ export default function LoginPage() {
                       aria-hidden="true"
                     />
                     <input
-                      id="email"
-                      name="email"
-                      type="email"
-                      autoComplete="email"
-                      placeholder="name@example.com"
+                      id="username"
+                      name="username"
+                      type="text"
+                      autoComplete="username"
+                      placeholder="admingod"
                       required
                       className="h-11 w-full rounded-md border bg-background pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/25"
                     />
@@ -126,6 +141,12 @@ export default function LoginPage() {
                     />
                   </div>
                 </div>
+
+                {error === "invalid" ? (
+                  <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+                    Invalid username or password.
+                  </p>
+                ) : null}
 
                 <label className="flex items-center gap-2 text-sm text-muted-foreground">
                   <input

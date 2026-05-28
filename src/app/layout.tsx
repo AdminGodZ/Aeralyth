@@ -20,7 +20,10 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Aeralyth",
+  title: {
+    default: "Aeralyth",
+    template: "Aeralyth - %s",
+  },
   description: "A simple, performant, self-hosted cloud.",
   icons: {
     icon: "/favicon.ico",
