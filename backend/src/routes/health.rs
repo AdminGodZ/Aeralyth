@@ -15,7 +15,7 @@ struct HealthResponse {
 pub async fn health(config: web::Data<Config>) -> HttpResponse {
     HttpResponse::Ok().json(HealthResponse {
         status: "ok",
-        service: "aeralith-api",
+        service: "aeralyth-api",
         version: env!("CARGO_PKG_VERSION"),
         database_configured: config.database_url.is_some(),
         storage_configured: !config.storage_path.trim().is_empty(),

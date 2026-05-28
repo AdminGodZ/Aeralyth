@@ -1,6 +1,6 @@
-# Aeralith
+# Aeralyth
 
-Aeralith is a self-hosted cloud project with a TypeScript/Next.js frontend and
+Aeralyth is a self-hosted cloud project with a TypeScript/Next.js frontend and
 an Actix Web backend.
 
 ## Structure
@@ -25,10 +25,10 @@ cargo build --manifest-path backend/Cargo.toml
 The backend reads these optional environment variables:
 
 ```text
-AERALITH_API_HOST=0.0.0.0
-AERALITH_API_PORT=8080
-DATABASE_URL=postgres://aeralith:aeralith@localhost:5432/aeralith
-AERALITH_STORAGE_PATH=./data/files
+AERALYTH_API_HOST=0.0.0.0
+AERALYTH_API_PORT=8080
+DATABASE_URL=postgres://aeralyth:aeralyth@localhost:5432/aeralyth
+AERALYTH_STORAGE_PATH=./data/files
 ```
 
 You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
