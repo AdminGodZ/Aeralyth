@@ -4,9 +4,9 @@ use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::{SESSION_COOKIE, authenticate_password, current_user};
 use crate::state::AppState;
 
-const SESSION_COOKIE: &str = "aeralyth_session";
 const DEFAULT_SESSION_SECONDS: i64 = 24 * 60 * 60;
 const REMEMBER_SESSION_SECONDS: i64 = 30 * 24 * 60 * 60;
 
@@ -18,17 +18,8 @@ pub struct LoginForm {
 }
 
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AuthUser {
-    id: String,
-    username: String,
-    role: String,
-    status: String,
-}
-
-#[derive(Serialize)]
 struct MeResponse {
-    user: Option<AuthUser>,
+    user: Option<crate::auth::AuthUser>,
 }
 
 pub async fn login(state: web::Data<AppState>, form: web::Form<LoginForm>) -> Result<HttpResponse> {
@@ -38,27 +29,12 @@ pub async fn login(state: web::Data<AppState>, form: web::Form<LoginForm>) -> Re
         return Ok(redirect("/login?error=invalid"));
     }
 
-    let user = state
-        .db
-        .query_opt(
-            "
-                SELECT id, username, role, status
-                FROM users
-                WHERE username = $1
-                  AND status = 'active'
-                  AND password_hash = crypt($2, password_hash)
-                LIMIT 1
-            ",
-            &[&username, &form.password],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let user = authenticate_password(&state, username, &form.password).await?;
 
     let Some(user) = user else {
         return Ok(redirect("/login?error=invalid"));
     };
 
-    let user_id: String = user.get("id");
     let session_seconds = if form.remember.is_some() {
         REMEMBER_SESSION_SECONDS
     } else {
@@ -78,7 +54,7 @@ pub async fn login(state: web::Data<AppState>, form: web::Form<LoginForm>) -> Re
                   now() + ($3::bigint * interval '1 second')
                 )
             ",
-            &[&user_id, &token, &session_seconds],
+            &[&user.id, &token, &session_seconds],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -129,36 +105,6 @@ pub async fn me(state: web::Data<AppState>, request: HttpRequest) -> Result<Http
     };
 
     Ok(status.json(MeResponse { user }))
-}
-
-async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Option<AuthUser>> {
-    let Some(cookie) = request.cookie(SESSION_COOKIE) else {
-        return Ok(None);
-    };
-
-    let user = state
-        .db
-        .query_opt(
-            "
-                SELECT users.id, users.username, users.role, users.status
-                FROM sessions
-                INNER JOIN users ON users.id = sessions.user_id
-                WHERE sessions.token_hash = encode(digest($1::text, 'sha256'), 'hex')
-                  AND sessions.expires_at > now()
-                  AND users.status = 'active'
-                LIMIT 1
-            ",
-            &[&cookie.value()],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    Ok(user.map(|row| AuthUser {
-        id: row.get("id"),
-        username: row.get("username"),
-        role: row.get("role"),
-        status: row.get("status"),
-    }))
 }
 
 fn create_session_token() -> Result<String> {

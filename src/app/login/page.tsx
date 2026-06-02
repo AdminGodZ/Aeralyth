@@ -7,10 +7,10 @@ import {
 } from "lucide-react";
 import type { Metadata } from "next";
 import Image from "next/image";
-import { headers } from "next/headers";
 import { redirect } from "next/navigation";
 
 import { Button } from "@/components/ui/button";
+import { getAuthState } from "@/lib/api";
 
 export const metadata: Metadata = {
   title: "Login",
@@ -25,63 +25,16 @@ type LoginPageProps = {
   }>;
 };
 
-type CurrentUser = {
-  id: string;
-  username: string;
-  role: "admin" | "user";
-  status: "active" | "disabled";
-};
-
-function getApiOrigin(requestHeaders: Headers) {
-  const configuredOrigin = process.env.AERALYTH_API_ORIGIN?.trim();
-
-  if (configuredOrigin) {
-    return configuredOrigin;
-  }
-
-  const host =
-    requestHeaders.get("x-forwarded-host") ?? requestHeaders.get("host");
-
-  if (!host) {
-    return "http://127.0.0.1:3000";
-  }
-
-  const proto = requestHeaders.get("x-forwarded-proto") ?? "http";
-
-  return `${proto}://${host}`;
-}
-
-async function getCurrentUser() {
-  const requestHeaders = await headers();
-  const cookie = requestHeaders.get("cookie");
-  const apiOrigin = getApiOrigin(requestHeaders);
-
-  try {
-    const response = await fetch(`${apiOrigin}/api/auth/me`, {
-      headers: cookie ? { cookie } : undefined,
-      cache: "no-store",
-    });
-
-    if (!response.ok) {
-      return null;
-    }
-
-    const data = (await response.json()) as { user: CurrentUser | null };
-
-    return data.user;
-  } catch {
-    return null;
-  }
-}
-
 export default async function LoginPage({ searchParams }: LoginPageProps) {
-  const user = await getCurrentUser();
+  const authState = await getAuthState();
 
-  if (user) {
+  if (authState.status === "authenticated") {
     redirect("/files");
   }
 
   const error = (await searchParams)?.error;
+  const backendUnavailable =
+    authState.status === "unavailable" || error === "backend";
 
   return (
     <main className="min-h-dvh bg-background text-foreground">
@@ -198,6 +151,12 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                   </p>
                 ) : null}
 
+                {backendUnavailable ? (
+                  <p className="rounded-md border border-primary/30 bg-primary/10 px-3 py-2 text-sm text-foreground">
+                    Backend unavailable. Start the Actix API and try again.
+                  </p>
+                ) : null}
+
                 <label className="flex items-center gap-2 text-sm text-muted-foreground">
                   <input
                     name="remember"
@@ -210,6 +169,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                 <Button
                   type="submit"
                   size="lg"
+                  disabled={backendUnavailable}
                   className="h-11 w-full rounded-md text-sm"
                 >
                   Sign in

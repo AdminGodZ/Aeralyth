@@ -42,6 +42,34 @@ username: admingod
 password: admingod
 ```
 
+## Local Runtime
+
+Run the local stack in three processes:
+
+```bash
+npm run db:up
+npm run db:migrate
+```
+
+```bash
+npm run dev:api
+```
+
+```bash
+npm run dev
+```
+
+The frontend expects the Actix API at `http://127.0.0.1:8080` by default. If
+the login page shows a backend unavailable error, the Actix process is not
+reachable or `AERALYTH_API_ORIGIN` points at the wrong API origin.
+
+Useful checks:
+
+```bash
+curl http://127.0.0.1:8080/api/health
+curl http://127.0.0.1:3000/api/health
+```
+
 ## Backend Environment
 
 The backend reads these optional environment variables:

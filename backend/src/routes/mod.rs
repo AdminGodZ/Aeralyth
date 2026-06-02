@@ -1,3 +1,4 @@
+mod admin;
 mod auth;
 mod files;
 mod health;
@@ -17,6 +18,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
                         .route("/logout", web::post().to(auth::logout))
                         .route("/me", web::get().to(auth::me)),
                 )
+                .service(web::scope("/admin").route("/me", web::get().to(admin::me)))
                 .route("/files", web::get().to(files::list_files)),
         );
 }
