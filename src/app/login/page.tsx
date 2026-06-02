@@ -9,10 +9,8 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import { redirect } from "next/navigation";
 
-import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
-import { getCurrentUser } from "@/lib/auth/session";
-import { requestSignIn } from "./actions";
+import { getAuthState } from "@/lib/api";
 
 export const metadata: Metadata = {
   title: "Login",
@@ -28,13 +26,15 @@ type LoginPageProps = {
 };
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
-  const user = await getCurrentUser();
+  const authState = await getAuthState();
 
-  if (user) {
+  if (authState.status === "authenticated") {
     redirect("/files");
   }
 
   const error = (await searchParams)?.error;
+  const backendUnavailable =
+    authState.status === "unavailable" || error === "backend";
 
   return (
     <main className="min-h-dvh bg-background text-foreground">
@@ -96,10 +96,13 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                     Sign in
                   </h2>
                 </div>
-                <ThemeToggle className="shrink-0" />
               </div>
 
-              <form action={requestSignIn} className="mt-8 space-y-5">
+              <form
+                action="/api/auth/login"
+                method="post"
+                className="mt-8 space-y-5"
+              >
                 <div className="space-y-2">
                   <label htmlFor="username" className="text-sm font-medium">
                     Username
@@ -148,6 +151,12 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                   </p>
                 ) : null}
 
+                {backendUnavailable ? (
+                  <p className="rounded-md border border-primary/30 bg-primary/10 px-3 py-2 text-sm text-foreground">
+                    Backend unavailable. Start the Actix API and try again.
+                  </p>
+                ) : null}
+
                 <label className="flex items-center gap-2 text-sm text-muted-foreground">
                   <input
                     name="remember"
@@ -160,6 +169,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                 <Button
                   type="submit"
                   size="lg"
+                  disabled={backendUnavailable}
                   className="h-11 w-full rounded-md text-sm"
                 >
                   Sign in

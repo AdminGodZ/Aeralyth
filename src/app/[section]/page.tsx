@@ -1,9 +1,9 @@
 import type { Metadata } from "next";
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 
 import { DashboardShell } from "@/features/dashboard/dashboard-shell";
 import { getDashboardSection } from "@/features/dashboard/config";
-import { requireUser } from "@/lib/auth/session";
+import { getAuthState } from "@/lib/api";
 
 type SectionPageProps = {
   params: Promise<{
@@ -37,7 +37,21 @@ export default async function SectionPage({ params }: SectionPageProps) {
     notFound();
   }
 
-  await requireUser();
+  const authState = await getAuthState();
 
-  return <DashboardShell sectionKey={section.key} />;
+  if (authState.status === "unavailable") {
+    redirect("/login?error=backend");
+  }
+
+  if (authState.status === "anonymous") {
+    redirect("/login");
+  }
+
+  const user = authState.user;
+
+  if (section.group === "system" && user.role !== "admin") {
+    notFound();
+  }
+
+  return <DashboardShell sectionKey={section.key} currentUser={user} />;
 }

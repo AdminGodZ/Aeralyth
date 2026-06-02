@@ -10,8 +10,9 @@ src/app/      Next.js App Router frontend
 backend/src/  Actix Web backend
 ```
 
-The frontend is responsible for the user interface. The backend owns API
-behavior, authentication, file permissions, metadata, and storage access.
+The frontend is responsible for the user interface. The Actix backend owns API
+behavior, authentication, sessions, file permissions, metadata, and storage
+access.
 
 ## Build Checks
 
@@ -27,8 +28,8 @@ docker compose up -d postgres
 docker compose exec -T postgres psql -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/001_auth.sql
 ```
 
-In local development, the Next.js app uses this Docker database by default when
-`DATABASE_URL` is not set:
+In local development, the Actix backend uses this Docker database by default
+when `DATABASE_URL` is not set:
 
 ```text
 postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth
@@ -41,6 +42,34 @@ username: admingod
 password: admingod
 ```
 
+## Local Runtime
+
+Run the local stack in three processes:
+
+```bash
+npm run db:up
+npm run db:migrate
+```
+
+```bash
+npm run dev:api
+```
+
+```bash
+npm run dev
+```
+
+The frontend expects the Actix API at `http://127.0.0.1:8080` by default. If
+the login page shows a backend unavailable error, the Actix process is not
+reachable or `AERALYTH_API_ORIGIN` points at the wrong API origin.
+
+Useful checks:
+
+```bash
+curl http://127.0.0.1:8080/api/health
+curl http://127.0.0.1:3000/api/health
+```
+
 ## Backend Environment
 
 The backend reads these optional environment variables:
@@ -49,7 +78,18 @@ The backend reads these optional environment variables:
 AERALYTH_API_HOST=0.0.0.0
 AERALYTH_API_PORT=8080
 DATABASE_URL=postgres://aeralyth:aeralyth@localhost:5432/aeralyth
+AERALYTH_COOKIE_SECURE=false
 AERALYTH_STORAGE_PATH=./data/files
+```
+
+`AERALYTH_COOKIE_SECURE` defaults to `false` for debug builds and `true` for
+release builds.
+
+The Next.js frontend proxies browser `/api/*` requests to the Actix backend.
+Override the target when Actix is not reachable at the local default:
+
+```text
+AERALYTH_API_ORIGIN=http://127.0.0.1:8080
 ```
 
 You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
