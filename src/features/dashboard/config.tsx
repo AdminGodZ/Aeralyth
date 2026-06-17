@@ -1,17 +1,11 @@
 import {
   Clock,
   Folder,
-  FolderPlus,
   HardDrive,
-  RefreshCw,
   Settings,
   Share2,
-  ShieldCheck,
-  SlidersHorizontal,
   Star,
   Trash2,
-  Upload,
-  UserPlus,
   Users,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
@@ -24,9 +18,7 @@ export type DashboardSectionKey =
   | "trash"
   | "settings"
   | "storage"
-  | "transfers"
-  | "users"
-  | "security";
+  | "users";
 
 type DashboardAction = {
   label: string;
@@ -57,11 +49,6 @@ export const dashboardSections: DashboardSection[] = [
     icon: Folder,
     title: "Files",
     subtitle: "Personal workspace",
-    searchPlaceholder: "Search files",
-    actions: [
-      { label: "New folder", icon: FolderPlus, variant: "outline" },
-      { label: "Upload", icon: Upload },
-    ],
   },
   {
     key: "recent",
@@ -72,8 +59,6 @@ export const dashboardSections: DashboardSection[] = [
     icon: Clock,
     title: "Recent",
     subtitle: "Recently opened and changed files",
-    searchPlaceholder: "Search recent files",
-    actions: [{ label: "Filter", icon: SlidersHorizontal, variant: "outline" }],
   },
   {
     key: "favorites",
@@ -84,8 +69,6 @@ export const dashboardSections: DashboardSection[] = [
     icon: Star,
     title: "Favorites",
     subtitle: "Pinned files and folders",
-    searchPlaceholder: "Search favorites",
-    actions: [{ label: "Filter", icon: SlidersHorizontal, variant: "outline" }],
   },
   {
     key: "shared",
@@ -96,8 +79,6 @@ export const dashboardSections: DashboardSection[] = [
     icon: Share2,
     title: "Shared",
     subtitle: "Links and files shared with others",
-    searchPlaceholder: "Search shared files",
-    actions: [{ label: "Create share", icon: Share2 }],
   },
   {
     key: "trash",
@@ -108,8 +89,6 @@ export const dashboardSections: DashboardSection[] = [
     icon: Trash2,
     title: "Trash",
     subtitle: "Deleted items before permanent removal",
-    searchPlaceholder: "Search trash",
-    actions: [{ label: "Empty trash", icon: Trash2, variant: "destructive" }],
   },
   {
     key: "settings",
@@ -130,24 +109,6 @@ export const dashboardSections: DashboardSection[] = [
     icon: HardDrive,
     title: "Storage",
     subtitle: "Capacity, quotas, and storage locations",
-    actions: [
-      { label: "Refresh", icon: RefreshCw, variant: "outline" },
-      { label: "Configure", icon: Settings },
-    ],
-  },
-  {
-    key: "transfers",
-    label: "Transfers",
-    href: "/transfers",
-    group: "system",
-    content: "system",
-    icon: Upload,
-    title: "Transfers",
-    subtitle: "Uploads, downloads, and failed jobs",
-    searchPlaceholder: "Search transfers",
-    actions: [
-      { label: "Clear completed", icon: Trash2, variant: "outline" },
-    ],
   },
   {
     key: "users",
@@ -158,19 +119,6 @@ export const dashboardSections: DashboardSection[] = [
     icon: Users,
     title: "Users",
     subtitle: "Accounts, roles, and access",
-    searchPlaceholder: "Search users",
-    actions: [{ label: "New user", icon: UserPlus }],
-  },
-  {
-    key: "security",
-    label: "Security",
-    href: "/security",
-    group: "system",
-    content: "system",
-    icon: ShieldCheck,
-    title: "Security",
-    subtitle: "Sessions, passwords, and access controls",
-    actions: [{ label: "Review sessions", icon: ShieldCheck }],
   },
 ];
 

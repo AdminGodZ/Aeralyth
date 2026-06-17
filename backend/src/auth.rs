@@ -4,6 +4,7 @@ use serde::Serialize;
 use crate::state::AppState;
 
 pub const SESSION_COOKIE: &str = "aeralyth_session";
+pub const CSRF_FIELD: &str = "csrf_token";
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -83,6 +84,42 @@ pub async fn require_admin(state: &AppState, request: &HttpRequest) -> Result<Au
     }
 
     Err(error::ErrorForbidden("admin access required"))
+}
+
+pub async fn require_csrf(state: &AppState, request: &HttpRequest, csrf_token: &str) -> Result<()> {
+    let csrf_token = csrf_token.trim();
+
+    if csrf_token.is_empty() {
+        return Err(error::ErrorForbidden("csrf token required"));
+    }
+
+    let Some(cookie) = request.cookie(SESSION_COOKIE) else {
+        return Err(error::ErrorUnauthorized("authentication required"));
+    };
+
+    let session = state
+        .db
+        .query_opt(
+            "
+                SELECT sessions.id
+                FROM sessions
+                INNER JOIN users ON users.id = sessions.user_id
+                WHERE sessions.token_hash = encode(digest($1::text, 'sha256'), 'hex')
+                  AND sessions.csrf_token = $2
+                  AND sessions.expires_at > now()
+                  AND users.status = 'active'
+                LIMIT 1
+            ",
+            &[&cookie.value(), &csrf_token],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    if session.is_some() {
+        return Ok(());
+    }
+
+    Err(error::ErrorForbidden("csrf token invalid"))
 }
 
 fn auth_user_from_row(row: tokio_postgres::Row) -> AuthUser {
