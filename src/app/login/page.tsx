@@ -1,5 +1,6 @@
 import {
   ArrowRight,
+  CircleAlert,
   HardDrive,
   LockKeyhole,
   Mail,
@@ -9,8 +10,20 @@ import type { Metadata } from "next";
 import Image from "next/image";
 import { redirect } from "next/navigation";
 
+import { DottedSurface } from "@/components/dotted-surface";
+import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
+import {
+  Card,
+  CardContent,
+  CardHeader,
+  CardTitle,
+} from "@/components/ui/card";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
 import { getAuthState } from "@/lib/api";
+import { cn } from "@/lib/utils";
 
 export const metadata: Metadata = {
   title: "Login",
@@ -26,44 +39,79 @@ type LoginPageProps = {
 };
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
+  const error = (await searchParams)?.error;
   const authState = await getAuthState();
 
-  if (authState.status === "authenticated") {
+  if (authState.status === "authenticated" && error !== "backend") {
     redirect("/files");
   }
 
-  const error = (await searchParams)?.error;
+  const invalidCredentials = error === "invalid";
   const backendUnavailable =
     authState.status === "unavailable" || error === "backend";
+  const loginAlertMessage =
+    invalidCredentials
+      ? "Invalid username or password."
+      : backendUnavailable
+        ? "Backend unavailable. Start the Actix API and try again."
+        : null;
 
   return (
-    <main className="min-h-dvh bg-background text-foreground">
-      <div className="mx-auto grid min-h-dvh w-full max-w-6xl items-center px-5 py-10 sm:px-8">
-        <section className="grid flex-1 items-center gap-10 py-10 lg:grid-cols-[minmax(0,1fr)_minmax(360px,420px)]">
-          <div className="hidden max-w-xl lg:block">
-            <div className="mb-6 flex size-14 items-center justify-center rounded-md border bg-card">
+    <main className="relative isolate min-h-dvh overflow-hidden bg-background text-foreground">
+      <DottedSurface className="opacity-70" />
+      {loginAlertMessage ? (
+        <Alert className="fixed left-1/2 top-5 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-full border border-[#C90000]/30 bg-[#C90000]/10 px-5 py-3 text-[#C90000] shadow-[0_24px_80px_rgb(0_0_0/0.2)] ring-0 backdrop-blur-md backdrop-saturate-150">
+          <div className="flex items-center justify-center gap-2">
+            <CircleAlert className="size-4 shrink-0" aria-hidden="true" />
+            <AlertDescription className="text-center leading-none text-[#C90000]">
+              {loginAlertMessage}
+            </AlertDescription>
+          </div>
+        </Alert>
+      ) : null}
+      <div
+        aria-hidden="true"
+        className={cn(
+          "pointer-events-none absolute -top-10 left-1/2 z-0 size-full -translate-x-1/2 rounded-full",
+          "bg-[radial-gradient(ellipse_at_center,--theme(--color-foreground/.1),transparent_50%)]",
+          "blur-[30px]",
+        )}
+      />
+      <div className="relative z-10 mx-auto grid min-h-dvh w-full max-w-6xl items-center px-5 py-10 sm:px-8">
+        <section className="grid flex-1 items-center gap-10 py-10 lg:grid-cols-[minmax(0,1fr)_minmax(360px,420px)] lg:items-stretch">
+          <div className="relative hidden max-w-2xl lg:block">
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute -left-20 top-16 -z-10 size-72 rounded-full bg-primary/15 blur-3xl"
+            />
+            <Card className="relative isolate mb-9 flex size-20 items-center justify-center rounded-[1.75rem] border border-white/[0.07] bg-card/10 p-0 py-0 shadow-[0_20px_60px_rgb(0_0_0/0.2)] ring-0 backdrop-blur-md backdrop-saturate-150 dark:bg-card/12">
+              <div
+                aria-hidden="true"
+                className="pointer-events-none absolute inset-0 bg-[linear-gradient(145deg,--theme(--color-foreground/.16),transparent_36%,--theme(--color-primary/.16))]"
+              />
               <Image
                 src="/Aeralyth_transparent.png"
                 alt="Aeralyth logo"
-                width={48}
-                height={48}
+                width={58}
+                height={58}
                 priority
-                className="size-12 object-contain"
+                className="relative size-14 object-contain drop-shadow-[0_0_18px_rgb(0_201_167/0.32)]"
               />
-            </div>
-            <h1 className="font-display text-5xl font-semibold leading-tight">
+            </Card>
+
+            <h1 className="max-w-3xl font-display text-6xl font-semibold leading-[1.02] tracking-normal">
               Private cloud access
             </h1>
-            <p className="mt-5 max-w-lg text-base leading-7 text-muted-foreground">
-              Sign in to manage files, storage, and access from your Aeralyth
-              workspace.
+            <p className="mt-6 max-w-xl text-xl leading-8 text-muted-foreground">
+              Your secure space for files, storage, and private Aeralyth
+              workspace access.
             </p>
 
-            <div className="mt-10 grid gap-4 text-sm">
-              <div className="flex items-center gap-3">
-                <span className="flex size-9 items-center justify-center rounded-md border bg-card">
+            <div className="mt-11 grid max-w-xl gap-6 text-base">
+              <div className="flex items-center gap-5">
+                <span className="flex size-11 shrink-0 items-center justify-center text-primary">
                   <ShieldCheck
-                    className="size-4 text-primary"
+                    className="size-5"
                     aria-hidden="true"
                   />
                 </span>
@@ -71,10 +119,10 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                   Protected self-hosted sessions
                 </span>
               </div>
-              <div className="flex items-center gap-3">
-                <span className="flex size-9 items-center justify-center rounded-md border bg-card">
+              <div className="flex items-center gap-5">
+                <span className="flex size-11 shrink-0 items-center justify-center text-primary">
                   <HardDrive
-                    className="size-4 text-primary"
+                    className="size-5"
                     aria-hidden="true"
                   />
                 </span>
@@ -85,98 +133,114 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
             </div>
           </div>
 
-          <div className="w-full max-w-md justify-self-center lg:justify-self-end">
-            <div className="rounded-md border bg-card p-6 shadow-sm sm:p-8">
-              <div className="flex items-start justify-between gap-4">
-                <div>
-                  <p className="text-sm font-medium text-primary">
-                    Welcome back
-                  </p>
-                  <h2 className="mt-2 font-display text-3xl font-semibold">
-                    Sign in
-                  </h2>
-                </div>
-              </div>
+          <div className="w-full max-w-md justify-self-center lg:flex lg:justify-self-end">
+            <Card className="h-full w-full justify-center gap-0 rounded-[2rem] border border-white/[0.07] bg-card/10 py-0 shadow-[0_24px_80px_rgb(0_0_0/0.2)] ring-0 backdrop-blur-md backdrop-saturate-150 dark:bg-card/12">
+              <CardHeader className="items-center px-7 pt-8 pb-5 text-center sm:px-8 sm:pt-9">
+                <CardTitle className="font-display text-4xl font-semibold tracking-normal text-foreground">
+                  Welcome back
+                </CardTitle>
+                <p className="text-sm text-muted-foreground">
+                  Sign in to your account
+                </p>
+              </CardHeader>
 
-              <form
-                action="/api/auth/login"
-                method="post"
-                className="mt-8 space-y-5"
-              >
-                <div className="space-y-2">
-                  <label htmlFor="username" className="text-sm font-medium">
-                    Username
-                  </label>
-                  <div className="relative">
-                    <Mail
-                      className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-                      aria-hidden="true"
-                    />
-                    <input
-                      id="username"
-                      name="username"
-                      type="text"
-                      autoComplete="username"
-                      placeholder="admingod"
-                      required
-                      className="h-11 w-full rounded-md border bg-background pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/25"
-                    />
-                  </div>
-                </div>
-
-                <div className="space-y-2">
-                  <label htmlFor="password" className="text-sm font-medium">
-                    Password
-                  </label>
-                  <div className="relative">
-                    <LockKeyhole
-                      className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-                      aria-hidden="true"
-                    />
-                    <input
-                      id="password"
-                      name="password"
-                      type="password"
-                      autoComplete="current-password"
-                      placeholder="Password"
-                      required
-                      className="h-11 w-full rounded-md border bg-background pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/25"
-                    />
-                  </div>
-                </div>
-
-                {error === "invalid" ? (
-                  <p className="rounded-md border border-destructive/30 bg-destructive/10 px-3 py-2 text-sm text-destructive">
-                    Invalid username or password.
-                  </p>
-                ) : null}
-
-                {backendUnavailable ? (
-                  <p className="rounded-md border border-primary/30 bg-primary/10 px-3 py-2 text-sm text-foreground">
-                    Backend unavailable. Start the Actix API and try again.
-                  </p>
-                ) : null}
-
-                <label className="flex items-center gap-2 text-sm text-muted-foreground">
-                  <input
-                    name="remember"
-                    type="checkbox"
-                    className="size-4 rounded border border-input accent-primary"
-                  />
-                  Keep me signed in
-                </label>
-
-                <Button
-                  type="submit"
-                  size="lg"
-                  disabled={backendUnavailable}
-                  className="h-11 w-full rounded-md text-sm"
+              <CardContent className="px-7 pb-7 sm:px-8 sm:pb-8">
+                <form
+                  action="/api/auth/login"
+                  method="post"
+                  className="space-y-5"
                 >
-                  Sign in
-                  <ArrowRight className="size-4" aria-hidden="true" />
-                </Button>
-              </form>
-            </div>
+                  <div className="space-y-2">
+                    <Label htmlFor="username" className="text-foreground">
+                      Username
+                    </Label>
+                    <div className="group/input relative overflow-hidden rounded-2xl">
+                      <Mail
+                        className="pointer-events-none absolute left-4 top-1/2 z-20 size-4 -translate-y-1/2 text-muted-foreground"
+                        aria-hidden="true"
+                      />
+                      <Input
+                        id="username"
+                        name="username"
+                        type="text"
+                        autoComplete="username"
+                        placeholder="john.doe"
+                        required
+                        aria-invalid={invalidCredentials}
+                        className={cn(
+                          "h-12 rounded-2xl bg-background/20 pl-11 pr-4 text-base shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-md focus-visible:ring-0",
+                          invalidCredentials
+                            ? "border-[#C90000]/50 focus-visible:border-[#C90000]/50"
+                            : "border-white/[0.07] focus-visible:border-white/[0.07]",
+                        )}
+                      />
+                      <span
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-y-0 left-0 z-10 w-[170%] rounded-2xl bg-[linear-gradient(100deg,transparent_0%,rgb(255_255_255/0.025)_18%,rgb(255_255_255/0.13)_46%,rgb(255_255_255/0.055)_66%,transparent_100%)] opacity-0 will-change-transform group-focus-within/input:animate-[input-shimmer-sweep_820ms_ease-out]"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="space-y-2">
+                    <Label htmlFor="password" className="text-foreground">
+                      Password
+                    </Label>
+                    <div className="group/input relative overflow-hidden rounded-2xl">
+                      <LockKeyhole
+                        className="pointer-events-none absolute left-4 top-1/2 z-20 size-4 -translate-y-1/2 text-muted-foreground"
+                        aria-hidden="true"
+                      />
+                      <Input
+                        id="password"
+                        name="password"
+                        type="password"
+                        autoComplete="current-password"
+                        placeholder="Enter your password..."
+                        required
+                        aria-invalid={invalidCredentials}
+                        className={cn(
+                          "h-12 rounded-2xl bg-background/20 pl-11 pr-4 text-base shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-md focus-visible:ring-0",
+                          invalidCredentials
+                            ? "border-[#C90000]/50 focus-visible:border-[#C90000]/50"
+                            : "border-white/[0.07] focus-visible:border-white/[0.07]",
+                        )}
+                      />
+                      <span
+                        aria-hidden="true"
+                        className="pointer-events-none absolute inset-y-0 left-0 z-10 w-[170%] rounded-2xl bg-[linear-gradient(100deg,transparent_0%,rgb(255_255_255/0.025)_18%,rgb(255_255_255/0.13)_46%,rgb(255_255_255/0.055)_66%,transparent_100%)] opacity-0 will-change-transform group-focus-within/input:animate-[input-shimmer-sweep_820ms_ease-out]"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="group/field flex items-center gap-3">
+                    <Checkbox
+                      id="remember"
+                      name="remember"
+                      className="size-5 rounded-[5px] border-white/[0.07] bg-background/20 shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-md"
+                    />
+                    <Label
+                      htmlFor="remember"
+                      className="text-sm font-normal text-muted-foreground"
+                    >
+                      Keep me signed in
+                    </Label>
+                  </div>
+
+                  <Button
+                    type="submit"
+                    size="lg"
+                    disabled={backendUnavailable}
+                    className="h-12 w-full rounded-full bg-primary/85 text-base shadow-[0_16px_40px_rgb(0_201_167/0.18)] hover:bg-primary/95"
+                  >
+                    Sign in
+                    <ArrowRight
+                      className="size-4 -translate-x-1 opacity-0 transition-all group-hover/button:translate-x-0 group-hover/button:opacity-100"
+                      aria-hidden="true"
+                    />
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
           </div>
         </section>
       </div>

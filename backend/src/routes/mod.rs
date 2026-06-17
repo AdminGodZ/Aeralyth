@@ -14,11 +14,34 @@ pub fn configure(config: &mut web::ServiceConfig) {
                 .service(
                     web::scope("/auth")
                         .route("/login", web::post().to(auth::login))
-                        .route("/logout", web::get().to(auth::logout))
                         .route("/logout", web::post().to(auth::logout))
+                        .route("/csrf", web::get().to(auth::csrf))
                         .route("/me", web::get().to(auth::me)),
                 )
-                .service(web::scope("/admin").route("/me", web::get().to(admin::me)))
-                .route("/files", web::get().to(files::list_files)),
+                .service(
+                    web::scope("/admin")
+                        .route("/me", web::get().to(admin::me))
+                        .route("/users", web::get().to(admin::users))
+                        .route("/users", web::post().to(admin::create_user))
+                        .route("/invitations", web::post().to(admin::create_invitation))
+                        .route("/users/{id}/role", web::post().to(admin::update_user_role))
+                        .route(
+                            "/users/{id}/status",
+                            web::post().to(admin::update_user_status),
+                        ),
+                )
+                .route("/files", web::get().to(files::list_files))
+                .route("/files/upload", web::post().to(files::upload))
+                .route("/files/{id}/download", web::get().to(files::download))
+                .route("/files/{id}/share", web::post().to(files::share))
+                .route("/files/{id}/unshare", web::post().to(files::unshare))
+                .route("/files/{id}/trash", web::post().to(files::trash))
+                .route("/files/{id}/restore", web::post().to(files::restore))
+                .route(
+                    "/files/{id}/favorite",
+                    web::post().to(files::toggle_favorite),
+                )
+                .route("/files/{id}/delete", web::post().to(files::delete))
+                .route("/storage", web::get().to(files::storage)),
         );
 }

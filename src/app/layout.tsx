@@ -41,8 +41,8 @@ export default function RootLayout({
       suppressHydrationWarning
       className={cn(
         "h-full antialiased",
-        figtree.variable,
         geistSans.variable,
+        figtree.variable,
         geistMono.variable,
       )}
     >

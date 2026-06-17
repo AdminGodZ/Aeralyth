@@ -23,8 +23,162 @@ export type AuthState =
       status: "unavailable";
     };
 
+export type CsrfState =
+  | {
+      status: "ready";
+      token: string;
+    }
+  | {
+      status: "unauthorized";
+    }
+  | {
+      status: "unavailable";
+    };
+
+export type AdminUser = {
+  id: string;
+  username: string;
+  role: "admin" | "user";
+  status: "active" | "disabled";
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Invitation = {
+  id: string;
+  invitedUsername: string;
+  role: "admin" | "user";
+  status: "pending" | "accepted" | "revoked" | "expired";
+  createdByUsername: string;
+  expiresAt: string;
+  createdAt: string;
+};
+
+export type AdminUsersData = {
+  users: AdminUser[];
+  invitations: Invitation[];
+  summary: {
+    totalUsers: number;
+    activeUsers: number;
+    admins: number;
+    pendingInvites: number;
+  };
+};
+
+export type AdminUsersState =
+  | {
+      status: "ready";
+      data: AdminUsersData;
+    }
+  | {
+      status: "unauthorized";
+    }
+  | {
+      status: "forbidden";
+    }
+  | {
+      status: "unavailable";
+    };
+
+export type FileView = "files" | "recent" | "favorites" | "shared" | "trash";
+
+export type FileEntry = {
+  id: string;
+  name: string;
+  kind: string;
+  sizeBytes: number;
+  state: "active" | "trashed";
+  favorite: boolean;
+  ownerUsername: string | null;
+  shared: boolean;
+  sharedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  trashedAt: string | null;
+};
+
+export type StorageStats = {
+  storagePath: string;
+  totalBytes: number;
+  availableBytes: number;
+  systemUsedBytes: number;
+  aeralythUsedBytes: number;
+};
+
+export type FilesData = {
+  view: FileView;
+  entries: FileEntry[];
+  summary: {
+    totalFiles: number;
+    activeFiles: number;
+    trashedFiles: number;
+    favoriteFiles: number;
+    usedBytes: number;
+  };
+  storage: StorageStats;
+};
+
+export type FilesState =
+  | {
+      status: "ready";
+      data: FilesData;
+    }
+  | {
+      status: "unauthorized";
+    }
+  | {
+      status: "unavailable";
+    };
+
 function getApiOrigin() {
   return process.env.AERALYTH_API_ORIGIN?.trim() || "http://127.0.0.1:8080";
+}
+
+function getApiTimeoutMs() {
+  const configuredTimeout = Number.parseInt(
+    process.env.AERALYTH_API_TIMEOUT_MS ?? "",
+    10,
+  );
+
+  if (Number.isFinite(configuredTimeout) && configuredTimeout > 0) {
+    return configuredTimeout;
+  }
+
+  return 2500;
+}
+
+function withApiTimeout<T>(operation: (signal: AbortSignal) => Promise<T>) {
+  const controller = new AbortController();
+  let timeoutId: ReturnType<typeof setTimeout> | undefined;
+  const timeoutPromise = new Promise<never>((_, reject) => {
+    timeoutId = setTimeout(() => {
+      controller.abort();
+      reject(new Error("Aeralyth API request timed out"));
+    }, getApiTimeoutMs());
+  });
+
+  return Promise.race([operation(controller.signal), timeoutPromise]).finally(
+    () => {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+      }
+    },
+  );
+}
+
+function requestApi<T>(
+  input: string,
+  init: RequestInit,
+  handleResponse: (response: Response) => Promise<T>,
+) {
+  return withApiTimeout(async (signal) => {
+    const response = await fetch(input, {
+      ...init,
+      signal,
+    });
+
+    return handleResponse(response);
+  });
 }
 
 export async function getAuthState(): Promise<AuthState> {
@@ -32,29 +186,175 @@ export async function getAuthState(): Promise<AuthState> {
   const cookie = requestHeaders.get("cookie");
 
   try {
-    const response = await fetch(`${getApiOrigin()}/api/auth/me`, {
-      headers: getForwardedHeaders(requestHeaders, cookie),
-      cache: "no-store",
-    });
+    return await requestApi<AuthState>(
+      `${getApiOrigin()}/api/auth/me`,
+      {
+        headers: getForwardedHeaders(requestHeaders, cookie),
+        cache: "no-store",
+      },
+      async (response) => {
+        if (response.status === 401) {
+          return { status: "anonymous" };
+        }
 
-    if (response.status === 401) {
-      return { status: "anonymous" };
-    }
+        if (!response.ok) {
+          return { status: "unavailable" };
+        }
 
-    if (!response.ok) {
-      return { status: "unavailable" };
-    }
+        const data = (await response.json()) as { user: CurrentUser | null };
 
-    const data = (await response.json()) as { user: CurrentUser | null };
+        if (!data.user) {
+          return { status: "anonymous" };
+        }
 
-    if (!data.user) {
-      return { status: "anonymous" };
-    }
-
-    return { status: "authenticated", user: data.user };
+        return { status: "authenticated", user: data.user };
+      },
+    );
   } catch {
     return { status: "unavailable" };
   }
+}
+
+export async function getAdminUsersState(): Promise<AdminUsersState> {
+  const requestHeaders = await headers();
+  const cookie = requestHeaders.get("cookie");
+
+  try {
+    return await requestApi<AdminUsersState>(
+      `${getApiOrigin()}/api/admin/users`,
+      {
+        headers: getForwardedHeaders(requestHeaders, cookie),
+        cache: "no-store",
+      },
+      async (response) => {
+        if (response.status === 401) {
+          return { status: "unauthorized" };
+        }
+
+        if (response.status === 403) {
+          return { status: "forbidden" };
+        }
+
+        if (!response.ok) {
+          return { status: "unavailable" };
+        }
+
+        return {
+          status: "ready",
+          data: (await response.json()) as AdminUsersData,
+        };
+      },
+    );
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
+export async function getCsrfState(): Promise<CsrfState> {
+  const requestHeaders = await headers();
+  const cookie = requestHeaders.get("cookie");
+
+  try {
+    return await requestApi<CsrfState>(
+      `${getApiOrigin()}/api/auth/csrf`,
+      {
+        headers: getForwardedHeaders(requestHeaders, cookie),
+        cache: "no-store",
+      },
+      async (response) => {
+        if (response.status === 401) {
+          return { status: "unauthorized" };
+        }
+
+        if (!response.ok) {
+          return { status: "unavailable" };
+        }
+
+        const data = (await response.json()) as { csrfToken?: unknown };
+
+        if (typeof data.csrfToken !== "string" || !data.csrfToken) {
+          return { status: "unavailable" };
+        }
+
+        return {
+          status: "ready",
+          token: data.csrfToken,
+        };
+      },
+    );
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
+export async function getFilesState(view: FileView): Promise<FilesState> {
+  const requestHeaders = await headers();
+  const cookie = requestHeaders.get("cookie");
+
+  try {
+    return await requestApi<FilesState>(
+      `${getApiOrigin()}/api/files?view=${view}`,
+      {
+        headers: getForwardedHeaders(requestHeaders, cookie),
+        cache: "no-store",
+      },
+      async (response) => {
+        if (response.status === 401) {
+          return { status: "unauthorized" };
+        }
+
+        if (!response.ok) {
+          return { status: "unavailable" };
+        }
+
+        const data = (await response.json()) as Partial<FilesData>;
+
+        if (!isFilesData(data)) {
+          return { status: "unavailable" };
+        }
+
+        return {
+          status: "ready",
+          data,
+        };
+      },
+    );
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
+function isFilesData(data: Partial<FilesData>): data is FilesData {
+  return (
+    data.view !== undefined &&
+    Array.isArray(data.entries) &&
+    data.entries.every(isFileEntry) &&
+    data.summary !== undefined &&
+    typeof data.summary.activeFiles === "number" &&
+    typeof data.summary.trashedFiles === "number" &&
+    typeof data.summary.usedBytes === "number" &&
+    data.storage !== undefined &&
+    typeof data.storage.totalBytes === "number" &&
+    typeof data.storage.systemUsedBytes === "number"
+  );
+}
+
+function isFileEntry(entry: unknown): entry is FileEntry {
+  if (!entry || typeof entry !== "object") {
+    return false;
+  }
+
+  const fileEntry = entry as Partial<FileEntry>;
+
+  return (
+    typeof fileEntry.id === "string" &&
+    typeof fileEntry.name === "string" &&
+    typeof fileEntry.kind === "string" &&
+    typeof fileEntry.sizeBytes === "number" &&
+    typeof fileEntry.state === "string" &&
+    typeof fileEntry.favorite === "boolean" &&
+    typeof fileEntry.shared === "boolean"
+  );
 }
 
 function getForwardedHeaders(requestHeaders: HeaderSource, cookie: string | null) {

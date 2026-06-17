@@ -30,12 +30,65 @@ CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
   token_hash TEXT NOT NULL UNIQUE,
+  csrf_token TEXT,
   expires_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE sessions
+  ADD COLUMN IF NOT EXISTS csrf_token TEXT;
+
+CREATE TABLE IF NOT EXISTS invitations (
+  id TEXT PRIMARY KEY,
+  invited_username TEXT NOT NULL,
+  role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+  token_hash TEXT NOT NULL UNIQUE,
+  status TEXT NOT NULL DEFAULT 'pending' CHECK (status IN ('pending', 'accepted', 'revoked', 'expired')),
+  created_by TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  expires_at TIMESTAMPTZ NOT NULL,
+  accepted_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS files (
+  id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  original_name TEXT NOT NULL,
+  storage_name TEXT NOT NULL UNIQUE,
+  mime_type TEXT,
+  size_bytes BIGINT NOT NULL CHECK (size_bytes >= 0),
+  state TEXT NOT NULL DEFAULT 'active' CHECK (state IN ('active', 'trashed')),
+  favorite BOOLEAN NOT NULL DEFAULT false,
+  trashed_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE IF NOT EXISTS file_shares (
+  id TEXT PRIMARY KEY,
+  file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  recipient_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (file_id, recipient_id),
+  CHECK (owner_id <> recipient_id)
+);
+
 CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id);
 CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS invitations_created_by_idx ON invitations(created_by);
+CREATE INDEX IF NOT EXISTS invitations_status_idx ON invitations(status);
+CREATE INDEX IF NOT EXISTS invitations_expires_at_idx ON invitations(expires_at);
+CREATE UNIQUE INDEX IF NOT EXISTS invitations_pending_username_idx
+  ON invitations (lower(invited_username))
+  WHERE status = 'pending';
+CREATE INDEX IF NOT EXISTS files_owner_id_idx ON files(owner_id);
+CREATE INDEX IF NOT EXISTS files_state_idx ON files(state);
+CREATE INDEX IF NOT EXISTS files_updated_at_idx ON files(updated_at);
+CREATE INDEX IF NOT EXISTS files_favorite_idx ON files(favorite);
+CREATE INDEX IF NOT EXISTS file_shares_file_id_idx ON file_shares(file_id);
+CREATE INDEX IF NOT EXISTS file_shares_owner_id_idx ON file_shares(owner_id);
+CREATE INDEX IF NOT EXISTS file_shares_recipient_id_idx ON file_shares(recipient_id);
 
 INSERT INTO users (id, username, password_hash, role)
 VALUES ('usr_admingod', 'admingod', crypt('admingod', gen_salt('bf')), 'admin')
