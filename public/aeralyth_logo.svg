@@ -1,0 +1,106 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="-70 -42 927 927" width="927" height="927">
+<defs>
+  <linearGradient id="g0_left_top" gradientUnits="userSpaceOnUse" x1="339.1" y1="237.9" x2="255.6" y2="196.1">
+    <stop offset="0" stop-color="#3489eb"/>
+    <stop offset="1" stop-color="#3186f7"/>
+  </linearGradient>
+  <linearGradient id="g1_left_dark_mid" gradientUnits="userSpaceOnUse" x1="294.7" y1="393.6" x2="168.9" y2="364.8">
+    <stop offset="0" stop-color="#1e67d7"/>
+    <stop offset="1" stop-color="#1850d3"/>
+  </linearGradient>
+  <linearGradient id="g2_left_outer_mid" gradientUnits="userSpaceOnUse" x1="197.5" y1="542.2" x2="73.4" y2="491.5">
+    <stop offset="0" stop-color="#348aec"/>
+    <stop offset="1" stop-color="#2f7ff6"/>
+  </linearGradient>
+  <linearGradient id="g3_left_lower" gradientUnits="userSpaceOnUse" x1="216.4" y1="497.3" x2="34.8" y2="701.9">
+    <stop offset="0" stop-color="#1954da"/>
+    <stop offset="1" stop-color="#206cda"/>
+  </linearGradient>
+  <linearGradient id="g4_left_bridge_light" gradientUnits="userSpaceOnUse" x1="241.4" y1="490.2" x2="270.0" y2="597.3">
+    <stop offset="0" stop-color="#77c7fd"/>
+    <stop offset="1" stop-color="#76c5fd"/>
+  </linearGradient>
+  <linearGradient id="g5_left_bridge_dark" gradientUnits="userSpaceOnUse" x1="361.2" y1="633.3" x2="188.7" y2="566.5">
+    <stop offset="0" stop-color="#2a7edc"/>
+    <stop offset="1" stop-color="#3795e3"/>
+  </linearGradient>
+  <linearGradient id="g6_right_top" gradientUnits="userSpaceOnUse" x1="366.1" y1="24.2" x2="627.4" y2="412.5">
+    <stop offset="0" stop-color="#7fe5f7"/>
+    <stop offset="1" stop-color="#7ce3f3"/>
+  </linearGradient>
+  <linearGradient id="g7_right_mid" gradientUnits="userSpaceOnUse" x1="637.5" y1="394.1" x2="456.8" y2="386.3">
+    <stop offset="0" stop-color="#7be2ed"/>
+    <stop offset="1" stop-color="#51c6e1"/>
+  </linearGradient>
+  <linearGradient id="g8_right_outer_mid" gradientUnits="userSpaceOnUse" x1="704.9" y1="496.2" x2="618.4" y2="561.3">
+    <stop offset="0" stop-color="#7ae2ee"/>
+    <stop offset="1" stop-color="#7ee1ed"/>
+  </linearGradient>
+  <linearGradient id="g9_right_lower_teal" gradientUnits="userSpaceOnUse" x1="590.5" y1="489.3" x2="734.8" y2="705.2">
+    <stop offset="0" stop-color="#2498c7"/>
+    <stop offset="1" stop-color="#25b6c5"/>
+  </linearGradient>
+  <linearGradient id="g10_right_bridge_light" gradientUnits="userSpaceOnUse" x1="627.2" y1="642.8" x2="451.0" y2="483.9">
+    <stop offset="0" stop-color="#389feb"/>
+    <stop offset="1" stop-color="#3da5ee"/>
+  </linearGradient>
+  <linearGradient id="g11_right_bridge_dark" gradientUnits="userSpaceOnUse" x1="608.2" y1="672.2" x2="407.5" y2="528.5">
+    <stop offset="0" stop-color="#1b5ac6"/>
+    <stop offset="1" stop-color="#1959c3"/>
+  </linearGradient>
+  <linearGradient id="g12_diamond_top_left" gradientUnits="userSpaceOnUse" x1="394.7" y1="367.9" x2="331.4" y2="363.7">
+    <stop offset="0" stop-color="#c2eefd"/>
+    <stop offset="1" stop-color="#c4f0fd"/>
+  </linearGradient>
+  <linearGradient id="g13_diamond_top_right" gradientUnits="userSpaceOnUse" x1="441.3" y1="342.0" x2="389.1" y2="389.7">
+    <stop offset="0" stop-color="#7ac4f9"/>
+    <stop offset="1" stop-color="#7bc5f8"/>
+  </linearGradient>
+  <linearGradient id="g14_diamond_bottom_left" gradientUnits="userSpaceOnUse" x1="407.4" y1="462.2" x2="341.0" y2="401.7">
+    <stop offset="0" stop-color="#5ccbea"/>
+    <stop offset="1" stop-color="#5fccec"/>
+  </linearGradient>
+  <linearGradient id="g15_diamond_bottom_right" gradientUnits="userSpaceOnUse" x1="437.3" y1="445.3" x2="383.6" y2="407.4">
+    <stop offset="0" stop-color="#46a4eb"/>
+    <stop offset="1" stop-color="#4ca7eb"/>
+  </linearGradient>
+  <linearGradient id="g16_bottom_left_upper" gradientUnits="userSpaceOnUse" x1="175.7" y1="734.8" x2="158.7" y2="794.0">
+    <stop offset="0" stop-color="#52c1f2"/>
+    <stop offset="1" stop-color="#4ebff2"/>
+  </linearGradient>
+  <linearGradient id="g17_bottom_left_lower" gradientUnits="userSpaceOnUse" x1="140.3" y1="689.7" x2="170.7" y2="864.3">
+    <stop offset="0" stop-color="#32abe8"/>
+    <stop offset="1" stop-color="#2598df"/>
+  </linearGradient>
+  <linearGradient id="g18_bottom_right_upper" gradientUnits="userSpaceOnUse" x1="600.8" y1="737.1" x2="631.3" y2="792.2">
+    <stop offset="0" stop-color="#49d7df"/>
+    <stop offset="1" stop-color="#3fd2d9"/>
+  </linearGradient>
+  <linearGradient id="g19_bottom_right_lower" gradientUnits="userSpaceOnUse" x1="622.0" y1="726.1" x2="630.7" y2="826.2">
+    <stop offset="0" stop-color="#1ebbc5"/>
+    <stop offset="1" stop-color="#1db8c1"/>
+  </linearGradient>
+</defs>
+<g shape-rendering="geometricPrecision" stroke-linejoin="round" stroke-width="0.55">
+  <polygon id="left_top" points="386,0 167,373 323,270" fill="url(#g0_left_top)" stroke="url(#g0_left_top)"/>
+  <polygon id="left_dark_mid" points="167,373 323,270 216,497" fill="url(#g1_left_dark_mid)" stroke="url(#g1_left_dark_mid)"/>
+  <polygon id="left_outer_mid" points="0,671 167,373 216,497" fill="url(#g2_left_outer_mid)" stroke="url(#g2_left_outer_mid)"/>
+  <polygon id="left_lower" points="0,671 216,497 166,625" fill="url(#g3_left_lower)" stroke="url(#g3_left_lower)"/>
+  <polygon id="left_bridge_light" points="216,497 395,546 166,625" fill="url(#g4_left_bridge_light)" stroke="url(#g4_left_bridge_light)"/>
+  <polygon id="left_bridge_dark" points="166,625 395,546 280,635" fill="url(#g5_left_bridge_dark)" stroke="url(#g5_left_bridge_dark)"/>
+  <polygon id="right_top" points="402,0 462,265 637,406" fill="url(#g6_right_top)" stroke="url(#g6_right_top)"/>
+  <polygon id="right_mid" points="462,265 573,501 637,406" fill="url(#g7_right_mid)" stroke="url(#g7_right_mid)"/>
+  <polygon id="right_outer_mid" points="637,406 573,501 786,671" fill="url(#g8_right_outer_mid)" stroke="url(#g8_right_outer_mid)"/>
+  <polygon id="right_lower_teal" points="573,501 637,632 786,671" fill="url(#g9_right_lower_teal)" stroke="url(#g9_right_lower_teal)"/>
+  <polygon id="right_bridge_light" points="395,546 573,501 637,632" fill="url(#g10_right_bridge_light)" stroke="url(#g10_right_bridge_light)"/>
+  <polygon id="right_bridge_dark" points="395,546 508,635 637,632" fill="url(#g11_right_bridge_dark)" stroke="url(#g11_right_bridge_dark)"/>
+  <polygon id="diamond_top_left" points="393,289 328,416 393,394" fill="url(#g12_diamond_top_left)" stroke="url(#g12_diamond_top_left)"/>
+  <polygon id="diamond_top_right" points="393,289 393,394 458,416" fill="url(#g13_diamond_top_right)" stroke="url(#g13_diamond_top_right)"/>
+  <polygon id="diamond_bottom_left" points="328,416 393,478 393,394" fill="url(#g14_diamond_bottom_left)" stroke="url(#g14_diamond_bottom_left)"/>
+  <polygon id="diamond_bottom_right" points="393,394 393,478 458,416" fill="url(#g15_diamond_bottom_right)" stroke="url(#g15_diamond_bottom_right)"/>
+  <polygon id="bottom_left_upper" points="7,713 180,736 316,839" fill="url(#g16_bottom_left_upper)" stroke="url(#g16_bottom_left_upper)"/>
+  <polygon id="bottom_left_lower" points="7,713 316,839 151,822" fill="url(#g17_bottom_left_lower)" stroke="url(#g17_bottom_left_lower)"/>
+  <polygon id="bottom_right_upper" points="774,713 471,840 601,737" fill="url(#g18_bottom_right_upper)" stroke="url(#g18_bottom_right_upper)"/>
+  <polygon id="bottom_right_lower" points="774,713 638,821 471,840" fill="url(#g19_bottom_right_lower)" stroke="url(#g19_bottom_right_lower)"/>
+</g>
+</svg>
