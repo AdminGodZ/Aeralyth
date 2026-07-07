@@ -13,6 +13,10 @@ pub struct AuthUser {
     pub username: String,
     pub role: String,
     pub status: String,
+    pub display_name: Option<String>,
+    pub theme_preference: String,
+    pub accent_color: String,
+    pub profile_image_url: Option<String>,
 }
 
 impl AuthUser {
@@ -30,7 +34,19 @@ pub async fn authenticate_password(
         .db
         .query_opt(
             "
-                SELECT id, username, role, status
+                SELECT
+                  id,
+                  username,
+                  role,
+                  status,
+                  display_name,
+                  COALESCE(theme_preference, 'system') AS theme_preference,
+                  COALESCE(accent_color, '#3088f0') AS accent_color,
+                  profile_image_bytes IS NOT NULL AS has_profile_image,
+                  to_char(
+                    COALESCE(profile_image_updated_at, updated_at) AT TIME ZONE 'UTC',
+                    'YYYYMMDDHH24MISSMS'
+                  ) AS profile_image_version
                 FROM users
                 WHERE username = $1
                   AND status = 'active'
@@ -54,7 +70,19 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
         .db
         .query_opt(
             "
-                SELECT users.id, users.username, users.role, users.status
+                SELECT
+                  users.id,
+                  users.username,
+                  users.role,
+                  users.status,
+                  users.display_name,
+                  COALESCE(users.theme_preference, 'system') AS theme_preference,
+                  COALESCE(users.accent_color, '#3088f0') AS accent_color,
+                  users.profile_image_bytes IS NOT NULL AS has_profile_image,
+                  to_char(
+                    COALESCE(users.profile_image_updated_at, users.updated_at) AT TIME ZONE 'UTC',
+                    'YYYYMMDDHH24MISSMS'
+                  ) AS profile_image_version
                 FROM sessions
                 INNER JOIN users ON users.id = sessions.user_id
                 WHERE sessions.token_hash = encode(digest($1::text, 'sha256'), 'hex')
@@ -123,10 +151,24 @@ pub async fn require_csrf(state: &AppState, request: &HttpRequest, csrf_token: &
 }
 
 fn auth_user_from_row(row: tokio_postgres::Row) -> AuthUser {
+    let has_profile_image: bool = row.get("has_profile_image");
+    let profile_image_version: Option<String> = row.get("profile_image_version");
+    let profile_image_url = has_profile_image.then(|| {
+        let version = profile_image_version
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "1".to_owned());
+
+        format!("/api/profile/avatar?v={version}")
+    });
+
     AuthUser {
         id: row.get("id"),
         username: row.get("username"),
         role: row.get("role"),
         status: row.get("status"),
+        display_name: row.get("display_name"),
+        theme_preference: row.get("theme_preference"),
+        accent_color: row.get("accent_color"),
+        profile_image_url,
     }
 }

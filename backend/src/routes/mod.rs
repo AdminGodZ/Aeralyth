@@ -2,6 +2,7 @@ mod admin;
 mod auth;
 mod files;
 mod health;
+mod profile;
 
 use actix_web::web;
 
@@ -17,6 +18,11 @@ pub fn configure(config: &mut web::ServiceConfig) {
                         .route("/logout", web::post().to(auth::logout))
                         .route("/csrf", web::get().to(auth::csrf))
                         .route("/me", web::get().to(auth::me)),
+                )
+                .service(
+                    web::scope("/profile")
+                        .route("", web::post().to(profile::update))
+                        .route("/avatar", web::get().to(profile::avatar)),
                 )
                 .service(
                     web::scope("/admin")

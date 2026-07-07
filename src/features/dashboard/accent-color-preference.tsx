@@ -9,20 +9,33 @@ import {
   ACCENT_COLOR_PRESETS,
   ACCENT_COLOR_STORAGE_KEY,
   DEFAULT_ACCENT_COLOR,
-  getAccentForeground,
+  applyAccentColor,
   normalizeAccentColor,
 } from "@/lib/accent-color";
 
-export function AccentColorPreference() {
-  const [accentColor, setAccentColor] = useState<string>(DEFAULT_ACCENT_COLOR);
+type AccentColorPreferenceProps = {
+  initialColor?: string | null;
+  inputName?: string;
+};
+
+export function AccentColorPreference({
+  initialColor,
+  inputName,
+}: AccentColorPreferenceProps) {
+  const normalizedInitialColor =
+    normalizeAccentColor(initialColor) ?? DEFAULT_ACCENT_COLOR;
+  const [accentColor, setAccentColor] = useState<string>(normalizedInitialColor);
 
   useEffect(() => {
-    const storedColor = readStoredAccentColor();
-    const nextColor = storedColor ?? DEFAULT_ACCENT_COLOR;
+    const nextColor =
+      normalizeAccentColor(initialColor) ??
+      readStoredAccentColor() ??
+      DEFAULT_ACCENT_COLOR;
 
     setAccentColor(nextColor);
     applyAccentColor(nextColor);
-  }, []);
+    syncStoredAccentColor(nextColor);
+  }, [initialColor]);
 
   function updateAccentColor(value: string) {
     const nextColor = normalizeAccentColor(value);
@@ -33,13 +46,7 @@ export function AccentColorPreference() {
 
     setAccentColor(nextColor);
     applyAccentColor(nextColor);
-
-    if (nextColor === DEFAULT_ACCENT_COLOR) {
-      removeStoredAccentColor();
-      return;
-    }
-
-    writeStoredAccentColor(nextColor);
+    syncStoredAccentColor(nextColor);
   }
 
   function resetAccentColor() {
@@ -50,6 +57,9 @@ export function AccentColorPreference() {
 
   return (
     <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+      {inputName ? (
+        <input type="hidden" name={inputName} value={accentColor} />
+      ) : null}
       <ColorPicker
         value={accentColor as `#${string}`}
         type="hex"
@@ -82,17 +92,6 @@ export function AccentColorPreference() {
   );
 }
 
-function applyAccentColor(color: string) {
-  const foreground = getAccentForeground(color);
-  const root = document.documentElement;
-
-  root.style.setProperty("--primary", color);
-  root.style.setProperty("--sidebar-primary", color);
-  root.style.setProperty("--ring", color);
-  root.style.setProperty("--primary-foreground", foreground);
-  root.style.setProperty("--sidebar-primary-foreground", foreground);
-}
-
 function readStoredAccentColor() {
   try {
     return normalizeAccentColor(
@@ -117,4 +116,13 @@ function removeStoredAccentColor() {
   } catch {
     return;
   }
+}
+
+function syncStoredAccentColor(color: string) {
+  if (color === DEFAULT_ACCENT_COLOR) {
+    removeStoredAccentColor();
+    return;
+  }
+
+  writeStoredAccentColor(color);
 }

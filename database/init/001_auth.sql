@@ -14,6 +14,27 @@ ALTER TABLE users
 ALTER TABLE users
   ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT now();
 
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS display_name TEXT;
+
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS theme_preference TEXT NOT NULL DEFAULT 'system';
+
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS accent_color TEXT NOT NULL DEFAULT '#3088f0';
+
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS profile_image_bytes BYTEA;
+
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS profile_image_mime_type TEXT;
+
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS profile_image_size_bytes BIGINT;
+
+ALTER TABLE users
+  ADD COLUMN IF NOT EXISTS profile_image_updated_at TIMESTAMPTZ;
+
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -23,6 +44,45 @@ BEGIN
   ) THEN
     ALTER TABLE users
       ADD CONSTRAINT users_status_check CHECK (status IN ('active', 'disabled'));
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'users_theme_preference_check'
+  ) THEN
+    ALTER TABLE users
+      ADD CONSTRAINT users_theme_preference_check CHECK (theme_preference IN ('system', 'light', 'dark'));
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'users_accent_color_check'
+  ) THEN
+    ALTER TABLE users
+      ADD CONSTRAINT users_accent_color_check CHECK (accent_color ~ '^#[0-9a-fA-F]{6}$');
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'users_profile_image_size_check'
+  ) THEN
+    ALTER TABLE users
+      ADD CONSTRAINT users_profile_image_size_check CHECK (
+        profile_image_size_bytes IS NULL
+        OR profile_image_size_bytes BETWEEN 0 AND 2097152
+      );
   END IF;
 END $$;
 

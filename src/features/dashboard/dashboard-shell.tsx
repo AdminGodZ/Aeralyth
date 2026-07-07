@@ -18,12 +18,10 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
-import type { ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 import { AeralythLogo } from "@/components/aeralyth-logo";
-import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
-import { AccentColorPreference } from "@/features/dashboard/accent-color-preference";
 import {
   getDashboardSection,
   primaryDashboardSections,
@@ -31,20 +29,21 @@ import {
   type DashboardSection,
   type DashboardSectionKey,
 } from "@/features/dashboard/config";
+import { ProfileSettingsForm } from "@/features/dashboard/profile-settings-form";
 import { UploadPanel } from "@/features/dashboard/upload-panel";
+import { UserPreferenceHydrator } from "@/features/dashboard/user-preference-hydrator";
 import type {
   AdminUsersState,
+  CurrentUser,
   FileEntry,
   FilesState,
   StorageStats,
 } from "@/lib/api";
-
-type CurrentUser = {
-  id: string;
-  username: string;
-  role: "admin" | "user";
-  status: "active" | "disabled";
-};
+import {
+  DEFAULT_ACCENT_COLOR,
+  getAccentCssProperties,
+  normalizeAccentColor,
+} from "@/lib/accent-color";
 
 type DashboardShellProps = {
   sectionKey: DashboardSectionKey;
@@ -64,13 +63,25 @@ export function DashboardShell({
   filesState,
 }: DashboardShellProps) {
   const section = getDashboardSection(sectionKey) ?? getDashboardSection("files");
+  const accentColor =
+    normalizeAccentColor(currentUser.accentColor) ?? DEFAULT_ACCENT_COLOR;
+  const dashboardStyle = getAccentCssProperties(
+    accentColor,
+  ) as CSSProperties;
 
   if (!section) {
     return null;
   }
 
   return (
-    <main className="flex min-h-dvh bg-sidebar text-foreground">
+    <main
+      className="flex min-h-dvh bg-sidebar text-foreground"
+      style={dashboardStyle}
+    >
+      <UserPreferenceHydrator
+        accentColor={accentColor}
+        themePreference={currentUser.themePreference}
+      />
       <Sidebar
         activeSectionKey={section.key}
         currentUser={currentUser}
@@ -243,16 +254,38 @@ function TopBar({
 }
 
 function ProfileLink({ currentUser }: { currentUser: CurrentUser }) {
+  const profileName = getProfileName(currentUser);
+
   return (
     <Link
       href="/settings"
-      className="flex size-9 shrink-0 items-center justify-center rounded-full border bg-background text-sm font-semibold text-primary transition-colors hover:bg-muted"
-      title={currentUser.username}
-      aria-label={`Open settings for ${currentUser.username}`}
+      className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-full border bg-background text-sm font-semibold text-primary transition-colors hover:bg-muted"
+      title={profileName}
+      aria-label={`Open settings for ${profileName}`}
     >
-      {getInitials(currentUser.username)}
+      <UserAvatar currentUser={currentUser} />
     </Link>
   );
+}
+
+function UserAvatar({ currentUser }: { currentUser: CurrentUser }) {
+  const profileName = getProfileName(currentUser);
+
+  if (currentUser.profileImageUrl) {
+    return (
+      <img
+        src={currentUser.profileImageUrl}
+        alt=""
+        className="size-full object-cover"
+      />
+    );
+  }
+
+  return <span>{getInitials(profileName)}</span>;
+}
+
+function getProfileName(currentUser: CurrentUser) {
+  return currentUser.displayName?.trim() || currentUser.username;
 }
 
 function SearchInput({
@@ -543,48 +576,10 @@ function SettingsContent({
   return (
     <div className="flex flex-1 flex-col px-4 py-5 sm:px-6">
       <div className="grid w-full max-w-3xl gap-4">
-        <SettingsSection title="Account">
-          <div className="flex min-w-0 items-center gap-3 px-4 py-3">
-            <span className="flex size-9 shrink-0 items-center justify-center rounded-full border bg-primary/10 text-sm font-semibold text-primary">
-              {getInitials(currentUser.username)}
-            </span>
-            <div className="min-w-0">
-              <p className="truncate text-sm font-medium">
-                {currentUser.username}
-              </p>
-              <p className="text-xs text-muted-foreground">Signed in</p>
-            </div>
-          </div>
-
-          <SettingsRow label="Role">
-            <span className="text-sm capitalize text-muted-foreground">
-              {currentUser.role}
-            </span>
-          </SettingsRow>
-
-          <SettingsRow label="Status">
-            <StatusPill>{currentUser.status}</StatusPill>
-          </SettingsRow>
-        </SettingsSection>
-
-        <SettingsSection title="Preferences">
-          <SettingsRow
-            label="Appearance"
-            description="Switch the interface between light and dark mode."
-          >
-            <div className="flex items-center gap-3">
-              <span className="text-sm text-muted-foreground">Dark mode</span>
-              <ThemeToggle className="shrink-0" />
-            </div>
-          </SettingsRow>
-
-          <SettingsRow
-            label="Accent color"
-            description="Controls buttons, highlights, focus rings, and selected states."
-          >
-            <AccentColorPreference />
-          </SettingsRow>
-        </SettingsSection>
+        <ProfileSettingsForm
+          currentUser={currentUser}
+          csrfToken={csrfToken}
+        />
 
         <SettingsSection title="Session">
           <SettingsRow label="Session">
@@ -638,14 +633,6 @@ function SettingsRow({
       </div>
       <div className="flex min-w-0 items-center sm:justify-end">{children}</div>
     </div>
-  );
-}
-
-function StatusPill({ children }: { children: string }) {
-  return (
-    <span className="rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs font-medium capitalize text-primary">
-      {children}
-    </span>
   );
 }
 

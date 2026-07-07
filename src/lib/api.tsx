@@ -9,6 +9,10 @@ export type CurrentUser = {
   username: string;
   role: "admin" | "user";
   status: "active" | "disabled";
+  displayName: string | null;
+  themePreference: "system" | "light" | "dark";
+  accentColor: string;
+  profileImageUrl: string | null;
 };
 
 export type AuthState =
