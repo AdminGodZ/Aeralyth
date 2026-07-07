@@ -45,6 +45,32 @@ export function getAccentForeground(color: string) {
     : "oklch(0.985 0 0)";
 }
 
+export function getAccentCssProperties(color: string) {
+  const accentColor = normalizeAccentColor(color) ?? DEFAULT_ACCENT_COLOR;
+  const foreground = getAccentForeground(accentColor);
+
+  return {
+    "--primary": accentColor,
+    "--sidebar-primary": accentColor,
+    "--ring": accentColor,
+    "--primary-foreground": foreground,
+    "--sidebar-primary-foreground": foreground,
+  };
+}
+
+export function applyAccentColor(color: string) {
+  if (typeof document === "undefined") {
+    return;
+  }
+
+  const root = document.documentElement;
+  const properties = getAccentCssProperties(color);
+
+  Object.entries(properties).forEach(([name, value]) => {
+    root.style.setProperty(name, value);
+  });
+}
+
 function toLinearRgb(value: number) {
   const normalizedValue = value / 255;
 
