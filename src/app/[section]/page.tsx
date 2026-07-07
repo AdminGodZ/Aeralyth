@@ -15,11 +15,6 @@ type SectionPageProps = {
   params: Promise<{
     section: string;
   }>;
-  searchParams?: Promise<{
-    file?: string;
-    invite?: string;
-    user?: string;
-  }>;
 };
 
 export const dynamic = "force-dynamic";
@@ -42,7 +37,6 @@ export async function generateMetadata({
 
 export default async function SectionPage({
   params,
-  searchParams,
 }: SectionPageProps) {
   const { section: sectionKey } = await params;
   const section = getDashboardSection(sectionKey);
@@ -67,8 +61,7 @@ export default async function SectionPage({
     notFound();
   }
 
-  const [query, csrfState, adminUsersState, filesState] = await Promise.all([
-    searchParams,
+  const [csrfState, adminUsersState, filesState] = await Promise.all([
     getCsrfState(),
     section.key === "users" ? getAdminUsersState() : Promise.resolve(undefined),
     getFilesState(getFileView(section.key) ?? "files"),
@@ -101,9 +94,6 @@ export default async function SectionPage({
       csrfToken={csrfState.token}
       adminUsersState={adminUsersState}
       filesState={filesState}
-      fileMessage={query?.file}
-      userMessage={query?.user}
-      inviteMessage={query?.invite}
     />
   );
 }

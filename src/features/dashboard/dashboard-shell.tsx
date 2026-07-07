@@ -1,21 +1,29 @@
 import {
+  Activity,
+  ArrowDown,
+  ChevronsUpDown,
   Download,
   FileArchive,
   FileText,
+  Folder,
+  HardDrive,
   ImageIcon,
+  ListFilter,
+  LogOut,
   RotateCcw,
   Search,
-  Share2,
   Star,
   Trash2,
-  Upload,
   X,
+  type LucideIcon,
 } from "lucide-react";
-import Image from "next/image";
 import Link from "next/link";
+import type { ReactNode } from "react";
 
+import { AeralythLogo } from "@/components/aeralyth-logo";
 import { ThemeToggle } from "@/components/theme-toggle";
 import { Button } from "@/components/ui/button";
+import { AccentColorPreference } from "@/features/dashboard/accent-color-preference";
 import {
   getDashboardSection,
   primaryDashboardSections,
@@ -23,6 +31,7 @@ import {
   type DashboardSection,
   type DashboardSectionKey,
 } from "@/features/dashboard/config";
+import { UploadPanel } from "@/features/dashboard/upload-panel";
 import type {
   AdminUsersState,
   FileEntry,
@@ -43,9 +52,6 @@ type DashboardShellProps = {
   csrfToken: string;
   adminUsersState?: AdminUsersState;
   filesState: FilesState;
-  fileMessage?: string;
-  userMessage?: string;
-  inviteMessage?: string;
 };
 
 type ReadyFilesState = Extract<FilesState, { status: "ready" }>;
@@ -56,9 +62,6 @@ export function DashboardShell({
   csrfToken,
   adminUsersState,
   filesState,
-  fileMessage,
-  userMessage,
-  inviteMessage,
 }: DashboardShellProps) {
   const section = getDashboardSection(sectionKey) ?? getDashboardSection("files");
 
@@ -67,24 +70,21 @@ export function DashboardShell({
   }
 
   return (
-    <main className="flex min-h-dvh bg-background text-foreground">
+    <main className="flex min-h-dvh bg-sidebar text-foreground">
       <Sidebar
         activeSectionKey={section.key}
         currentUser={currentUser}
         filesState={filesState}
       />
 
-      <section className="flex min-w-0 flex-1 flex-col">
-        <TopBar section={section} />
+      <section className="dashboard-main-panel flex min-w-0 flex-1 flex-col bg-background lg:mt-4 lg:min-h-[calc(100dvh-1rem)] lg:overflow-hidden lg:rounded-tl-3xl">
+        <TopBar section={section} currentUser={currentUser} />
         <DashboardContent
           section={section}
           currentUser={currentUser}
           csrfToken={csrfToken}
           adminUsersState={adminUsersState}
           filesState={filesState}
-          fileMessage={fileMessage}
-          userMessage={userMessage}
-          inviteMessage={inviteMessage}
         />
       </section>
     </main>
@@ -109,32 +109,18 @@ function Sidebar({
     : 0;
 
   return (
-    <aside className="hidden w-64 shrink-0 flex-col border-r bg-muted/30 px-4 py-5 lg:flex">
-      <div className="flex items-center justify-between gap-3 px-2">
+    <aside className="dashboard-sidebar hidden w-64 shrink-0 flex-col px-4 pb-5 pt-5 lg:flex lg:pt-9">
+      <div className="px-2">
         <Link href="/files" className="flex min-w-0 items-center gap-3">
-          <Image
-            src="/Aeralyth_transparent.png"
-            alt="Aeralyth logo"
-            width={40}
-            height={40}
-            priority
-            className="size-10 shrink-0 object-contain"
-          />
-          <p className="truncate font-display text-lg font-semibold leading-6">
+          <AeralythLogo className="size-10" />
+          <p className="truncate font-display text-4xl font-semibold leading-10">
             Aeralyth
           </p>
         </Link>
-        <Link
-          href="/settings"
-          className="flex size-9 shrink-0 items-center justify-center rounded-full border bg-background text-sm font-semibold text-primary"
-          title={currentUser.username}
-          aria-label={`Open settings for ${currentUser.username}`}
-        >
-          {getInitials(currentUser.username)}
-        </Link>
+        <div role="separator" aria-hidden="true" className="mt-5 h-px bg-border" />
       </div>
 
-      <div className="mt-8 space-y-7">
+      <div className="mt-6 space-y-7">
         <nav className="space-y-1" aria-label="Main navigation">
           {primaryDashboardSections.map((item) => (
             <SidebarLink
@@ -211,18 +197,17 @@ function SidebarLink({
   );
 }
 
-function TopBar({ section }: { section: DashboardSection }) {
+function TopBar({
+  section,
+  currentUser,
+}: {
+  section: DashboardSection;
+  currentUser: CurrentUser;
+}) {
   return (
-    <header className="grid min-h-16 gap-3 border-b px-4 py-3 sm:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,34rem)_minmax(0,1fr)] lg:items-center">
-      <div className="flex min-w-0 items-center gap-3">
-        <Image
-          src="/Aeralyth_transparent.png"
-          alt="Aeralyth logo"
-          width={36}
-          height={36}
-          priority
-          className="size-9 shrink-0 object-contain lg:hidden"
-        />
+    <header className="grid min-h-20 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-3 border-b px-4 py-3 sm:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,34rem)_minmax(0,1fr)] lg:items-center">
+      <div className="col-start-1 row-start-1 flex min-w-0 items-center gap-3">
+        <AeralythLogo className="size-9 lg:hidden" />
         <div className="min-w-0">
           <p className="font-display text-xl font-semibold leading-6">
             {section.title}
@@ -233,13 +218,13 @@ function TopBar({ section }: { section: DashboardSection }) {
         </div>
       </div>
 
-      <div className="min-w-0 lg:justify-self-center">
-        {section.searchPlaceholder ? (
+      {section.searchPlaceholder ? (
+        <div className="col-span-2 min-w-0 lg:col-span-1 lg:col-start-2 lg:row-start-1 lg:w-full lg:justify-self-center">
           <SearchInput placeholder={section.searchPlaceholder} />
-        ) : null}
-      </div>
+        </div>
+      ) : null}
 
-      <div className="flex min-w-0 flex-wrap items-center gap-2 lg:justify-end">
+      <div className="col-start-2 row-start-1 flex min-w-0 flex-wrap items-center justify-end gap-2 self-center lg:col-start-3">
         {section.actions?.map((action) => (
           <Button
             key={action.label}
@@ -251,8 +236,22 @@ function TopBar({ section }: { section: DashboardSection }) {
             {action.label}
           </Button>
         ))}
+        <ProfileLink currentUser={currentUser} />
       </div>
     </header>
+  );
+}
+
+function ProfileLink({ currentUser }: { currentUser: CurrentUser }) {
+  return (
+    <Link
+      href="/settings"
+      className="flex size-9 shrink-0 items-center justify-center rounded-full border bg-background text-sm font-semibold text-primary transition-colors hover:bg-muted"
+      title={currentUser.username}
+      aria-label={`Open settings for ${currentUser.username}`}
+    >
+      {getInitials(currentUser.username)}
+    </Link>
   );
 }
 
@@ -285,18 +284,12 @@ function DashboardContent({
   csrfToken,
   adminUsersState,
   filesState,
-  fileMessage,
-  userMessage,
-  inviteMessage,
 }: {
   section: DashboardSection;
   currentUser: CurrentUser;
   csrfToken: string;
   adminUsersState?: AdminUsersState;
   filesState: FilesState;
-  fileMessage?: string;
-  userMessage?: string;
-  inviteMessage?: string;
 }) {
   if (section.key === "settings") {
     return <SettingsContent currentUser={currentUser} csrfToken={csrfToken} />;
@@ -308,8 +301,6 @@ function DashboardContent({
         currentUser={currentUser}
         csrfToken={csrfToken}
         adminUsersState={adminUsersState}
-        userMessage={userMessage}
-        inviteMessage={inviteMessage}
       />
     );
   }
@@ -323,7 +314,6 @@ function DashboardContent({
       section={section}
       filesState={filesState}
       csrfToken={csrfToken}
-      fileMessage={fileMessage}
     />
   );
 }
@@ -332,14 +322,10 @@ function UsersContent({
   currentUser,
   csrfToken,
   adminUsersState,
-  userMessage,
-  inviteMessage,
 }: {
   currentUser: CurrentUser;
   csrfToken: string;
   adminUsersState?: AdminUsersState;
-  userMessage?: string;
-  inviteMessage?: string;
 }) {
   if (!adminUsersState || adminUsersState.status === "unavailable") {
     return (
@@ -359,28 +345,15 @@ function UsersContent({
   }
 
   const { users, invitations, summary } = adminUsersState.data;
-  const message = getUsersMessage(userMessage, inviteMessage);
 
   return (
-    <div className="flex flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
+    <div className="flex min-h-0 flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
       <div className="grid gap-3 sm:grid-cols-4">
         <Metric label="Users" value={String(summary.totalUsers)} />
         <Metric label="Active" value={String(summary.activeUsers)} />
         <Metric label="Admins" value={String(summary.admins)} />
         <Metric label="Invites" value={String(summary.pendingInvites)} />
       </div>
-
-      {message ? (
-        <section
-          className={
-            message.tone === "success"
-              ? "rounded-md border border-primary/30 bg-primary/10 px-4 py-3 text-sm"
-              : "rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
-          }
-        >
-          {message.text}
-        </section>
-      ) : null}
 
       <section className="rounded-md border p-5">
         <p className="font-medium">Create user</p>
@@ -568,38 +541,111 @@ function SettingsContent({
   csrfToken: string;
 }) {
   return (
-    <div className="flex flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
-      <section className="grid gap-4 lg:grid-cols-[minmax(0,1fr)_18rem]">
-        <div className="rounded-md border p-5">
-          <div className="flex items-center gap-3">
-            <span className="flex size-10 items-center justify-center rounded-md border bg-background text-sm font-semibold text-primary">
+    <div className="flex flex-1 flex-col px-4 py-5 sm:px-6">
+      <div className="grid w-full max-w-3xl gap-4">
+        <SettingsSection title="Account">
+          <div className="flex min-w-0 items-center gap-3 px-4 py-3">
+            <span className="flex size-9 shrink-0 items-center justify-center rounded-full border bg-primary/10 text-sm font-semibold text-primary">
               {getInitials(currentUser.username)}
             </span>
             <div className="min-w-0">
-              <p className="truncate font-medium">{currentUser.username}</p>
-              <p className="text-sm capitalize text-muted-foreground">
-                {currentUser.role}
+              <p className="truncate text-sm font-medium">
+                {currentUser.username}
               </p>
+              <p className="text-xs text-muted-foreground">Signed in</p>
             </div>
           </div>
 
-          <form action="/api/auth/logout" method="post" className="mt-5">
-            <input type="hidden" name="csrf_token" value={csrfToken} />
-            <Button type="submit" variant="outline" className="rounded-full">
-              Sign out
-            </Button>
-          </form>
-        </div>
+          <SettingsRow label="Role">
+            <span className="text-sm capitalize text-muted-foreground">
+              {currentUser.role}
+            </span>
+          </SettingsRow>
 
-        <div className="rounded-md border p-5">
-          <p className="font-medium">Appearance</p>
-          <div className="mt-4 flex items-center justify-between gap-4">
-            <span className="text-sm text-muted-foreground">Dark mode</span>
-            <ThemeToggle className="shrink-0" />
-          </div>
-        </div>
-      </section>
+          <SettingsRow label="Status">
+            <StatusPill>{currentUser.status}</StatusPill>
+          </SettingsRow>
+        </SettingsSection>
+
+        <SettingsSection title="Preferences">
+          <SettingsRow
+            label="Appearance"
+            description="Switch the interface between light and dark mode."
+          >
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-muted-foreground">Dark mode</span>
+              <ThemeToggle className="shrink-0" />
+            </div>
+          </SettingsRow>
+
+          <SettingsRow
+            label="Accent color"
+            description="Controls buttons, highlights, focus rings, and selected states."
+          >
+            <AccentColorPreference />
+          </SettingsRow>
+        </SettingsSection>
+
+        <SettingsSection title="Session">
+          <SettingsRow label="Session">
+            <form action="/api/auth/logout" method="post">
+              <input type="hidden" name="csrf_token" value={csrfToken} />
+              <Button type="submit" variant="destructive" size="sm">
+                <LogOut className="size-4" aria-hidden="true" />
+                Sign out
+              </Button>
+            </form>
+          </SettingsRow>
+        </SettingsSection>
+      </div>
     </div>
+  );
+}
+
+function SettingsSection({
+  title,
+  children,
+}: {
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <section className="w-full overflow-hidden rounded-md border">
+      <div className="border-b px-4 py-3">
+        <p className="text-sm font-medium">{title}</p>
+      </div>
+      <div className="divide-y">{children}</div>
+    </section>
+  );
+}
+
+function SettingsRow({
+  label,
+  description,
+  children,
+}: {
+  label: string;
+  description?: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+      <div className="min-w-0">
+        <p className="text-sm font-medium">{label}</p>
+        {description ? (
+          <p className="mt-1 text-xs text-muted-foreground">{description}</p>
+        ) : null}
+      </div>
+      <div className="flex min-w-0 items-center sm:justify-end">{children}</div>
+    </div>
+  );
+}
+
+function StatusPill({ children }: { children: string }) {
+  return (
+    <span className="rounded-full border border-primary/30 bg-primary/10 px-2.5 py-1 text-xs font-medium capitalize text-primary">
+      {children}
+    </span>
   );
 }
 
@@ -607,16 +653,14 @@ function FileContent({
   section,
   filesState,
   csrfToken,
-  fileMessage,
 }: {
   section: DashboardSection;
   filesState: FilesState;
   csrfToken: string;
-  fileMessage?: string;
 }) {
   if (!hasReadyFilesState(filesState)) {
     return (
-      <div className="flex flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
+      <div className="flex min-h-0 flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
         <section className="rounded-md border p-5">
           <p className="font-medium">Files unavailable</p>
           <p className="mt-2 text-sm text-muted-foreground">
@@ -628,91 +672,101 @@ function FileContent({
   }
 
   const { entries, summary } = filesState.data;
-  const message = getFileMessage(fileMessage);
   const isTrash = section.key === "trash";
   const isShared = section.key === "shared";
+  const folderCount = countFolders(entries);
+  const fileCount = entries.length - folderCount;
+  const uploadInputId =
+    section.key === "files" ? "aeralyth-file-upload-input" : undefined;
 
   return (
-    <div className="flex flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
-      <div className="grid gap-3 sm:grid-cols-4">
-        <Metric label={section.title} value={String(entries.length)} />
-        <Metric label="Active" value={String(summary.activeFiles)} />
-        <Metric label="Trash" value={String(summary.trashedFiles)} />
-        <Metric label="Used" value={formatBytes(summary.usedBytes)} />
+    <div className="flex min-h-0 flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
+      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+        <FileMetric
+          icon={FileText}
+          label={section.key === "files" ? "Files" : section.title}
+          value={String(section.key === "files" ? fileCount : entries.length)}
+        />
+        <FileMetric icon={Folder} label="Folders" value={String(folderCount)} />
+        <FileMetric
+          icon={Activity}
+          label="Active"
+          value={String(summary.activeFiles)}
+        />
+        <FileMetric
+          icon={Trash2}
+          label="Trash"
+          value={String(summary.trashedFiles)}
+        />
+        <FileMetric
+          icon={HardDrive}
+          label="Used"
+          value={formatBytes(summary.usedBytes)}
+        />
       </div>
 
-      {message ? (
-        <section
-          className={
-            message.tone === "success"
-              ? "rounded-md border border-primary/30 bg-primary/10 px-4 py-3 text-sm"
-              : "rounded-md border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive"
-          }
-        >
-          {message.text}
-        </section>
+      {section.key === "files" ? (
+        <UploadPanel csrfToken={csrfToken} inputId={uploadInputId} />
       ) : null}
 
-      {section.key === "files" ? <UploadPanel csrfToken={csrfToken} /> : null}
-
-      <section className="min-w-0 overflow-hidden rounded-md border">
-        <div className="grid grid-cols-[minmax(0,1fr)_7rem] gap-3 border-b bg-muted/40 px-4 py-3 text-xs font-medium uppercase text-muted-foreground md:grid-cols-[minmax(0,1fr)_7rem_7rem_9rem_minmax(18rem,26rem)]">
-          <span>Name</span>
-          <span>Kind</span>
-          <span className="hidden md:block">Size</span>
-          <span className="hidden md:block">
-            {isTrash ? "Deleted" : isShared ? "Shared" : "Updated"}
-          </span>
-          <span className="hidden md:block">Actions</span>
-        </div>
-
-        <div className="divide-y">
-          {entries.length ? (
-            entries.map((file) => (
-              <FileRow
-                key={file.id}
-                file={file}
-                sectionKey={section.key}
-                csrfToken={csrfToken}
-              />
-            ))
-          ) : (
-            <p className="px-4 py-4 text-sm text-muted-foreground">
-              {emptyFilesText(section.key)}
-            </p>
-          )}
-        </div>
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md border bg-card/45 shadow-[0_18px_70px_rgb(0_0_0/0.08)]">
+        {entries.length ? (
+          <>
+            <FileTableHeader
+              isShared={isShared}
+              isTrash={isTrash}
+            />
+            <div className="min-h-0 flex-1 divide-y overflow-auto">
+              {entries.map((file) => (
+                <FileRow
+                  key={file.id}
+                  file={file}
+                  sectionKey={section.key}
+                  csrfToken={csrfToken}
+                />
+              ))}
+            </div>
+          </>
+        ) : (
+          <FilesEmptyState sectionKey={section.key} />
+        )}
       </section>
     </div>
   );
 }
 
-function UploadPanel({ csrfToken }: { csrfToken: string }) {
-  const action = `/api/files/upload?csrf_token=${encodeURIComponent(csrfToken)}`;
-
+function FileTableHeader({
+  isTrash,
+  isShared,
+}: {
+  isTrash: boolean;
+  isShared: boolean;
+}) {
   return (
-    <section className="rounded-md border p-5">
-      <p className="font-medium">Upload</p>
-      <form
-        action={action}
-        method="post"
-        encType="multipart/form-data"
-        className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_auto]"
-      >
-        <input type="hidden" name="csrf_token" value={csrfToken} />
+    <div className="grid min-h-14 grid-cols-[2rem_minmax(0,1fr)_7rem] gap-3 border-b px-4 py-3 text-sm font-medium text-muted-foreground md:grid-cols-[2rem_minmax(12rem,1fr)_7rem_7rem_9rem_minmax(18rem,22rem)] md:items-center">
+      <span className="flex items-center justify-center">
         <input
-          name="file"
-          type="file"
-          required
-          multiple
-          className="h-10 min-w-0 rounded-full border bg-background px-3 py-2 text-sm file:mr-3 file:rounded-full file:border-0 file:bg-primary file:px-3 file:py-1 file:text-sm file:font-medium file:text-primary-foreground"
+          type="checkbox"
+          aria-label="Select all files"
+          disabled
+          className="size-4 rounded border border-border bg-transparent"
         />
-        <Button type="submit" className="h-10 rounded-full">
-          <Upload className="size-4" aria-hidden="true" />
-          Upload
-        </Button>
-      </form>
-    </section>
+      </span>
+      <span className="flex items-center gap-1.5">
+        Name
+        <ChevronsUpDown className="size-3.5" aria-hidden="true" />
+      </span>
+      <span>Kind</span>
+      <span className="hidden md:block">Size</span>
+      <span className="hidden items-center gap-1.5 md:flex">
+        {isTrash ? "Deleted" : isShared ? "Shared" : "Updated"}
+        <ArrowDown className="size-3.5" aria-hidden="true" />
+      </span>
+      <span className="hidden items-center justify-end gap-1.5 md:flex">
+        Actions
+        <ListFilter className="size-3.5" aria-hidden="true" />
+      </span>
+    </div>
   );
 }
 
@@ -736,7 +790,15 @@ function FileRow({
         : file.updatedAt;
 
   return (
-    <div className="grid gap-3 px-4 py-3 text-sm md:grid-cols-[minmax(0,1fr)_7rem_7rem_9rem_minmax(18rem,26rem)] md:items-center">
+    <div className="grid gap-3 px-4 py-3 text-sm md:min-h-16 md:grid-cols-[2rem_minmax(12rem,1fr)_7rem_7rem_9rem_minmax(18rem,22rem)] md:items-center">
+      <span className="hidden items-center justify-center md:flex">
+        <input
+          type="checkbox"
+          aria-label={`Select ${file.name}`}
+          disabled
+          className="size-4 rounded border border-border bg-transparent"
+        />
+      </span>
       <div className="flex min-w-0 items-center gap-3">
         <FileIcon className="size-5 shrink-0 text-primary" aria-hidden="true" />
         <div className="min-w-0">
@@ -758,18 +820,17 @@ function FileRow({
       <span className="hidden text-muted-foreground md:block">
         {formatDate(rowDate)}
       </span>
-      <div className="flex flex-wrap gap-2">
+      <div className="flex min-w-0 flex-wrap items-center justify-start gap-2 md:flex-nowrap md:justify-end">
         {isTrash ? (
           <>
             <form action={`/api/files/${file.id}/restore`} method="post">
               <input type="hidden" name="csrf_token" value={csrfToken} />
               <Button
                 type="submit"
-                size="xs"
                 variant="outline"
                 className="rounded-full"
               >
-                <RotateCcw className="size-3" aria-hidden="true" />
+                <RotateCcw className="size-4" aria-hidden="true" />
                 Restore
               </Button>
             </form>
@@ -777,11 +838,10 @@ function FileRow({
               <input type="hidden" name="csrf_token" value={csrfToken} />
               <Button
                 type="submit"
-                size="xs"
                 variant="destructive"
                 className="rounded-full"
               >
-                <Trash2 className="size-3" aria-hidden="true" />
+                <Trash2 className="size-4" aria-hidden="true" />
                 Delete
               </Button>
             </form>
@@ -790,12 +850,11 @@ function FileRow({
           <>
             <Button
               asChild
-              size="xs"
               variant="outline"
               className="rounded-full"
             >
               <Link href={`/api/files/${file.id}/download`}>
-                <Download className="size-3" aria-hidden="true" />
+                <Download className="size-4" aria-hidden="true" />
                 Download
               </Link>
             </Button>
@@ -803,11 +862,10 @@ function FileRow({
               <input type="hidden" name="csrf_token" value={csrfToken} />
               <Button
                 type="submit"
-                size="xs"
                 variant="outline"
                 className="rounded-full"
               >
-                <X className="size-3" aria-hidden="true" />
+                <X className="size-4" aria-hidden="true" />
                 Remove
               </Button>
             </form>
@@ -816,12 +874,11 @@ function FileRow({
           <>
             <Button
               asChild
-              size="xs"
               variant="outline"
               className="rounded-full"
             >
               <Link href={`/api/files/${file.id}/download`}>
-                <Download className="size-3" aria-hidden="true" />
+                <Download className="size-4" aria-hidden="true" />
                 Download
               </Link>
             </Button>
@@ -829,12 +886,11 @@ function FileRow({
               <input type="hidden" name="csrf_token" value={csrfToken} />
               <Button
                 type="submit"
-                size="xs"
                 variant="outline"
                 className="rounded-full"
               >
                 <Star
-                  className={file.favorite ? "size-3 fill-primary" : "size-3"}
+                  className={file.favorite ? "size-4 fill-primary" : "size-4"}
                   aria-hidden="true"
                 />
                 Star
@@ -844,38 +900,11 @@ function FileRow({
               <input type="hidden" name="csrf_token" value={csrfToken} />
               <Button
                 type="submit"
-                size="xs"
                 variant="outline"
                 className="rounded-full"
               >
-                <Trash2 className="size-3" aria-hidden="true" />
+                <Trash2 className="size-4" aria-hidden="true" />
                 Trash
-              </Button>
-            </form>
-            <form
-              action={`/api/files/${file.id}/share`}
-              method="post"
-              className="flex min-w-0 gap-2"
-            >
-              <input type="hidden" name="csrf_token" value={csrfToken} />
-              <input
-                name="username"
-                type="text"
-                required
-                minLength={3}
-                maxLength={32}
-                pattern="[A-Za-z0-9_.-]{3,32}"
-                placeholder="username"
-                className="h-7 w-28 rounded-full border bg-background px-2 text-xs outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30"
-              />
-              <Button
-                type="submit"
-                size="xs"
-                variant="outline"
-                className="rounded-full"
-              >
-                <Share2 className="size-3" aria-hidden="true" />
-                Share
               </Button>
             </form>
           </>
@@ -942,6 +971,56 @@ function Metric({ label, value }: { label: string; value: string }) {
   );
 }
 
+function FileMetric({
+  icon: Icon,
+  label,
+  value,
+}: {
+  icon: LucideIcon;
+  label: string;
+  value: string;
+}) {
+  return (
+    <div className="flex min-h-24 items-center gap-4 rounded-md border bg-card/45 p-5 shadow-[0_18px_70px_rgb(0_0_0/0.08)]">
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-md text-primary">
+        <Icon className="size-6" aria-hidden="true" />
+      </span>
+      <div className="min-w-0">
+        <p className="text-sm text-muted-foreground">{label}</p>
+        <p className="mt-1 font-display text-2xl font-semibold leading-8">
+          {value}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+function FilesEmptyState({ sectionKey }: { sectionKey: DashboardSectionKey }) {
+  const isFilesView = sectionKey === "files";
+
+  return (
+    <div className="flex min-h-72 flex-1 flex-col items-center justify-center px-4 py-12 text-center">
+      <div className="relative flex size-28 items-center justify-center text-primary">
+        <Folder
+          className="absolute left-1/2 top-6 size-20 -translate-x-1/2 text-muted-foreground/30"
+          aria-hidden="true"
+        />
+        <span className="absolute bottom-4 right-4 flex size-11 items-center justify-center rounded-full border bg-background text-primary shadow-[0_12px_38px_rgb(0_0_0/0.18)]">
+          <Search className="size-5" aria-hidden="true" />
+        </span>
+      </div>
+      <p className="mt-2 font-display text-lg font-semibold">
+        {isFilesView ? "No files uploaded yet" : emptyFilesText(sectionKey)}
+      </p>
+      <p className="mt-2 max-w-md text-sm text-muted-foreground">
+        {isFilesView
+          ? "Upload your first file or create a new folder to get started."
+          : "Items for this view will appear here."}
+      </p>
+    </div>
+  );
+}
+
 function getInitials(username: string) {
   const initials = username
     .split(/[\s._-]+/)
@@ -997,6 +1076,10 @@ function percentage(used: number, total: number) {
 function getFileIcon(file: FileEntry) {
   const kind = file.kind.toLowerCase();
 
+  if (isFolderEntry(file)) {
+    return Folder;
+  }
+
   if (kind.includes("image")) {
     return ImageIcon;
   }
@@ -1011,6 +1094,16 @@ function getFileIcon(file: FileEntry) {
   }
 
   return FileText;
+}
+
+function countFolders(entries: FileEntry[]) {
+  return entries.filter(isFolderEntry).length;
+}
+
+function isFolderEntry(entry: FileEntry) {
+  const kind = entry.kind.toLowerCase();
+
+  return kind === "folder" || kind === "directory";
 }
 
 function emptyFilesText(sectionKey: DashboardSectionKey) {
@@ -1033,61 +1126,6 @@ function emptyFilesText(sectionKey: DashboardSectionKey) {
   return "No files uploaded.";
 }
 
-function getFileMessage(fileMessage?: string) {
-  if (fileMessage === "uploaded") {
-    return { tone: "success" as const, text: "Upload complete." };
-  }
-
-  if (fileMessage === "trashed") {
-    return { tone: "success" as const, text: "File moved to trash." };
-  }
-
-  if (fileMessage === "restored") {
-    return { tone: "success" as const, text: "File restored." };
-  }
-
-  if (fileMessage === "deleted") {
-    return { tone: "success" as const, text: "File deleted." };
-  }
-
-  if (fileMessage === "updated") {
-    return { tone: "success" as const, text: "File updated." };
-  }
-
-  if (fileMessage === "shared") {
-    return { tone: "success" as const, text: "File shared." };
-  }
-
-  if (fileMessage === "unshared") {
-    return { tone: "success" as const, text: "Share removed." };
-  }
-
-  if (fileMessage === "too-large") {
-    return { tone: "error" as const, text: "Upload is too large." };
-  }
-
-  if (fileMessage === "missing") {
-    return { tone: "error" as const, text: "Choose a file first." };
-  }
-
-  if (fileMessage === "share-invalid") {
-    return { tone: "error" as const, text: "Use a valid username." };
-  }
-
-  if (fileMessage === "share-user-missing") {
-    return { tone: "error" as const, text: "That active user does not exist." };
-  }
-
-  if (fileMessage === "share-self") {
-    return {
-      tone: "error" as const,
-      text: "You cannot share a file with yourself.",
-    };
-  }
-
-  return null;
-}
-
 function hasReadyFilesState(filesState: FilesState): filesState is ReadyFilesState {
   if (filesState.status !== "ready") {
     return false;
@@ -1106,80 +1144,4 @@ function hasReadyFilesState(filesState: FilesState): filesState is ReadyFilesSta
     typeof storage.totalBytes === "number" &&
     typeof storage.systemUsedBytes === "number"
   );
-}
-
-function getUsersMessage(userMessage?: string, inviteMessage?: string) {
-  if (inviteMessage === "created") {
-    return { tone: "success" as const, text: "Invitation created." };
-  }
-
-  if (inviteMessage === "invalid-username") {
-    return {
-      tone: "error" as const,
-      text: "Use 3 to 32 letters, numbers, dots, underscores, or hyphens.",
-    };
-  }
-
-  if (inviteMessage === "invalid-role") {
-    return { tone: "error" as const, text: "Choose a valid role." };
-  }
-
-  if (inviteMessage === "user-exists") {
-    return { tone: "error" as const, text: "That user already exists." };
-  }
-
-  if (inviteMessage === "invite-exists") {
-    return { tone: "error" as const, text: "That invite is already pending." };
-  }
-
-  if (userMessage === "updated") {
-    return { tone: "success" as const, text: "User updated." };
-  }
-
-  if (userMessage === "created") {
-    return { tone: "success" as const, text: "User created." };
-  }
-
-  if (userMessage === "self-protected") {
-    return {
-      tone: "error" as const,
-      text: "You cannot remove your own admin access.",
-    };
-  }
-
-  if (userMessage === "last-admin") {
-    return {
-      tone: "error" as const,
-      text: "At least one active admin is required.",
-    };
-  }
-
-  if (userMessage === "missing") {
-    return { tone: "error" as const, text: "User not found." };
-  }
-
-  if (userMessage === "invalid-username") {
-    return {
-      tone: "error" as const,
-      text: "Use 3 to 32 letters, numbers, dots, underscores, or hyphens.",
-    };
-  }
-
-  if (userMessage === "invalid-role") {
-    return { tone: "error" as const, text: "Choose a valid role." };
-  }
-
-  if (userMessage === "invalid-status") {
-    return { tone: "error" as const, text: "Choose a valid status." };
-  }
-
-  if (userMessage === "weak-password") {
-    return { tone: "error" as const, text: "Password must be at least 8 characters." };
-  }
-
-  if (userMessage === "user-exists") {
-    return { tone: "error" as const, text: "That user already exists." };
-  }
-
-  return null;
 }

@@ -67,7 +67,7 @@ h3 {
   --card-foreground: oklch(0.141 0.005 285.823);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.141 0.005 285.823);
-  --primary: #00c9a7;
+  --primary: #3088f0;
   --primary-foreground: oklch(0.141 0.005 285.823);
   --secondary: oklch(0.967 0.001 286.375);
   --secondary-foreground: oklch(0.21 0.006 285.885);
@@ -85,9 +85,9 @@ h3 {
   --chart-4: oklch(0.37 0.013 285.805);
   --chart-5: oklch(0.274 0.006 286.033);
   --radius: 0.625rem;
-  --sidebar: oklch(0.985 0 0);
+  --sidebar: oklch(0.958 0.002 286.35);
   --sidebar-foreground: oklch(0.141 0.005 285.823);
-  --sidebar-primary: #00c9a7;
+  --sidebar-primary: #3088f0;
   --sidebar-primary-foreground: oklch(0.141 0.005 285.823);
   --sidebar-accent: oklch(0.967 0.001 286.375);
   --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
@@ -104,7 +104,7 @@ h3 {
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.21 0.006 285.885);
   --popover-foreground: oklch(0.985 0 0);
-  --primary: #00c9a7;
+  --primary: #3088f0;
   --primary-foreground: oklch(0.21 0.006 285.885);
   --secondary: oklch(0.274 0.006 286.033);
   --secondary-foreground: oklch(0.985 0 0);
@@ -123,12 +123,60 @@ h3 {
   --chart-5: oklch(0.274 0.006 286.033);
   --sidebar: oklch(0.21 0.006 285.885);
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: #00c9a7;
+  --sidebar-primary: #3088f0;
   --sidebar-primary-foreground: oklch(0.21 0.006 285.885);
   --sidebar-accent: oklch(0.274 0.006 286.033);
   --sidebar-accent-foreground: oklch(0.985 0 0);
   --sidebar-border: oklch(1 0 0 / 10%);
   --sidebar-ring: oklch(0.552 0.016 285.938);
+}
+
+::selection {
+  background: color-mix(in srgb, var(--primary) 34%, transparent);
+  color: var(--foreground);
+}
+
+.dashboard-sidebar {
+  position: relative;
+}
+
+.dashboard-main-panel {
+  position: relative;
+  --dashboard-divider-rim: color-mix(in srgb, var(--primary) 28%, transparent);
+  --dashboard-divider-glow: color-mix(in srgb, var(--primary) 5%, transparent);
+  --dashboard-divider-outer-glow: color-mix(
+    in srgb,
+    var(--primary) 2.5%,
+    transparent
+  );
+  box-shadow: none;
+}
+
+.dashboard-main-panel::after {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  display: none;
+  border-top-left-radius: inherit;
+  border-left: 1px solid var(--dashboard-divider-rim);
+  border-top: 1px solid var(--dashboard-divider-rim);
+  content: "";
+  opacity: 0.62;
+  pointer-events: none;
+}
+
+@media (min-width: 64rem) {
+  .dashboard-main-panel {
+    box-shadow:
+      -1px 0 6px var(--dashboard-divider-glow),
+      0 -1px 6px var(--dashboard-divider-glow),
+      -10px 0 24px var(--dashboard-divider-outer-glow),
+      0 -10px 24px var(--dashboard-divider-outer-glow);
+  }
+
+  .dashboard-main-panel::after {
+    display: block;
+  }
 }
 
 @keyframes input-shimmer-sweep {
@@ -142,6 +190,175 @@ h3 {
   100% {
     opacity: 0;
     transform: translateX(45%);
+  }
+}
+
+.upload-dropzone {
+  border-color: color-mix(in srgb, var(--border) 88%, var(--primary) 12%);
+  box-shadow:
+    inset 0 -1px 0 color-mix(in srgb, var(--primary) 10%, transparent),
+    inset 1px 0 0 color-mix(in srgb, var(--primary) 3%, transparent),
+    inset -1px 0 0 color-mix(in srgb, var(--primary) 3%, transparent);
+  transition-property: background-color, border-color, box-shadow;
+  transition-duration: 150ms;
+  transition-timing-function: ease;
+}
+
+.upload-dropzone:hover {
+  border-color: color-mix(in srgb, var(--border) 70%, var(--primary) 30%);
+}
+
+.upload-dropzone.is-dragging {
+  border-color: color-mix(in srgb, var(--primary) 56%, var(--border) 44%);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--primary) 12%, transparent),
+    inset 0 -1px 0 color-mix(in srgb, var(--primary) 38%, transparent),
+    inset 1px 0 0 color-mix(in srgb, var(--primary) 12%, transparent),
+    inset -1px 0 0 color-mix(in srgb, var(--primary) 12%, transparent),
+    0 18px 56px color-mix(in srgb, var(--primary) 6%, transparent);
+}
+
+.upload-edge-effect {
+  --upload-glow-low-opacity: 0.34;
+  --upload-glow-mid-opacity: 0.46;
+  --upload-glow-high-opacity: 0.58;
+  color: var(--primary);
+}
+
+.upload-edge-effect.is-active {
+  --upload-glow-low-opacity: 0.48;
+  --upload-glow-mid-opacity: 0.62;
+  --upload-glow-high-opacity: 0.74;
+}
+
+.upload-edge-glow {
+  position: absolute;
+  inset: auto 0 0;
+  height: 36%;
+  background:
+    radial-gradient(
+      34% 118% at 0% 100%,
+      color-mix(in srgb, currentColor 40%, transparent) 0%,
+      color-mix(in srgb, currentColor 14%, transparent) 36%,
+      transparent 78%
+    ),
+    radial-gradient(
+      34% 118% at 100% 100%,
+      color-mix(in srgb, currentColor 40%, transparent) 0%,
+      color-mix(in srgb, currentColor 14%, transparent) 36%,
+      transparent 78%
+    ),
+    linear-gradient(
+      to top,
+      color-mix(in srgb, currentColor 22%, transparent) 0%,
+      color-mix(in srgb, currentColor 8%, transparent) 36%,
+      transparent 84%
+  );
+  filter: blur(0.4px);
+  opacity: var(--upload-glow-high-opacity);
+  border-radius: inherit;
+  mask-image: linear-gradient(
+    to top,
+    #000 0%,
+    rgb(0 0 0 / 82%) 38%,
+    transparent 100%
+  );
+  transform-origin: bottom;
+  animation: upload-edge-breathe 3.8s ease-in-out infinite;
+}
+
+.upload-edge-rim {
+  position: absolute;
+  inset: auto 0 0;
+  height: 1px;
+  background:
+    linear-gradient(
+      to right,
+      transparent,
+      color-mix(in srgb, currentColor 92%, white 8%) 11%,
+      color-mix(in srgb, currentColor 38%, transparent) 32%,
+      color-mix(in srgb, currentColor 24%, transparent) 68%,
+      color-mix(in srgb, currentColor 92%, white 8%) 89%,
+      transparent
+    );
+  box-shadow:
+    0 -1px 12px color-mix(in srgb, currentColor 34%, transparent),
+    0 -16px 34px color-mix(in srgb, currentColor 11%, transparent);
+  opacity: var(--upload-glow-high-opacity);
+  animation: upload-edge-rim 2.4s ease-in-out infinite;
+}
+
+.upload-edge-spark {
+  position: absolute;
+  bottom: 2px;
+  left: var(--spark-left);
+  width: var(--spark-size);
+  height: var(--spark-size);
+  border-radius: 999px;
+  background: color-mix(in srgb, currentColor 72%, white 28%);
+  box-shadow:
+    0 0 12px color-mix(in srgb, currentColor 50%, transparent),
+    0 0 2px color-mix(in srgb, white 58%, transparent);
+  opacity: 0;
+  transform: translate3d(0, 0, 0) scale(0.5);
+  animation: upload-edge-spark var(--spark-duration) ease-out infinite;
+  animation-delay: var(--spark-delay);
+}
+
+@keyframes upload-edge-breathe {
+  0%,
+  100% {
+    transform: scaleY(0.92);
+    opacity: var(--upload-glow-low-opacity);
+  }
+  44% {
+    transform: scaleY(1);
+    opacity: var(--upload-glow-high-opacity);
+  }
+  62% {
+    transform: scaleY(0.96);
+    opacity: var(--upload-glow-mid-opacity);
+  }
+}
+
+@keyframes upload-edge-rim {
+  0%,
+  100% {
+    opacity: var(--upload-glow-mid-opacity);
+  }
+  48% {
+    opacity: var(--upload-glow-high-opacity);
+  }
+}
+
+@keyframes upload-edge-spark {
+  0% {
+    opacity: 0;
+    transform: translate3d(0, 0, 0) scale(0.42);
+  }
+  13% {
+    opacity: 0.82;
+  }
+  48% {
+    opacity: 0.42;
+  }
+  100% {
+    opacity: 0;
+    transform: translate3d(var(--spark-drift), calc(var(--spark-rise) * -1), 0)
+      scale(0.12);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dashboard-main-panel::after,
+  .upload-edge-glow,
+  .upload-edge-rim,
+  .upload-edge-spark {
+    animation: none;
+  }
+
+  .upload-edge-spark {
+    display: none;
   }
 }
 

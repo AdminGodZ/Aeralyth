@@ -25,7 +25,7 @@ export function DottedSurface({ className, ...props }: DottedSurfaceProps) {
     const primaryColor =
       getComputedStyle(document.documentElement)
         .getPropertyValue("--primary")
-        .trim() || "#00c9a7";
+        .trim() || "#3088f0";
 
     const scene = new THREE.Scene();
     scene.fog = new THREE.Fog(0xffffff, 2000, 10000);

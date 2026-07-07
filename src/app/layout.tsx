@@ -1,5 +1,6 @@
 import type { Metadata } from "next";
 import { Figtree, Geist, Geist_Mono } from "next/font/google";
+import { AccentColorScript } from "@/components/accent-color-script";
 import { ThemeProvider } from "@/components/theme-provider";
 import { cn } from "@/lib/utils";
 import "./globals.css";
@@ -26,7 +27,8 @@ export const metadata: Metadata = {
   },
   description: "A simple, performant, self-hosted cloud.",
   icons: {
-    icon: "/favicon.ico",
+    icon: [{ url: "/aeralyth_logo.svg", type: "image/svg+xml" }],
+    shortcut: [{ url: "/aeralyth_logo.svg", type: "image/svg+xml" }],
   },
 };
 
@@ -47,6 +49,7 @@ export default function RootLayout({
       )}
     >
       <body className="min-h-full flex flex-col">
+        <AccentColorScript />
         <ThemeProvider
           attribute="class"
           defaultTheme="system"

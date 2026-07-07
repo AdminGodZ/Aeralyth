@@ -7,9 +7,9 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import type { Metadata } from "next";
-import Image from "next/image";
 import { redirect } from "next/navigation";
 
+import { AeralythLogo } from "@/components/aeralyth-logo";
 import { DottedSurface } from "@/components/dotted-surface";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -89,14 +89,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                 aria-hidden="true"
                 className="pointer-events-none absolute inset-0 bg-[linear-gradient(145deg,--theme(--color-foreground/.16),transparent_36%,--theme(--color-primary/.16))]"
               />
-              <Image
-                src="/Aeralyth_transparent.png"
-                alt="Aeralyth logo"
-                width={58}
-                height={58}
-                priority
-                className="relative size-14 object-contain drop-shadow-[0_0_18px_rgb(0_201_167/0.32)]"
-              />
+              <AeralythLogo className="relative size-14 drop-shadow-[0_0_18px_rgb(48_136_240/0.32)]" />
             </Card>
 
             <h1 className="max-w-3xl font-display text-6xl font-semibold leading-[1.02] tracking-normal">
@@ -230,7 +223,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                     type="submit"
                     size="lg"
                     disabled={backendUnavailable}
-                    className="h-12 w-full rounded-full bg-primary/85 text-base shadow-[0_16px_40px_rgb(0_201_167/0.18)] hover:bg-primary/95"
+                    className="h-12 w-full rounded-full bg-primary/85 text-base shadow-[0_16px_40px_rgb(48_136_240/0.18)] hover:bg-primary/95"
                   >
                     Sign in
                     <ArrowRight
