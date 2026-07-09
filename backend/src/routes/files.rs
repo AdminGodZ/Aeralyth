@@ -20,11 +20,13 @@ const MAX_UPLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 #[derive(Deserialize)]
 pub(crate) struct FilesQuery {
     view: Option<String>,
+    folder: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct UploadQuery {
     csrf_token: Option<String>,
+    parent_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -49,6 +51,8 @@ pub(crate) struct CsrfForm {
 pub struct FilesResponse {
     view: String,
     entries: Vec<FileEntry>,
+    current_folder_id: Option<String>,
+    breadcrumbs: Vec<FolderBreadcrumb>,
     summary: FilesSummary,
     storage: StorageStats,
 }
@@ -56,11 +60,20 @@ pub struct FilesResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FilesSummary {
-    total_files: usize,
+    total_files: i64,
+    total_folders: i64,
     active_files: i64,
     trashed_files: i64,
     favorite_files: i64,
+    shared_files: i64,
     used_bytes: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FolderBreadcrumb {
+    id: String,
+    name: String,
 }
 
 #[derive(Serialize)]
@@ -69,6 +82,8 @@ pub struct FileEntry {
     id: String,
     name: String,
     kind: String,
+    entry_type: String,
+    parent_id: Option<String>,
     size_bytes: i64,
     state: String,
     favorite: bool,
@@ -107,13 +122,21 @@ pub async fn list_files(
     ensure_storage_dir(&state)?;
 
     let view = normalize_view(query.view.as_deref());
-    let entries = list_entries(&state, &user, view).await?;
+    let current_folder_id = if view == "files" {
+        validate_folder(&state, &user, query.folder.as_deref()).await?
+    } else {
+        None
+    };
+    let breadcrumbs = get_breadcrumbs(&state, &user, current_folder_id.as_deref()).await?;
+    let entries = list_entries(&state, &user, view, current_folder_id.as_deref()).await?;
     let summary = get_summary(&state, &user).await?;
     let storage = storage_stats(&state)?;
 
     Ok(HttpResponse::Ok().json(FilesResponse {
         view: view.to_owned(),
         entries,
+        current_folder_id,
+        breadcrumbs,
         summary,
         storage,
     }))
@@ -134,6 +157,7 @@ pub async fn upload(
 ) -> Result<HttpResponse> {
     let user = require_user(&state, &request).await?;
     let user_dir = user_storage_dir(&state, &user);
+    let upload_parent_id = validate_folder(&state, &user, query.parent_id.as_deref()).await?;
     let mut uploaded_any = false;
     let mut csrf_verified = false;
 
@@ -173,13 +197,11 @@ pub async fn upload(
             drain_field(&mut field).await?;
             continue;
         };
-        let display_name = sanitize_display_name(&filename);
-
-        if display_name.is_empty() {
+        let upload_path = sanitize_upload_path(&filename);
+        let Some((display_name, folder_names)) = upload_path.split_last() else {
             drain_field(&mut field).await?;
             continue;
-        }
-
+        };
         fs::create_dir_all(&user_dir).map_err(error::ErrorInternalServerError)?;
         let storage_name = create_storage_name()?;
         let storage_path = user_dir.join(&storage_name);
@@ -194,7 +216,10 @@ pub async fn upload(
 
             if size_bytes > MAX_UPLOAD_BYTES {
                 let _ = fs::remove_file(&storage_path);
-                return Ok(redirect("/files?file=too-large"));
+                return Ok(redirect(upload_redirect_location(
+                    upload_parent_id.as_deref(),
+                    "too-large",
+                )));
             }
 
             file.write_all(&chunk)
@@ -204,6 +229,17 @@ pub async fn upload(
         let mime_type = field.content_type().map(|mime| mime.to_string());
         let size_bytes_i64 =
             i64::try_from(size_bytes).map_err(|_| error::ErrorBadRequest("upload is too large"))?;
+        let mut parent_id = upload_parent_id.clone();
+
+        for folder_name in folder_names {
+            match ensure_folder(&state, &user, parent_id.as_deref(), folder_name).await {
+                Ok(folder_id) => parent_id = Some(folder_id),
+                Err(folder_error) => {
+                    let _ = fs::remove_file(&storage_path);
+                    return Err(folder_error);
+                }
+            }
+        }
 
         let insert_result = state
             .db
@@ -215,9 +251,11 @@ pub async fn upload(
                       original_name,
                       storage_name,
                       mime_type,
-                      size_bytes
+                      size_bytes,
+                      entry_type,
+                      parent_id
                     )
-                    VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5)
+                    VALUES (gen_random_uuid()::text, $1, $2, $3, $4, $5, 'file', $6)
                 ",
                 &[
                     &user.id,
@@ -225,6 +263,7 @@ pub async fn upload(
                     &storage_name,
                     &mime_type,
                     &size_bytes_i64,
+                    &parent_id,
                 ],
             )
             .await;
@@ -242,9 +281,15 @@ pub async fn upload(
     }
 
     if uploaded_any {
-        Ok(redirect("/files?file=uploaded"))
+        Ok(redirect(upload_redirect_location(
+            upload_parent_id.as_deref(),
+            "uploaded",
+        )))
     } else {
-        Ok(redirect("/files?file=missing"))
+        Ok(redirect(upload_redirect_location(
+            upload_parent_id.as_deref(),
+            "missing",
+        )))
     }
 }
 
@@ -345,6 +390,7 @@ pub async fn share(
                 WHERE id = $1
                   AND owner_id = $2
                   AND state = 'active'
+                  AND entry_type = 'file'
                 LIMIT 1
             ",
             &[&file_id, &user.id],
@@ -434,13 +480,25 @@ pub async fn trash(
         .db
         .execute(
             "
+                WITH RECURSIVE subtree AS (
+                  SELECT id
+                  FROM files
+                  WHERE id = $1
+                    AND owner_id = $2
+                    AND state = 'active'
+
+                  UNION ALL
+
+                  SELECT child.id
+                  FROM files AS child
+                  INNER JOIN subtree AS parent ON child.parent_id = parent.id
+                  WHERE child.owner_id = $2
+                )
                 UPDATE files
                 SET state = 'trashed',
                     trashed_at = now(),
                     updated_at = now()
-                WHERE id = $1
-                  AND owner_id = $2
-                  AND state = 'active'
+                WHERE id IN (SELECT id FROM subtree)
             ",
             &[&path.into_inner(), &user.id],
         )
@@ -463,13 +521,25 @@ pub async fn restore(
         .db
         .execute(
             "
+                WITH RECURSIVE subtree AS (
+                  SELECT id
+                  FROM files
+                  WHERE id = $1
+                    AND owner_id = $2
+                    AND state = 'trashed'
+
+                  UNION ALL
+
+                  SELECT child.id
+                  FROM files AS child
+                  INNER JOIN subtree AS parent ON child.parent_id = parent.id
+                  WHERE child.owner_id = $2
+                )
                 UPDATE files
                 SET state = 'active',
                     trashed_at = NULL,
                     updated_at = now()
-                WHERE id = $1
-                  AND owner_id = $2
-                  AND state = 'trashed'
+                WHERE id IN (SELECT id FROM subtree)
             ",
             &[&path.into_inner(), &user.id],
         )
@@ -519,6 +589,28 @@ pub async fn delete(
     let Some(file) = get_file(&state, &user, &file_id, false).await? else {
         return Ok(redirect("/trash?file=missing"));
     };
+    let stored_entries = state
+        .db
+        .query(
+            "
+                WITH RECURSIVE subtree AS (
+                  SELECT id, storage_name, entry_type
+                  FROM files
+                  WHERE id = $1 AND owner_id = $2 AND state = 'trashed'
+
+                  UNION ALL
+
+                  SELECT child.id, child.storage_name, child.entry_type
+                  FROM files AS child
+                  INNER JOIN subtree AS parent ON child.parent_id = parent.id
+                  WHERE child.owner_id = $2
+                )
+                SELECT storage_name, entry_type FROM subtree
+            ",
+            &[&file.id, &user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
 
     state
         .db
@@ -529,22 +621,206 @@ pub async fn delete(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    let file_path = user_storage_dir(&state, &user).join(file.storage_name);
-    let _ = fs::remove_file(file_path);
+    for entry in stored_entries {
+        let entry_type: String = entry.get("entry_type");
+
+        if entry_type == "file" {
+            let storage_name: String = entry.get("storage_name");
+            let _ = fs::remove_file(user_storage_dir(&state, &user).join(storage_name));
+        }
+    }
 
     Ok(redirect("/trash?file=deleted"))
 }
 
-async fn list_entries(state: &AppState, user: &AuthUser, view: &str) -> Result<Vec<FileEntry>> {
+async fn validate_folder(
+    state: &AppState,
+    user: &AuthUser,
+    folder_id: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(folder_id) = folder_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let folder = state
+        .db
+        .query_opt(
+            "
+                SELECT id
+                FROM files
+                WHERE id = $1
+                  AND owner_id = $2
+                  AND entry_type = 'folder'
+                  AND state = 'active'
+                LIMIT 1
+            ",
+            &[&folder_id, &user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    folder
+        .map(|row| row.get("id"))
+        .ok_or_else(|| error::ErrorNotFound("folder not found"))
+        .map(Some)
+}
+
+async fn get_breadcrumbs(
+    state: &AppState,
+    user: &AuthUser,
+    folder_id: Option<&str>,
+) -> Result<Vec<FolderBreadcrumb>> {
+    let Some(folder_id) = folder_id else {
+        return Ok(Vec::new());
+    };
+    let rows = state
+        .db
+        .query(
+            "
+                WITH RECURSIVE ancestors AS (
+                  SELECT id, original_name, parent_id, 0 AS depth
+                  FROM files
+                  WHERE id = $1 AND owner_id = $2
+
+                  UNION ALL
+
+                  SELECT parent.id, parent.original_name, parent.parent_id, child.depth + 1
+                  FROM files AS parent
+                  INNER JOIN ancestors AS child ON child.parent_id = parent.id
+                  WHERE parent.owner_id = $2
+                )
+                SELECT id, original_name
+                FROM ancestors
+                ORDER BY depth DESC
+            ",
+            &[&folder_id, &user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| FolderBreadcrumb {
+            id: row.get("id"),
+            name: row.get("original_name"),
+        })
+        .collect())
+}
+
+async fn ensure_folder(
+    state: &AppState,
+    user: &AuthUser,
+    parent_id: Option<&str>,
+    name: &str,
+) -> Result<String> {
+    let parent_id = parent_id.map(str::to_owned);
+    let existing = state
+        .db
+        .query_opt(
+            "
+                SELECT id
+                FROM files
+                WHERE owner_id = $1
+                  AND entry_type = 'folder'
+                  AND state = 'active'
+                  AND parent_id IS NOT DISTINCT FROM $2
+                  AND lower(original_name) = lower($3)
+                LIMIT 1
+            ",
+            &[&user.id, &parent_id, &name],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    if let Some(existing) = existing {
+        return Ok(existing.get("id"));
+    }
+
+    let storage_name = create_storage_name()?;
+    let row = state
+        .db
+        .query_one(
+            "
+                INSERT INTO files (
+                  id,
+                  owner_id,
+                  original_name,
+                  storage_name,
+                  size_bytes,
+                  entry_type,
+                  parent_id
+                )
+                VALUES (gen_random_uuid()::text, $1, $2, $3, 0, 'folder', $4)
+                RETURNING id
+            ",
+            &[&user.id, &name, &storage_name, &parent_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    Ok(row.get("id"))
+}
+
+async fn list_entries(
+    state: &AppState,
+    user: &AuthUser,
+    view: &str,
+    folder_id: Option<&str>,
+) -> Result<Vec<FileEntry>> {
     if view == "shared" {
         return list_shared_entries(state, user).await;
     }
 
+    if view == "files" {
+        let folder_id = folder_id.map(str::to_owned);
+        let rows = state
+            .db
+            .query(
+                "
+                    SELECT
+                      id,
+                      original_name,
+                      mime_type,
+                      entry_type,
+                      parent_id,
+                      size_bytes,
+                      state,
+                      favorite,
+                      NULL::text AS owner_username,
+                      false AS shared,
+                      NULL::text AS shared_at,
+                      to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
+                      to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
+                      to_char(trashed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS trashed_at
+                    FROM files
+                    WHERE owner_id = $1
+                      AND state = 'active'
+                      AND parent_id IS NOT DISTINCT FROM $2
+                    ORDER BY
+                      CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END,
+                      lower(original_name)
+                ",
+                &[&user.id, &folder_id],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+
+        return Ok(rows.into_iter().map(file_entry_from_row).collect());
+    }
+
     let (predicate, order) = match view {
-        "trash" => ("state = 'trashed'", "trashed_at DESC NULLS LAST"),
-        "favorites" => ("state = 'active' AND favorite = true", "updated_at DESC"),
-        "recent" => ("state = 'active'", "updated_at DESC"),
-        _ => ("state = 'active'", "original_name ASC"),
+        "trash" => (
+            "files.state = 'trashed' AND NOT EXISTS (
+              SELECT 1 FROM files AS parent
+              WHERE parent.id = files.parent_id AND parent.state = 'trashed'
+            )",
+            "files.trashed_at DESC NULLS LAST",
+        ),
+        "favorites" => (
+            "files.state = 'active' AND files.favorite = true",
+            "files.updated_at DESC",
+        ),
+        "recent" => ("files.state = 'active'", "files.updated_at DESC"),
+        _ => ("files.state = 'active'", "files.original_name ASC"),
     };
     let limit = if view == "recent" { " LIMIT 50" } else { "" };
     let sql = format!(
@@ -553,15 +829,17 @@ async fn list_entries(state: &AppState, user: &AuthUser, view: &str) -> Result<V
               id,
               original_name,
               mime_type,
-                size_bytes,
-                state,
-                favorite,
-                NULL::text AS owner_username,
-                false AS shared,
-                NULL::text AS shared_at,
-                to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
-                to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
-                to_char(trashed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS trashed_at
+              entry_type,
+              parent_id,
+              size_bytes,
+              state,
+              favorite,
+              NULL::text AS owner_username,
+              false AS shared,
+              NULL::text AS shared_at,
+              to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
+              to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
+              to_char(trashed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS trashed_at
             FROM files
             WHERE owner_id = $1
               AND {predicate}
@@ -576,28 +854,7 @@ async fn list_entries(state: &AppState, user: &AuthUser, view: &str) -> Result<V
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| {
-            let mime_type: Option<String> = row.get("mime_type");
-            let name: String = row.get("original_name");
-
-            FileEntry {
-                id: row.get("id"),
-                kind: file_kind(&name, mime_type.as_deref()),
-                name,
-                size_bytes: row.get("size_bytes"),
-                state: row.get("state"),
-                favorite: row.get("favorite"),
-                owner_username: row.get("owner_username"),
-                shared: row.get("shared"),
-                shared_at: row.get("shared_at"),
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
-                trashed_at: row.get("trashed_at"),
-            }
-        })
-        .collect())
+    Ok(rows.into_iter().map(file_entry_from_row).collect())
 }
 
 async fn list_shared_entries(state: &AppState, user: &AuthUser) -> Result<Vec<FileEntry>> {
@@ -609,6 +866,8 @@ async fn list_shared_entries(state: &AppState, user: &AuthUser) -> Result<Vec<Fi
                   files.id,
                   files.original_name,
                   files.mime_type,
+                  files.entry_type,
+                  files.parent_id,
                   files.size_bytes,
                   files.state,
                   false AS favorite,
@@ -623,6 +882,7 @@ async fn list_shared_entries(state: &AppState, user: &AuthUser) -> Result<Vec<Fi
                 INNER JOIN users AS owners ON owners.id = files.owner_id
                 WHERE file_shares.recipient_id = $1
                   AND files.state = 'active'
+                  AND files.entry_type = 'file'
                   AND owners.status = 'active'
                 ORDER BY file_shares.created_at DESC
             ",
@@ -631,28 +891,35 @@ async fn list_shared_entries(state: &AppState, user: &AuthUser) -> Result<Vec<Fi
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    Ok(rows
-        .into_iter()
-        .map(|row| {
-            let mime_type: Option<String> = row.get("mime_type");
-            let name: String = row.get("original_name");
+    Ok(rows.into_iter().map(file_entry_from_row).collect())
+}
 
-            FileEntry {
-                id: row.get("id"),
-                kind: file_kind(&name, mime_type.as_deref()),
-                name,
-                size_bytes: row.get("size_bytes"),
-                state: row.get("state"),
-                favorite: row.get("favorite"),
-                owner_username: row.get("owner_username"),
-                shared: row.get("shared"),
-                shared_at: row.get("shared_at"),
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
-                trashed_at: row.get("trashed_at"),
-            }
-        })
-        .collect())
+fn file_entry_from_row(row: tokio_postgres::Row) -> FileEntry {
+    let mime_type: Option<String> = row.get("mime_type");
+    let name: String = row.get("original_name");
+    let entry_type: String = row.get("entry_type");
+    let kind = if entry_type == "folder" {
+        "Folder".to_owned()
+    } else {
+        file_kind(&name, mime_type.as_deref())
+    };
+
+    FileEntry {
+        id: row.get("id"),
+        name,
+        kind,
+        entry_type,
+        parent_id: row.get("parent_id"),
+        size_bytes: row.get("size_bytes"),
+        state: row.get("state"),
+        favorite: row.get("favorite"),
+        owner_username: row.get("owner_username"),
+        shared: row.get("shared"),
+        shared_at: row.get("shared_at"),
+        created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+        trashed_at: row.get("trashed_at"),
+    }
 }
 
 async fn get_summary(state: &AppState, user: &AuthUser) -> Result<FilesSummary> {
@@ -661,10 +928,28 @@ async fn get_summary(state: &AppState, user: &AuthUser) -> Result<FilesSummary> 
         .query_one(
             "
                 SELECT
-                  count(*) FILTER (WHERE state = 'active') AS active_files,
-                  count(*) FILTER (WHERE state = 'trashed') AS trashed_files,
+                  count(*) FILTER (
+                    WHERE state = 'active' AND entry_type = 'file'
+                  ) AS total_files,
+                  count(*) FILTER (
+                    WHERE state = 'active' AND entry_type = 'folder'
+                  ) AS total_folders,
+                  count(*) FILTER (
+                    WHERE state = 'active' AND entry_type = 'file'
+                  ) AS active_files,
+                  count(*) FILTER (
+                    WHERE state = 'trashed' AND entry_type = 'file'
+                  ) AS trashed_files,
                   count(*) FILTER (WHERE state = 'active' AND favorite = true) AS favorite_files,
-                  COALESCE(sum(size_bytes), 0)::bigint AS used_bytes
+                  COALESCE(sum(size_bytes) FILTER (WHERE entry_type = 'file'), 0)::bigint AS used_bytes,
+                  (
+                    SELECT count(*)
+                    FROM file_shares
+                    INNER JOIN files AS shared_files ON shared_files.id = file_shares.file_id
+                    WHERE file_shares.recipient_id = $1
+                      AND shared_files.state = 'active'
+                      AND shared_files.entry_type = 'file'
+                  ) AS shared_files
                 FROM files
                 WHERE owner_id = $1
             ",
@@ -673,14 +958,13 @@ async fn get_summary(state: &AppState, user: &AuthUser) -> Result<FilesSummary> 
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    let active_files: i64 = row.get("active_files");
-    let trashed_files: i64 = row.get("trashed_files");
-
     Ok(FilesSummary {
-        total_files: usize::try_from(active_files + trashed_files).unwrap_or(0),
-        active_files,
-        trashed_files,
+        total_files: row.get("total_files"),
+        total_folders: row.get("total_folders"),
+        active_files: row.get("active_files"),
+        trashed_files: row.get("trashed_files"),
         favorite_files: row.get("favorite_files"),
+        shared_files: row.get("shared_files"),
         used_bytes: row.get("used_bytes"),
     })
 }
@@ -698,7 +982,7 @@ async fn get_file(
     };
     let sql = format!(
         "
-            SELECT id, owner_id, original_name, storage_name, mime_type
+            SELECT id, owner_id, original_name, storage_name, mime_type, entry_type
             FROM files
             WHERE id = $1
               AND owner_id = $2
@@ -736,11 +1020,13 @@ async fn get_download_file(
                   files.owner_id,
                   files.original_name,
                   files.storage_name,
-                  files.mime_type
+                  files.mime_type,
+                  files.entry_type
                 FROM files
                 INNER JOIN users AS owners ON owners.id = files.owner_id
                 WHERE files.id = $1
                   AND files.state = 'active'
+                  AND files.entry_type = 'file'
                   AND (
                     files.owner_id = $2
                     OR (
@@ -826,6 +1112,36 @@ fn sanitize_display_name(filename: &str) -> String {
         .chars()
         .take(180)
         .collect()
+}
+
+fn sanitize_upload_path(filename: &str) -> Vec<String> {
+    let normalized = filename.replace('\\', "/");
+    let raw_segments = normalized
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+
+    if raw_segments.is_empty()
+        || raw_segments.len() > 64
+        || raw_segments
+            .iter()
+            .any(|segment| matches!(*segment, "." | ".."))
+    {
+        return Vec::new();
+    }
+
+    raw_segments
+        .into_iter()
+        .map(sanitize_display_name)
+        .filter(|segment| !segment.is_empty())
+        .collect()
+}
+
+fn upload_redirect_location(parent_id: Option<&str>, status: &str) -> String {
+    match parent_id {
+        Some(parent_id) => format!("/files?folder={parent_id}&file={status}"),
+        None => format!("/files?file={status}"),
+    }
 }
 
 fn normalize_username(username: &str) -> String {
@@ -933,8 +1249,8 @@ struct StorageStatsRaw {
     available_bytes: u64,
 }
 
-fn redirect(location: &'static str) -> HttpResponse {
+fn redirect(location: impl Into<String>) -> HttpResponse {
     HttpResponse::SeeOther()
-        .insert_header((LOCATION, location))
+        .insert_header((LOCATION, location.into()))
         .finish()
 }

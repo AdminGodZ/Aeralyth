@@ -1,6 +1,15 @@
 "use client";
 
-import { Save, Upload, X } from "lucide-react";
+import {
+  Monitor,
+  Moon,
+  Pencil,
+  RotateCcw,
+  Save,
+  Sun,
+  Undo2,
+} from "lucide-react";
+import { useTheme } from "next-themes";
 import {
   useEffect,
   useId,
@@ -9,14 +18,23 @@ import {
   type ChangeEvent,
   type ReactNode,
 } from "react";
-import { useTheme } from "next-themes";
 
-import { Button, buttonVariants } from "@/components/ui/button";
+import {
+  Avatar,
+  AvatarFallback,
+  AvatarImage,
+} from "@/components/ui/avatar";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Separator } from "@/components/ui/separator";
+import {
+  ToggleGroup,
+  ToggleGroupItem,
+} from "@/components/ui/toggle-group";
 import { AccentColorPreference } from "@/features/dashboard/accent-color-preference";
 import type { CurrentUser } from "@/lib/api";
-import { cn } from "@/lib/utils";
 
 type ProfileSettingsFormProps = {
   currentUser: CurrentUser;
@@ -28,8 +46,9 @@ export function ProfileSettingsForm({
   csrfToken,
 }: ProfileSettingsFormProps) {
   const fileInputId = useId();
-  const themeSelectId = useId();
   const displayNameId = useId();
+  const themeLabelId = useId();
+  const accentLabelId = useId();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { setTheme } = useTheme();
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
@@ -69,7 +88,7 @@ export function ProfileSettingsForm({
     setRemoveImage(false);
   }
 
-  function removeProfileImage() {
+  function resetProfileImage() {
     setRemoveImage(true);
 
     if (previewUrl?.startsWith("blob:")) {
@@ -83,12 +102,22 @@ export function ProfileSettingsForm({
     }
   }
 
+  function restoreProfileImage() {
+    setRemoveImage(false);
+  }
+
+  function updateThemePreference(value: string) {
+    if (value === "system" || value === "light" || value === "dark") {
+      setThemePreference(value);
+    }
+  }
+
   return (
     <form
       action="/api/profile"
       method="post"
       encType="multipart/form-data"
-      className="space-y-4"
+      className="w-full"
     >
       <input type="hidden" name="csrf_token" value={csrfToken} />
       <input
@@ -96,139 +125,164 @@ export function ProfileSettingsForm({
         name="remove_profile_image"
         value={removeImage ? "1" : "0"}
       />
+      <input
+        type="hidden"
+        name="theme_preference"
+        value={themePreference}
+      />
 
-      <section className="w-full overflow-hidden rounded-md border">
-        <div className="border-b px-4 py-3">
-          <p className="text-sm font-medium">Profile</p>
-        </div>
-        <div className="divide-y">
-          <div className="grid gap-4 px-4 py-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-            <div className="min-w-0">
-              <p className="text-sm font-medium">Profile image</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                PNG, JPG, WebP, or GIF up to 2 MB.
-              </p>
-            </div>
-            <div className="flex min-w-0 items-center gap-3 sm:justify-end">
-              <span className="relative flex size-14 shrink-0 items-center justify-center overflow-hidden rounded-full border bg-primary/10 text-sm font-semibold text-primary">
-                {avatarUrl ? (
-                  <img
-                    src={avatarUrl}
-                    alt=""
-                    className="size-full object-cover"
-                  />
-                ) : (
-                  getInitials(displayName)
-                )}
+      <SettingsSection title="Profile" description="Photo and display name">
+        <div className="flex flex-col gap-6 sm:flex-row sm:items-center">
+          <div className="group relative w-fit shrink-0">
+            <Button
+              type="button"
+              variant="ghost"
+              className="group/photo relative size-24 rounded-full p-0 hover:bg-transparent"
+              onClick={() => fileInputRef.current?.click()}
+              aria-label="Change profile image"
+              title="Change profile image"
+            >
+              <Avatar className="size-24 bg-primary/10">
+                {avatarUrl ? <AvatarImage src={avatarUrl} alt="" /> : null}
+                <AvatarFallback className="bg-primary/10 text-xl font-semibold text-primary">
+                  {getInitials(displayName)}
+                </AvatarFallback>
+              </Avatar>
+              <span className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-full bg-background/60 opacity-0 transition-opacity group-hover/photo:opacity-100 group-focus-visible/photo:opacity-100">
+                <Pencil className="size-5" aria-hidden="true" />
               </span>
-              <input
-                id={fileInputId}
-                ref={fileInputRef}
-                name="profile_image"
-                type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif"
-                className="sr-only"
-                onChange={handleFileChange}
-              />
-              <Label
-                htmlFor={fileInputId}
-                className={cn(
-                  buttonVariants({ variant: "outline", size: "sm" }),
-                  "cursor-pointer",
-                )}
+            </Button>
+
+            {avatarUrl || (removeImage && currentUser.profileImageUrl) ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="icon"
+                className="absolute -bottom-1 -right-1 z-20 shadow-sm"
+                onClick={removeImage ? restoreProfileImage : resetProfileImage}
+                aria-label={
+                  removeImage
+                    ? "Undo profile image reset"
+                    : "Reset profile image"
+                }
+                title={
+                  removeImage
+                    ? "Undo profile image reset"
+                    : "Reset profile image"
+                }
               >
-                <Upload className="size-4" aria-hidden="true" />
-                Upload
-              </Label>
-              {currentUser.profileImageUrl || previewUrl ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  onClick={removeProfileImage}
-                >
-                  <X className="size-4" aria-hidden="true" />
-                  Remove
-                </Button>
-              ) : null}
-            </div>
+                {removeImage ? (
+                  <Undo2 className="size-4" aria-hidden="true" />
+                ) : (
+                  <RotateCcw className="size-4" aria-hidden="true" />
+                )}
+              </Button>
+            ) : null}
           </div>
 
-          <SettingsFormRow
-            label="Name"
-            description="Shown in your profile and account controls."
-          >
+          <input
+            id={fileInputId}
+            ref={fileInputRef}
+            name="profile_image"
+            type="file"
+            accept="image/png,image/jpeg,image/webp,image/gif"
+            className="sr-only"
+            tabIndex={-1}
+            onChange={handleFileChange}
+          />
+
+          <div className="grid w-full max-w-md gap-2">
+            <Label htmlFor={displayNameId}>Name</Label>
             <Input
               id={displayNameId}
               name="display_name"
               defaultValue={currentUser.displayName ?? ""}
               placeholder={currentUser.username}
               maxLength={80}
-              className="h-9 w-full min-w-0 sm:w-64"
+              className="h-10"
             />
-          </SettingsFormRow>
+            <p className="text-xs text-muted-foreground">
+              PNG, JPG, WebP, or GIF. Maximum 2 MB.
+            </p>
+          </div>
+        </div>
+      </SettingsSection>
 
-          <SettingsFormRow label="Username">
-            <span className="text-sm text-muted-foreground">
-              {currentUser.username}
-            </span>
-          </SettingsFormRow>
+      <Separator />
 
-          <SettingsFormRow label="Role">
-            <span className="text-sm capitalize text-muted-foreground">
+      <SettingsSection title="Account" description="Identity and access">
+        <dl className="grid gap-x-8 gap-y-5 sm:grid-cols-3">
+          <AccountDetail label="Username">
+            <span className="font-mono text-sm">{currentUser.username}</span>
+          </AccountDetail>
+          <AccountDetail label="Role">
+            <Badge variant="outline" className="capitalize">
               {currentUser.role}
-            </span>
-          </SettingsFormRow>
+            </Badge>
+          </AccountDetail>
+          <AccountDetail label="Status">
+            <Badge className="capitalize">{currentUser.status}</Badge>
+          </AccountDetail>
+        </dl>
+      </SettingsSection>
 
-          <SettingsFormRow label="Status">
-            <span className="rounded-full border border-primary/25 bg-primary/10 px-2.5 py-1 text-xs font-medium capitalize text-primary">
-              {currentUser.status}
-            </span>
-          </SettingsFormRow>
-        </div>
-      </section>
+      <Separator />
 
-      <section className="w-full overflow-hidden rounded-md border">
-        <div className="border-b px-4 py-3">
-          <p className="text-sm font-medium">Preferences</p>
-        </div>
-        <div className="divide-y">
-          <SettingsFormRow
-            label="Appearance"
-            description="Saved as your default theme on this account."
-          >
-            <select
-              id={themeSelectId}
-              name="theme_preference"
+      <SettingsSection title="Appearance" description="Theme and accent color">
+        <div className="space-y-6">
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <Label id={themeLabelId}>Theme</Label>
+            <ToggleGroup
+              type="single"
               value={themePreference}
-              onChange={(event) => {
-                const nextTheme = event.currentTarget.value as
-                  | "system"
-                  | "light"
-                  | "dark";
-                setThemePreference(nextTheme);
-              }}
-              className="h-9 min-w-36 rounded-full border bg-background px-3 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30"
+              onValueChange={updateThemePreference}
+              aria-labelledby={themeLabelId}
+              className="w-full rounded-full border bg-muted/40 p-1 sm:w-auto"
             >
-              <option value="system">System</option>
-              <option value="dark">Dark</option>
-              <option value="light">Light</option>
-            </select>
-          </SettingsFormRow>
+              <ToggleGroupItem
+                type="button"
+                value="system"
+                aria-label="Use system theme"
+                className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-sm sm:flex-none"
+              >
+                <Monitor className="size-4" aria-hidden="true" />
+                System
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                type="button"
+                value="light"
+                aria-label="Use light theme"
+                className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-sm sm:flex-none"
+              >
+                <Sun className="size-4" aria-hidden="true" />
+                Light
+              </ToggleGroupItem>
+              <ToggleGroupItem
+                type="button"
+                value="dark"
+                aria-label="Use dark theme"
+                className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-sm sm:flex-none"
+              >
+                <Moon className="size-4" aria-hidden="true" />
+                Dark
+              </ToggleGroupItem>
+            </ToggleGroup>
+          </div>
 
-          <SettingsFormRow
-            label="Accent color"
-            description="Saved for buttons, highlights, focus rings, and selected states."
-          >
+          <Separator />
+
+          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <Label id={accentLabelId}>Accent color</Label>
             <AccentColorPreference
               initialColor={currentUser.accentColor}
               inputName="accent_color"
+              labelId={accentLabelId}
             />
-          </SettingsFormRow>
+          </div>
         </div>
-      </section>
+      </SettingsSection>
 
-      <div className="flex justify-end">
+      <div className="flex justify-end border-t py-5">
         <Button type="submit" size="lg">
           <Save className="size-4" aria-hidden="true" />
           Save changes
@@ -238,24 +292,37 @@ export function ProfileSettingsForm({
   );
 }
 
-function SettingsFormRow({
-  label,
+function SettingsSection({
+  title,
   description,
   children,
 }: {
-  label: string;
-  description?: string;
+  title: string;
+  description: string;
   children: ReactNode;
 }) {
   return (
-    <div className="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+    <section className="grid gap-5 py-8 md:grid-cols-[11rem_minmax(0,1fr)] md:gap-10">
       <div className="min-w-0">
-        <p className="text-sm font-medium">{label}</p>
-        {description ? (
-          <p className="mt-1 text-xs text-muted-foreground">{description}</p>
-        ) : null}
+        <h2 className="text-sm font-semibold">{title}</h2>
+        <p className="mt-1 text-xs text-muted-foreground">{description}</p>
       </div>
-      <div className="flex min-w-0 items-center sm:justify-end">{children}</div>
+      <div className="min-w-0">{children}</div>
+    </section>
+  );
+}
+
+function AccountDetail({
+  label,
+  children,
+}: {
+  label: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="min-w-0">
+      <dt className="mb-2 text-xs text-muted-foreground">{label}</dt>
+      <dd className="flex min-h-5 items-center">{children}</dd>
     </div>
   );
 }

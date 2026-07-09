@@ -1,6 +1,6 @@
 import {
-  Activity,
   ArrowDown,
+  ChevronRight,
   ChevronsUpDown,
   Download,
   FileArchive,
@@ -9,26 +9,25 @@ import {
   HardDrive,
   ImageIcon,
   ListFilter,
-  LogOut,
   RotateCcw,
   Search,
+  Share2,
   Star,
   Trash2,
   X,
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
-import type { CSSProperties, ReactNode } from "react";
+import type { CSSProperties } from "react";
 
 import { AeralythLogo } from "@/components/aeralyth-logo";
 import { Button } from "@/components/ui/button";
 import {
   getDashboardSection,
-  primaryDashboardSections,
-  systemDashboardSections,
   type DashboardSection,
   type DashboardSectionKey,
 } from "@/features/dashboard/config";
+import { DashboardSidebar } from "@/features/dashboard/dashboard-sidebar";
 import { ProfileSettingsForm } from "@/features/dashboard/profile-settings-form";
 import { UploadPanel } from "@/features/dashboard/upload-panel";
 import { UserPreferenceHydrator } from "@/features/dashboard/user-preference-hydrator";
@@ -36,6 +35,7 @@ import type {
   AdminUsersState,
   CurrentUser,
   FileEntry,
+  FolderBreadcrumb,
   FilesState,
   StorageStats,
 } from "@/lib/api";
@@ -49,6 +49,7 @@ type DashboardShellProps = {
   sectionKey: DashboardSectionKey;
   currentUser: CurrentUser;
   csrfToken: string;
+  initialSidebarCollapsed: boolean;
   adminUsersState?: AdminUsersState;
   filesState: FilesState;
 };
@@ -59,6 +60,7 @@ export function DashboardShell({
   sectionKey,
   currentUser,
   csrfToken,
+  initialSidebarCollapsed,
   adminUsersState,
   filesState,
 }: DashboardShellProps) {
@@ -75,6 +77,7 @@ export function DashboardShell({
 
   return (
     <main
+      data-accent-color-scope
       className="flex min-h-dvh bg-sidebar text-foreground"
       style={dashboardStyle}
     >
@@ -82,10 +85,11 @@ export function DashboardShell({
         accentColor={accentColor}
         themePreference={currentUser.themePreference}
       />
-      <Sidebar
+      <DashboardSidebar
         activeSectionKey={section.key}
-        currentUser={currentUser}
-        filesState={filesState}
+        canViewSystemNavigation={currentUser.role === "admin"}
+        csrfToken={csrfToken}
+        initialCollapsed={initialSidebarCollapsed}
       />
 
       <section className="dashboard-main-panel flex min-w-0 flex-1 flex-col bg-background lg:mt-4 lg:min-h-[calc(100dvh-1rem)] lg:overflow-hidden lg:rounded-tl-3xl">
@@ -99,112 +103,6 @@ export function DashboardShell({
         />
       </section>
     </main>
-  );
-}
-
-function Sidebar({
-  activeSectionKey,
-  currentUser,
-  filesState,
-}: {
-  activeSectionKey: DashboardSectionKey;
-  currentUser: CurrentUser;
-  filesState: FilesState;
-}) {
-  const canViewSystemNavigation = currentUser.role === "admin";
-  const storage = hasReadyFilesState(filesState)
-    ? filesState.data.storage
-    : undefined;
-  const storagePercent = storage
-    ? percentage(storage.systemUsedBytes, storage.totalBytes)
-    : 0;
-
-  return (
-    <aside className="dashboard-sidebar hidden w-64 shrink-0 flex-col px-4 pb-5 pt-5 lg:flex lg:pt-9">
-      <div className="px-2">
-        <Link href="/files" className="flex min-w-0 items-center gap-3">
-          <AeralythLogo className="size-10" />
-          <p className="truncate font-display text-4xl font-semibold leading-10">
-            Aeralyth
-          </p>
-        </Link>
-        <div role="separator" aria-hidden="true" className="mt-5 h-px bg-border" />
-      </div>
-
-      <div className="mt-6 space-y-7">
-        <nav className="space-y-1" aria-label="Main navigation">
-          {primaryDashboardSections.map((item) => (
-            <SidebarLink
-              key={item.key}
-              section={item}
-              active={item.key === activeSectionKey}
-            />
-          ))}
-        </nav>
-
-        {canViewSystemNavigation ? (
-          <section>
-            <p className="px-3 text-xs font-medium uppercase text-muted-foreground">
-              System
-            </p>
-            <nav className="mt-2 space-y-1" aria-label="System navigation">
-              {systemDashboardSections.map((item) => (
-                <SidebarLink
-                  key={item.key}
-                  section={item}
-                  active={item.key === activeSectionKey}
-                />
-              ))}
-            </nav>
-          </section>
-        ) : null}
-      </div>
-
-      <div className="mt-auto px-2 pt-6">
-        <div className="flex items-center justify-between text-sm">
-          <span className="font-medium">Storage</span>
-          <span className="text-muted-foreground">
-            {storage ? `${storagePercent}%` : "Unavailable"}
-          </span>
-        </div>
-        <div className="mt-3 h-2 rounded-full bg-muted">
-          <div
-            className="h-full rounded-full bg-primary"
-            style={{ width: `${storagePercent}%` }}
-          />
-        </div>
-        <p className="mt-2 text-xs text-muted-foreground">
-          {storage
-            ? `${formatBytes(storage.systemUsedBytes)} of ${formatBytes(
-                storage.totalBytes,
-              )} used`
-            : "Storage stats unavailable"}
-        </p>
-      </div>
-    </aside>
-  );
-}
-
-function SidebarLink({
-  section,
-  active,
-}: {
-  section: DashboardSection;
-  active: boolean;
-}) {
-  return (
-    <Link
-      href={section.href}
-      aria-current={active ? "page" : undefined}
-      className={
-        active
-          ? "flex h-9 w-full items-center gap-2 rounded-full bg-background px-3 text-left text-sm font-medium shadow-xs"
-          : "flex h-9 w-full items-center gap-2 rounded-full px-3 text-left text-sm text-muted-foreground transition-colors hover:bg-background hover:text-foreground"
-      }
-    >
-      <section.icon className="size-4" aria-hidden="true" />
-      {section.label}
-    </Link>
   );
 }
 
@@ -574,64 +472,13 @@ function SettingsContent({
   csrfToken: string;
 }) {
   return (
-    <div className="flex flex-1 flex-col px-4 py-5 sm:px-6">
-      <div className="grid w-full max-w-3xl gap-4">
+    <div className="flex flex-1 flex-col overflow-auto px-4 sm:px-8">
+      <div className="mx-auto w-full max-w-5xl">
         <ProfileSettingsForm
           currentUser={currentUser}
           csrfToken={csrfToken}
         />
-
-        <SettingsSection title="Session">
-          <SettingsRow label="Session">
-            <form action="/api/auth/logout" method="post">
-              <input type="hidden" name="csrf_token" value={csrfToken} />
-              <Button type="submit" variant="destructive" size="sm">
-                <LogOut className="size-4" aria-hidden="true" />
-                Sign out
-              </Button>
-            </form>
-          </SettingsRow>
-        </SettingsSection>
       </div>
-    </div>
-  );
-}
-
-function SettingsSection({
-  title,
-  children,
-}: {
-  title: string;
-  children: ReactNode;
-}) {
-  return (
-    <section className="w-full overflow-hidden rounded-md border">
-      <div className="border-b px-4 py-3">
-        <p className="text-sm font-medium">{title}</p>
-      </div>
-      <div className="divide-y">{children}</div>
-    </section>
-  );
-}
-
-function SettingsRow({
-  label,
-  description,
-  children,
-}: {
-  label: string;
-  description?: string;
-  children: ReactNode;
-}) {
-  return (
-    <div className="grid gap-3 px-4 py-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-      <div className="min-w-0">
-        <p className="text-sm font-medium">{label}</p>
-        {description ? (
-          <p className="mt-1 text-xs text-muted-foreground">{description}</p>
-        ) : null}
-      </div>
-      <div className="flex min-w-0 items-center sm:justify-end">{children}</div>
     </div>
   );
 }
@@ -658,11 +505,9 @@ function FileContent({
     );
   }
 
-  const { entries, summary } = filesState.data;
+  const { breadcrumbs, currentFolderId, entries, summary } = filesState.data;
   const isTrash = section.key === "trash";
   const isShared = section.key === "shared";
-  const folderCount = countFolders(entries);
-  const fileCount = entries.length - folderCount;
   const uploadInputId =
     section.key === "files" ? "aeralyth-file-upload-input" : undefined;
 
@@ -671,29 +516,41 @@ function FileContent({
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
         <FileMetric
           icon={FileText}
-          label={section.key === "files" ? "Files" : section.title}
-          value={String(section.key === "files" ? fileCount : entries.length)}
-        />
-        <FileMetric icon={Folder} label="Folders" value={String(folderCount)} />
-        <FileMetric
-          icon={Activity}
-          label="Active"
-          value={String(summary.activeFiles)}
+          label="Files"
+          value={String(summary.totalFiles)}
         />
         <FileMetric
-          icon={Trash2}
-          label="Trash"
-          value={String(summary.trashedFiles)}
+          icon={Folder}
+          label="Folders"
+          value={String(summary.totalFolders)}
+        />
+        <FileMetric
+          icon={Star}
+          label="Favorites"
+          value={String(summary.favoriteFiles)}
+        />
+        <FileMetric
+          icon={Share2}
+          label="Shared with me"
+          value={String(summary.sharedFiles)}
         />
         <FileMetric
           icon={HardDrive}
-          label="Used"
+          label="Storage used"
           value={formatBytes(summary.usedBytes)}
         />
       </div>
 
+      {section.key === "files" && breadcrumbs.length > 0 ? (
+        <FolderBreadcrumbs breadcrumbs={breadcrumbs} />
+      ) : null}
+
       {section.key === "files" ? (
-        <UploadPanel csrfToken={csrfToken} inputId={uploadInputId} />
+        <UploadPanel
+          csrfToken={csrfToken}
+          inputId={uploadInputId}
+          parentFolderId={currentFolderId}
+        />
       ) : null}
 
       <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md border bg-card/45 shadow-[0_18px_70px_rgb(0_0_0/0.08)]">
@@ -715,10 +572,57 @@ function FileContent({
             </div>
           </>
         ) : (
-          <FilesEmptyState sectionKey={section.key} />
+          <FilesEmptyState
+            sectionKey={section.key}
+            inFolder={Boolean(currentFolderId)}
+          />
         )}
       </section>
     </div>
+  );
+}
+
+function FolderBreadcrumbs({
+  breadcrumbs,
+}: {
+  breadcrumbs: FolderBreadcrumb[];
+}) {
+  return (
+    <nav
+      aria-label="Folder path"
+      className="flex min-h-8 min-w-0 items-center gap-1 overflow-x-auto text-sm"
+    >
+      <Link
+        href="/files"
+        className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+      >
+        Files
+      </Link>
+      {breadcrumbs.map((breadcrumb, index) => {
+        const isCurrent = index === breadcrumbs.length - 1;
+
+        return (
+          <span key={breadcrumb.id} className="flex min-w-0 items-center gap-1">
+            <ChevronRight
+              className="size-4 shrink-0 text-muted-foreground/60"
+              aria-hidden="true"
+            />
+            {isCurrent ? (
+              <span className="max-w-52 truncate font-medium">
+                {breadcrumb.name}
+              </span>
+            ) : (
+              <Link
+                href={{ pathname: "/files", query: { folder: breadcrumb.id } }}
+                className="max-w-52 truncate text-muted-foreground transition-colors hover:text-foreground"
+              >
+                {breadcrumb.name}
+              </Link>
+            )}
+          </span>
+        );
+      })}
+    </nav>
   );
 }
 
@@ -769,6 +673,7 @@ function FileRow({
   const FileIcon = getFileIcon(file);
   const isTrash = sectionKey === "trash";
   const isShared = sectionKey === "shared";
+  const isFolder = isFolderEntry(file);
   const rowDate =
     isTrash && file.trashedAt
       ? file.trashedAt
@@ -786,23 +691,36 @@ function FileRow({
           className="size-4 rounded border border-border bg-transparent"
         />
       </span>
-      <div className="flex min-w-0 items-center gap-3">
-        <FileIcon className="size-5 shrink-0 text-primary" aria-hidden="true" />
-        <div className="min-w-0">
-          <p className="truncate font-medium">{file.name}</p>
-          <p className="text-xs text-muted-foreground md:hidden">
-            {file.kind} · {formatBytes(file.sizeBytes)}
-          </p>
-          {isShared && file.ownerUsername ? (
-            <p className="truncate text-xs text-muted-foreground">
-              Shared by {file.ownerUsername}
+      {isFolder && !isTrash ? (
+        <Link
+          href={{ pathname: "/files", query: { folder: file.id } }}
+          className="flex min-w-0 items-center gap-3 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+        >
+          <FileIcon className="size-5 shrink-0 text-primary" aria-hidden="true" />
+          <div className="min-w-0">
+            <p className="truncate font-medium">{file.name}</p>
+            <p className="text-xs text-muted-foreground md:hidden">Folder</p>
+          </div>
+        </Link>
+      ) : (
+        <div className="flex min-w-0 items-center gap-3">
+          <FileIcon className="size-5 shrink-0 text-primary" aria-hidden="true" />
+          <div className="min-w-0">
+            <p className="truncate font-medium">{file.name}</p>
+            <p className="text-xs text-muted-foreground md:hidden">
+              {file.kind} · {formatBytes(file.sizeBytes)}
             </p>
-          ) : null}
+            {isShared && file.ownerUsername ? (
+              <p className="truncate text-xs text-muted-foreground">
+                Shared by {file.ownerUsername}
+              </p>
+            ) : null}
+          </div>
         </div>
-      </div>
+      )}
       <span className="text-muted-foreground">{file.kind}</span>
       <span className="hidden text-muted-foreground md:block">
-        {formatBytes(file.sizeBytes)}
+        {isFolder ? "—" : formatBytes(file.sizeBytes)}
       </span>
       <span className="hidden text-muted-foreground md:block">
         {formatDate(rowDate)}
@@ -854,6 +772,26 @@ function FileRow({
               >
                 <X className="size-4" aria-hidden="true" />
                 Remove
+              </Button>
+            </form>
+          </>
+        ) : isFolder ? (
+          <>
+            <form action={`/api/files/${file.id}/favorite`} method="post">
+              <input type="hidden" name="csrf_token" value={csrfToken} />
+              <Button type="submit" variant="outline">
+                <Star
+                  className={file.favorite ? "size-4 fill-primary" : "size-4"}
+                  aria-hidden="true"
+                />
+                Star
+              </Button>
+            </form>
+            <form action={`/api/files/${file.id}/trash`} method="post">
+              <input type="hidden" name="csrf_token" value={csrfToken} />
+              <Button type="submit" variant="outline">
+                <Trash2 className="size-4" aria-hidden="true" />
+                Trash
               </Button>
             </form>
           </>
@@ -968,13 +906,15 @@ function FileMetric({
   value: string;
 }) {
   return (
-    <div className="flex min-h-24 items-center gap-4 rounded-md border bg-card/45 p-5 shadow-[0_18px_70px_rgb(0_0_0/0.08)]">
-      <span className="flex size-10 shrink-0 items-center justify-center rounded-md text-primary">
-        <Icon className="size-6" aria-hidden="true" />
+    <div className="grid h-24 grid-cols-[2.5rem_minmax(0,1fr)] items-center gap-3 rounded-md border bg-card/45 px-4">
+      <span className="flex size-10 items-center justify-center text-primary">
+        <Icon className="size-5" aria-hidden="true" />
       </span>
-      <div className="min-w-0">
-        <p className="text-sm text-muted-foreground">{label}</p>
-        <p className="mt-1 font-display text-2xl font-semibold leading-8">
+      <div className="flex min-w-0 flex-col justify-center">
+        <p className="truncate text-sm leading-5 text-muted-foreground">
+          {label}
+        </p>
+        <p className="mt-0.5 truncate font-display text-2xl font-semibold leading-7 tabular-nums">
           {value}
         </p>
       </div>
@@ -982,7 +922,13 @@ function FileMetric({
   );
 }
 
-function FilesEmptyState({ sectionKey }: { sectionKey: DashboardSectionKey }) {
+function FilesEmptyState({
+  sectionKey,
+  inFolder = false,
+}: {
+  sectionKey: DashboardSectionKey;
+  inFolder?: boolean;
+}) {
   const isFilesView = sectionKey === "files";
 
   return (
@@ -997,11 +943,15 @@ function FilesEmptyState({ sectionKey }: { sectionKey: DashboardSectionKey }) {
         </span>
       </div>
       <p className="mt-2 font-display text-lg font-semibold">
-        {isFilesView ? "No files uploaded yet" : emptyFilesText(sectionKey)}
+        {isFilesView
+          ? inFolder
+            ? "This folder is empty"
+            : "No files or folders yet"
+          : emptyFilesText(sectionKey)}
       </p>
       <p className="mt-2 max-w-md text-sm text-muted-foreground">
         {isFilesView
-          ? "Upload your first file or create a new folder to get started."
+          ? "Upload files or choose a folder to preserve its structure."
           : "Items for this view will appear here."}
       </p>
     </div>
@@ -1083,14 +1033,8 @@ function getFileIcon(file: FileEntry) {
   return FileText;
 }
 
-function countFolders(entries: FileEntry[]) {
-  return entries.filter(isFolderEntry).length;
-}
-
 function isFolderEntry(entry: FileEntry) {
-  const kind = entry.kind.toLowerCase();
-
-  return kind === "folder" || kind === "directory";
+  return entry.entryType === "folder";
 }
 
 function emptyFilesText(sectionKey: DashboardSectionKey) {
@@ -1124,8 +1068,12 @@ function hasReadyFilesState(filesState: FilesState): filesState is ReadyFilesSta
     Array.isArray(entries) &&
     entries.every((entry) => typeof entry.shared === "boolean") &&
     summary !== undefined &&
+    typeof summary.totalFiles === "number" &&
+    typeof summary.totalFolders === "number" &&
     typeof summary.activeFiles === "number" &&
     typeof summary.trashedFiles === "number" &&
+    typeof summary.favoriteFiles === "number" &&
+    typeof summary.sharedFiles === "number" &&
     typeof summary.usedBytes === "number" &&
     storage !== undefined &&
     typeof storage.totalBytes === "number" &&

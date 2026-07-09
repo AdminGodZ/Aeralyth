@@ -90,6 +90,8 @@ export type FileEntry = {
   id: string;
   name: string;
   kind: string;
+  entryType: "file" | "folder";
+  parentId: string | null;
   sizeBytes: number;
   state: "active" | "trashed";
   favorite: boolean;
@@ -99,6 +101,11 @@ export type FileEntry = {
   createdAt: string;
   updatedAt: string;
   trashedAt: string | null;
+};
+
+export type FolderBreadcrumb = {
+  id: string;
+  name: string;
 };
 
 export type StorageStats = {
@@ -112,11 +119,15 @@ export type StorageStats = {
 export type FilesData = {
   view: FileView;
   entries: FileEntry[];
+  currentFolderId: string | null;
+  breadcrumbs: FolderBreadcrumb[];
   summary: {
     totalFiles: number;
+    totalFolders: number;
     activeFiles: number;
     trashedFiles: number;
     favoriteFiles: number;
+    sharedFiles: number;
     usedBytes: number;
   };
   storage: StorageStats;
@@ -291,13 +302,19 @@ export async function getCsrfState(): Promise<CsrfState> {
   }
 }
 
-export async function getFilesState(view: FileView): Promise<FilesState> {
+export async function getFilesState(
+  view: FileView,
+  folderId?: string,
+): Promise<FilesState> {
   const requestHeaders = await headers();
   const cookie = requestHeaders.get("cookie");
 
   try {
     return await requestApi<FilesState>(
-      `${getApiOrigin()}/api/files?view=${view}`,
+      `${getApiOrigin()}/api/files?${new URLSearchParams({
+        view,
+        ...(folderId ? { folder: folderId } : {}),
+      })}`,
       {
         headers: getForwardedHeaders(requestHeaders, cookie),
         cache: "no-store",
@@ -333,9 +350,21 @@ function isFilesData(data: Partial<FilesData>): data is FilesData {
     data.view !== undefined &&
     Array.isArray(data.entries) &&
     data.entries.every(isFileEntry) &&
+    (typeof data.currentFolderId === "string" ||
+      data.currentFolderId === null) &&
+    Array.isArray(data.breadcrumbs) &&
+    data.breadcrumbs.every(
+      (breadcrumb) =>
+        typeof breadcrumb.id === "string" &&
+        typeof breadcrumb.name === "string",
+    ) &&
     data.summary !== undefined &&
+    typeof data.summary.totalFiles === "number" &&
+    typeof data.summary.totalFolders === "number" &&
     typeof data.summary.activeFiles === "number" &&
     typeof data.summary.trashedFiles === "number" &&
+    typeof data.summary.favoriteFiles === "number" &&
+    typeof data.summary.sharedFiles === "number" &&
     typeof data.summary.usedBytes === "number" &&
     data.storage !== undefined &&
     typeof data.storage.totalBytes === "number" &&
@@ -354,6 +383,8 @@ function isFileEntry(entry: unknown): entry is FileEntry {
     typeof fileEntry.id === "string" &&
     typeof fileEntry.name === "string" &&
     typeof fileEntry.kind === "string" &&
+    (fileEntry.entryType === "file" || fileEntry.entryType === "folder") &&
+    (typeof fileEntry.parentId === "string" || fileEntry.parentId === null) &&
     typeof fileEntry.sizeBytes === "number" &&
     typeof fileEntry.state === "string" &&
     typeof fileEntry.favorite === "boolean" &&

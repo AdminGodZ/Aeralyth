@@ -1,4 +1,5 @@
 import type { Metadata } from "next";
+import { cookies } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 
 import { DashboardShell } from "@/features/dashboard/dashboard-shell";
@@ -14,6 +15,9 @@ import {
 type SectionPageProps = {
   params: Promise<{
     section: string;
+  }>;
+  searchParams: Promise<{
+    folder?: string;
   }>;
 };
 
@@ -37,8 +41,12 @@ export async function generateMetadata({
 
 export default async function SectionPage({
   params,
+  searchParams,
 }: SectionPageProps) {
   const { section: sectionKey } = await params;
+  const { folder } = await searchParams;
+  const sidebarCollapsed =
+    (await cookies()).get("aeralyth_sidebar_collapsed")?.value === "1";
   const section = getDashboardSection(sectionKey);
 
   if (!section) {
@@ -64,7 +72,10 @@ export default async function SectionPage({
   const [csrfState, adminUsersState, filesState] = await Promise.all([
     getCsrfState(),
     section.key === "users" ? getAdminUsersState() : Promise.resolve(undefined),
-    getFilesState(getFileView(section.key) ?? "files"),
+    getFilesState(
+      getFileView(section.key) ?? "files",
+      section.key === "files" ? folder?.trim() : undefined,
+    ),
   ]);
 
   if (csrfState.status === "unauthorized") {
@@ -92,6 +103,7 @@ export default async function SectionPage({
       sectionKey={section.key}
       currentUser={user}
       csrfToken={csrfState.token}
+      initialSidebarCollapsed={sidebarCollapsed}
       adminUsersState={adminUsersState}
       filesState={filesState}
     />
