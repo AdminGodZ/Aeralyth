@@ -119,7 +119,7 @@ export function DashboardSidebar({
             <input type="hidden" name="csrf_token" value={csrfToken} />
             <Button
               type="submit"
-              variant="ghost"
+              variant="secondary"
               title={isCollapsed ? "Sign out" : undefined}
               aria-label={isCollapsed ? "Sign out" : undefined}
               className={cn(
@@ -134,7 +134,7 @@ export function DashboardSidebar({
 
           <Button
             type="button"
-            variant="ghost"
+            variant="secondary"
             size="icon-lg"
             onClick={toggleSidebar}
             aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}

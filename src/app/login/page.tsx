@@ -35,11 +35,14 @@ export const dynamic = "force-dynamic";
 type LoginPageProps = {
   searchParams?: Promise<{
     error?: string;
+    username?: string;
   }>;
 };
 
 export default async function LoginPage({ searchParams }: LoginPageProps) {
-  const error = (await searchParams)?.error;
+  const resolvedSearchParams = await searchParams;
+  const error = resolvedSearchParams?.error;
+  const username = resolvedSearchParams?.username;
   const authState = await getAuthState();
 
   if (authState.status === "authenticated" && error !== "backend") {
@@ -157,6 +160,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                         name="username"
                         type="text"
                         autoComplete="username"
+                        defaultValue={username}
                         placeholder="john.doe"
                         required
                         aria-invalid={invalidCredentials}

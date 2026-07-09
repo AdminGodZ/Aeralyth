@@ -84,6 +84,24 @@ export type AdminUsersState =
       status: "unavailable";
     };
 
+export type InvitationDetails = {
+  username: string;
+  role: "admin" | "user";
+  expiresAt: string;
+};
+
+export type InvitationState =
+  | {
+      status: "ready";
+      invitation: InvitationDetails;
+    }
+  | {
+      status: "invalid";
+    }
+  | {
+      status: "unavailable";
+    };
+
 export type FileView = "files" | "recent" | "favorites" | "shared" | "trash";
 
 export type FileEntry = {
@@ -257,6 +275,37 @@ export async function getAdminUsersState(): Promise<AdminUsersState> {
         return {
           status: "ready",
           data: (await response.json()) as AdminUsersData,
+        };
+      },
+    );
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
+export async function getInvitationState(
+  token: string,
+): Promise<InvitationState> {
+  try {
+    return await requestApi<InvitationState>(
+      `${getApiOrigin()}/api/invitations/${encodeURIComponent(token)}`,
+      {
+        cache: "no-store",
+      },
+      async (response) => {
+        if (response.status === 404 || response.status === 410) {
+          return { status: "invalid" };
+        }
+
+        if (!response.ok) {
+          return { status: "unavailable" };
+        }
+
+        return {
+          status: "ready",
+          invitation: (
+            (await response.json()) as { invitation: InvitationDetails }
+          ).invitation,
         };
       },
     );

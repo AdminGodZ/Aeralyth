@@ -2,6 +2,7 @@ mod admin;
 mod auth;
 mod files;
 mod health;
+mod invitations;
 mod profile;
 
 use actix_web::web;
@@ -30,11 +31,27 @@ pub fn configure(config: &mut web::ServiceConfig) {
                         .route("/users", web::get().to(admin::users))
                         .route("/users", web::post().to(admin::create_user))
                         .route("/invitations", web::post().to(admin::create_invitation))
+                        .route(
+                            "/invitations/{id}/rotate",
+                            web::post().to(admin::rotate_invitation),
+                        )
+                        .route(
+                            "/invitations/{id}/revoke",
+                            web::post().to(admin::revoke_invitation),
+                        )
                         .route("/users/{id}/role", web::post().to(admin::update_user_role))
                         .route(
                             "/users/{id}/status",
                             web::post().to(admin::update_user_status),
                         ),
+                )
+                .route(
+                    "/invitations/{token}",
+                    web::get().to(invitations::details),
+                )
+                .route(
+                    "/invitations/{token}/accept",
+                    web::post().to(invitations::accept),
                 )
                 .route("/files", web::get().to(files::list_files))
                 .route("/files/upload", web::post().to(files::upload))
