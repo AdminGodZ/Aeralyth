@@ -64,10 +64,15 @@ export function applyAccentColor(color: string) {
   }
 
   const root = document.documentElement;
+  const scopedElements = document.querySelectorAll<HTMLElement>(
+    "[data-accent-color-scope]",
+  );
   const properties = getAccentCssProperties(color);
 
-  Object.entries(properties).forEach(([name, value]) => {
-    root.style.setProperty(name, value);
+  [root, ...scopedElements].forEach((element) => {
+    Object.entries(properties).forEach(([name, value]) => {
+      element.style.setProperty(name, value);
+    });
   });
 }
 

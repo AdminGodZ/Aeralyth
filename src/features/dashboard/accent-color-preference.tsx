@@ -1,13 +1,12 @@
 "use client";
 
 import { ChevronDown, RotateCcw } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { ColorPicker } from "@/components/ui/color-picker";
 import {
   ACCENT_COLOR_PRESETS,
-  ACCENT_COLOR_STORAGE_KEY,
   DEFAULT_ACCENT_COLOR,
   applyAccentColor,
   normalizeAccentColor,
@@ -16,25 +15,25 @@ import {
 type AccentColorPreferenceProps = {
   initialColor?: string | null;
   inputName?: string;
+  labelId?: string;
 };
 
 export function AccentColorPreference({
   initialColor,
   inputName,
+  labelId,
 }: AccentColorPreferenceProps) {
+  const valueId = useId();
   const normalizedInitialColor =
     normalizeAccentColor(initialColor) ?? DEFAULT_ACCENT_COLOR;
   const [accentColor, setAccentColor] = useState<string>(normalizedInitialColor);
 
   useEffect(() => {
     const nextColor =
-      normalizeAccentColor(initialColor) ??
-      readStoredAccentColor() ??
-      DEFAULT_ACCENT_COLOR;
+      normalizeAccentColor(initialColor) ?? DEFAULT_ACCENT_COLOR;
 
     setAccentColor(nextColor);
     applyAccentColor(nextColor);
-    syncStoredAccentColor(nextColor);
   }, [initialColor]);
 
   function updateAccentColor(value: string) {
@@ -46,17 +45,15 @@ export function AccentColorPreference({
 
     setAccentColor(nextColor);
     applyAccentColor(nextColor);
-    syncStoredAccentColor(nextColor);
   }
 
   function resetAccentColor() {
     setAccentColor(DEFAULT_ACCENT_COLOR);
     applyAccentColor(DEFAULT_ACCENT_COLOR);
-    removeStoredAccentColor();
   }
 
   return (
-    <div className="flex min-w-0 flex-wrap items-center justify-end gap-2">
+    <div className="flex min-w-0 flex-wrap items-center gap-2 sm:justify-end">
       {inputName ? (
         <input type="hidden" name={inputName} value={accentColor} />
       ) : null}
@@ -68,13 +65,21 @@ export function AccentColorPreference({
         align="end"
         onValueChange={(value) => updateAccentColor(value.hex)}
       >
-        <Button type="button" variant="outline" className="gap-2">
+        <Button
+          type="button"
+          variant="outline"
+          className="gap-2"
+          aria-labelledby={labelId ? `${labelId} ${valueId}` : undefined}
+          aria-label={labelId ? undefined : `Accent color ${accentColor}`}
+        >
           <span
             className="size-4 rounded-full border"
             style={{ backgroundColor: accentColor }}
             aria-hidden="true"
           />
-          <span className="font-mono text-xs uppercase">{accentColor}</span>
+          <span id={valueId} className="font-mono text-xs uppercase">
+            {accentColor}
+          </span>
           <ChevronDown className="size-4 opacity-60" aria-hidden="true" />
         </Button>
       </ColorPicker>
@@ -90,39 +95,4 @@ export function AccentColorPreference({
       </Button>
     </div>
   );
-}
-
-function readStoredAccentColor() {
-  try {
-    return normalizeAccentColor(
-      window.localStorage.getItem(ACCENT_COLOR_STORAGE_KEY),
-    );
-  } catch {
-    return null;
-  }
-}
-
-function writeStoredAccentColor(color: string) {
-  try {
-    window.localStorage.setItem(ACCENT_COLOR_STORAGE_KEY, color);
-  } catch {
-    return;
-  }
-}
-
-function removeStoredAccentColor() {
-  try {
-    window.localStorage.removeItem(ACCENT_COLOR_STORAGE_KEY);
-  } catch {
-    return;
-  }
-}
-
-function syncStoredAccentColor(color: string) {
-  if (color === DEFAULT_ACCENT_COLOR) {
-    removeStoredAccentColor();
-    return;
-  }
-
-  writeStoredAccentColor(color);
 }

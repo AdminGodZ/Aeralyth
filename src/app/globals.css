@@ -142,40 +142,14 @@ h3 {
 
 .dashboard-main-panel {
   position: relative;
-  --dashboard-divider-rim: color-mix(in srgb, var(--primary) 28%, transparent);
-  --dashboard-divider-glow: color-mix(in srgb, var(--primary) 5%, transparent);
-  --dashboard-divider-outer-glow: color-mix(
-    in srgb,
-    var(--primary) 2.5%,
-    transparent
-  );
-  box-shadow: none;
-}
-
-.dashboard-main-panel::after {
-  position: absolute;
-  inset: 0;
-  z-index: 2;
-  display: none;
-  border-top-left-radius: inherit;
-  border-left: 1px solid var(--dashboard-divider-rim);
-  border-top: 1px solid var(--dashboard-divider-rim);
-  content: "";
-  opacity: 0.62;
-  pointer-events: none;
 }
 
 @media (min-width: 64rem) {
   .dashboard-main-panel {
-    box-shadow:
-      -1px 0 6px var(--dashboard-divider-glow),
-      0 -1px 6px var(--dashboard-divider-glow),
-      -10px 0 24px var(--dashboard-divider-outer-glow),
-      0 -10px 24px var(--dashboard-divider-outer-glow);
-  }
-
-  .dashboard-main-panel::after {
-    display: block;
+    border-top: 1px solid
+      color-mix(in srgb, var(--primary) 42%, var(--border) 58%);
+    border-left: 1px solid
+      color-mix(in srgb, var(--primary) 42%, var(--border) 58%);
   }
 }
 
@@ -190,6 +164,51 @@ h3 {
   100% {
     opacity: 0;
     transform: translateX(45%);
+  }
+}
+
+.dotted-surface {
+  overflow: hidden;
+  perspective: 720px;
+  mask-image: radial-gradient(
+    ellipse 78% 68% at 50% 48%,
+    #000 12%,
+    rgb(0 0 0 / 78%) 48%,
+    transparent 100%
+  );
+}
+
+.dotted-surface::before,
+.dotted-surface::after {
+  position: absolute;
+  inset: -42%;
+  background-image: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--primary) 72%, transparent) 0 1.2px,
+    transparent 1.7px
+  );
+  background-size: 46px 46px;
+  content: "";
+  opacity: 0.52;
+  transform: rotateX(58deg) translate3d(0, -4%, 0) scale(1.18);
+  transform-origin: center;
+  animation: dotted-surface-drift 22s linear infinite;
+}
+
+.dotted-surface::after {
+  background-position: 23px 23px;
+  background-size: 70px 70px;
+  opacity: 0.3;
+  animation-direction: reverse;
+  animation-duration: 30s;
+}
+
+@keyframes dotted-surface-drift {
+  from {
+    background-position: 0 0;
+  }
+  to {
+    background-position: 92px 46px;
   }
 }
 
@@ -350,7 +369,8 @@ h3 {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .dashboard-main-panel::after,
+  .dotted-surface::before,
+  .dotted-surface::after,
   .upload-edge-glow,
   .upload-edge-rim,
   .upload-edge-spark {

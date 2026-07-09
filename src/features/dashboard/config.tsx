@@ -98,7 +98,7 @@ export const dashboardSections: DashboardSection[] = [
     content: "system",
     icon: Settings,
     title: "Settings",
-    subtitle: "Profile, preferences, and session",
+    subtitle: "Profile and appearance",
   },
   {
     key: "storage",

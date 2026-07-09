@@ -4,12 +4,11 @@ import { useId, useRef, useState } from "react";
 import {
   FileArchive,
   FileText,
+  FolderUp,
   ImageIcon,
-  Plus,
   UploadCloud,
 } from "lucide-react";
 
-import { Button } from "@/components/ui/button";
 import {
   Attachment,
   AttachmentContent,
@@ -18,90 +17,110 @@ import {
   AttachmentMedia,
   AttachmentTitle,
 } from "@/components/ui/attachment";
+import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+
+type UploadSelection = {
+  file: File;
+  relativePath: string;
+};
 
 export function UploadPanel({
   csrfToken,
   inputId: inputIdProp,
+  parentFolderId,
 }: {
   csrfToken: string;
   inputId?: string;
+  parentFolderId?: string | null;
 }) {
   const generatedInputId = useId();
   const inputId = inputIdProp ?? generatedInputId;
-  const formRef = useRef<HTMLFormElement>(null);
-  const inputRef = useRef<HTMLInputElement>(null);
-  const [selectedFiles, setSelectedFiles] = useState<File[]>([]);
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const folderInputRef = useRef<HTMLInputElement>(null);
+  const [selectedFiles, setSelectedFiles] = useState<UploadSelection[]>([]);
   const [isUploading, setIsUploading] = useState(false);
   const [isDragging, setIsDragging] = useState(false);
-  const action = `/api/files/upload?csrf_token=${encodeURIComponent(csrfToken)}`;
+  const [uploadError, setUploadError] = useState<string | null>(null);
+  const action = `/api/files/upload?${new URLSearchParams({
+    csrf_token: csrfToken,
+    ...(parentFolderId ? { parent_id: parentFolderId } : {}),
+  })}`;
 
-  function submitFiles(files: File[]) {
-    if (files.length === 0 || !inputRef.current || !formRef.current) {
+  async function submitFiles(files: UploadSelection[]) {
+    if (files.length === 0 || isUploading) {
       return;
     }
 
     setSelectedFiles(files);
+    setUploadError(null);
+    setIsUploading(true);
 
-    const dataTransfer = new DataTransfer();
+    const formData = new FormData();
+    formData.append("csrf_token", csrfToken);
 
-    files.forEach((file) => {
-      dataTransfer.items.add(file);
+    files.forEach(({ file, relativePath }) => {
+      formData.append("file", file, relativePath);
     });
 
-    inputRef.current.files = dataTransfer.files;
-    setIsUploading(true);
-    formRef.current.requestSubmit();
+    try {
+      const response = await fetch(action, {
+        method: "POST",
+        body: formData,
+      });
+
+      if (!response.ok) {
+        throw new Error(`Upload failed with status ${response.status}`);
+      }
+
+      window.location.assign(response.url);
+    } catch {
+      setIsUploading(false);
+      setUploadError("Upload failed. Check the backend and try again.");
+    }
   }
 
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
-    submitFiles(Array.from(event.currentTarget.files ?? []));
+    const files = Array.from(event.currentTarget.files ?? []).map((file) => ({
+      file,
+      relativePath: getBrowserRelativePath(file),
+    }));
+
+    void submitFiles(files);
+    event.currentTarget.value = "";
   }
 
-  function handleDrop(event: React.DragEvent<HTMLLabelElement>) {
+  async function handleDrop(event: React.DragEvent<HTMLLabelElement>) {
     event.preventDefault();
     setIsDragging(false);
 
-    const droppedFiles = Array.from(event.dataTransfer.files);
-
-    if (droppedFiles.length === 0) {
-      return;
-    }
-
-    submitFiles(droppedFiles);
+    const files = await collectDroppedFiles(event.dataTransfer);
+    void submitFiles(files);
   }
 
   return (
     <section className="overflow-hidden rounded-md border bg-card/45 p-5 shadow-[0_18px_70px_rgb(0_0_0/0.08)]">
-      <form
-        ref={formRef}
-        action={action}
-        method="post"
-        encType="multipart/form-data"
-        className="space-y-5"
-      >
-        <input type="hidden" name="csrf_token" value={csrfToken} />
-
+      <div className="space-y-5">
         <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
           <div className="min-w-0">
             <p className="font-display text-xl font-semibold leading-7">
-              Upload files
+              Upload files and folders
             </p>
             <p className="mt-1 text-sm text-muted-foreground">
               {isUploading
-                ? "Uploading selected files"
-                : "Drag and drop files anywhere in the area below, or use the button to browse."}
+                ? "Uploading selected items"
+                : "Add any file type or preserve a complete folder structure."}
             </p>
           </div>
           <Button
             type="button"
             variant="outline"
-            disabled
+            disabled={isUploading}
             className="self-start"
-            title="Folder creation is not wired yet"
+            onClick={() => folderInputRef.current?.click()}
           >
-            <Plus className="size-4" aria-hidden="true" />
-            New folder
+            <FolderUp className="size-4" aria-hidden="true" />
+            Choose folder
           </Button>
         </div>
 
@@ -115,12 +134,16 @@ export function UploadPanel({
             event.preventDefault();
             setIsDragging(true);
           }}
-          onDragLeave={() => setIsDragging(false)}
-          onDrop={handleDrop}
+          onDragLeave={(event) => {
+            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
+              setIsDragging(false);
+            }
+          }}
+          onDrop={(event) => void handleDrop(event)}
           onKeyDown={(event) => {
             if (event.key === "Enter" || event.key === " ") {
               event.preventDefault();
-              inputRef.current?.click();
+              fileInputRef.current?.click();
             }
           }}
           className={cn(
@@ -138,29 +161,42 @@ export function UploadPanel({
             <UploadCloud className="size-7" aria-hidden="true" />
           </span>
           <span className="relative z-10 mt-5 font-display text-lg font-semibold">
-            Drag & drop files here
+            Drag & drop files or folders here
           </span>
           <span className="relative z-10 mt-1 text-sm text-muted-foreground">
-            or browse from your device
+            or browse files from your device
           </span>
           <span className="relative z-10 mt-5 inline-flex h-9 items-center justify-center gap-2 rounded-full bg-primary px-4 text-sm font-medium text-primary-foreground shadow-[0_12px_34px_color-mix(in_oklch,var(--primary)_28%,transparent)]">
             <UploadCloud className="size-4" aria-hidden="true" />
             Choose files
           </span>
           <span className="relative z-10 mt-4 text-sm text-muted-foreground">
-            Max file size: 2 GB
+            Any file type · Max file size: 2 GB
           </span>
           <input
             id={inputId}
-            ref={inputRef}
-            name="file"
+            ref={fileInputRef}
             type="file"
-            required
             multiple
             className="sr-only"
             onChange={handleFileChange}
           />
         </label>
+
+        <input
+          ref={folderInputRef}
+          type="file"
+          multiple
+          className="sr-only"
+          onChange={handleFileChange}
+          {...({ webkitdirectory: "", directory: "" } as React.InputHTMLAttributes<HTMLInputElement>)}
+        />
+
+        {uploadError ? (
+          <p role="alert" className="text-sm text-destructive">
+            {uploadError}
+          </p>
+        ) : null}
 
         {selectedFiles.length > 0 ? (
           <AttachmentGroup
@@ -169,12 +205,12 @@ export function UploadPanel({
             tabIndex={0}
             className="pt-1"
           >
-            {selectedFiles.map((file, index) => {
+            {selectedFiles.map(({ file, relativePath }, index) => {
               const FileIcon = getUploadFileIcon(file);
 
               return (
                 <Attachment
-                  key={`${file.name}-${file.size}-${file.lastModified}-${index}`}
+                  key={`${relativePath}-${file.size}-${file.lastModified}-${index}`}
                   state={isUploading ? "uploading" : "idle"}
                   className="w-72"
                 >
@@ -182,7 +218,7 @@ export function UploadPanel({
                     <FileIcon aria-hidden="true" />
                   </AttachmentMedia>
                   <AttachmentContent>
-                    <AttachmentTitle>{file.name}</AttachmentTitle>
+                    <AttachmentTitle>{relativePath}</AttachmentTitle>
                     <AttachmentDescription>
                       {isUploading
                         ? `Uploading - ${formatUploadBytes(file.size)}`
@@ -194,7 +230,7 @@ export function UploadPanel({
             })}
           </AttachmentGroup>
         ) : null}
-      </form>
+      </div>
     </section>
   );
 }
@@ -241,6 +277,78 @@ function UploadEdgeAnimation({ active }: { active: boolean }) {
       ))}
     </span>
   );
+}
+
+function getBrowserRelativePath(file: File) {
+  const relativePath = (file as File & { webkitRelativePath?: string })
+    .webkitRelativePath;
+
+  return relativePath || file.name;
+}
+
+async function collectDroppedFiles(dataTransfer: DataTransfer) {
+  const entries = Array.from(dataTransfer.items)
+    .map((item) => item.webkitGetAsEntry())
+    .filter((entry): entry is FileSystemEntry => entry !== null);
+
+  if (entries.length === 0) {
+    return Array.from(dataTransfer.files).map((file) => ({
+      file,
+      relativePath: file.name,
+    }));
+  }
+
+  const nestedFiles = await Promise.all(entries.map(readDroppedEntry));
+  return nestedFiles.flat();
+}
+
+async function readDroppedEntry(
+  entry: FileSystemEntry,
+): Promise<UploadSelection[]> {
+  if (entry.isFile) {
+    const file = await readDroppedFile(entry as FileSystemFileEntry);
+
+    return [
+      {
+        file,
+        relativePath: entry.fullPath.replace(/^\/+/, "") || file.name,
+      },
+    ];
+  }
+
+  if (!entry.isDirectory) {
+    return [];
+  }
+
+  const children = await readDirectoryEntries(
+    (entry as FileSystemDirectoryEntry).createReader(),
+  );
+  const nestedFiles = await Promise.all(children.map(readDroppedEntry));
+  return nestedFiles.flat();
+}
+
+function readDroppedFile(entry: FileSystemFileEntry) {
+  return new Promise<File>((resolve, reject) => entry.file(resolve, reject));
+}
+
+function readDirectoryEntries(reader: FileSystemDirectoryReader) {
+  return new Promise<FileSystemEntry[]>((resolve, reject) => {
+    const entries: FileSystemEntry[] = [];
+
+    const readBatch = () => {
+      reader.readEntries((batch) => {
+        if (batch.length === 0) {
+          resolve(entries);
+          return;
+        }
+
+        entries.push(...batch);
+        readBatch();
+      }, reject);
+    };
+
+    readBatch();
+  });
 }
 
 function getUploadFileIcon(file: File) {

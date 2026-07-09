@@ -124,6 +124,37 @@ CREATE TABLE IF NOT EXISTS files (
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+ALTER TABLE files
+  ADD COLUMN IF NOT EXISTS entry_type TEXT NOT NULL DEFAULT 'file';
+
+ALTER TABLE files
+  ADD COLUMN IF NOT EXISTS parent_id TEXT;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'files_entry_type_check'
+  ) THEN
+    ALTER TABLE files
+      ADD CONSTRAINT files_entry_type_check CHECK (entry_type IN ('file', 'folder'));
+  END IF;
+END $$;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'files_parent_id_fkey'
+  ) THEN
+    ALTER TABLE files
+      ADD CONSTRAINT files_parent_id_fkey
+      FOREIGN KEY (parent_id) REFERENCES files(id) ON DELETE CASCADE;
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS file_shares (
   id TEXT PRIMARY KEY,
   file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
@@ -143,6 +174,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS invitations_pending_username_idx
   ON invitations (lower(invited_username))
   WHERE status = 'pending';
 CREATE INDEX IF NOT EXISTS files_owner_id_idx ON files(owner_id);
+CREATE INDEX IF NOT EXISTS files_parent_id_idx ON files(parent_id);
 CREATE INDEX IF NOT EXISTS files_state_idx ON files(state);
 CREATE INDEX IF NOT EXISTS files_updated_at_idx ON files(updated_at);
 CREATE INDEX IF NOT EXISTS files_favorite_idx ON files(favorite);
@@ -152,8 +184,4 @@ CREATE INDEX IF NOT EXISTS file_shares_recipient_id_idx ON file_shares(recipient
 
 INSERT INTO users (id, username, password_hash, role)
 VALUES ('usr_admingod', 'admingod', crypt('admingod', gen_salt('bf')), 'admin')
-ON CONFLICT (username) DO UPDATE
-SET password_hash = EXCLUDED.password_hash,
-    role = EXCLUDED.role,
-    status = 'active',
-    updated_at = now();
+ON CONFLICT (username) DO NOTHING;
