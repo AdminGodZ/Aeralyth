@@ -80,6 +80,11 @@ pub(crate) struct StatusForm {
     csrf_token: String,
 }
 
+#[derive(Deserialize)]
+pub(crate) struct CsrfForm {
+    csrf_token: String,
+}
+
 struct TargetUser {
     id: String,
     role: String,
@@ -206,7 +211,9 @@ pub async fn create_invitation(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    Ok(redirect("/users?invite=created"))
+    Ok(redirect(format!(
+        "/users?invite=created&token={token}"
+    )))
 }
 
 pub async fn create_user(
@@ -361,6 +368,78 @@ pub async fn update_user_status(
     Ok(redirect("/users?user=updated"))
 }
 
+pub async fn rotate_invitation(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    path: web::Path<String>,
+    form: web::Form<CsrfForm>,
+) -> Result<HttpResponse> {
+    require_admin(&state, &request).await?;
+    require_csrf(&state, &request, &form.csrf_token).await?;
+    let invitation_id = path.into_inner();
+    let token = create_token()?;
+    let expires_after_days = INVITATION_LIFETIME_DAYS;
+    let updated = state
+        .db
+        .execute(
+            "
+                UPDATE invitations AS target
+                SET token_hash = encode(digest($1::text, 'sha256'), 'hex'),
+                    status = 'pending',
+                    expires_at = now() + ($2::bigint * interval '1 day'),
+                    accepted_at = NULL
+                WHERE target.id = $3
+                  AND target.status <> 'accepted'
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM invitations AS existing
+                    WHERE existing.id <> target.id
+                      AND lower(existing.invited_username) = lower(target.invited_username)
+                      AND existing.status = 'pending'
+                      AND existing.expires_at > now()
+                  )
+            ",
+            &[&token, &expires_after_days, &invitation_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    if updated == 0 {
+        return Ok(redirect("/users?invite=missing"));
+    }
+
+    Ok(redirect(format!(
+        "/users?invite=created&token={token}"
+    )))
+}
+
+pub async fn revoke_invitation(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    path: web::Path<String>,
+    form: web::Form<CsrfForm>,
+) -> Result<HttpResponse> {
+    require_admin(&state, &request).await?;
+    require_csrf(&state, &request, &form.csrf_token).await?;
+    let invitation_id = path.into_inner();
+
+    state
+        .db
+        .execute(
+            "
+                UPDATE invitations
+                SET status = 'revoked'
+                WHERE id = $1
+                  AND status = 'pending'
+            ",
+            &[&invitation_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    Ok(redirect("/users?invite=revoked"))
+}
+
 async fn list_users(state: &AppState) -> Result<Vec<AdminUser>> {
     let rows = state
         .db
@@ -508,8 +587,8 @@ fn create_token() -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-fn redirect(location: &'static str) -> HttpResponse {
+fn redirect(location: impl AsRef<str>) -> HttpResponse {
     HttpResponse::SeeOther()
-        .insert_header((LOCATION, location))
+        .insert_header((LOCATION, location.as_ref().to_owned()))
         .finish()
 }

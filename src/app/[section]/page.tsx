@@ -18,6 +18,7 @@ type SectionPageProps = {
   }>;
   searchParams: Promise<{
     folder?: string;
+    token?: string;
   }>;
 };
 
@@ -44,7 +45,7 @@ export default async function SectionPage({
   searchParams,
 }: SectionPageProps) {
   const { section: sectionKey } = await params;
-  const { folder } = await searchParams;
+  const { folder, token } = await searchParams;
   const sidebarCollapsed =
     (await cookies()).get("aeralyth_sidebar_collapsed")?.value === "1";
   const section = getDashboardSection(sectionKey);
@@ -104,6 +105,7 @@ export default async function SectionPage({
       currentUser={user}
       csrfToken={csrfState.token}
       initialSidebarCollapsed={sidebarCollapsed}
+      invitationToken={section.key === "users" ? token?.trim() : undefined}
       adminUsersState={adminUsersState}
       filesState={filesState}
     />

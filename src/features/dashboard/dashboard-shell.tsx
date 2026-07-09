@@ -21,6 +21,7 @@ import Link from "next/link";
 import type { CSSProperties } from "react";
 
 import { AeralythLogo } from "@/components/aeralyth-logo";
+import { FileEmptyIllustration } from "@/components/file-empty-illustration";
 import { Button } from "@/components/ui/button";
 import {
   getDashboardSection,
@@ -31,6 +32,7 @@ import { DashboardSidebar } from "@/features/dashboard/dashboard-sidebar";
 import { ProfileSettingsForm } from "@/features/dashboard/profile-settings-form";
 import { UploadPanel } from "@/features/dashboard/upload-panel";
 import { UserPreferenceHydrator } from "@/features/dashboard/user-preference-hydrator";
+import { UsersContent as UsersDirectory } from "@/features/dashboard/users-content";
 import type {
   AdminUsersState,
   CurrentUser,
@@ -50,6 +52,7 @@ type DashboardShellProps = {
   currentUser: CurrentUser;
   csrfToken: string;
   initialSidebarCollapsed: boolean;
+  invitationToken?: string;
   adminUsersState?: AdminUsersState;
   filesState: FilesState;
 };
@@ -61,6 +64,7 @@ export function DashboardShell({
   currentUser,
   csrfToken,
   initialSidebarCollapsed,
+  invitationToken,
   adminUsersState,
   filesState,
 }: DashboardShellProps) {
@@ -98,6 +102,7 @@ export function DashboardShell({
           section={section}
           currentUser={currentUser}
           csrfToken={csrfToken}
+          invitationToken={invitationToken}
           adminUsersState={adminUsersState}
           filesState={filesState}
         />
@@ -213,12 +218,14 @@ function DashboardContent({
   section,
   currentUser,
   csrfToken,
+  invitationToken,
   adminUsersState,
   filesState,
 }: {
   section: DashboardSection;
   currentUser: CurrentUser;
   csrfToken: string;
+  invitationToken?: string;
   adminUsersState?: AdminUsersState;
   filesState: FilesState;
 }) {
@@ -228,9 +235,10 @@ function DashboardContent({
 
   if (section.key === "users") {
     return (
-      <UsersContent
+      <UsersDirectory
         currentUser={currentUser}
         csrfToken={csrfToken}
+        invitationToken={invitationToken}
         adminUsersState={adminUsersState}
       />
     );
@@ -249,220 +257,6 @@ function DashboardContent({
   );
 }
 
-function UsersContent({
-  currentUser,
-  csrfToken,
-  adminUsersState,
-}: {
-  currentUser: CurrentUser;
-  csrfToken: string;
-  adminUsersState?: AdminUsersState;
-}) {
-  if (!adminUsersState || adminUsersState.status === "unavailable") {
-    return (
-      <div className="flex flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
-        <section className="rounded-md border p-5">
-          <p className="font-medium">Users unavailable</p>
-          <p className="mt-2 text-sm text-muted-foreground">
-            The admin users API is not reachable.
-          </p>
-        </section>
-      </div>
-    );
-  }
-
-  if (adminUsersState.status !== "ready") {
-    return null;
-  }
-
-  const { users, invitations, summary } = adminUsersState.data;
-
-  return (
-    <div className="flex min-h-0 flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
-      <div className="grid gap-3 sm:grid-cols-4">
-        <Metric label="Users" value={String(summary.totalUsers)} />
-        <Metric label="Active" value={String(summary.activeUsers)} />
-        <Metric label="Admins" value={String(summary.admins)} />
-        <Metric label="Invites" value={String(summary.pendingInvites)} />
-      </div>
-
-      <section className="rounded-md border p-5">
-        <p className="font-medium">Create user</p>
-        <form
-          action="/api/admin/users"
-          method="post"
-          className="mt-4 grid gap-3 lg:grid-cols-[minmax(0,1fr)_minmax(12rem,16rem)_10rem_auto]"
-        >
-          <input type="hidden" name="csrf_token" value={csrfToken} />
-          <input
-            name="username"
-            type="text"
-            autoComplete="off"
-            required
-            minLength={3}
-            maxLength={32}
-            pattern="[A-Za-z0-9_.-]{3,32}"
-            placeholder="username"
-            className="h-10 min-w-0 rounded-full border bg-background px-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30"
-          />
-          <input
-            name="password"
-            type="password"
-            autoComplete="new-password"
-            required
-            minLength={8}
-            placeholder="password"
-            className="h-10 min-w-0 rounded-full border bg-background px-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30"
-          />
-          <select
-            name="role"
-            defaultValue="user"
-            className="h-10 rounded-full border bg-background px-3 text-sm outline-none transition-colors focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30"
-          >
-            <option value="user">User</option>
-            <option value="admin">Admin</option>
-          </select>
-          <Button type="submit" className="h-10 rounded-full">
-            Create
-          </Button>
-        </form>
-      </section>
-
-      <section className="min-w-0 overflow-hidden rounded-md border">
-        <div className="grid grid-cols-[minmax(0,1fr)_7rem] gap-3 border-b bg-muted/40 px-4 py-3 text-xs font-medium uppercase text-muted-foreground md:grid-cols-[minmax(0,1fr)_7rem_7rem_10rem_16rem]">
-          <span>User</span>
-          <span>Role</span>
-          <span className="hidden md:block">Status</span>
-          <span className="hidden md:block">Created</span>
-          <span className="hidden md:block">Actions</span>
-        </div>
-
-        <div className="divide-y">
-          {users.map((user) => {
-            const isCurrentUser = user.id === currentUser.id;
-
-            return (
-              <div
-                key={user.id}
-                className="grid gap-3 px-4 py-3 text-sm md:grid-cols-[minmax(0,1fr)_7rem_7rem_10rem_16rem] md:items-center"
-              >
-                <div className="min-w-0">
-                  <p className="truncate font-medium">{user.username}</p>
-                  <p className="text-xs text-muted-foreground md:hidden">
-                    {user.role} · {user.status}
-                  </p>
-                </div>
-                <span className="capitalize text-muted-foreground">
-                  {user.role}
-                </span>
-                <span className="hidden capitalize text-muted-foreground md:block">
-                  {user.status}
-                </span>
-                <span className="hidden text-muted-foreground md:block">
-                  {formatDate(user.createdAt)}
-                </span>
-                <div className="grid gap-2 sm:grid-cols-2 md:flex md:items-center">
-                  <form
-                    action={`/api/admin/users/${user.id}/role`}
-                    method="post"
-                    className="flex min-w-0 gap-2"
-                  >
-                    <input type="hidden" name="csrf_token" value={csrfToken} />
-                    <select
-                      name="role"
-                      defaultValue={user.role}
-                      disabled={isCurrentUser}
-                      className="h-8 min-w-0 flex-1 rounded-full border bg-background px-2 text-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30"
-                    >
-                      <option value="user">User</option>
-                      <option value="admin">Admin</option>
-                    </select>
-                    <Button
-                      type="submit"
-                      size="xs"
-                      variant="outline"
-                      disabled={isCurrentUser}
-                      className="rounded-full"
-                    >
-                      Role
-                    </Button>
-                  </form>
-                  <form
-                    action={`/api/admin/users/${user.id}/status`}
-                    method="post"
-                    className="flex min-w-0 gap-2"
-                  >
-                    <input type="hidden" name="csrf_token" value={csrfToken} />
-                    <select
-                      name="status"
-                      defaultValue={user.status}
-                      disabled={isCurrentUser}
-                      className="h-8 min-w-0 flex-1 rounded-full border bg-background px-2 text-xs outline-none focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30"
-                    >
-                      <option value="active">Active</option>
-                      <option value="disabled">Disabled</option>
-                    </select>
-                    <Button
-                      type="submit"
-                      size="xs"
-                      variant="outline"
-                      disabled={isCurrentUser}
-                      className="rounded-full"
-                    >
-                      Status
-                    </Button>
-                  </form>
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
-      <section className="min-w-0 overflow-hidden rounded-md border">
-        <div className="grid grid-cols-[minmax(0,1fr)_7rem_7rem] gap-3 border-b bg-muted/40 px-4 py-3 text-xs font-medium uppercase text-muted-foreground md:grid-cols-[minmax(0,1fr)_7rem_7rem_10rem]">
-          <span>Invite</span>
-          <span>Role</span>
-          <span>Status</span>
-          <span className="hidden md:block">Expires</span>
-        </div>
-
-        <div className="divide-y">
-          {invitations.length ? (
-            invitations.map((invitation) => (
-              <div
-                key={invitation.id}
-                className="grid grid-cols-[minmax(0,1fr)_7rem_7rem] gap-3 px-4 py-3 text-sm md:grid-cols-[minmax(0,1fr)_7rem_7rem_10rem]"
-              >
-                <div className="min-w-0">
-                  <p className="truncate font-medium">
-                    {invitation.invitedUsername}
-                  </p>
-                  <p className="text-xs text-muted-foreground">
-                    by {invitation.createdByUsername}
-                  </p>
-                </div>
-                <span className="capitalize text-muted-foreground">
-                  {invitation.role}
-                </span>
-                <span className="capitalize text-muted-foreground">
-                  {invitation.status}
-                </span>
-                <span className="hidden text-muted-foreground md:block">
-                  {formatDate(invitation.expiresAt)}
-                </span>
-              </div>
-            ))
-          ) : (
-            <p className="px-4 py-4 text-sm text-muted-foreground">
-              No invitations.
-            </p>
-          )}
-        </div>
-      </section>
-    </div>
-  );
-}
 
 function SettingsContent({
   currentUser,
@@ -933,15 +727,7 @@ function FilesEmptyState({
 
   return (
     <div className="flex min-h-72 flex-1 flex-col items-center justify-center px-4 py-12 text-center">
-      <div className="relative flex size-28 items-center justify-center text-primary">
-        <Folder
-          className="absolute left-1/2 top-6 size-20 -translate-x-1/2 text-muted-foreground/30"
-          aria-hidden="true"
-        />
-        <span className="absolute bottom-4 right-4 flex size-11 items-center justify-center rounded-full border bg-background text-primary shadow-[0_12px_38px_rgb(0_0_0/0.18)]">
-          <Search className="size-5" aria-hidden="true" />
-        </span>
-      </div>
+      <FileEmptyIllustration className="size-32" />
       <p className="mt-2 font-display text-lg font-semibold">
         {isFilesView
           ? inFolder
