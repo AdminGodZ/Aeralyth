@@ -1,16 +1,15 @@
 import type { Metadata } from "next";
-import { cookies } from "next/headers";
 import { notFound, redirect } from "next/navigation";
 
-import { DashboardShell } from "@/features/dashboard/dashboard-shell";
+import { DashboardPage } from "@/features/dashboard/dashboard-shell";
 import { getDashboardSection } from "@/features/dashboard/config";
+import { getDashboardSession } from "@/features/dashboard/dashboard-session";
 import {
   type FileSort,
   type FileSortDirection,
   type FileView,
+  type FilesState,
   getAdminUsersState,
-  getAuthState,
-  getCsrfState,
   getFilesState,
 } from "@/lib/api";
 
@@ -50,8 +49,6 @@ export default async function SectionPage({
 }: SectionPageProps) {
   const { section: sectionKey } = await params;
   const { direction, folder, sort, token } = await searchParams;
-  const sidebarCollapsed =
-    (await cookies()).get("aeralyth_sidebar_collapsed")?.value === "1";
   const section = getDashboardSection(sectionKey);
 
   if (!section) {
@@ -64,46 +61,35 @@ export default async function SectionPage({
     requestedFileSort ? direction : undefined,
     fileSort,
   );
-  const authState = await getAuthState();
+  const dashboardSessionPromise = getDashboardSession();
+  const adminUsersPromise =
+    section.key === "users"
+      ? getAdminUsersState()
+      : Promise.resolve(undefined);
+  const filesPromise = sectionNeedsFiles(section.key)
+    ? getFilesState(
+        getFileView(section.key) ?? "files",
+        section.key === "files" ? folder?.trim() : undefined,
+        fileSort,
+        fileSortDirection,
+      )
+    : Promise.resolve<FilesState>({ status: "unavailable" });
+  const [{ csrfToken, currentUser }, adminUsersState, filesState] =
+    await Promise.all([
+      dashboardSessionPromise,
+      adminUsersPromise,
+      filesPromise,
+    ]);
 
-  if (authState.status === "unavailable") {
-    redirect("/login?error=backend");
-  }
-
-  if (authState.status === "anonymous") {
-    redirect("/login");
-  }
-
-  const user = authState.user;
-
-  if (section.group === "system" && user.role !== "admin") {
+  if (section.group === "system" && currentUser.role !== "admin") {
     notFound();
-  }
-
-  const [csrfState, adminUsersState, filesState] = await Promise.all([
-    getCsrfState(),
-    section.key === "users" ? getAdminUsersState() : Promise.resolve(undefined),
-    getFilesState(
-      getFileView(section.key) ?? "files",
-      section.key === "files" ? folder?.trim() : undefined,
-      fileSort,
-      fileSortDirection,
-    ),
-  ]);
-
-  if (csrfState.status === "unauthorized") {
-    redirect("/login");
-  }
-
-  if (csrfState.status === "unavailable") {
-    redirect("/login?error=backend");
   }
 
   if (adminUsersState?.status === "unauthorized") {
     redirect("/login");
   }
 
-  if (filesState?.status === "unauthorized") {
+  if (filesState.status === "unauthorized") {
     redirect("/login");
   }
 
@@ -112,11 +98,10 @@ export default async function SectionPage({
   }
 
   return (
-    <DashboardShell
+    <DashboardPage
       sectionKey={section.key}
-      currentUser={user}
-      csrfToken={csrfState.token}
-      initialSidebarCollapsed={sidebarCollapsed}
+      currentUser={currentUser}
+      csrfToken={csrfToken}
       invitationToken={section.key === "users" ? token?.trim() : undefined}
       adminUsersState={adminUsersState}
       filesState={filesState}
@@ -136,7 +121,12 @@ function getFileView(sectionKey: string): FileView | null {
   ) {
     return sectionKey;
   }
+
   return null;
+}
+
+function sectionNeedsFiles(sectionKey: string) {
+  return sectionKey === "storage" || getFileView(sectionKey) !== null;
 }
 
 function normalizeFileSort(value?: string): FileSort | undefined {
