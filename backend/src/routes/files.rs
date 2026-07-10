@@ -209,12 +209,23 @@ pub async fn upload(
         let mut size_bytes: u64 = 0;
 
         while let Some(chunk_result) = field.next().await {
-            let chunk = chunk_result.map_err(error::ErrorBadRequest)?;
-            size_bytes = size_bytes
-                .checked_add(chunk.len() as u64)
-                .ok_or_else(|| error::ErrorBadRequest("upload is too large"))?;
+            let chunk = match chunk_result {
+                Ok(chunk) => chunk,
+                Err(chunk_error) => {
+                    drop(file);
+                    let _ = fs::remove_file(&storage_path);
+                    return Err(error::ErrorBadRequest(chunk_error));
+                }
+            };
+            let Some(next_size_bytes) = size_bytes.checked_add(chunk.len() as u64) else {
+                drop(file);
+                let _ = fs::remove_file(&storage_path);
+                return Err(error::ErrorBadRequest("upload is too large"));
+            };
+            size_bytes = next_size_bytes;
 
             if size_bytes > MAX_UPLOAD_BYTES {
+                drop(file);
                 let _ = fs::remove_file(&storage_path);
                 return Ok(redirect(upload_redirect_location(
                     upload_parent_id.as_deref(),
@@ -222,9 +233,13 @@ pub async fn upload(
                 )));
             }
 
-            file.write_all(&chunk)
-                .map_err(error::ErrorInternalServerError)?;
+            if let Err(write_error) = file.write_all(&chunk) {
+                drop(file);
+                let _ = fs::remove_file(&storage_path);
+                return Err(error::ErrorInternalServerError(write_error));
+            }
         }
+        drop(file);
 
         let mime_type = field.content_type().map(|mime| mime.to_string());
         let size_bytes_i64 =

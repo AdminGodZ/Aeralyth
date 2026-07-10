@@ -253,7 +253,7 @@ function DashboardContent({
       section={section}
       filesState={filesState}
       csrfToken={csrfToken}
-      folderZipPromptEnabled={currentUser.folderZipPromptEnabled}
+      folderZipPromptEnabled={currentUser.folderZipPromptEnabled !== false}
     />
   );
 }
@@ -305,12 +305,9 @@ function FileContent({
   const { breadcrumbs, currentFolderId, entries, summary } = filesState.data;
   const isTrash = section.key === "trash";
   const isShared = section.key === "shared";
-  const uploadInputId =
-    section.key === "files" ? "aeralyth-file-upload-input" : undefined;
-
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
-      <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
+    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-4 py-5 sm:px-6">
+      <div className="grid shrink-0 gap-3 md:grid-cols-2 xl:grid-cols-5">
         <FileMetric
           icon={FileText}
           label="Files"
@@ -338,20 +335,18 @@ function FileContent({
         />
       </div>
 
-      {section.key === "files" && breadcrumbs.length > 0 ? (
-        <FolderBreadcrumbs breadcrumbs={breadcrumbs} />
-      ) : null}
-
-      {section.key === "files" ? (
-        <UploadPanel
-          csrfToken={csrfToken}
-          inputId={uploadInputId}
-          parentFolderId={currentFolderId}
-          folderZipPromptEnabled={folderZipPromptEnabled}
-        />
-      ) : null}
-
       <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md border bg-card/45 shadow-[0_18px_70px_rgb(0_0_0/0.08)]">
+        {section.key === "files" ? (
+          <div className="flex min-h-16 shrink-0 flex-col justify-center gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+            <FolderBreadcrumbs breadcrumbs={breadcrumbs} />
+            <UploadPanel
+              csrfToken={csrfToken}
+              parentFolderId={currentFolderId}
+              folderZipPromptEnabled={folderZipPromptEnabled}
+            />
+          </div>
+        ) : null}
+
         {entries.length ? (
           <>
             <FileTableHeader
@@ -385,6 +380,8 @@ function FolderBreadcrumbs({
 }: {
   breadcrumbs: FolderBreadcrumb[];
 }) {
+  const isRoot = breadcrumbs.length === 0;
+
   return (
     <nav
       aria-label="Folder path"
@@ -392,7 +389,12 @@ function FolderBreadcrumbs({
     >
       <Link
         href="/files"
-        className="shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+        aria-current={isRoot ? "page" : undefined}
+        className={
+          isRoot
+            ? "shrink-0 font-medium text-foreground"
+            : "shrink-0 text-muted-foreground transition-colors hover:text-foreground"
+        }
       >
         Files
       </Link>

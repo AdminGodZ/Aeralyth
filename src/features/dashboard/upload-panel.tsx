@@ -1,24 +1,17 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  ChevronDown,
   FileArchive,
-  FileText,
+  FileUp,
+  Folder,
   FolderUp,
-  ImageIcon,
   LoaderCircle,
   UploadCloud,
   X,
 } from "lucide-react";
 
-import {
-  Attachment,
-  AttachmentContent,
-  AttachmentDescription,
-  AttachmentGroup,
-  AttachmentMedia,
-  AttachmentTitle,
-} from "@/components/ui/attachment";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -28,9 +21,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { Progress } from "@/components/ui/progress";
 import type { FolderZipWorkerResponse } from "@/features/dashboard/folder-zip-messages";
-import { cn } from "@/lib/utils";
 
 type UploadSelection = {
   file: File;
@@ -50,29 +48,23 @@ type CompressionProgress = {
 };
 
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
-const MAX_VISIBLE_SELECTIONS = 4;
 
 export function UploadPanel({
   csrfToken,
   folderZipPromptEnabled,
-  inputId: inputIdProp,
   parentFolderId,
 }: {
   csrfToken: string;
   folderZipPromptEnabled: boolean;
-  inputId?: string;
   parentFolderId?: string | null;
 }) {
-  const generatedInputId = useId();
-  const inputId = inputIdProp ?? generatedInputId;
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const zipWorkerRef = useRef<Worker | null>(null);
   const uploadRequestRef = useRef<XMLHttpRequest | null>(null);
-  const [selectedFiles, setSelectedFiles] = useState<UploadSelection[]>([]);
+  const [selectedFileCount, setSelectedFileCount] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
-  const [isDragging, setIsDragging] = useState(false);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [pendingFolderUpload, setPendingFolderUpload] =
     useState<PendingFolderUpload | null>(null);
@@ -84,12 +76,13 @@ export function UploadPanel({
       totalBytes: 0,
       currentPath: "",
     });
-  const action = `/api/files/upload?${new URLSearchParams({
-    csrf_token: csrfToken,
-    ...(parentFolderId ? { parent_id: parentFolderId } : {}),
-  })}`;
+  const action =
+    "/api/files/upload?" +
+    new URLSearchParams({
+      csrf_token: csrfToken,
+      ...(parentFolderId ? { parent_id: parentFolderId } : {}),
+    }).toString();
   const isBusy = isUploading || isCompressing;
-  const visibleSelectedFiles = selectedFiles.slice(0, MAX_VISIBLE_SELECTIONS);
 
   useEffect(() => {
     return () => {
@@ -103,7 +96,7 @@ export function UploadPanel({
       return;
     }
 
-    setSelectedFiles(files);
+    setSelectedFileCount(files.length);
     setUploadError(null);
     setIsUploading(true);
     setUploadProgress(null);
@@ -128,27 +121,30 @@ export function UploadPanel({
 
       if (request.status >= 200 && request.status < 400) {
         setUploadProgress(100);
-        window.location.assign(request.responseURL || action);
+        window.location.assign(request.responseURL || "/files");
         return;
       }
 
-      setIsUploading(false);
-      setUploadProgress(null);
-      setUploadError("Upload failed. Check the backend and try again.");
+      finishUploadWithError("Upload failed. Check the backend and try again.");
     });
     request.addEventListener("error", () => {
       uploadRequestRef.current = null;
-      setIsUploading(false);
-      setUploadProgress(null);
-      setUploadError("Upload failed. Check the backend and try again.");
+      finishUploadWithError("Upload failed. Check the backend and try again.");
     });
     request.addEventListener("abort", () => {
       uploadRequestRef.current = null;
       setIsUploading(false);
       setUploadProgress(null);
-      setSelectedFiles([]);
+      setSelectedFileCount(0);
     });
     request.send(formData);
+  }
+
+  function finishUploadWithError(message: string) {
+    setIsUploading(false);
+    setUploadProgress(null);
+    setSelectedFileCount(0);
+    setUploadError(message);
   }
 
   function handleSelection(files: UploadSelection[]) {
@@ -163,7 +159,10 @@ export function UploadPanel({
       setPendingFolderUpload({
         files,
         archiveName: getFolderArchiveName(files),
-        totalBytes: files.reduce((total, selection) => total + selection.file.size, 0),
+        totalBytes: files.reduce(
+          (total, selection) => total + selection.file.size,
+          0,
+        ),
       });
       return;
     }
@@ -181,25 +180,15 @@ export function UploadPanel({
     event.currentTarget.value = "";
   }
 
-  async function handleDrop(event: React.DragEvent<HTMLLabelElement>) {
-    event.preventDefault();
-    setIsDragging(false);
-
-    if (isBusy) {
-      return;
-    }
-
-    const files = await collectDroppedFiles(event.dataTransfer);
-    handleSelection(files);
-  }
-
   function startFolderCompression() {
     if (!pendingFolderUpload || isCompressing) {
       return;
     }
 
     if (typeof Worker === "undefined") {
-      setCompressionError("This browser cannot create ZIP archives in the background.");
+      setCompressionError(
+        "This browser cannot create ZIP archives in the background.",
+      );
       return;
     }
 
@@ -227,7 +216,6 @@ export function UploadPanel({
     }
 
     zipWorkerRef.current = worker;
-
     worker.addEventListener(
       "message",
       (event: MessageEvent<FolderZipWorkerResponse>) => {
@@ -325,191 +313,96 @@ export function UploadPanel({
   }
 
   return (
-    <section className="overflow-hidden rounded-md border bg-card/45 p-5 shadow-[0_18px_70px_rgb(0_0_0/0.08)]">
-      <div className="space-y-5">
-        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-          <div className="min-w-0">
-            <p className="font-display text-xl font-semibold leading-7">
-              Upload files and folders
-            </p>
-            <p className="mt-1 text-sm text-muted-foreground">
-              {isCompressing
-                ? "Creating a ZIP archive in your browser"
-                : isUploading
-                  ? "Uploading selected items"
-                  : "Add any file type or preserve a complete folder structure."}
-            </p>
-          </div>
-          <Button
-            type="button"
-            variant="outline"
-            disabled={isBusy}
-            className="self-start"
-            onClick={() => folderInputRef.current?.click()}
-          >
-            <FolderUp className="size-4" aria-hidden="true" />
-            Choose folder
-          </Button>
-        </div>
-
-        <label
-          id="file-upload-area"
-          htmlFor={inputId}
-          role="button"
-          tabIndex={isBusy ? -1 : 0}
-          aria-disabled={isBusy}
-          onDragEnter={() => {
-            if (!isBusy) {
-              setIsDragging(true);
-            }
-          }}
-          onDragOver={(event) => {
-            event.preventDefault();
-            if (!isBusy) {
-              setIsDragging(true);
-            }
-          }}
-          onDragLeave={(event) => {
-            if (!event.currentTarget.contains(event.relatedTarget as Node | null)) {
-              setIsDragging(false);
-            }
-          }}
-          onDrop={(event) => void handleDrop(event)}
-          onKeyDown={(event) => {
-            if (!isBusy && (event.key === "Enter" || event.key === " ")) {
-              event.preventDefault();
-              fileInputRef.current?.click();
-            }
-          }}
-          className={cn(
-            "upload-dropzone relative isolate flex min-h-60 cursor-pointer flex-col items-center justify-center overflow-hidden rounded-md border border-dashed px-4 py-8 text-center outline-none transition-colors",
-            "bg-[linear-gradient(180deg,--theme(--color-muted/.20),transparent)]",
-            "focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30",
-            isDragging
-              ? "border-primary/80 bg-primary/10"
-              : "border-border hover:border-primary/40 hover:bg-muted/40",
-            isDragging && "is-dragging",
-            isBusy && "cursor-not-allowed opacity-70",
-          )}
+    <div className="flex min-w-0 flex-col items-end gap-2 sm:flex-row sm:items-center">
+      {uploadError ? (
+        <p
+          role="alert"
+          className="max-w-64 truncate text-xs text-destructive"
+          title={uploadError}
         >
-          <UploadEdgeAnimation active={isDragging} />
-          <span className="relative z-10 flex size-14 items-center justify-center rounded-full border bg-background/80 text-primary shadow-[0_12px_40px_rgb(0_0_0/0.18)] backdrop-blur">
-            <UploadCloud className="size-7" aria-hidden="true" />
-          </span>
-          <span className="relative z-10 mt-5 font-display text-lg font-semibold">
-            Drag & drop files or folders here
-          </span>
-          <span className="relative z-10 mt-1 text-sm text-muted-foreground">
-            or browse files from your device
-          </span>
-          <span className="relative z-10 mt-5 inline-flex h-9 items-center justify-center gap-2 rounded-full bg-primary px-4 text-sm font-medium text-primary-foreground shadow-[0_12px_34px_color-mix(in_oklch,var(--primary)_28%,transparent)]">
-            <UploadCloud className="size-4" aria-hidden="true" />
-            Choose files
-          </span>
-          <span className="relative z-10 mt-4 text-sm text-muted-foreground">
-            Any file type · Max file size: 2 GB
-          </span>
-          <input
-            id={inputId}
-            ref={fileInputRef}
-            type="file"
-            multiple
-            disabled={isBusy}
-            className="sr-only"
-            onChange={handleFileChange}
+          {uploadError}
+        </p>
+      ) : null}
+
+      {isUploading ? (
+        <div className="flex min-w-52 items-center gap-3">
+          <LoaderCircle
+            className="size-4 shrink-0 animate-spin text-primary"
+            aria-hidden="true"
           />
-        </label>
-
-        <input
-          ref={folderInputRef}
-          type="file"
-          multiple
-          disabled={isBusy}
-          className="sr-only"
-          onChange={handleFileChange}
-          {...({ webkitdirectory: "", directory: "" } as React.InputHTMLAttributes<HTMLInputElement>)}
-        />
-
-        {uploadError ? (
-          <p role="alert" className="text-sm text-destructive">
-            {uploadError}
-          </p>
-        ) : null}
-
-        {isUploading ? (
-          <div className="rounded-md border bg-muted/25 p-3" role="status">
-            <div className="mb-2 flex items-center justify-between gap-3">
-              <div className="flex min-w-0 items-center gap-2 text-sm font-medium">
-                <LoaderCircle
-                  className="size-4 shrink-0 animate-spin text-primary"
-                  aria-hidden="true"
-                />
-                <span className="truncate">
-                  Uploading{" "}
-                  {selectedFiles.length === 1
-                    ? "1 item"
-                    : `${selectedFiles.length} items`}
-                </span>
-              </div>
-              <div className="flex shrink-0 items-center gap-2">
-                <span className="text-xs tabular-nums text-muted-foreground">
-                  {uploadProgress === null
-                    ? "Preparing"
-                    : `${Math.round(uploadProgress)}%`}
-                </span>
-                <Button
-                  type="button"
-                  variant="ghost"
-                  size="sm"
-                  onClick={cancelUpload}
-                >
-                  <X className="size-4" aria-hidden="true" />
-                  Cancel
-                </Button>
-              </div>
+          <div className="min-w-0 flex-1">
+            <div className="mb-1 flex items-center justify-between gap-3 text-xs">
+              <span className="truncate">
+                {formatUploadCount(selectedFileCount)}
+              </span>
+              <span className="shrink-0 tabular-nums text-muted-foreground">
+                {uploadProgress === null
+                  ? "Preparing"
+                  : String(Math.round(uploadProgress)) + "%"}
+              </span>
             </div>
             <Progress value={uploadProgress ?? 0} aria-label="Upload progress" />
           </div>
-        ) : null}
-
-        {selectedFiles.length > 0 ? (
-          <AttachmentGroup
-            role="group"
-            aria-label="Selected files"
-            tabIndex={0}
-            className="pt-1"
+          <Button
+            type="button"
+            variant="secondary"
+            size="icon-sm"
+            className="rounded-md"
+            onClick={cancelUpload}
+            aria-label="Cancel upload"
+            title="Cancel upload"
           >
-            {visibleSelectedFiles.map(({ file, relativePath }, index) => {
-              const FileIcon = getUploadFileIcon(file);
+            <X className="size-4" aria-hidden="true" />
+          </Button>
+        </div>
+      ) : (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button type="button" disabled={isBusy} className="rounded-full">
+              <UploadCloud className="size-4" aria-hidden="true" />
+              Upload
+              <ChevronDown className="size-4 opacity-70" aria-hidden="true" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-44">
+            <DropdownMenuItem
+              onSelect={() => fileInputRef.current?.click()}
+            >
+              <FileUp className="size-4" aria-hidden="true" />
+              Upload files
+            </DropdownMenuItem>
+            <DropdownMenuItem
+              onSelect={() => folderInputRef.current?.click()}
+            >
+              <FolderUp className="size-4" aria-hidden="true" />
+              Upload folder
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
 
-              return (
-                <Attachment
-                  key={`${relativePath}-${file.size}-${file.lastModified}-${index}`}
-                  state={isUploading ? "uploading" : "idle"}
-                  className="w-72"
-                >
-                  <AttachmentMedia>
-                    <FileIcon aria-hidden="true" />
-                  </AttachmentMedia>
-                  <AttachmentContent>
-                    <AttachmentTitle>{relativePath}</AttachmentTitle>
-                    <AttachmentDescription>
-                      {isUploading
-                        ? `Uploading - ${formatUploadBytes(file.size)}`
-                        : formatUploadFileDescription(file)}
-                    </AttachmentDescription>
-                  </AttachmentContent>
-                </Attachment>
-              );
-            })}
-            {selectedFiles.length > MAX_VISIBLE_SELECTIONS ? (
-              <p className="self-center px-2 text-sm text-muted-foreground">
-                +{selectedFiles.length - MAX_VISIBLE_SELECTIONS} more
-              </p>
-            ) : null}
-          </AttachmentGroup>
-        ) : null}
-      </div>
+      <input
+        ref={fileInputRef}
+        type="file"
+        multiple
+        disabled={isBusy}
+        className="sr-only"
+        tabIndex={-1}
+        onChange={handleFileChange}
+      />
+      <input
+        ref={folderInputRef}
+        type="file"
+        multiple
+        disabled={isBusy}
+        className="sr-only"
+        tabIndex={-1}
+        onChange={handleFileChange}
+        {...({
+          webkitdirectory: "",
+          directory: "",
+        } as React.InputHTMLAttributes<HTMLInputElement>)}
+      />
 
       {pendingFolderUpload ? (
         <FolderUploadDecisionDialog
@@ -523,7 +416,7 @@ export function UploadPanel({
           onCancelCompression={cancelCompression}
         />
       ) : null}
-    </section>
+    </div>
   );
 }
 
@@ -589,7 +482,7 @@ function FolderUploadDecisionDialog({
 
         <div className="flex items-center gap-3 rounded-md border bg-muted/25 p-3">
           <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <FileArchive className="size-5" aria-hidden="true" />
+            <Folder className="size-5" aria-hidden="true" />
           </span>
           <div className="min-w-0">
             <p className="truncate text-sm font-medium">
@@ -620,7 +513,8 @@ function FolderUploadDecisionDialog({
             <DialogFooter>
               <Button
                 type="button"
-                variant="outline"
+                variant="secondary"
+                className="rounded-md"
                 onClick={onCancelCompression}
               >
                 <X className="size-4" aria-hidden="true" />
@@ -639,44 +533,51 @@ function FolderUploadDecisionDialog({
             <div className="grid gap-3 sm:grid-cols-2">
               <Button
                 type="button"
-                variant="outline"
-                className="h-auto min-h-24 items-start justify-start gap-3 whitespace-normal p-4 text-left"
+                variant="secondary"
+                size="lg"
+                className="h-auto min-h-16 justify-start gap-3 rounded-md border border-transparent px-4 py-3 text-left whitespace-normal"
                 onClick={onUploadFolder}
               >
                 <FolderUp
-                  className="mt-0.5 size-5 shrink-0 text-primary"
+                  className="size-5 shrink-0 text-primary"
                   aria-hidden="true"
                 />
                 <span className="min-w-0">
-                  <span className="block font-semibold">Upload as folder</span>
-                  <span className="mt-1 block text-xs font-normal leading-5 text-muted-foreground">
-                    Preserve the hierarchy so its contents remain browsable.
+                  <span className="block font-semibold">
+                    Upload uncompressed
+                  </span>
+                  <span className="mt-0.5 block text-xs font-normal leading-4 text-muted-foreground">
+                    Keep the folder browsable
                   </span>
                 </span>
               </Button>
               <Button
                 type="button"
-                variant="outline"
-                className="h-auto min-h-24 items-start justify-start gap-3 whitespace-normal border-primary/35 bg-primary/5 p-4 text-left hover:bg-primary/10"
+                variant="secondary"
+                size="lg"
+                className="h-auto min-h-16 justify-start gap-3 rounded-md border border-primary/70 px-4 py-3 text-left whitespace-normal hover:border-primary"
                 onClick={onCreateZip}
               >
                 <FileArchive
-                  className="mt-0.5 size-5 shrink-0 text-primary"
+                  className="size-5 shrink-0 text-primary"
                   aria-hidden="true"
                 />
                 <span className="min-w-0">
-                  <span className="block font-semibold">
-                    Create ZIP and upload
-                  </span>
-                  <span className="mt-1 block text-xs font-normal leading-5 text-muted-foreground">
-                    Compress locally and store the folder as one archive.
+                  <span className="block font-semibold">Compress to ZIP</span>
+                  <span className="mt-0.5 block text-xs font-normal leading-4 text-muted-foreground">
+                    Store it as one archive
                   </span>
                 </span>
               </Button>
             </div>
 
             <DialogFooter>
-              <Button type="button" variant="ghost" onClick={onClose}>
+              <Button
+                type="button"
+                variant="secondary"
+                className="rounded-md"
+                onClick={onClose}
+              >
                 Cancel
               </Button>
             </DialogFooter>
@@ -684,50 +585,6 @@ function FolderUploadDecisionDialog({
         )}
       </DialogContent>
     </Dialog>
-  );
-}
-
-const uploadSparks = [
-  ["2.5%", "7px", "0.2s", "3.2s", "42px", "8px"],
-  ["5.5%", "11px", "1.1s", "3.8s", "58px", "16px"],
-  ["9%", "6px", "2.1s", "3.4s", "34px", "-7px"],
-  ["17%", "7px", "1.6s", "3.9s", "24px", "10px"],
-  ["28%", "5px", "2.7s", "3.5s", "18px", "-6px"],
-  ["72%", "6px", "0.7s", "3.6s", "20px", "8px"],
-  ["83%", "8px", "1.8s", "4.1s", "28px", "-10px"],
-  ["91%", "6px", "2.9s", "3.5s", "38px", "7px"],
-  ["94.5%", "10px", "0.9s", "3.7s", "56px", "-17px"],
-  ["97.5%", "6px", "2.4s", "3.3s", "44px", "-9px"],
-] as const;
-
-function UploadEdgeAnimation({ active }: { active: boolean }) {
-  return (
-    <span
-      aria-hidden="true"
-      className={cn(
-        "upload-edge-effect pointer-events-none absolute inset-0 z-0 overflow-hidden",
-        active && "is-active",
-      )}
-    >
-      <span className="upload-edge-glow" />
-      <span className="upload-edge-rim" />
-      {uploadSparks.map(([left, size, delay, duration, rise, drift]) => (
-        <span
-          key={`${left}-${delay}`}
-          className="upload-edge-spark"
-          style={
-            {
-              "--spark-left": left,
-              "--spark-size": size,
-              "--spark-delay": delay,
-              "--spark-duration": duration,
-              "--spark-rise": rise,
-              "--spark-drift": drift,
-            } as React.CSSProperties
-          }
-        />
-      ))}
-    </span>
   );
 }
 
@@ -755,7 +612,8 @@ function getFolderArchiveName(files: UploadSelection[]) {
       .map((path) => path.split("/", 1)[0])
       .filter(Boolean),
   );
-  const fallbackName = `folder-upload-${new Date().toISOString().slice(0, 10)}`;
+  const fallbackName =
+    "folder-upload-" + new Date().toISOString().slice(0, 10);
   const rootName =
     !hasTopLevelFile && roots.size === 1 ? Array.from(roots)[0] : fallbackName;
   const safeName = rootName
@@ -765,115 +623,33 @@ function getFolderArchiveName(files: UploadSelection[]) {
     .slice(0, 120);
   const archiveBaseName = (safeName || fallbackName).replace(/\.zip$/i, "");
 
-  return `${archiveBaseName}.zip`;
+  return archiveBaseName + ".zip";
 }
 
-async function collectDroppedFiles(dataTransfer: DataTransfer) {
-  const entries = Array.from(dataTransfer.items)
-    .map((item) => item.webkitGetAsEntry())
-    .filter((entry): entry is FileSystemEntry => entry !== null);
-
-  if (entries.length === 0) {
-    return Array.from(dataTransfer.files).map((file) => ({
-      file,
-      relativePath: file.name,
-    }));
+function formatUploadCount(fileCount: number) {
+  if (fileCount === 1) {
+    return "Uploading 1 item";
   }
 
-  const nestedFiles = await Promise.all(entries.map(readDroppedEntry));
-  return nestedFiles.flat();
-}
-
-async function readDroppedEntry(
-  entry: FileSystemEntry,
-): Promise<UploadSelection[]> {
-  if (entry.isFile) {
-    const file = await readDroppedFile(entry as FileSystemFileEntry);
-
-    return [
-      {
-        file,
-        relativePath: entry.fullPath.replace(/^\/+/, "") || file.name,
-      },
-    ];
-  }
-
-  if (!entry.isDirectory) {
-    return [];
-  }
-
-  const children = await readDirectoryEntries(
-    (entry as FileSystemDirectoryEntry).createReader(),
-  );
-  const nestedFiles = await Promise.all(children.map(readDroppedEntry));
-  return nestedFiles.flat();
-}
-
-function readDroppedFile(entry: FileSystemFileEntry) {
-  return new Promise<File>((resolve, reject) => entry.file(resolve, reject));
-}
-
-function readDirectoryEntries(reader: FileSystemDirectoryReader) {
-  return new Promise<FileSystemEntry[]>((resolve, reject) => {
-    const entries: FileSystemEntry[] = [];
-
-    const readBatch = () => {
-      reader.readEntries((batch) => {
-        if (batch.length === 0) {
-          resolve(entries);
-          return;
-        }
-
-        entries.push(...batch);
-        readBatch();
-      }, reject);
-    };
-
-    readBatch();
-  });
-}
-
-function getUploadFileIcon(file: File) {
-  const type = file.type.toLowerCase();
-  const name = file.name.toLowerCase();
-
-  if (type.startsWith("image/")) {
-    return ImageIcon;
-  }
-
-  if (
-    type.includes("zip") ||
-    type.includes("archive") ||
-    name.endsWith(".zip") ||
-    name.endsWith(".tar") ||
-    name.endsWith(".gz") ||
-    name.endsWith(".rar")
-  ) {
-    return FileArchive;
-  }
-
-  return FileText;
-}
-
-function formatUploadFileDescription(file: File) {
-  const type = file.type.split("/").at(-1)?.toUpperCase() || "File";
-
-  return `${type} - ${formatUploadBytes(file.size)}`;
+  return "Uploading " + String(fileCount) + " items";
 }
 
 function formatFolderSelectionSummary(pendingUpload: PendingFolderUpload) {
   const fileCount =
     pendingUpload.files.length === 1
       ? "1 file"
-      : `${pendingUpload.files.length} files`;
+      : String(pendingUpload.files.length) + " files";
 
-  return `${fileCount} · ${formatUploadBytes(pendingUpload.totalBytes)} total`;
+  return fileCount + " - " + formatUploadBytes(pendingUpload.totalBytes);
 }
 
 function formatCompressionProgress(progress: CompressionProgress) {
-  return `${formatUploadBytes(progress.processedBytes)} of ${formatUploadBytes(
-    progress.totalBytes,
-  )} processed`;
+  return (
+    formatUploadBytes(progress.processedBytes) +
+    " of " +
+    formatUploadBytes(progress.totalBytes) +
+    " processed"
+  );
 }
 
 function getProgressPercentage(processedBytes: number, totalBytes: number) {
@@ -898,7 +674,8 @@ function formatUploadBytes(value: number) {
     unitIndex += 1;
   }
 
-  return `${size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1)} ${
-    units[unitIndex]
-  }`;
+  const formattedSize =
+    size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1);
+
+  return formattedSize + " " + units[unitIndex];
 }

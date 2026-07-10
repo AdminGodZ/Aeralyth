@@ -22,6 +22,10 @@
 /build
 /backend/target/
 
+# local file storage
+/data/
+/backend/data/
+
 # misc
 .DS_Store
 *.pem

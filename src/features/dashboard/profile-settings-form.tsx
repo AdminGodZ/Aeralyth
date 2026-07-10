@@ -59,7 +59,7 @@ export function ProfileSettingsForm({
     currentUser.themePreference,
   );
   const [folderZipPromptEnabled, setFolderZipPromptEnabled] = useState(
-    currentUser.folderZipPromptEnabled,
+    currentUser.folderZipPromptEnabled !== false,
   );
   const displayName = currentUser.displayName?.trim() || currentUser.username;
   const avatarUrl = removeImage
