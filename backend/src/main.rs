@@ -19,6 +19,7 @@ async fn main() -> std::io::Result<()> {
     let db = db::connect(&config.database_url)
         .await
         .map_err(|error| io::Error::other(format!("failed to connect to postgres: {error}")))?;
+    routes::cleanup_pending_user_storage(&config.storage_path, &db).await;
     let state = web::Data::new(AppState {
         config: config.clone(),
         db,

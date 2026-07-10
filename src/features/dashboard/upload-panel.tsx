@@ -480,7 +480,7 @@ function FolderUploadDecisionDialog({
           </DialogDescription>
         </DialogHeader>
 
-        <div className="flex items-center gap-3 rounded-md border bg-muted/25 p-3">
+        <div className="flex items-center gap-3 rounded-md border p-3">
           <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
             <Folder className="size-5" aria-hidden="true" />
           </span>

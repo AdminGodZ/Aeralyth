@@ -6,6 +6,11 @@ mod invitations;
 mod profile;
 
 use actix_web::web;
+use tokio_postgres::Client;
+
+pub(crate) async fn cleanup_pending_user_storage(storage_path: &str, db: &Client) {
+    admin::cleanup_pending_user_storage(storage_path, db).await;
+}
 
 pub fn configure(config: &mut web::ServiceConfig) {
     config
@@ -30,6 +35,9 @@ pub fn configure(config: &mut web::ServiceConfig) {
                         .route("/me", web::get().to(admin::me))
                         .route("/users", web::get().to(admin::users))
                         .route("/users", web::post().to(admin::create_user))
+                        .route("/users/{id}", web::post().to(admin::update_user))
+                        .route("/users/{id}/avatar", web::get().to(admin::user_avatar))
+                        .route("/users/{id}/delete", web::post().to(admin::delete_user))
                         .route("/invitations", web::post().to(admin::create_invitation))
                         .route(
                             "/invitations/{id}/rotate",

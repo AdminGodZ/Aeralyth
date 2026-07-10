@@ -43,8 +43,10 @@ export type CsrfState =
 export type AdminUser = {
   id: string;
   username: string;
+  displayName: string | null;
   role: "admin" | "user";
   status: "active" | "disabled";
+  profileImageUrl: string | null;
   createdAt: string;
   updatedAt: string;
 };
@@ -104,6 +106,8 @@ export type InvitationState =
     };
 
 export type FileView = "files" | "recent" | "favorites" | "shared" | "trash";
+export type FileSort = "name" | "size" | "updated";
+export type FileSortDirection = "asc" | "desc";
 
 export type FileEntry = {
   id: string;
@@ -355,6 +359,8 @@ export async function getCsrfState(): Promise<CsrfState> {
 export async function getFilesState(
   view: FileView,
   folderId?: string,
+  sort?: FileSort,
+  direction?: FileSortDirection,
 ): Promise<FilesState> {
   const requestHeaders = await headers();
   const cookie = requestHeaders.get("cookie");
@@ -364,6 +370,8 @@ export async function getFilesState(
       `${getApiOrigin()}/api/files?${new URLSearchParams({
         view,
         ...(folderId ? { folder: folderId } : {}),
+        ...(sort ? { sort } : {}),
+        ...(sort && direction ? { direction } : {}),
       })}`,
       {
         headers: getForwardedHeaders(requestHeaders, cookie),

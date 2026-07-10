@@ -8,10 +8,11 @@ import {
   Ellipsis,
   KeyRound,
   MailPlus,
+  Pencil,
   RefreshCw,
   Search,
   ShieldCheck,
-  ShieldMinus,
+  Trash2,
   UserCheck,
   UserPlus,
   Users,
@@ -34,7 +35,7 @@ import {
   AlertDialogMedia,
   AlertDialogTitle,
 } from "@/components/ui/alert-dialog";
-import { Avatar, AvatarFallback } from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -123,7 +124,7 @@ export function UsersContent({
   const normalizedQuery = query.trim().toLowerCase();
   const filteredUsers = normalizedQuery
     ? users.filter((user) =>
-        [user.username, user.role, user.status].some((value) =>
+        [user.username, user.displayName ?? "", user.role, user.status].some((value) =>
           value.toLowerCase().includes(normalizedQuery),
         ),
       )
@@ -143,7 +144,7 @@ export function UsersContent({
     <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-4 py-5 sm:px-6">
       <InvitationLinkDialog token={invitationToken} />
 
-      <div className="grid grid-cols-2 gap-px overflow-hidden rounded-md border bg-border lg:grid-cols-4">
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <DirectoryMetric
           icon={Users}
           label="Accounts"
@@ -242,7 +243,7 @@ function DirectoryMetric({
   value: number;
 }) {
   return (
-    <div className="flex min-h-20 items-center gap-3 bg-background px-4 py-3">
+    <div className="flex min-h-20 items-center gap-3 rounded-md border px-4 py-3">
       <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
         <Icon className="size-4" aria-hidden="true" />
       </span>
@@ -280,22 +281,33 @@ function AccountsTable({
         {users.length ? (
           users.map((user) => {
             const isCurrentUser = user.id === currentUserId;
+            const displayName = user.displayName?.trim() || user.username;
 
             return (
               <TableRow key={user.id}>
                 <TableCell className="px-4 py-3">
                   <div className="flex min-w-0 items-center gap-3">
                     <Avatar>
+                      {user.profileImageUrl ? (
+                        <AvatarImage src={user.profileImageUrl} alt="" />
+                      ) : null}
                       <AvatarFallback className="bg-primary/10 font-medium text-primary">
-                        {getInitials(user.username)}
+                        {getInitials(displayName)}
                       </AvatarFallback>
                     </Avatar>
-                    <div className="flex min-w-0 items-center gap-2">
-                      <span className="truncate font-medium">
-                        {user.username}
-                      </span>
-                      {isCurrentUser ? (
-                        <Badge variant="outline">You</Badge>
+                    <div className="min-w-0">
+                      <div className="flex min-w-0 items-center gap-2">
+                        <span className="truncate font-medium">
+                          {displayName}
+                        </span>
+                        {isCurrentUser ? (
+                          <Badge variant="outline">You</Badge>
+                        ) : null}
+                      </div>
+                      {displayName !== user.username ? (
+                        <p className="truncate text-xs text-muted-foreground">
+                          {user.username}
+                        </p>
                       ) : null}
                     </div>
                   </div>
@@ -550,23 +562,15 @@ function UserActions({
   csrfToken: string;
   isCurrentUser: boolean;
 }) {
-  const roleFormId = useId();
   const statusFormId = useId();
+  const deleteFormId = useId();
+  const [editOpen, setEditOpen] = useState(false);
   const [disableOpen, setDisableOpen] = useState(false);
-  const nextRole = user.role === "admin" ? "user" : "admin";
+  const [deleteOpen, setDeleteOpen] = useState(false);
   const nextStatus = user.status === "active" ? "disabled" : "active";
 
   return (
     <>
-      <form
-        id={roleFormId}
-        action={`/api/admin/users/${user.id}/role`}
-        method="post"
-        className="hidden"
-      >
-        <input type="hidden" name="csrf_token" value={csrfToken} />
-        <input type="hidden" name="role" value={nextRole} />
-      </form>
       <form
         id={statusFormId}
         action={`/api/admin/users/${user.id}/status`}
@@ -576,54 +580,79 @@ function UserActions({
         <input type="hidden" name="csrf_token" value={csrfToken} />
         <input type="hidden" name="status" value={nextStatus} />
       </form>
+      <form
+        id={deleteFormId}
+        action={`/api/admin/users/${user.id}/delete`}
+        method="post"
+        className="hidden"
+      >
+        <input type="hidden" name="csrf_token" value={csrfToken} />
+      </form>
 
       <DropdownMenu>
         <DropdownMenuTrigger asChild>
           <Button
             type="button"
-            variant="ghost"
+            variant="secondary"
             size="icon"
-            disabled={isCurrentUser}
+            className="rounded-md"
             aria-label={`Manage ${user.username}`}
-            title={isCurrentUser ? "Current account" : `Manage ${user.username}`}
+            title={`Manage ${user.username}`}
           >
             <Ellipsis className="size-4" aria-hidden="true" />
           </Button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="w-48">
           <DropdownMenuLabel>Account actions</DropdownMenuLabel>
-          <DropdownMenuItem asChild>
-            <button type="submit" form={roleFormId} className="w-full">
-              {nextRole === "admin" ? (
-                <ShieldCheck className="size-4" aria-hidden="true" />
-              ) : (
-                <ShieldMinus className="size-4" aria-hidden="true" />
-              )}
-              Make {nextRole}
-            </button>
+          <DropdownMenuItem
+            onSelect={() => {
+              setEditOpen(true);
+            }}
+          >
+            <Pencil className="size-4" aria-hidden="true" />
+            Edit account
           </DropdownMenuItem>
-          <DropdownMenuSeparator />
-          {nextStatus === "active" ? (
-            <DropdownMenuItem asChild>
-              <button type="submit" form={statusFormId} className="w-full">
-                <UserCheck className="size-4" aria-hidden="true" />
-                Enable account
-              </button>
-            </DropdownMenuItem>
-          ) : (
-            <DropdownMenuItem
-              variant="destructive"
-              onSelect={(event) => {
-                event.preventDefault();
-                setDisableOpen(true);
-              }}
-            >
-              <Ban className="size-4" aria-hidden="true" />
-              Disable account
-            </DropdownMenuItem>
-          )}
+          {!isCurrentUser ? (
+            <>
+              <DropdownMenuSeparator />
+              {nextStatus === "active" ? (
+                <DropdownMenuItem asChild>
+                  <button type="submit" form={statusFormId} className="w-full">
+                    <UserCheck className="size-4" aria-hidden="true" />
+                    Enable account
+                  </button>
+                </DropdownMenuItem>
+              ) : (
+                <DropdownMenuItem
+                  onSelect={() => {
+                    setDisableOpen(true);
+                  }}
+                >
+                  <Ban className="size-4" aria-hidden="true" />
+                  Disable account
+                </DropdownMenuItem>
+              )}
+              <DropdownMenuItem
+                variant="destructive"
+                onSelect={() => {
+                  setDeleteOpen(true);
+                }}
+              >
+                <Trash2 className="size-4" aria-hidden="true" />
+                Delete account
+              </DropdownMenuItem>
+            </>
+          ) : null}
         </DropdownMenuContent>
       </DropdownMenu>
+
+      <EditUserDialog
+        user={user}
+        csrfToken={csrfToken}
+        isCurrentUser={isCurrentUser}
+        open={editOpen}
+        onOpenChange={setEditOpen}
+      />
 
       <AlertDialog open={disableOpen} onOpenChange={setDisableOpen}>
         <AlertDialogContent>
@@ -642,14 +671,156 @@ function UserActions({
             <AlertDialogAction
               type="submit"
               form={statusFormId}
-              variant="destructive"
+              variant="secondary"
+              className="text-destructive hover:text-destructive"
             >
               Disable account
             </AlertDialogAction>
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      <AlertDialog open={deleteOpen} onOpenChange={setDeleteOpen}>
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogMedia>
+              <Trash2 className="size-7 text-destructive" aria-hidden="true" />
+            </AlertDialogMedia>
+            <AlertDialogTitle>Delete {user.username}?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This permanently removes the account, its sessions, shared data,
+              and all files owned by this user. This cannot be undone.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              type="submit"
+              form={deleteFormId}
+              variant="secondary"
+              className="text-destructive hover:text-destructive"
+            >
+              Delete account
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </>
+  );
+}
+
+function EditUserDialog({
+  user,
+  csrfToken,
+  isCurrentUser,
+  open,
+  onOpenChange,
+}: {
+  user: AdminUser;
+  csrfToken: string;
+  isCurrentUser: boolean;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+}) {
+  const displayNameId = useId();
+  const usernameId = useId();
+  const roleId = useId();
+  const statusId = useId();
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent>
+        <form
+          action={`/api/admin/users/${user.id}`}
+          method="post"
+          className="contents"
+        >
+          <input type="hidden" name="csrf_token" value={csrfToken} />
+          <DialogHeader>
+            <DialogTitle>Edit account</DialogTitle>
+            <DialogDescription>
+              Update this account&apos;s identity and access settings.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4">
+            <div className="grid gap-2">
+              <Label htmlFor={displayNameId}>Name</Label>
+              <Input
+                id={displayNameId}
+                name="display_name"
+                defaultValue={user.displayName ?? ""}
+                maxLength={80}
+                placeholder={user.username}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor={usernameId}>Username</Label>
+              <Input
+                id={usernameId}
+                name="username"
+                defaultValue={user.username}
+                autoComplete="off"
+                required
+                minLength={3}
+                maxLength={32}
+                pattern="[A-Za-z0-9_.-]{3,32}"
+              />
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div className="grid gap-2">
+                <Label id={roleId}>Role</Label>
+                <Select
+                  name={isCurrentUser ? undefined : "role"}
+                  defaultValue={user.role}
+                  disabled={isCurrentUser}
+                >
+                  <SelectTrigger className="w-full" aria-labelledby={roleId}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="user">User</SelectItem>
+                    <SelectItem value="admin">Admin</SelectItem>
+                  </SelectContent>
+                </Select>
+                {isCurrentUser ? (
+                  <input type="hidden" name="role" value={user.role} />
+                ) : null}
+              </div>
+              <div className="grid gap-2">
+                <Label id={statusId}>Status</Label>
+                <Select
+                  name={isCurrentUser ? undefined : "status"}
+                  defaultValue={user.status}
+                  disabled={isCurrentUser}
+                >
+                  <SelectTrigger className="w-full" aria-labelledby={statusId}>
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectItem value="active">Active</SelectItem>
+                    <SelectItem value="disabled">Disabled</SelectItem>
+                  </SelectContent>
+                </Select>
+                {isCurrentUser ? (
+                  <input type="hidden" name="status" value={user.status} />
+                ) : null}
+              </div>
+            </div>
+          </div>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button type="button" variant="secondary">
+                Cancel
+              </Button>
+            </DialogClose>
+            <Button type="submit">
+              <Pencil className="size-4" aria-hidden="true" />
+              Save changes
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -693,8 +864,9 @@ function InvitationActions({
         <DropdownMenuTrigger asChild>
           <Button
             type="button"
-            variant="ghost"
+            variant="secondary"
             size="icon"
+            className="rounded-md"
             aria-label={`Manage invitation for ${invitation.invitedUsername}`}
           >
             <Ellipsis className="size-4" aria-hidden="true" />
@@ -745,7 +917,8 @@ function InvitationActions({
             <AlertDialogAction
               type="submit"
               form={revokeFormId}
-              variant="destructive"
+              variant="secondary"
+              className="text-destructive hover:text-destructive"
             >
               Revoke invitation
             </AlertDialogAction>
