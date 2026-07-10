@@ -21,6 +21,8 @@ const MAX_UPLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 pub(crate) struct FilesQuery {
     view: Option<String>,
     folder: Option<String>,
+    sort: Option<String>,
+    direction: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -122,13 +124,23 @@ pub async fn list_files(
     ensure_storage_dir(&state)?;
 
     let view = normalize_view(query.view.as_deref());
+    let sort = normalize_sort(query.sort.as_deref());
+    let direction = normalize_sort_direction(query.direction.as_deref(), sort);
     let current_folder_id = if view == "files" {
         validate_folder(&state, &user, query.folder.as_deref()).await?
     } else {
         None
     };
     let breadcrumbs = get_breadcrumbs(&state, &user, current_folder_id.as_deref()).await?;
-    let entries = list_entries(&state, &user, view, current_folder_id.as_deref()).await?;
+    let entries = list_entries(
+        &state,
+        &user,
+        view,
+        current_folder_id.as_deref(),
+        sort,
+        direction,
+    )
+    .await?;
     let summary = get_summary(&state, &user).await?;
     let storage = storage_stats(&state)?;
 
@@ -213,20 +225,20 @@ pub async fn upload(
                 Ok(chunk) => chunk,
                 Err(chunk_error) => {
                     drop(file);
-                    let _ = fs::remove_file(&storage_path);
+                    remove_failed_upload(&storage_path, &user_dir);
                     return Err(error::ErrorBadRequest(chunk_error));
                 }
             };
             let Some(next_size_bytes) = size_bytes.checked_add(chunk.len() as u64) else {
                 drop(file);
-                let _ = fs::remove_file(&storage_path);
+                remove_failed_upload(&storage_path, &user_dir);
                 return Err(error::ErrorBadRequest("upload is too large"));
             };
             size_bytes = next_size_bytes;
 
             if size_bytes > MAX_UPLOAD_BYTES {
                 drop(file);
-                let _ = fs::remove_file(&storage_path);
+                remove_failed_upload(&storage_path, &user_dir);
                 return Ok(redirect(upload_redirect_location(
                     upload_parent_id.as_deref(),
                     "too-large",
@@ -235,7 +247,7 @@ pub async fn upload(
 
             if let Err(write_error) = file.write_all(&chunk) {
                 drop(file);
-                let _ = fs::remove_file(&storage_path);
+                remove_failed_upload(&storage_path, &user_dir);
                 return Err(error::ErrorInternalServerError(write_error));
             }
         }
@@ -250,7 +262,7 @@ pub async fn upload(
             match ensure_folder(&state, &user, parent_id.as_deref(), folder_name).await {
                 Ok(folder_id) => parent_id = Some(folder_id),
                 Err(folder_error) => {
-                    let _ = fs::remove_file(&storage_path);
+                    remove_failed_upload(&storage_path, &user_dir);
                     return Err(folder_error);
                 }
             }
@@ -284,7 +296,7 @@ pub async fn upload(
             .await;
 
         if let Err(error) = insert_result {
-            let _ = fs::remove_file(&storage_path);
+            remove_failed_upload(&storage_path, &user_dir);
             return Err(error::ErrorInternalServerError(error));
         }
 
@@ -780,49 +792,61 @@ async fn list_entries(
     user: &AuthUser,
     view: &str,
     folder_id: Option<&str>,
+    sort: Option<&str>,
+    direction: &str,
 ) -> Result<Vec<FileEntry>> {
     if view == "shared" {
-        return list_shared_entries(state, user).await;
+        return list_shared_entries(state, user, sort, direction).await;
     }
 
     if view == "files" {
         let folder_id = folder_id.map(str::to_owned);
+        let order = match sort {
+            Some("name") => format!("lower(original_name) {direction}, id ASC"),
+            Some("size") => {
+                format!("size_bytes {direction}, lower(original_name) ASC, id ASC")
+            }
+            Some("updated") => {
+                format!("updated_at {direction}, lower(original_name) ASC, id ASC")
+            }
+            _ => "lower(original_name) ASC, id ASC".to_owned(),
+        };
+        let sql = format!(
+            "
+                SELECT
+                  id,
+                  original_name,
+                  mime_type,
+                  entry_type,
+                  parent_id,
+                  size_bytes,
+                  state,
+                  favorite,
+                  NULL::text AS owner_username,
+                  false AS shared,
+                  NULL::text AS shared_at,
+                  to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
+                  to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
+                  to_char(trashed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS trashed_at
+                FROM files
+                WHERE owner_id = $1
+                  AND state = 'active'
+                  AND parent_id IS NOT DISTINCT FROM $2
+                ORDER BY
+                  CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END,
+                  {order}
+            "
+        );
         let rows = state
             .db
-            .query(
-                "
-                    SELECT
-                      id,
-                      original_name,
-                      mime_type,
-                      entry_type,
-                      parent_id,
-                      size_bytes,
-                      state,
-                      favorite,
-                      NULL::text AS owner_username,
-                      false AS shared,
-                      NULL::text AS shared_at,
-                      to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
-                      to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
-                      to_char(trashed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS trashed_at
-                    FROM files
-                    WHERE owner_id = $1
-                      AND state = 'active'
-                      AND parent_id IS NOT DISTINCT FROM $2
-                    ORDER BY
-                      CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END,
-                      lower(original_name)
-                ",
-                &[&user.id, &folder_id],
-            )
+            .query(&sql, &[&user.id, &folder_id])
             .await
             .map_err(error::ErrorInternalServerError)?;
 
         return Ok(rows.into_iter().map(file_entry_from_row).collect());
     }
 
-    let (predicate, order) = match view {
+    let (predicate, default_order) = match view {
         "trash" => (
             "files.state = 'trashed' AND NOT EXISTS (
               SELECT 1 FROM files AS parent
@@ -837,7 +861,36 @@ async fn list_entries(
         "recent" => ("files.state = 'active'", "files.updated_at DESC"),
         _ => ("files.state = 'active'", "files.original_name ASC"),
     };
-    let limit = if view == "recent" { " LIMIT 50" } else { "" };
+    let order = match sort {
+        Some("name") => format!(
+            "CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END, lower(files.original_name) {direction}, files.id ASC"
+        ),
+        Some("size") => format!(
+            "CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END, files.size_bytes {direction}, lower(files.original_name) ASC, files.id ASC"
+        ),
+        Some("updated") => {
+            let date_column = if view == "trash" {
+                "files.trashed_at"
+            } else {
+                "files.updated_at"
+            };
+            format!(
+                "CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END, {date_column} {direction} NULLS LAST, lower(files.original_name) ASC, files.id ASC"
+            )
+        }
+        _ => default_order.to_owned(),
+    };
+    let source = if view == "recent" {
+        "(
+          SELECT *
+          FROM files
+          WHERE owner_id = $1 AND state = 'active'
+          ORDER BY updated_at DESC
+          LIMIT 50
+        ) AS files"
+    } else {
+        "files"
+    };
     let sql = format!(
         "
             SELECT
@@ -855,11 +908,10 @@ async fn list_entries(
               to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
               to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
               to_char(trashed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS trashed_at
-            FROM files
+            FROM {source}
             WHERE owner_id = $1
               AND {predicate}
             ORDER BY {order}
-            {limit}
         "
     );
 
@@ -872,37 +924,54 @@ async fn list_entries(
     Ok(rows.into_iter().map(file_entry_from_row).collect())
 }
 
-async fn list_shared_entries(state: &AppState, user: &AuthUser) -> Result<Vec<FileEntry>> {
+async fn list_shared_entries(
+    state: &AppState,
+    user: &AuthUser,
+    sort: Option<&str>,
+    direction: &str,
+) -> Result<Vec<FileEntry>> {
+    let order = match sort {
+        Some("name") => {
+            format!("lower(files.original_name) {direction}, files.id ASC")
+        }
+        Some("size") => format!(
+            "files.size_bytes {direction}, lower(files.original_name) ASC, files.id ASC"
+        ),
+        Some("updated") => format!(
+            "file_shares.created_at {direction}, lower(files.original_name) ASC, files.id ASC"
+        ),
+        _ => "file_shares.created_at DESC, files.id ASC".to_owned(),
+    };
+    let sql = format!(
+        "
+            SELECT
+              files.id,
+              files.original_name,
+              files.mime_type,
+              files.entry_type,
+              files.parent_id,
+              files.size_bytes,
+              files.state,
+              false AS favorite,
+              owners.username AS owner_username,
+              true AS shared,
+              to_char(file_shares.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS shared_at,
+              to_char(files.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
+              to_char(files.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
+              to_char(files.trashed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS trashed_at
+            FROM file_shares
+            INNER JOIN files ON files.id = file_shares.file_id
+            INNER JOIN users AS owners ON owners.id = files.owner_id
+            WHERE file_shares.recipient_id = $1
+              AND files.state = 'active'
+              AND files.entry_type = 'file'
+              AND owners.status = 'active'
+            ORDER BY {order}
+        "
+    );
     let rows = state
         .db
-        .query(
-            "
-                SELECT
-                  files.id,
-                  files.original_name,
-                  files.mime_type,
-                  files.entry_type,
-                  files.parent_id,
-                  files.size_bytes,
-                  files.state,
-                  false AS favorite,
-                  owners.username AS owner_username,
-                  true AS shared,
-                  to_char(file_shares.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS shared_at,
-                  to_char(files.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
-                  to_char(files.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
-                  to_char(files.trashed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS trashed_at
-                FROM file_shares
-                INNER JOIN files ON files.id = file_shares.file_id
-                INNER JOIN users AS owners ON owners.id = files.owner_id
-                WHERE file_shares.recipient_id = $1
-                  AND files.state = 'active'
-                  AND files.entry_type = 'file'
-                  AND owners.status = 'active'
-                ORDER BY file_shares.created_at DESC
-            ",
-            &[&user.id],
-        )
+        .query(&sql, &[&user.id])
         .await
         .map_err(error::ErrorInternalServerError)?;
 
@@ -1109,6 +1178,11 @@ fn owner_storage_dir(state: &AppState, owner_id: &str) -> PathBuf {
     Path::new(&state.config.storage_path).join(owner_id)
 }
 
+fn remove_failed_upload(storage_path: &Path, user_directory: &Path) {
+    let _ = fs::remove_file(storage_path);
+    let _ = fs::remove_dir(user_directory);
+}
+
 fn create_storage_name() -> Result<String> {
     let mut bytes = [0_u8; 24];
     getrandom::fill(&mut bytes).map_err(error::ErrorInternalServerError)?;
@@ -1195,6 +1269,24 @@ fn normalize_view(view: Option<&str>) -> &str {
         Some("shared") => "shared",
         Some("trash") => "trash",
         _ => "files",
+    }
+}
+
+fn normalize_sort(sort: Option<&str>) -> Option<&'static str> {
+    match sort {
+        Some("name") => Some("name"),
+        Some("size") => Some("size"),
+        Some("updated") => Some("updated"),
+        _ => None,
+    }
+}
+
+fn normalize_sort_direction(direction: Option<&str>, sort: Option<&str>) -> &'static str {
+    match direction {
+        Some("asc") => "ASC",
+        Some("desc") => "DESC",
+        _ if sort == Some("name") => "ASC",
+        _ => "DESC",
     }
 }
 

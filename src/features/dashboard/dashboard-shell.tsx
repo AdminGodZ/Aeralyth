@@ -1,5 +1,6 @@
 import {
   ArrowDown,
+  ArrowUp,
   ChevronRight,
   ChevronsUpDown,
   Download,
@@ -37,6 +38,8 @@ import type {
   AdminUsersState,
   CurrentUser,
   FileEntry,
+  FileSort,
+  FileSortDirection,
   FolderBreadcrumb,
   FilesState,
   StorageStats,
@@ -55,6 +58,8 @@ type DashboardShellProps = {
   invitationToken?: string;
   adminUsersState?: AdminUsersState;
   filesState: FilesState;
+  fileSort?: FileSort;
+  fileSortDirection?: FileSortDirection;
 };
 
 type ReadyFilesState = Extract<FilesState, { status: "ready" }>;
@@ -67,6 +72,8 @@ export function DashboardShell({
   invitationToken,
   adminUsersState,
   filesState,
+  fileSort,
+  fileSortDirection,
 }: DashboardShellProps) {
   const section = getDashboardSection(sectionKey) ?? getDashboardSection("files");
   const accentColor =
@@ -105,6 +112,8 @@ export function DashboardShell({
           invitationToken={invitationToken}
           adminUsersState={adminUsersState}
           filesState={filesState}
+          fileSort={fileSort}
+          fileSortDirection={fileSortDirection}
         />
       </section>
     </main>
@@ -208,7 +217,7 @@ function SearchInput({
         type="search"
         aria-label={placeholder}
         placeholder={placeholder}
-        className="h-10 w-full rounded-full border bg-background pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-ring focus-visible:ring-3 focus-visible:ring-ring/30"
+        className="h-10 w-full rounded-full border bg-background pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-primary"
       />
     </div>
   );
@@ -221,6 +230,8 @@ function DashboardContent({
   invitationToken,
   adminUsersState,
   filesState,
+  fileSort,
+  fileSortDirection,
 }: {
   section: DashboardSection;
   currentUser: CurrentUser;
@@ -228,6 +239,8 @@ function DashboardContent({
   invitationToken?: string;
   adminUsersState?: AdminUsersState;
   filesState: FilesState;
+  fileSort?: FileSort;
+  fileSortDirection?: FileSortDirection;
 }) {
   if (section.key === "settings") {
     return <SettingsContent currentUser={currentUser} csrfToken={csrfToken} />;
@@ -254,6 +267,8 @@ function DashboardContent({
       filesState={filesState}
       csrfToken={csrfToken}
       folderZipPromptEnabled={currentUser.folderZipPromptEnabled !== false}
+      fileSort={fileSort}
+      fileSortDirection={fileSortDirection}
     />
   );
 }
@@ -283,11 +298,15 @@ function FileContent({
   filesState,
   csrfToken,
   folderZipPromptEnabled,
+  fileSort,
+  fileSortDirection,
 }: {
   section: DashboardSection;
   filesState: FilesState;
   csrfToken: string;
   folderZipPromptEnabled: boolean;
+  fileSort?: FileSort;
+  fileSortDirection?: FileSortDirection;
 }) {
   if (!hasReadyFilesState(filesState)) {
     return (
@@ -335,10 +354,14 @@ function FileContent({
         />
       </div>
 
-      <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md border bg-card/45 shadow-[0_18px_70px_rgb(0_0_0/0.08)]">
+      <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md border">
         {section.key === "files" ? (
           <div className="flex min-h-16 shrink-0 flex-col justify-center gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-            <FolderBreadcrumbs breadcrumbs={breadcrumbs} />
+            <FolderBreadcrumbs
+              breadcrumbs={breadcrumbs}
+              sort={fileSort}
+              direction={fileSortDirection}
+            />
             <UploadPanel
               csrfToken={csrfToken}
               parentFolderId={currentFolderId}
@@ -350,8 +373,12 @@ function FileContent({
         {entries.length ? (
           <>
             <FileTableHeader
+              sectionKey={section.key}
+              currentFolderId={currentFolderId}
               isShared={isShared}
               isTrash={isTrash}
+              sort={fileSort}
+              direction={fileSortDirection}
             />
             <div className="min-h-0 flex-1 divide-y overflow-auto">
               {entries.map((file) => (
@@ -360,6 +387,8 @@ function FileContent({
                   file={file}
                   sectionKey={section.key}
                   csrfToken={csrfToken}
+                  sort={fileSort}
+                  direction={fileSortDirection}
                 />
               ))}
             </div>
@@ -377,8 +406,12 @@ function FileContent({
 
 function FolderBreadcrumbs({
   breadcrumbs,
+  sort,
+  direction,
 }: {
   breadcrumbs: FolderBreadcrumb[];
+  sort?: FileSort;
+  direction?: FileSortDirection;
 }) {
   const isRoot = breadcrumbs.length === 0;
 
@@ -388,7 +421,7 @@ function FolderBreadcrumbs({
       className="flex min-h-8 min-w-0 items-center gap-1 overflow-x-auto text-sm"
     >
       <Link
-        href="/files"
+        href={{ pathname: "/files", query: getSortQuery(sort, direction) }}
         aria-current={isRoot ? "page" : undefined}
         className={
           isRoot
@@ -413,7 +446,13 @@ function FolderBreadcrumbs({
               </span>
             ) : (
               <Link
-                href={{ pathname: "/files", query: { folder: breadcrumb.id } }}
+                href={{
+                  pathname: "/files",
+                  query: {
+                    folder: breadcrumb.id,
+                    ...getSortQuery(sort, direction),
+                  },
+                }}
                 className="max-w-52 truncate text-muted-foreground transition-colors hover:text-foreground"
               >
                 {breadcrumb.name}
@@ -427,15 +466,28 @@ function FolderBreadcrumbs({
 }
 
 function FileTableHeader({
+  sectionKey,
+  currentFolderId,
   isTrash,
   isShared,
+  sort,
+  direction,
 }: {
+  sectionKey: DashboardSectionKey;
+  currentFolderId: string | null;
   isTrash: boolean;
   isShared: boolean;
+  sort?: FileSort;
+  direction?: FileSortDirection;
 }) {
+  const dateLabel = isTrash ? "Deleted" : isShared ? "Shared" : "Updated";
+
   return (
     <div className="grid min-h-14 grid-cols-[2rem_minmax(0,1fr)_7rem] gap-3 border-b px-4 py-3 text-sm font-medium text-muted-foreground md:grid-cols-[2rem_minmax(12rem,1fr)_7rem_7rem_9rem_minmax(18rem,22rem)] md:items-center">
-      <span className="flex items-center justify-center">
+      <span
+        role="columnheader"
+        className="flex items-center justify-center"
+      >
         <input
           type="checkbox"
           aria-label="Select all files"
@@ -443,17 +495,37 @@ function FileTableHeader({
           className="size-4 rounded border border-border bg-transparent"
         />
       </span>
-      <span className="flex items-center gap-1.5">
-        Name
-        <ChevronsUpDown className="size-3.5" aria-hidden="true" />
-      </span>
-      <span>Kind</span>
-      <span className="hidden md:block">Size</span>
-      <span className="hidden items-center gap-1.5 md:flex">
-        {isTrash ? "Deleted" : isShared ? "Shared" : "Updated"}
-        <ArrowDown className="size-3.5" aria-hidden="true" />
-      </span>
-      <span className="hidden items-center justify-end gap-1.5 md:flex">
+      <SortableFileHeader
+        field="name"
+        label="Name"
+        sectionKey={sectionKey}
+        currentFolderId={currentFolderId}
+        sort={sort}
+        direction={direction}
+      />
+      <span role="columnheader">Kind</span>
+      <SortableFileHeader
+        field="size"
+        label="Size"
+        sectionKey={sectionKey}
+        currentFolderId={currentFolderId}
+        sort={sort}
+        direction={direction}
+        className="hidden md:flex"
+      />
+      <SortableFileHeader
+        field="updated"
+        label={dateLabel}
+        sectionKey={sectionKey}
+        currentFolderId={currentFolderId}
+        sort={sort}
+        direction={direction}
+        className="hidden md:flex"
+      />
+      <span
+        role="columnheader"
+        className="hidden items-center justify-end gap-1.5 md:flex"
+      >
         Actions
         <ListFilter className="size-3.5" aria-hidden="true" />
       </span>
@@ -461,14 +533,93 @@ function FileTableHeader({
   );
 }
 
+function SortableFileHeader({
+  field,
+  label,
+  sectionKey,
+  currentFolderId,
+  sort,
+  direction,
+  className,
+}: {
+  field: FileSort;
+  label: string;
+  sectionKey: DashboardSectionKey;
+  currentFolderId: string | null;
+  sort?: FileSort;
+  direction?: FileSortDirection;
+  className?: string;
+}) {
+  const isActive = sort === field;
+  const activeDirection =
+    direction ?? (field === "name" ? "asc" : "desc");
+  const nextDirection = isActive
+    ? activeDirection === "asc"
+      ? "desc"
+      : "asc"
+    : field === "name"
+      ? "asc"
+      : "desc";
+  const SortIcon = isActive
+    ? activeDirection === "asc"
+      ? ArrowUp
+      : ArrowDown
+    : ChevronsUpDown;
+  const ariaSort = isActive
+    ? activeDirection === "asc"
+      ? "ascending"
+      : "descending"
+    : "none";
+
+  return (
+    <span
+      role="columnheader"
+      aria-sort={ariaSort}
+      className={className}
+    >
+      <Link
+        href={{
+          pathname: "/" + sectionKey,
+          query: {
+            ...(sectionKey === "files" && currentFolderId
+              ? { folder: currentFolderId }
+              : {}),
+            sort: field,
+            direction: nextDirection,
+          },
+        }}
+        aria-label={
+          "Sort by " +
+          label.toLowerCase() +
+          " " +
+          (nextDirection === "asc" ? "ascending" : "descending")
+        }
+        className={
+          "inline-flex items-center gap-1.5 rounded-sm border border-transparent outline-none transition-colors focus-visible:border-primary " +
+          (isActive
+            ? "text-foreground"
+            : "text-muted-foreground hover:text-foreground")
+        }
+      >
+        {label}
+        <SortIcon className="size-3.5" aria-hidden="true" />
+      </Link>
+    </span>
+  );
+}
+
 function FileRow({
   file,
   sectionKey,
   csrfToken,
+  sort,
+  direction,
 }: {
   file: FileEntry;
   sectionKey: DashboardSectionKey;
   csrfToken: string;
+  sort?: FileSort;
+  direction?: FileSortDirection;
 }) {
   const FileIcon = getFileIcon(file);
   const isTrash = sectionKey === "trash";
@@ -493,8 +644,14 @@ function FileRow({
       </span>
       {isFolder && !isTrash ? (
         <Link
-          href={{ pathname: "/files", query: { folder: file.id } }}
-          className="flex min-w-0 items-center gap-3 rounded-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
+          href={{
+            pathname: "/files",
+            query: {
+              folder: file.id,
+              ...getSortQuery(sort, direction),
+            },
+          }}
+          className="flex min-w-0 items-center gap-3 rounded-sm border border-transparent outline-none focus-visible:border-primary"
         >
           <FileIcon className="size-5 shrink-0 text-primary" aria-hidden="true" />
           <div className="min-w-0">
@@ -543,8 +700,8 @@ function FileRow({
               <input type="hidden" name="csrf_token" value={csrfToken} />
               <Button
                 type="submit"
-                variant="destructive"
-                className="rounded-full"
+                variant="secondary"
+                className="rounded-md text-destructive hover:text-destructive"
               >
                 <Trash2 className="size-4" aria-hidden="true" />
                 Delete
@@ -555,8 +712,8 @@ function FileRow({
           <>
             <Button
               asChild
-              variant="outline"
-              className="rounded-full"
+              variant="secondary"
+              className="rounded-md text-primary hover:text-primary"
             >
               <Link href={`/api/files/${file.id}/download`}>
                 <Download className="size-4" aria-hidden="true" />
@@ -579,17 +736,25 @@ function FileRow({
           <>
             <form action={`/api/files/${file.id}/favorite`} method="post">
               <input type="hidden" name="csrf_token" value={csrfToken} />
-              <Button type="submit" variant="outline">
+              <Button
+                type="submit"
+                variant="secondary"
+                className="rounded-md text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
+              >
                 <Star
-                  className={file.favorite ? "size-4 fill-primary" : "size-4"}
+                  className={file.favorite ? "size-4 fill-current" : "size-4"}
                   aria-hidden="true"
                 />
-                Star
+                {file.favorite ? "Unstar" : "Star"}
               </Button>
             </form>
             <form action={`/api/files/${file.id}/trash`} method="post">
               <input type="hidden" name="csrf_token" value={csrfToken} />
-              <Button type="submit" variant="outline">
+              <Button
+                type="submit"
+                variant="secondary"
+                className="rounded-md text-destructive hover:text-destructive"
+              >
                 <Trash2 className="size-4" aria-hidden="true" />
                 Trash
               </Button>
@@ -599,8 +764,8 @@ function FileRow({
           <>
             <Button
               asChild
-              variant="outline"
-              className="rounded-full"
+              variant="secondary"
+              className="rounded-md text-primary hover:text-primary"
             >
               <Link href={`/api/files/${file.id}/download`}>
                 <Download className="size-4" aria-hidden="true" />
@@ -611,22 +776,22 @@ function FileRow({
               <input type="hidden" name="csrf_token" value={csrfToken} />
               <Button
                 type="submit"
-                variant="outline"
-                className="rounded-full"
+                variant="secondary"
+                className="rounded-md text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
               >
                 <Star
-                  className={file.favorite ? "size-4 fill-primary" : "size-4"}
+                  className={file.favorite ? "size-4 fill-current" : "size-4"}
                   aria-hidden="true"
                 />
-                Star
+                {file.favorite ? "Unstar" : "Star"}
               </Button>
             </form>
             <form action={`/api/files/${file.id}/trash`} method="post">
               <input type="hidden" name="csrf_token" value={csrfToken} />
               <Button
                 type="submit"
-                variant="outline"
-                className="rounded-full"
+                variant="secondary"
+                className="rounded-md text-destructive hover:text-destructive"
               >
                 <Trash2 className="size-4" aria-hidden="true" />
                 Trash
@@ -706,7 +871,7 @@ function FileMetric({
   value: string;
 }) {
   return (
-    <div className="grid h-24 grid-cols-[2.5rem_minmax(0,1fr)] items-center gap-3 rounded-md border bg-card/45 px-4">
+    <div className="grid h-24 grid-cols-[2.5rem_minmax(0,1fr)] items-center gap-3 rounded-md border px-4">
       <span className="flex size-10 items-center justify-center text-primary">
         <Icon className="size-5" aria-hidden="true" />
       </span>
@@ -759,6 +924,20 @@ function getInitials(username: string) {
     .join("");
 
   return initials || "A";
+}
+
+function getSortQuery(
+  sort?: FileSort,
+  direction?: FileSortDirection,
+) {
+  if (!sort) {
+    return {};
+  }
+
+  return {
+    sort,
+    direction: direction ?? (sort === "name" ? "asc" : "desc"),
+  };
 }
 
 function formatDate(value: string) {
