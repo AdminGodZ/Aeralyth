@@ -253,6 +253,7 @@ function DashboardContent({
       section={section}
       filesState={filesState}
       csrfToken={csrfToken}
+      folderZipPromptEnabled={currentUser.folderZipPromptEnabled}
     />
   );
 }
@@ -281,10 +282,12 @@ function FileContent({
   section,
   filesState,
   csrfToken,
+  folderZipPromptEnabled,
 }: {
   section: DashboardSection;
   filesState: FilesState;
   csrfToken: string;
+  folderZipPromptEnabled: boolean;
 }) {
   if (!hasReadyFilesState(filesState)) {
     return (
@@ -344,6 +347,7 @@ function FileContent({
           csrfToken={csrfToken}
           inputId={uploadInputId}
           parentFolderId={currentFolderId}
+          folderZipPromptEnabled={folderZipPromptEnabled}
         />
       ) : null}
 

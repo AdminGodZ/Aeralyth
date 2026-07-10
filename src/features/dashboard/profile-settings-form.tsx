@@ -29,6 +29,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Separator } from "@/components/ui/separator";
+import { Switch } from "@/components/ui/switch";
 import {
   ToggleGroup,
   ToggleGroupItem,
@@ -49,12 +50,16 @@ export function ProfileSettingsForm({
   const displayNameId = useId();
   const themeLabelId = useId();
   const accentLabelId = useId();
+  const folderZipPromptId = useId();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const { setTheme } = useTheme();
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [removeImage, setRemoveImage] = useState(false);
   const [themePreference, setThemePreference] = useState(
     currentUser.themePreference,
+  );
+  const [folderZipPromptEnabled, setFolderZipPromptEnabled] = useState(
+    currentUser.folderZipPromptEnabled,
   );
   const displayName = currentUser.displayName?.trim() || currentUser.username;
   const avatarUrl = removeImage
@@ -129,6 +134,11 @@ export function ProfileSettingsForm({
         type="hidden"
         name="theme_preference"
         value={themePreference}
+      />
+      <input
+        type="hidden"
+        name="folder_zip_prompt_enabled"
+        value={folderZipPromptEnabled ? "1" : "0"}
       />
 
       <SettingsSection title="Profile" description="Photo and display name">
@@ -279,6 +289,28 @@ export function ProfileSettingsForm({
               labelId={accentLabelId}
             />
           </div>
+        </div>
+      </SettingsSection>
+
+      <Separator />
+
+      <SettingsSection title="Uploads" description="Folder handling">
+        <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+          <div className="min-w-0">
+            <Label htmlFor={folderZipPromptId}>Ask how to upload folders</Label>
+            <p
+              id={`${folderZipPromptId}-description`}
+              className="mt-1 text-xs leading-5 text-muted-foreground"
+            >
+              Choose between a browsable folder structure and one client-side ZIP archive.
+            </p>
+          </div>
+          <Switch
+            id={folderZipPromptId}
+            checked={folderZipPromptEnabled}
+            onCheckedChange={setFolderZipPromptEnabled}
+            aria-describedby={`${folderZipPromptId}-description`}
+          />
         </div>
       </SettingsSection>
 

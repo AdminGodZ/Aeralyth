@@ -16,6 +16,7 @@ pub struct AuthUser {
     pub display_name: Option<String>,
     pub theme_preference: String,
     pub accent_color: String,
+    pub folder_zip_prompt_enabled: bool,
     pub profile_image_url: Option<String>,
 }
 
@@ -42,6 +43,7 @@ pub async fn authenticate_password(
                   display_name,
                   COALESCE(theme_preference, 'system') AS theme_preference,
                   COALESCE(accent_color, '#3088f0') AS accent_color,
+                  COALESCE(folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
                   profile_image_bytes IS NOT NULL AS has_profile_image,
                   to_char(
                     COALESCE(profile_image_updated_at, updated_at) AT TIME ZONE 'UTC',
@@ -78,6 +80,7 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
                   users.display_name,
                   COALESCE(users.theme_preference, 'system') AS theme_preference,
                   COALESCE(users.accent_color, '#3088f0') AS accent_color,
+                  COALESCE(users.folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
                   users.profile_image_bytes IS NOT NULL AS has_profile_image,
                   to_char(
                     COALESCE(users.profile_image_updated_at, users.updated_at) AT TIME ZONE 'UTC',
@@ -169,6 +172,7 @@ fn auth_user_from_row(row: tokio_postgres::Row) -> AuthUser {
         display_name: row.get("display_name"),
         theme_preference: row.get("theme_preference"),
         accent_color: row.get("accent_color"),
+        folder_zip_prompt_enabled: row.get("folder_zip_prompt_enabled"),
         profile_image_url,
     }
 }
