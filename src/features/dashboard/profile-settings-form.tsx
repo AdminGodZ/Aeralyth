@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  LoaderCircle,
   Monitor,
   Moon,
   Pencil,
@@ -9,6 +10,7 @@ import {
   Sun,
   Undo2,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import {
   useEffect,
@@ -16,6 +18,7 @@ import {
   useRef,
   useState,
   type ChangeEvent,
+  type FormEvent,
   type ReactNode,
 } from "react";
 
@@ -52,9 +55,12 @@ export function ProfileSettingsForm({
   const accentLabelId = useId();
   const folderZipPromptId = useId();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const router = useRouter();
   const { setTheme } = useTheme();
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [removeImage, setRemoveImage] = useState(false);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveError, setSaveError] = useState<string | null>(null);
   const [themePreference, setThemePreference] = useState(
     currentUser.themePreference,
   );
@@ -77,6 +83,21 @@ export function ProfileSettingsForm({
       }
     };
   }, [previewUrl]);
+
+  useEffect(() => {
+    setPreviewUrl((currentPreviewUrl) => {
+      if (currentPreviewUrl?.startsWith("blob:")) {
+        URL.revokeObjectURL(currentPreviewUrl);
+      }
+
+      return null;
+    });
+    setRemoveImage(false);
+
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  }, [currentUser.profileImageUrl]);
 
   function handleFileChange(event: ChangeEvent<HTMLInputElement>) {
     const file = event.currentTarget.files?.[0];
@@ -117,12 +138,52 @@ export function ProfileSettingsForm({
     }
   }
 
+  async function saveSettings(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (isSaving) {
+      return;
+    }
+
+    const form = event.currentTarget;
+    setIsSaving(true);
+    setSaveError(null);
+
+    try {
+      const response = await fetch(form.action, {
+        method: "POST",
+        body: new FormData(form),
+        credentials: "same-origin",
+      });
+      const result = new URL(response.url).searchParams.get("profile");
+
+      if (!response.ok || result !== "updated") {
+        throw new Error(getProfileSaveError(result));
+      }
+
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+
+      router.refresh();
+    } catch (error) {
+      setSaveError(
+        error instanceof Error
+          ? error.message
+          : "Settings could not be saved.",
+      );
+    } finally {
+      setIsSaving(false);
+    }
+  }
+
   return (
     <form
       action="/api/profile"
       method="post"
       encType="multipart/form-data"
       className="w-full"
+      onSubmit={saveSettings}
     >
       <input type="hidden" name="csrf_token" value={csrfToken} />
       <input
@@ -253,7 +314,7 @@ export function ProfileSettingsForm({
                 type="button"
                 value="system"
                 aria-label="Use system theme"
-                className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-sm sm:flex-none"
+                className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
               >
                 <Monitor className="size-4" aria-hidden="true" />
                 System
@@ -262,7 +323,7 @@ export function ProfileSettingsForm({
                 type="button"
                 value="light"
                 aria-label="Use light theme"
-                className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-sm sm:flex-none"
+                className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
               >
                 <Sun className="size-4" aria-hidden="true" />
                 Light
@@ -271,7 +332,7 @@ export function ProfileSettingsForm({
                 type="button"
                 value="dark"
                 aria-label="Use dark theme"
-                className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-sm sm:flex-none"
+                className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
               >
                 <Moon className="size-4" aria-hidden="true" />
                 Dark
@@ -314,14 +375,35 @@ export function ProfileSettingsForm({
         </div>
       </SettingsSection>
 
-      <div className="flex justify-end border-t py-5">
-        <Button type="submit" size="lg">
-          <Save className="size-4" aria-hidden="true" />
-          Save changes
+      <div className="flex min-h-20 items-center justify-end gap-3 border-t py-5">
+        {saveError ? (
+          <p className="text-sm text-destructive" role="alert">
+            {saveError}
+          </p>
+        ) : null}
+        <Button type="submit" size="lg" disabled={isSaving}>
+          {isSaving ? (
+            <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+          ) : (
+            <Save className="size-4" aria-hidden="true" />
+          )}
+          {isSaving ? "Saving..." : "Save changes"}
         </Button>
       </div>
     </form>
   );
+}
+
+function getProfileSaveError(result: string | null) {
+  if (result === "invalid-image") {
+    return "Choose a PNG, JPG, WebP, or GIF image.";
+  }
+
+  if (result === "image-too-large") {
+    return "The profile image must be 2 MB or smaller.";
+  }
+
+  return "Settings could not be saved.";
 }
 
 function SettingsSection({

@@ -19,7 +19,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 import { AeralythLogo } from "@/components/aeralyth-logo";
 import { FileEmptyIllustration } from "@/components/file-empty-illustration";
@@ -50,11 +50,17 @@ import {
   normalizeAccentColor,
 } from "@/lib/accent-color";
 
-type DashboardShellProps = {
-  sectionKey: DashboardSectionKey;
+type DashboardFrameProps = {
+  children: ReactNode;
   currentUser: CurrentUser;
   csrfToken: string;
   initialSidebarCollapsed: boolean;
+};
+
+type DashboardPageProps = {
+  sectionKey: DashboardSectionKey;
+  currentUser: CurrentUser;
+  csrfToken: string;
   invitationToken?: string;
   adminUsersState?: AdminUsersState;
   filesState: FilesState;
@@ -64,27 +70,17 @@ type DashboardShellProps = {
 
 type ReadyFilesState = Extract<FilesState, { status: "ready" }>;
 
-export function DashboardShell({
-  sectionKey,
+export function DashboardFrame({
+  children,
   currentUser,
   csrfToken,
   initialSidebarCollapsed,
-  invitationToken,
-  adminUsersState,
-  filesState,
-  fileSort,
-  fileSortDirection,
-}: DashboardShellProps) {
-  const section = getDashboardSection(sectionKey) ?? getDashboardSection("files");
+}: DashboardFrameProps) {
   const accentColor =
     normalizeAccentColor(currentUser.accentColor) ?? DEFAULT_ACCENT_COLOR;
   const dashboardStyle = getAccentCssProperties(
     accentColor,
   ) as CSSProperties;
-
-  if (!section) {
-    return null;
-  }
 
   return (
     <main
@@ -97,26 +93,48 @@ export function DashboardShell({
         themePreference={currentUser.themePreference}
       />
       <DashboardSidebar
-        activeSectionKey={section.key}
         canViewSystemNavigation={currentUser.role === "admin"}
         csrfToken={csrfToken}
         initialCollapsed={initialSidebarCollapsed}
       />
 
       <section className="dashboard-main-panel flex min-w-0 flex-1 flex-col bg-background lg:mt-4 lg:min-h-[calc(100dvh-1rem)] lg:overflow-hidden lg:rounded-tl-3xl">
-        <TopBar section={section} currentUser={currentUser} />
-        <DashboardContent
-          section={section}
-          currentUser={currentUser}
-          csrfToken={csrfToken}
-          invitationToken={invitationToken}
-          adminUsersState={adminUsersState}
-          filesState={filesState}
-          fileSort={fileSort}
-          fileSortDirection={fileSortDirection}
-        />
+        {children}
       </section>
     </main>
+  );
+}
+
+export function DashboardPage({
+  sectionKey,
+  currentUser,
+  csrfToken,
+  invitationToken,
+  adminUsersState,
+  filesState,
+  fileSort,
+  fileSortDirection,
+}: DashboardPageProps) {
+  const section = getDashboardSection(sectionKey) ?? getDashboardSection("files");
+
+  if (!section) {
+    return null;
+  }
+
+  return (
+    <>
+      <TopBar section={section} currentUser={currentUser} />
+      <DashboardContent
+        section={section}
+        currentUser={currentUser}
+        csrfToken={csrfToken}
+        invitationToken={invitationToken}
+        adminUsersState={adminUsersState}
+        filesState={filesState}
+        fileSort={fileSort}
+        fileSortDirection={fileSortDirection}
+      />
+    </>
   );
 }
 
