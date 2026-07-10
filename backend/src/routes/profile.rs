@@ -14,6 +14,7 @@ struct ProfileUpdate {
     display_name: Option<String>,
     theme_preference: Option<String>,
     accent_color: Option<String>,
+    folder_zip_prompt_enabled: Option<bool>,
     remove_profile_image: bool,
     profile_image: Option<ProfileImage>,
 }
@@ -56,6 +57,10 @@ pub async fn update(
             }
             "accent_color" => {
                 update.accent_color = Some(read_limited_text_field(&mut field, 32).await?);
+            }
+            "folder_zip_prompt_enabled" => {
+                let value = read_limited_text_field(&mut field, 32).await?;
+                update.folder_zip_prompt_enabled = normalize_boolean_preference(&value);
             }
             "remove_profile_image" => {
                 let value = read_limited_text_field(&mut field, 32).await?;
@@ -121,7 +126,8 @@ pub async fn update(
                 SELECT
                   display_name,
                   COALESCE(theme_preference, 'system') AS theme_preference,
-                  COALESCE(accent_color, '#3088f0') AS accent_color
+                  COALESCE(accent_color, '#3088f0') AS accent_color,
+                  COALESCE(folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled
                 FROM users
                 WHERE id = $1
                 LIMIT 1
@@ -133,6 +139,8 @@ pub async fn update(
     let existing_display_name: Option<String> = existing_settings.get("display_name");
     let existing_theme_preference: String = existing_settings.get("theme_preference");
     let existing_accent_color: String = existing_settings.get("accent_color");
+    let existing_folder_zip_prompt_enabled: bool =
+        existing_settings.get("folder_zip_prompt_enabled");
     let display_name = match update.display_name.as_deref() {
         Some(display_name) => normalize_display_name(Some(display_name)),
         None => existing_display_name,
@@ -148,6 +156,9 @@ pub async fn update(
         .as_deref()
         .and_then(|accent_color| normalize_accent_color(Some(accent_color)))
         .unwrap_or(existing_accent_color);
+    let folder_zip_prompt_enabled = update
+        .folder_zip_prompt_enabled
+        .unwrap_or(existing_folder_zip_prompt_enabled);
 
     if update.remove_profile_image {
         state
@@ -158,14 +169,21 @@ pub async fn update(
                     SET display_name = $1,
                         theme_preference = $2,
                         accent_color = $3,
+                        folder_zip_prompt_enabled = $4,
                         profile_image_bytes = NULL,
                         profile_image_mime_type = NULL,
                         profile_image_size_bytes = NULL,
                         profile_image_updated_at = NULL,
                         updated_at = now()
-                    WHERE id = $4
+                    WHERE id = $5
                 ",
-                &[&display_name, &theme_preference, &accent_color, &user.id],
+                &[
+                    &display_name,
+                    &theme_preference,
+                    &accent_color,
+                    &folder_zip_prompt_enabled,
+                    &user.id,
+                ],
             )
             .await
             .map_err(error::ErrorInternalServerError)?;
@@ -178,17 +196,19 @@ pub async fn update(
                     SET display_name = $1,
                         theme_preference = $2,
                         accent_color = $3,
-                        profile_image_bytes = $4,
-                        profile_image_mime_type = $5,
-                        profile_image_size_bytes = $6,
+                        folder_zip_prompt_enabled = $4,
+                        profile_image_bytes = $5,
+                        profile_image_mime_type = $6,
+                        profile_image_size_bytes = $7,
                         profile_image_updated_at = now(),
                         updated_at = now()
-                    WHERE id = $7
+                    WHERE id = $8
                 ",
                 &[
                     &display_name,
                     &theme_preference,
                     &accent_color,
+                    &folder_zip_prompt_enabled,
                     &profile_image.bytes,
                     &profile_image.mime_type,
                     &profile_image.size_bytes,
@@ -206,10 +226,17 @@ pub async fn update(
                     SET display_name = $1,
                         theme_preference = $2,
                         accent_color = $3,
+                        folder_zip_prompt_enabled = $4,
                         updated_at = now()
-                    WHERE id = $4
+                    WHERE id = $5
                 ",
-                &[&display_name, &theme_preference, &accent_color, &user.id],
+                &[
+                    &display_name,
+                    &theme_preference,
+                    &accent_color,
+                    &folder_zip_prompt_enabled,
+                    &user.id,
+                ],
             )
             .await
             .map_err(error::ErrorInternalServerError)?;
@@ -330,6 +357,14 @@ fn normalize_accent_color(value: Option<&str>) -> Option<String> {
     }
 
     Some(value.to_ascii_lowercase())
+}
+
+fn normalize_boolean_preference(value: &str) -> Option<bool> {
+    match value.trim() {
+        "1" | "true" | "on" => Some(true),
+        "0" | "false" | "off" => Some(false),
+        _ => None,
+    }
 }
 
 fn is_allowed_profile_image_mime_type(mime_type: &str) -> bool {

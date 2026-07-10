@@ -12,6 +12,7 @@ export type CurrentUser = {
   displayName: string | null;
   themePreference: "system" | "light" | "dark";
   accentColor: string;
+  folderZipPromptEnabled: boolean;
   profileImageUrl: string | null;
 };
 
