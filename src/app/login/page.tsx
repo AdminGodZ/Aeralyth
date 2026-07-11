@@ -227,7 +227,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                     type="submit"
                     size="lg"
                     disabled={backendUnavailable}
-                    className="h-12 w-full rounded-full bg-primary/85 text-base shadow-[0_16px_40px_rgb(48_136_240/0.18)] hover:bg-primary/95"
+                    className="h-12 w-full rounded-full bg-primary/85 text-base shadow-[0_16px_40px_color-mix(in_srgb,var(--primary)_18%,transparent)] hover:bg-primary/95"
                   >
                     Sign in
                     <ArrowRight
