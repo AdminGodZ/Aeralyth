@@ -1,19 +1,16 @@
-use std::fs;
-use std::io::ErrorKind;
-use std::path::{Path, PathBuf};
-
 use actix_web::http::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION};
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
-use tokio_postgres::{Client, Transaction};
+use deadpool_postgres::Transaction;
 
 use crate::auth::{AuthUser, SESSION_COOKIE, require_admin, require_csrf};
 use crate::state::AppState;
 
 const INVITATION_LIFETIME_DAYS: i64 = 7;
 const ADMIN_USER_MUTATION_LOCK_ID: i64 = 4_132_591_101;
-const USER_STORAGE_TOMBSTONE_PREFIX: &str = ".deleting-user-";
+const DEFAULT_ADMIN_PAGE_SIZE: usize = 50;
+const MAX_ADMIN_PAGE_SIZE: usize = 100;
 
 #[derive(Serialize)]
 struct AdminSessionResponse {
@@ -26,15 +23,19 @@ struct AdminUsersResponse {
     users: Vec<AdminUser>,
     invitations: Vec<Invitation>,
     summary: AdminUsersSummary,
+    users_next_cursor: Option<String>,
+    users_has_more: bool,
+    invitations_next_cursor: Option<String>,
+    invitations_has_more: bool,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AdminUsersSummary {
-    total_users: usize,
-    active_users: usize,
-    admins: usize,
-    pending_invites: usize,
+    total_users: i64,
+    active_users: i64,
+    admins: i64,
+    pending_invites: i64,
 }
 
 #[derive(Serialize)]
@@ -60,6 +61,28 @@ struct Invitation {
     created_by_username: String,
     expires_at: String,
     created_at: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct AdminUsersQuery {
+    users_cursor: Option<String>,
+    invitations_cursor: Option<String>,
+    q: Option<String>,
+    limit: Option<usize>,
+}
+
+struct AdminPage<T> {
+    items: Vec<T>,
+    next_cursor: Option<String>,
+    has_more: bool,
+}
+
+#[derive(Deserialize, Serialize)]
+struct AdminCursor {
+    kind: String,
+    query: Option<String>,
+    created_at: String,
+    id: String,
 }
 
 #[derive(Deserialize)]
@@ -109,40 +132,70 @@ struct TargetUser {
     status: String,
 }
 
-struct StagedUserStorage {
-    original_path: PathBuf,
-    tombstone_path: PathBuf,
-}
-
 pub async fn me(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
     let user = require_admin(&state, &request).await?;
 
     Ok(HttpResponse::Ok().json(AdminSessionResponse { user }))
 }
 
-pub async fn users(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
+pub async fn users(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    query: web::Query<AdminUsersQuery>,
+) -> Result<HttpResponse> {
     require_admin(&state, &request).await?;
-    expire_old_invitations(&state).await?;
 
-    let users = list_users(&state).await?;
-    let invitations = list_invitations(&state).await?;
+    let page_size = query
+        .limit
+        .unwrap_or(DEFAULT_ADMIN_PAGE_SIZE)
+        .clamp(1, MAX_ADMIN_PAGE_SIZE);
+    let search = query
+        .q
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|value| value.chars().take(100).collect::<String>());
+    let users = list_users(
+        &state,
+        query.users_cursor.as_deref(),
+        search.as_deref(),
+        page_size,
+    )
+    .await?;
+    let invitations = list_invitations(
+        &state,
+        query.invitations_cursor.as_deref(),
+        search.as_deref(),
+        page_size,
+    )
+    .await?;
+    let summary_row = state
+        .db
+        .query_one(
+            "
+                SELECT total_users, active_users, active_admins, pending_invitations
+                FROM admin_directory_counters
+                WHERE singleton = TRUE
+            ",
+            &[],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     let summary = AdminUsersSummary {
-        total_users: users.len(),
-        active_users: users.iter().filter(|user| user.status == "active").count(),
-        admins: users
-            .iter()
-            .filter(|user| user.role == "admin" && user.status == "active")
-            .count(),
-        pending_invites: invitations
-            .iter()
-            .filter(|invitation| invitation.status == "pending")
-            .count(),
+        total_users: summary_row.get("total_users"),
+        active_users: summary_row.get("active_users"),
+        admins: summary_row.get("active_admins"),
+        pending_invites: summary_row.get("pending_invitations"),
     };
 
     Ok(HttpResponse::Ok().json(AdminUsersResponse {
-        users,
-        invitations,
+        users: users.items,
+        invitations: invitations.items,
         summary,
+        users_next_cursor: users.next_cursor,
+        users_has_more: users.has_more,
+        invitations_next_cursor: invitations.next_cursor,
+        invitations_has_more: invitations.has_more,
     }))
 }
 
@@ -177,7 +230,7 @@ pub async fn create_invitation(
         return Ok(redirect("/users?invite=user-exists"));
     }
 
-    expire_old_invitations(&state).await?;
+    expire_invitations_for_username(&state, &username).await?;
 
     let existing_invite = state
         .db
@@ -327,7 +380,9 @@ pub async fn update_user_role(
         return Ok(redirect("/users?user=self-protected"));
     }
 
-    let mut db = crate::db::connect(&state.config.database_url)
+    let mut db = state
+        .db
+        .get()
         .await
         .map_err(error::ErrorInternalServerError)?;
     let transaction = db
@@ -388,7 +443,9 @@ pub async fn update_user_status(
         return Ok(redirect("/users?user=self-protected"));
     }
 
-    let mut db = crate::db::connect(&state.config.database_url)
+    let mut db = state
+        .db
+        .get()
         .await
         .map_err(error::ErrorInternalServerError)?;
     let transaction = db
@@ -454,7 +511,9 @@ pub async fn update_user(
         return Ok(redirect("/users?user=invalid-username"));
     }
 
-    let mut db = crate::db::connect(&state.config.database_url)
+    let mut db = state
+        .db
+        .get()
         .await
         .map_err(error::ErrorInternalServerError)?;
     let transaction = db
@@ -536,7 +595,9 @@ pub async fn delete_user(
         return Ok(redirect("/users?user=self-protected"));
     }
 
-    let mut db = crate::db::connect(&state.config.database_url)
+    let mut db = state
+        .db
+        .get()
         .await
         .map_err(error::ErrorInternalServerError)?;
     let transaction = db
@@ -563,38 +624,54 @@ pub async fn delete_user(
         return Ok(redirect("/users?user=last-admin"));
     }
 
-    let staged_storage = stage_user_storage_for_deletion(
-        &state.config.storage_path,
-        &target_user.id,
-    )?;
-    let deleted = match transaction
+    transaction
+        .query_opt(
+            "SELECT owner_id FROM user_file_counters WHERE owner_id = $1 FOR UPDATE",
+            &[&target_user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    transaction
+        .execute(
+            "
+                INSERT INTO storage_deletion_jobs (object_key, multipart_upload_id)
+                SELECT
+                  CASE
+                    WHEN position('/' IN storage_name) = 0
+                      THEN owner_id || '/' || storage_name
+                    ELSE storage_name
+                  END,
+                  NULL::text
+                FROM files
+                WHERE owner_id = $1 AND entry_type = 'file'
+                UNION ALL
+                SELECT object_key, multipart_upload_id
+                FROM file_uploads
+                WHERE owner_id = $1 AND status IN ('pending', 'completing')
+                ON CONFLICT (object_key) DO UPDATE SET
+                  multipart_upload_id = COALESCE(
+                    EXCLUDED.multipart_upload_id,
+                    storage_deletion_jobs.multipart_upload_id
+                  )
+            ",
+            &[&target_user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let deleted = transaction
         .execute("DELETE FROM users WHERE id = $1", &[&target_user.id])
         .await
-    {
-        Ok(deleted) => deleted,
-        Err(database_error) => {
-            restore_staged_user_storage(staged_storage.as_ref());
-            return Err(error::ErrorInternalServerError(database_error));
-        }
-    };
+        .map_err(error::ErrorInternalServerError)?;
 
     if deleted == 0 {
-        restore_staged_user_storage(staged_storage.as_ref());
         return Ok(redirect("/users?user=missing"));
     }
 
-    if let Err(commit_error) = transaction.commit().await {
-        reconcile_staged_user_storage(
-            &state.db,
-            &target_user.id,
-            staged_storage.as_ref(),
-        )
-        .await;
-        return Err(error::ErrorInternalServerError(commit_error));
-    }
-
-    remove_staged_user_storage(staged_storage.as_ref());
-    remove_deleted_user_storage(Path::new(&state.config.storage_path), &target_user.id);
+    transaction
+        .commit()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
 
     Ok(redirect("/users?user=deleted"))
 }
@@ -648,6 +725,7 @@ pub async fn rotate_invitation(
     require_admin(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
     let invitation_id = path.into_inner();
+    expire_invitations_for_id(&state, &invitation_id).await?;
     let token = create_token()?;
     let expires_after_days = INVITATION_LIFETIME_DAYS;
     let updated = state
@@ -711,8 +789,19 @@ pub async fn revoke_invitation(
     Ok(redirect("/users?invite=revoked"))
 }
 
-async fn list_users(state: &AppState) -> Result<Vec<AdminUser>> {
-    let rows = state
+async fn list_users(
+    state: &AppState,
+    encoded_cursor: Option<&str>,
+    search: Option<&str>,
+    page_size: usize,
+) -> Result<AdminPage<AdminUser>> {
+    let cursor = decode_admin_cursor(encoded_cursor, "users", search)?;
+    let search_pattern = search.map(|value| format!("%{value}%"));
+    let cursor_date = cursor.as_ref().map(|value| value.created_at.clone());
+    let cursor_id = cursor.as_ref().map(|value| value.id.clone());
+    let row_limit = i64::try_from(page_size + 1)
+        .map_err(|_| error::ErrorInternalServerError("invalid admin page size"))?;
+    let mut rows = state
         .db
         .query(
             "
@@ -728,16 +817,46 @@ async fn list_users(state: &AppState) -> Result<Vec<AdminUser>> {
                     'YYYYMMDDHH24MISSUS'
                   ) AS profile_image_version,
                   to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
-                  to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at
+                  to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
+                  to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_created_at
                 FROM users
-                ORDER BY created_at ASC
+                WHERE (
+                  $1::text IS NULL
+                  OR username ILIKE $1
+                  OR COALESCE(display_name, '') ILIKE $1
+                  OR role ILIKE $1
+                  OR status ILIKE $1
+                )
+                  AND (
+                    $2::text IS NULL
+                    OR created_at > $2::text::timestamptz
+                    OR (created_at = $2::text::timestamptz AND id > $3)
+                  )
+                ORDER BY created_at ASC, id ASC
+                LIMIT $4
             ",
-            &[],
+            &[&search_pattern, &cursor_date, &cursor_id, &row_limit],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
+    let has_more = rows.len() > page_size;
+    rows.truncate(page_size);
+    let next_cursor = if has_more {
+        rows.last()
+            .map(|row| {
+                encode_admin_cursor(&AdminCursor {
+                    kind: "users".to_owned(),
+                    query: search.map(str::to_owned),
+                    created_at: row.get("cursor_created_at"),
+                    id: row.get("id"),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
 
-    Ok(rows
+    let items = rows
         .into_iter()
         .map(|row| {
             let id: String = row.get("id");
@@ -762,11 +881,28 @@ async fn list_users(state: &AppState) -> Result<Vec<AdminUser>> {
                 updated_at: row.get("updated_at"),
             }
         })
-        .collect())
+        .collect();
+
+    Ok(AdminPage {
+        items,
+        next_cursor,
+        has_more,
+    })
 }
 
-async fn list_invitations(state: &AppState) -> Result<Vec<Invitation>> {
-    let rows = state
+async fn list_invitations(
+    state: &AppState,
+    encoded_cursor: Option<&str>,
+    search: Option<&str>,
+    page_size: usize,
+) -> Result<AdminPage<Invitation>> {
+    let cursor = decode_admin_cursor(encoded_cursor, "invitations", search)?;
+    let search_pattern = search.map(|value| format!("%{value}%"));
+    let cursor_date = cursor.as_ref().map(|value| value.created_at.clone());
+    let cursor_id = cursor.as_ref().map(|value| value.id.clone());
+    let row_limit = i64::try_from(page_size + 1)
+        .map_err(|_| error::ErrorInternalServerError("invalid admin page size"))?;
+    let mut rows = state
         .db
         .query(
             "
@@ -777,17 +913,50 @@ async fn list_invitations(state: &AppState) -> Result<Vec<Invitation>> {
                   invitations.status,
                   users.username AS created_by_username,
                   to_char(invitations.expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS expires_at,
-                  to_char(invitations.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at
+                  to_char(invitations.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
+                  to_char(invitations.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_created_at
                 FROM invitations
                 INNER JOIN users ON users.id = invitations.created_by
-                ORDER BY invitations.created_at DESC
+                WHERE (
+                  $1::text IS NULL
+                  OR invitations.invited_username ILIKE $1
+                  OR invitations.role ILIKE $1
+                  OR invitations.status ILIKE $1
+                  OR users.username ILIKE $1
+                )
+                  AND (
+                    $2::text IS NULL
+                    OR invitations.created_at < $2::text::timestamptz
+                    OR (
+                      invitations.created_at = $2::text::timestamptz
+                      AND invitations.id < $3
+                    )
+                  )
+                ORDER BY invitations.created_at DESC, invitations.id DESC
+                LIMIT $4
             ",
-            &[],
+            &[&search_pattern, &cursor_date, &cursor_id, &row_limit],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
+    let has_more = rows.len() > page_size;
+    rows.truncate(page_size);
+    let next_cursor = if has_more {
+        rows.last()
+            .map(|row| {
+                encode_admin_cursor(&AdminCursor {
+                    kind: "invitations".to_owned(),
+                    query: search.map(str::to_owned),
+                    created_at: row.get("cursor_created_at"),
+                    id: row.get("id"),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
 
-    Ok(rows
+    let items = rows
         .into_iter()
         .map(|row| Invitation {
             id: row.get("id"),
@@ -798,7 +967,44 @@ async fn list_invitations(state: &AppState) -> Result<Vec<Invitation>> {
             expires_at: row.get("expires_at"),
             created_at: row.get("created_at"),
         })
-        .collect())
+        .collect();
+
+    Ok(AdminPage {
+        items,
+        next_cursor,
+        has_more,
+    })
+}
+
+fn decode_admin_cursor(
+    encoded: Option<&str>,
+    expected_kind: &str,
+    search: Option<&str>,
+) -> Result<Option<AdminCursor>> {
+    let Some(encoded) = encoded else {
+        return Ok(None);
+    };
+
+    if encoded.len() > 1024 {
+        return Err(error::ErrorBadRequest("invalid admin cursor"));
+    }
+
+    let bytes = URL_SAFE_NO_PAD
+        .decode(encoded)
+        .map_err(|_| error::ErrorBadRequest("invalid admin cursor"))?;
+    let cursor = serde_json::from_slice::<AdminCursor>(&bytes)
+        .map_err(|_| error::ErrorBadRequest("invalid admin cursor"))?;
+
+    if cursor.kind != expected_kind || cursor.query.as_deref() != search {
+        return Err(error::ErrorBadRequest("admin cursor does not match this list"));
+    }
+
+    Ok(Some(cursor))
+}
+
+fn encode_admin_cursor(cursor: &AdminCursor) -> Result<String> {
+    let bytes = serde_json::to_vec(cursor).map_err(error::ErrorInternalServerError)?;
+    Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
 async fn lock_admin_user_mutations(transaction: &Transaction<'_>) -> Result<()> {
@@ -883,233 +1089,41 @@ async fn active_admin_count(transaction: &Transaction<'_>) -> Result<i64> {
     Ok(row.get(0))
 }
 
-fn stage_user_storage_for_deletion(
-    storage_path: &str,
-    user_id: &str,
-) -> Result<Option<StagedUserStorage>> {
-    let original_path = Path::new(storage_path).join(user_id);
-    let metadata = match fs::symlink_metadata(&original_path) {
-        Ok(metadata) => metadata,
-        Err(storage_error) if storage_error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(storage_error) => return Err(error::ErrorInternalServerError(storage_error)),
-    };
-
-    if !metadata.file_type().is_dir() {
-        return Err(error::ErrorInternalServerError(
-            "user storage path is not a directory",
-        ));
-    }
-
-    let mut random_bytes = [0_u8; 12];
-    getrandom::fill(&mut random_bytes).map_err(error::ErrorInternalServerError)?;
-    let encoded_user_id = URL_SAFE_NO_PAD.encode(user_id.as_bytes());
-    let random_suffix = URL_SAFE_NO_PAD.encode(random_bytes);
-    let tombstone_path = Path::new(storage_path).join(format!(
-        "{USER_STORAGE_TOMBSTONE_PREFIX}{encoded_user_id}~{random_suffix}"
-    ));
-
-    fs::rename(&original_path, &tombstone_path)
-        .map_err(error::ErrorInternalServerError)?;
-
-    Ok(Some(StagedUserStorage {
-        original_path,
-        tombstone_path,
-    }))
-}
-
-fn restore_staged_user_storage(staged_storage: Option<&StagedUserStorage>) {
-    let Some(staged_storage) = staged_storage else {
-        return;
-    };
-
-    if !staged_storage.original_path.exists() {
-        match fs::rename(
-            &staged_storage.tombstone_path,
-            &staged_storage.original_path,
-        ) {
-            Ok(()) => return,
-            Err(storage_error) if staged_storage.original_path.exists() => {
-                log::info!(
-                    "merging concurrently recreated user storage after rename conflict: {}",
-                    storage_error
-                );
-            }
-            Err(storage_error) => {
-                log::error!(
-                    "failed to restore staged user storage {}: {}",
-                    staged_storage.tombstone_path.display(),
-                    storage_error
-                );
-                return;
-            }
-        }
-    }
-
-    let entries = match fs::read_dir(&staged_storage.tombstone_path) {
-        Ok(entries) => entries,
-        Err(storage_error) if storage_error.kind() == ErrorKind::NotFound => return,
-        Err(storage_error) => {
-            log::error!(
-                "failed to read staged user storage {}: {}",
-                staged_storage.tombstone_path.display(),
-                storage_error
-            );
-            return;
-        }
-    };
-
-    for entry_result in entries {
-        let Ok(entry) = entry_result else {
-            continue;
-        };
-        let destination = staged_storage.original_path.join(entry.file_name());
-
-        if destination.exists() {
-            log::error!(
-                "could not restore staged storage entry because the destination exists: {}",
-                destination.display()
-            );
-            continue;
-        }
-
-        if let Err(storage_error) = fs::rename(entry.path(), &destination) {
-            log::error!(
-                "failed to merge staged storage entry into {}: {}",
-                destination.display(),
-                storage_error
-            );
-        }
-    }
-
-    match fs::remove_dir(&staged_storage.tombstone_path) {
-        Ok(()) => {}
-        Err(storage_error) if storage_error.kind() == ErrorKind::NotFound => {}
-        Err(storage_error) => {
-            log::warn!(
-                "staged user storage still contains unresolved entries {}: {}",
-                staged_storage.tombstone_path.display(),
-                storage_error
-            );
-        }
-    }
-}
-
-fn remove_staged_user_storage(staged_storage: Option<&StagedUserStorage>) {
-    let Some(staged_storage) = staged_storage else {
-        return;
-    };
-
-    match fs::remove_dir_all(&staged_storage.tombstone_path) {
-        Ok(()) => {}
-        Err(storage_error) if storage_error.kind() == ErrorKind::NotFound => {}
-        Err(storage_error) => {
-            log::warn!(
-                "deferred cleanup for deleted user storage {}: {}",
-                staged_storage.tombstone_path.display(),
-                storage_error
-            );
-        }
-    }
-}
-
-fn remove_deleted_user_storage(storage_path: &Path, user_id: &str) {
-    let storage_directory = storage_path.join(user_id);
-
-    match fs::remove_dir_all(&storage_directory) {
-        Ok(()) => {}
-        Err(storage_error) if storage_error.kind() == ErrorKind::NotFound => {}
-        Err(storage_error) => log::warn!(
-            "deferred cleanup for recreated deleted-user storage {}: {}",
-            storage_directory.display(),
-            storage_error
-        ),
-    }
-}
-
-async fn reconcile_staged_user_storage(
-    db: &Client,
-    user_id: &str,
-    staged_storage: Option<&StagedUserStorage>,
-) {
-    let Some(staged_storage) = staged_storage else {
-        return;
-    };
-    let user_exists = db
-        .query_opt("SELECT 1 FROM users WHERE id = $1 LIMIT 1", &[&user_id])
-        .await;
-
-    match user_exists {
-        Ok(Some(_)) => restore_staged_user_storage(Some(staged_storage)),
-        Ok(None) => {
-            remove_staged_user_storage(Some(staged_storage));
-            if let Some(storage_path) = staged_storage.original_path.parent() {
-                remove_deleted_user_storage(storage_path, user_id);
-            }
-        }
-        Err(database_error) => log::error!(
-            "could not reconcile staged storage {} after commit failure: {}",
-            staged_storage.tombstone_path.display(),
-            database_error
-        ),
-    }
-}
-
-pub(crate) async fn cleanup_pending_user_storage(storage_path: &str, db: &Client) {
-    let entries = match fs::read_dir(storage_path) {
-        Ok(entries) => entries,
-        Err(storage_error) if storage_error.kind() == ErrorKind::NotFound => return,
-        Err(storage_error) => {
-            log::warn!("could not inspect pending user storage cleanup: {storage_error}");
-            return;
-        }
-    };
-
-    for entry_result in entries {
-        let Ok(entry) = entry_result else {
-            continue;
-        };
-        let Ok(file_type) = entry.file_type() else {
-            continue;
-        };
-
-        if !file_type.is_dir() {
-            continue;
-        }
-
-        let file_name = entry.file_name();
-        let Some(file_name) = file_name.to_str() else {
-            continue;
-        };
-        let Some(encoded_user_id) = file_name
-            .strip_prefix(USER_STORAGE_TOMBSTONE_PREFIX)
-            .and_then(|value| value.split_once('~').map(|(user_id, _)| user_id))
-        else {
-            continue;
-        };
-        let Some(user_id) = URL_SAFE_NO_PAD
-            .decode(encoded_user_id)
-            .ok()
-            .and_then(|bytes| String::from_utf8(bytes).ok())
-        else {
-            log::warn!("ignored invalid user storage tombstone {file_name}");
-            continue;
-        };
-        let original_path = Path::new(storage_path).join(&user_id);
-        let staged_storage = StagedUserStorage {
-            original_path,
-            tombstone_path: entry.path(),
-        };
-
-        reconcile_staged_user_storage(db, &user_id, Some(&staged_storage)).await;
-    }
-}
-
-async fn expire_old_invitations(state: &AppState) -> Result<()> {
+async fn expire_invitations_for_username(state: &AppState, username: &str) -> Result<()> {
     state
         .db
         .execute(
-            "UPDATE invitations SET status = 'expired' WHERE status = 'pending' AND expires_at <= now()",
-            &[],
+            "
+                UPDATE invitations
+                SET status = 'expired'
+                WHERE lower(invited_username) = lower($1)
+                  AND status = 'pending'
+                  AND expires_at <= now()
+            ",
+            &[&username],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    Ok(())
+}
+
+async fn expire_invitations_for_id(state: &AppState, invitation_id: &str) -> Result<()> {
+    state
+        .db
+        .execute(
+            "
+                UPDATE invitations
+                SET status = 'expired'
+                WHERE status = 'pending'
+                  AND expires_at <= now()
+                  AND lower(invited_username) = (
+                    SELECT lower(invited_username)
+                    FROM invitations
+                    WHERE id = $1
+                  )
+            ",
+            &[&invitation_id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;

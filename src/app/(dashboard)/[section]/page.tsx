@@ -21,7 +21,11 @@ type SectionPageProps = {
     folder?: string;
     sort?: string;
     direction?: string;
+    cursor?: string;
     token?: string;
+    q?: string;
+    usersCursor?: string;
+    invitationsCursor?: string;
   }>;
 };
 
@@ -48,7 +52,16 @@ export default async function SectionPage({
   searchParams,
 }: SectionPageProps) {
   const { section: sectionKey } = await params;
-  const { direction, folder, sort, token } = await searchParams;
+  const {
+    cursor,
+    direction,
+    folder,
+    invitationsCursor,
+    q,
+    sort,
+    token,
+    usersCursor,
+  } = await searchParams;
   const section = getDashboardSection(sectionKey);
 
   if (!section) {
@@ -64,7 +77,11 @@ export default async function SectionPage({
   const dashboardSessionPromise = getDashboardSession();
   const adminUsersPromise =
     section.key === "users"
-      ? getAdminUsersState()
+      ? getAdminUsersState({
+          usersCursor: usersCursor?.trim() || undefined,
+          invitationsCursor: invitationsCursor?.trim() || undefined,
+          query: q?.trim() || undefined,
+        })
       : Promise.resolve(undefined);
   const filesPromise = sectionNeedsFiles(section.key)
     ? getFilesState(
@@ -72,6 +89,7 @@ export default async function SectionPage({
         section.key === "files" ? folder?.trim() : undefined,
         fileSort,
         fileSortDirection,
+        cursor?.trim() || undefined,
       )
     : Promise.resolve<FilesState>({ status: "unavailable" });
   const [{ csrfToken, currentUser }, adminUsersState, filesState] =
@@ -103,6 +121,7 @@ export default async function SectionPage({
       currentUser={currentUser}
       csrfToken={csrfToken}
       invitationToken={section.key === "users" ? token?.trim() : undefined}
+      adminQuery={section.key === "users" ? q?.trim() : undefined}
       adminUsersState={adminUsersState}
       filesState={filesState}
       fileSort={fileSort}

@@ -62,6 +62,7 @@ type DashboardPageProps = {
   currentUser: CurrentUser;
   csrfToken: string;
   invitationToken?: string;
+  adminQuery?: string;
   adminUsersState?: AdminUsersState;
   filesState: FilesState;
   fileSort?: FileSort;
@@ -110,6 +111,7 @@ export function DashboardPage({
   currentUser,
   csrfToken,
   invitationToken,
+  adminQuery,
   adminUsersState,
   filesState,
   fileSort,
@@ -129,6 +131,7 @@ export function DashboardPage({
         currentUser={currentUser}
         csrfToken={csrfToken}
         invitationToken={invitationToken}
+        adminQuery={adminQuery}
         adminUsersState={adminUsersState}
         filesState={filesState}
         fileSort={fileSort}
@@ -246,6 +249,7 @@ function DashboardContent({
   currentUser,
   csrfToken,
   invitationToken,
+  adminQuery,
   adminUsersState,
   filesState,
   fileSort,
@@ -255,6 +259,7 @@ function DashboardContent({
   currentUser: CurrentUser;
   csrfToken: string;
   invitationToken?: string;
+  adminQuery?: string;
   adminUsersState?: AdminUsersState;
   filesState: FilesState;
   fileSort?: FileSort;
@@ -270,6 +275,7 @@ function DashboardContent({
         currentUser={currentUser}
         csrfToken={csrfToken}
         invitationToken={invitationToken}
+        initialQuery={adminQuery}
         adminUsersState={adminUsersState}
       />
     );
@@ -339,7 +345,14 @@ function FileContent({
     );
   }
 
-  const { breadcrumbs, currentFolderId, entries, summary } = filesState.data;
+  const {
+    breadcrumbs,
+    currentFolderId,
+    entries,
+    hasMore,
+    nextCursor,
+    summary,
+  } = filesState.data;
   const isTrash = section.key === "trash";
   const isShared = section.key === "shared";
   return (
@@ -410,6 +423,27 @@ function FileContent({
                 />
               ))}
             </div>
+            {hasMore && nextCursor ? (
+              <div className="flex shrink-0 justify-end border-t px-4 py-3">
+                <Button asChild variant="outline">
+                  <Link
+                    href={{
+                      pathname: "/" + section.key,
+                      query: {
+                        ...(section.key === "files" && currentFolderId
+                          ? { folder: currentFolderId }
+                          : {}),
+                        ...getSortQuery(fileSort, fileSortDirection),
+                        cursor: nextCursor,
+                      },
+                    }}
+                  >
+                    Next page
+                    <ChevronRight className="size-4" aria-hidden="true" />
+                  </Link>
+                </Button>
+              </div>
+            ) : null}
           </>
         ) : (
           <FilesEmptyState
@@ -733,10 +767,10 @@ function FileRow({
               variant="secondary"
               className="rounded-md text-primary hover:text-primary"
             >
-              <Link href={`/api/files/${file.id}/download`}>
+              <a href={`/api/files/${file.id}/download`}>
                 <Download className="size-4" aria-hidden="true" />
                 Download
-              </Link>
+              </a>
             </Button>
             <form action={`/api/files/${file.id}/unshare`} method="post">
               <input type="hidden" name="csrf_token" value={csrfToken} />
@@ -785,10 +819,10 @@ function FileRow({
               variant="secondary"
               className="rounded-md text-primary hover:text-primary"
             >
-              <Link href={`/api/files/${file.id}/download`}>
+              <a href={`/api/files/${file.id}/download`}>
                 <Download className="size-4" aria-hidden="true" />
                 Download
-              </Link>
+              </a>
             </Button>
             <form action={`/api/files/${file.id}/favorite`} method="post">
               <input type="hidden" name="csrf_token" value={csrfToken} />
@@ -842,18 +876,15 @@ function StorageContent({ filesState }: { filesState: FilesState }) {
   return (
     <div className="flex flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
       <div className="grid gap-3 sm:grid-cols-4">
-        <Metric label="System used" value={formatBytes(storage.systemUsedBytes)} />
+        <Metric label="Used" value={formatBytes(storage.systemUsedBytes)} />
         <Metric label="Available" value={formatBytes(storage.availableBytes)} />
-        <Metric label="Capacity" value={formatBytes(storage.totalBytes)} />
-        <Metric
-          label="Aeralyth data"
-          value={formatBytes(storage.aeralythUsedBytes)}
-        />
+        <Metric label="Quota" value={formatBytes(storage.totalBytes)} />
+        <Metric label="Utilization" value={`${usedPercent}%`} />
       </div>
 
       <section className="rounded-md border p-5">
         <div className="flex items-center justify-between gap-4 text-sm">
-          <span className="font-medium">System storage</span>
+          <span className="font-medium">Storage quota</span>
           <span className="text-muted-foreground">{usedPercent}% used</span>
         </div>
         <div className="mt-4 h-3 rounded-full bg-muted">

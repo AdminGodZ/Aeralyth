@@ -70,6 +70,10 @@ export type AdminUsersData = {
     admins: number;
     pendingInvites: number;
   };
+  usersNextCursor: string | null;
+  usersHasMore: boolean;
+  invitationsNextCursor: string | null;
+  invitationsHasMore: boolean;
 };
 
 export type AdminUsersState =
@@ -154,6 +158,8 @@ export type FilesData = {
     usedBytes: number;
   };
   storage: StorageStats;
+  nextCursor: string | null;
+  hasMore: boolean;
 };
 
 export type FilesState =
@@ -253,13 +259,23 @@ export async function getAuthState(): Promise<AuthState> {
   }
 }
 
-export async function getAdminUsersState(): Promise<AdminUsersState> {
+export async function getAdminUsersState(options?: {
+  usersCursor?: string;
+  invitationsCursor?: string;
+  query?: string;
+}): Promise<AdminUsersState> {
   const requestHeaders = await headers();
   const cookie = requestHeaders.get("cookie");
 
   try {
     return await requestApi<AdminUsersState>(
-      `${getApiOrigin()}/api/admin/users`,
+      `${getApiOrigin()}/api/admin/users?${new URLSearchParams({
+        ...(options?.usersCursor ? { users_cursor: options.usersCursor } : {}),
+        ...(options?.invitationsCursor
+          ? { invitations_cursor: options.invitationsCursor }
+          : {}),
+        ...(options?.query ? { q: options.query } : {}),
+      })}`,
       {
         headers: getForwardedHeaders(requestHeaders, cookie),
         cache: "no-store",
@@ -361,6 +377,7 @@ export async function getFilesState(
   folderId?: string,
   sort?: FileSort,
   direction?: FileSortDirection,
+  cursor?: string,
 ): Promise<FilesState> {
   const requestHeaders = await headers();
   const cookie = requestHeaders.get("cookie");
@@ -372,6 +389,7 @@ export async function getFilesState(
         ...(folderId ? { folder: folderId } : {}),
         ...(sort ? { sort } : {}),
         ...(sort && direction ? { direction } : {}),
+        ...(cursor ? { cursor } : {}),
       })}`,
       {
         headers: getForwardedHeaders(requestHeaders, cookie),
@@ -424,6 +442,8 @@ function isFilesData(data: Partial<FilesData>): data is FilesData {
     typeof data.summary.favoriteFiles === "number" &&
     typeof data.summary.sharedFiles === "number" &&
     typeof data.summary.usedBytes === "number" &&
+    (typeof data.nextCursor === "string" || data.nextCursor === null) &&
+    typeof data.hasMore === "boolean" &&
     data.storage !== undefined &&
     typeof data.storage.totalBytes === "number" &&
     typeof data.storage.systemUsedBytes === "number"
