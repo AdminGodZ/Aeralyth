@@ -6,13 +6,18 @@ edition = "2024"
 [dependencies]
 actix-multipart = "0.7.2"
 actix-web = "4"
+aws-config = "1"
+aws-credential-types = "1"
+aws-sdk-s3 = "1"
+aws-types = "1"
 base64 = "0.22.1"
+deadpool-postgres = "0.14.1"
 dotenvy = "0.15"
 env_logger = "0.11"
 futures-util = "0.3.32"
 getrandom = "0.4.2"
-libc = "0.2.186"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
-tokio = { version = "1", features = ["fs", "io-util"] }
+serde_json = "1"
+tokio = { version = "1", features = ["fs", "io-util", "time"] }
 tokio-postgres = "0.7.17"

@@ -4,10 +4,13 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "predev": "npm run worker:build",
     "dev:api": "cargo run --manifest-path backend/Cargo.toml",
     "db:up": "docker compose up -d postgres",
     "db:migrate": "docker compose exec -T postgres psql -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/001_auth.sql",
     "build": "next build",
+    "prebuild": "npm run worker:build",
+    "worker:build": "esbuild src/features/dashboard/folder-zip.worker.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=public/folder-zip.worker.js",
     "postinstall": "npm rebuild typescript-7",
     "start": "next start",
     "lint": "biome check",
@@ -39,6 +42,7 @@
     "@types/node": "^26.1.1",
     "@types/react": "^19",
     "@types/react-dom": "^19",
+    "esbuild": "^0.25.0",
     "tailwindcss": "^4",
     "typescript": "npm:@typescript/typescript6@^6.0.2",
     "typescript-7": "npm:typescript@^7.0.2"

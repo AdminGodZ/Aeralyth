@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { useRouter } from "next/navigation";
 import {
   ChevronDown,
   FileArchive,
@@ -47,7 +48,33 @@ type CompressionProgress = {
   currentPath: string;
 };
 
+type UploadPlan = {
+  uploadId: string;
+  mode: "local" | "single" | "multipart";
+  uploadUrl: string | null;
+  existingParts: Array<{
+    partNumber: number;
+    etag: string;
+    checksumSha256: string | null;
+  }>;
+  partSizeBytes: number | null;
+  contentType: string;
+};
+
+type UploadedPart = {
+  partNumber: number;
+  etag: string;
+  checksumSha256: string;
+};
+
+type UploadUrl = {
+  url: string;
+};
+
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_SELECTION_FILES = 1000;
+const MULTIPART_CONCURRENCY = 4;
+const UPLOAD_RETRY_COUNT = 3;
 
 export function UploadPanel({
   csrfToken,
@@ -58,10 +85,12 @@ export function UploadPanel({
   folderZipPromptEnabled: boolean;
   parentFolderId?: string | null;
 }) {
+  const router = useRouter();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const zipWorkerRef = useRef<Worker | null>(null);
-  const uploadRequestRef = useRef<XMLHttpRequest | null>(null);
+  const uploadAbortRef = useRef<AbortController | null>(null);
+  const activeUploadRequestsRef = useRef(new Set<XMLHttpRequest>());
   const [selectedFileCount, setSelectedFileCount] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
@@ -76,18 +105,14 @@ export function UploadPanel({
       totalBytes: 0,
       currentPath: "",
     });
-  const action =
-    "/api/files/upload?" +
-    new URLSearchParams({
-      csrf_token: csrfToken,
-      ...(parentFolderId ? { parent_id: parentFolderId } : {}),
-    }).toString();
   const isBusy = isUploading || isCompressing;
 
   useEffect(() => {
     return () => {
       zipWorkerRef.current?.terminate();
-      uploadRequestRef.current?.abort();
+      uploadAbortRef.current?.abort();
+      activeUploadRequestsRef.current.forEach((request) => request.abort());
+      activeUploadRequestsRef.current.clear();
     };
   }, []);
 
@@ -96,48 +121,241 @@ export function UploadPanel({
       return;
     }
 
+    if (files.length > MAX_SELECTION_FILES) {
+      setUploadError(
+        `Choose no more than ${MAX_SELECTION_FILES.toLocaleString()} files at once.`,
+      );
+      return;
+    }
+
     setSelectedFileCount(files.length);
     setUploadError(null);
     setIsUploading(true);
-    setUploadProgress(null);
+    setUploadProgress(0);
+    void uploadSelections(files);
+  }
 
-    const formData = new FormData();
-    formData.append("csrf_token", csrfToken);
+  async function uploadSelections(files: UploadSelection[]) {
+    const controller = new AbortController();
+    uploadAbortRef.current = controller;
+    const totalBytes = files.reduce(
+      (total, selection) => total + selection.file.size,
+      0,
+    );
+    const uploadedByPart = new Map<string, number>();
+    const reportProgress = (key: string, loaded: number) => {
+      uploadedByPart.set(key, loaded);
+      const uploadedBytes = Array.from(uploadedByPart.values()).reduce(
+        (total, value) => total + value,
+        0,
+      );
+      setUploadProgress(
+        totalBytes === 0
+          ? 100
+          : Math.min(100, (uploadedBytes / totalBytes) * 100),
+      );
+    };
 
-    files.forEach(({ file, relativePath }) => {
-      formData.append("file", file, relativePath);
-    });
+    try {
+      for (const [fileIndex, selection] of files.entries()) {
+        if (controller.signal.aborted) {
+          throw new DOMException("Upload canceled", "AbortError");
+        }
 
-    const request = new XMLHttpRequest();
-    uploadRequestRef.current = request;
-    request.open("POST", action);
-    request.upload.addEventListener("progress", (event) => {
-      if (event.lengthComputable && event.total > 0) {
-        setUploadProgress(Math.min(100, (event.loaded / event.total) * 100));
+        await uploadSelection(
+          selection,
+          fileIndex,
+          controller.signal,
+          reportProgress,
+        );
       }
-    });
-    request.addEventListener("load", () => {
-      uploadRequestRef.current = null;
 
-      if (request.status >= 200 && request.status < 400) {
-        setUploadProgress(100);
-        window.location.assign(request.responseURL || "/files");
+      setUploadProgress(100);
+      setIsUploading(false);
+      setSelectedFileCount(0);
+      uploadAbortRef.current = null;
+      router.refresh();
+    } catch (uploadFailure) {
+      uploadAbortRef.current = null;
+
+      if (controller.signal.aborted || isAbortError(uploadFailure)) {
+        setIsUploading(false);
+        setUploadProgress(null);
+        setSelectedFileCount(0);
         return;
       }
 
-      finishUploadWithError("Upload failed. Check the backend and try again.");
-    });
-    request.addEventListener("error", () => {
-      uploadRequestRef.current = null;
-      finishUploadWithError("Upload failed. Check the backend and try again.");
-    });
-    request.addEventListener("abort", () => {
-      uploadRequestRef.current = null;
-      setIsUploading(false);
-      setUploadProgress(null);
-      setSelectedFileCount(0);
-    });
-    request.send(formData);
+      finishUploadWithError(
+        uploadFailure instanceof Error && uploadFailure.message
+          ? uploadFailure.message
+          : "Upload failed. Check the backend and try again.",
+      );
+    }
+  }
+
+  async function uploadSelection(
+    selection: UploadSelection,
+    fileIndex: number,
+    signal: AbortSignal,
+    reportProgress: (key: string, loaded: number) => void,
+  ) {
+    if (selection.file.size > MAX_UPLOAD_BYTES) {
+      throw new Error(`${selection.file.name} exceeds the 2 GB upload limit.`);
+    }
+
+    const plan = await requestJson<UploadPlan>(
+      "/api/files/uploads",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken,
+        },
+        body: JSON.stringify({
+          name: selection.file.name,
+          relativePath: selection.relativePath,
+          sizeBytes: selection.file.size,
+          mimeType: selection.file.type || null,
+          parentId: parentFolderId ?? null,
+        }),
+        signal,
+      },
+    );
+
+    try {
+      let parts: UploadedPart[] = [];
+
+      if (plan.mode === "multipart") {
+        if (!plan.partSizeBytes) {
+          throw new Error("The storage service returned an invalid multipart plan.");
+        }
+
+        const partCount = Math.ceil(selection.file.size / plan.partSizeBytes);
+        const uploadParts = Array.from({ length: partCount }, (_, index) => ({
+          partNumber: index + 1,
+        }));
+        const existingParts = new Map(
+          plan.existingParts.map((part) => [part.partNumber, part]),
+        );
+        parts = await mapWithConcurrency(
+          uploadParts,
+          MULTIPART_CONCURRENCY,
+          async (part) => {
+            const start = (part.partNumber - 1) * plan.partSizeBytes!;
+            const end = Math.min(start + plan.partSizeBytes!, selection.file.size);
+            const blob = selection.file.slice(start, end, "");
+            const progressKey = `${fileIndex}:${part.partNumber}`;
+            const checksumSha256 = await sha256Base64(blob);
+            const existingPart = existingParts.get(part.partNumber);
+
+            if (
+              existingPart?.checksumSha256 === checksumSha256 &&
+              existingPart.etag
+            ) {
+              reportProgress(progressKey, blob.size);
+              return {
+                partNumber: part.partNumber,
+                etag: existingPart.etag,
+                checksumSha256,
+              };
+            }
+
+            const signedPart = await requestJson<UploadUrl>(
+              `/api/files/uploads/${encodeURIComponent(plan.uploadId)}/parts/${part.partNumber}`,
+              {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  "X-CSRF-Token": csrfToken,
+                },
+                body: JSON.stringify({ checksumSha256 }),
+                signal,
+              },
+            );
+            const response = await putBlobWithRetry(
+              signedPart.url,
+              blob,
+              { "x-amz-checksum-sha256": checksumSha256 },
+              signal,
+              activeUploadRequestsRef.current,
+              (loaded) => reportProgress(progressKey, loaded),
+            );
+            const etag = response.getResponseHeader("ETag")?.trim();
+
+            if (!etag) {
+              throw new Error(
+                "The storage service did not expose the multipart ETag header.",
+              );
+            }
+
+            return { partNumber: part.partNumber, etag, checksumSha256 };
+          },
+        );
+        parts.sort((left, right) => left.partNumber - right.partNumber);
+      } else {
+        const checksumSha256 =
+          plan.mode === "single"
+            ? await sha256Base64(selection.file)
+            : null;
+        const uploadUrl =
+          plan.mode === "single"
+            ? (
+                await requestJson<UploadUrl>(
+                  `/api/files/uploads/${encodeURIComponent(plan.uploadId)}/content-url`,
+                  {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      "X-CSRF-Token": csrfToken,
+                    },
+                    body: JSON.stringify({ checksumSha256 }),
+                    signal,
+                  },
+                )
+              ).url
+            : plan.uploadUrl;
+
+        if (!uploadUrl) {
+          throw new Error("The storage service did not return an upload URL.");
+        }
+
+        await putBlobWithRetry(
+          uploadUrl,
+          selection.file,
+          {
+            "Content-Type": plan.contentType,
+            ...(checksumSha256
+              ? { "x-amz-checksum-sha256": checksumSha256 }
+              : {}),
+            ...(plan.mode === "local" ? { "X-CSRF-Token": csrfToken } : {}),
+          },
+          signal,
+          activeUploadRequestsRef.current,
+          (loaded) => reportProgress(`${fileIndex}:single`, loaded),
+        );
+      }
+
+      await requestJson(
+        `/api/files/uploads/${encodeURIComponent(plan.uploadId)}/complete`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": csrfToken,
+          },
+          body: JSON.stringify({ parts }),
+          signal,
+        },
+      );
+    } catch (error) {
+      if (signal.aborted || plan.mode !== "multipart") {
+        await fetch(`/api/files/uploads/${encodeURIComponent(plan.uploadId)}`, {
+          method: "DELETE",
+          headers: { "X-CSRF-Token": csrfToken },
+        }).catch(() => undefined);
+      }
+      throw error;
+    }
   }
 
   function finishUploadWithError(message: string) {
@@ -203,7 +421,7 @@ export function UploadPanel({
     let worker: Worker;
 
     try {
-      worker = new Worker(new URL("./folder-zip.worker.ts", import.meta.url), {
+      worker = new Worker("/folder-zip.worker.js", {
         type: "module",
         name: "aeralyth-folder-zip",
       });
@@ -309,7 +527,9 @@ export function UploadPanel({
   }
 
   function cancelUpload() {
-    uploadRequestRef.current?.abort();
+    uploadAbortRef.current?.abort();
+    activeUploadRequestsRef.current.forEach((request) => request.abort());
+    activeUploadRequestsRef.current.clear();
   }
 
   return (
@@ -593,6 +813,197 @@ function getBrowserRelativePath(file: File) {
     .webkitRelativePath;
 
   return relativePath || file.name;
+}
+
+async function requestJson<T = unknown>(
+  input: string,
+  init: RequestInit,
+): Promise<T> {
+  const response = await fetch(input, init);
+
+  if (!response.ok) {
+    const message = (await response.text()).trim();
+    throw new Error(message || `Upload request failed (${response.status}).`);
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+
+  if (!contentType.includes("application/json")) {
+    return undefined as T;
+  }
+
+  return (await response.json()) as T;
+}
+
+async function sha256Base64(blob: Blob) {
+  if (!globalThis.crypto?.subtle) {
+    throw new Error("This browser cannot verify upload integrity with SHA-256.");
+  }
+
+  const digest = await globalThis.crypto.subtle.digest(
+    "SHA-256",
+    await blob.arrayBuffer(),
+  );
+  const bytes = new Uint8Array(digest);
+  let binary = "";
+
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte);
+  }
+
+  return btoa(binary);
+}
+
+async function putBlobWithRetry(
+  url: string,
+  blob: Blob,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+  activeRequests: Set<XMLHttpRequest>,
+  onProgress: (loaded: number) => void,
+) {
+  let lastError: unknown;
+
+  for (let attempt = 0; attempt < UPLOAD_RETRY_COUNT; attempt += 1) {
+    if (signal.aborted) {
+      throw new DOMException("Upload canceled", "AbortError");
+    }
+
+    onProgress(0);
+
+    try {
+      return await putBlobOnce(
+        url,
+        blob,
+        headers,
+        signal,
+        activeRequests,
+        onProgress,
+      );
+    } catch (error) {
+      if (signal.aborted || isAbortError(error)) {
+        throw error;
+      }
+
+      lastError = error;
+
+      if (attempt + 1 < UPLOAD_RETRY_COUNT) {
+        await wait(400 * 2 ** attempt, signal);
+      }
+    }
+  }
+
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("The object upload failed after multiple attempts.");
+}
+
+function putBlobOnce(
+  url: string,
+  blob: Blob,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+  activeRequests: Set<XMLHttpRequest>,
+  onProgress: (loaded: number) => void,
+) {
+  return new Promise<XMLHttpRequest>((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    const abortRequest = () => request.abort();
+    activeRequests.add(request);
+    request.open("PUT", url);
+
+    for (const [name, value] of Object.entries(headers)) {
+      request.setRequestHeader(name, value);
+    }
+
+    const cleanup = () => {
+      activeRequests.delete(request);
+      signal.removeEventListener("abort", abortRequest);
+    };
+
+    request.upload.addEventListener("progress", (event) => {
+      if (event.lengthComputable) {
+        onProgress(Math.min(blob.size, event.loaded));
+      }
+    });
+    request.addEventListener("load", () => {
+      cleanup();
+
+      if (request.status >= 200 && request.status < 300) {
+        onProgress(blob.size);
+        resolve(request);
+        return;
+      }
+
+      reject(new Error(`Object upload failed (${request.status}).`));
+    });
+    request.addEventListener("error", () => {
+      cleanup();
+      reject(new Error("The storage service could not be reached."));
+    });
+    request.addEventListener("abort", () => {
+      cleanup();
+      reject(new DOMException("Upload canceled", "AbortError"));
+    });
+    signal.addEventListener("abort", abortRequest, { once: true });
+    request.send(blob);
+  });
+}
+
+async function mapWithConcurrency<T, R>(
+  values: T[],
+  concurrency: number,
+  operation: (value: T) => Promise<R>,
+) {
+  const results = new Array<R>(values.length);
+  let nextIndex = 0;
+  let failure: unknown;
+
+  const workers = Array.from(
+    { length: Math.min(Math.max(1, concurrency), values.length) },
+    async () => {
+      while (failure === undefined) {
+        const index = nextIndex;
+        nextIndex += 1;
+
+        if (index >= values.length) {
+          return;
+        }
+
+        try {
+          results[index] = await operation(values[index]);
+        } catch (error) {
+          failure = error;
+        }
+      }
+    },
+  );
+
+  await Promise.all(workers);
+
+  if (failure !== undefined) {
+    throw failure;
+  }
+
+  return results;
+}
+
+function wait(milliseconds: number, signal: AbortSignal) {
+  return new Promise<void>((resolve, reject) => {
+    const timeout = setTimeout(resolve, milliseconds);
+    signal.addEventListener(
+      "abort",
+      () => {
+        clearTimeout(timeout);
+        reject(new DOMException("Upload canceled", "AbortError"));
+      },
+      { once: true },
+    );
+  });
+}
+
+function isAbortError(error: unknown) {
+  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function isFolderSelection(files: UploadSelection[]) {

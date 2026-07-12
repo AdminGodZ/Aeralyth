@@ -6,11 +6,6 @@ mod invitations;
 mod profile;
 
 use actix_web::web;
-use tokio_postgres::Client;
-
-pub(crate) async fn cleanup_pending_user_storage(storage_path: &str, db: &Client) {
-    admin::cleanup_pending_user_storage(storage_path, db).await;
-}
 
 pub fn configure(config: &mut web::ServiceConfig) {
     config
@@ -62,7 +57,27 @@ pub fn configure(config: &mut web::ServiceConfig) {
                     web::post().to(invitations::accept),
                 )
                 .route("/files", web::get().to(files::list_files))
-                .route("/files/upload", web::post().to(files::upload))
+                .route("/files/uploads", web::post().to(files::init_upload))
+                .route(
+                    "/files/uploads/{id}/content",
+                    web::put().to(files::upload_content),
+                )
+                .route(
+                    "/files/uploads/{id}/content-url",
+                    web::post().to(files::presign_upload_content),
+                )
+                .route(
+                    "/files/uploads/{id}/parts/{part_number}",
+                    web::post().to(files::presign_upload_part),
+                )
+                .route(
+                    "/files/uploads/{id}/complete",
+                    web::post().to(files::complete_upload),
+                )
+                .route(
+                    "/files/uploads/{id}",
+                    web::delete().to(files::abort_upload),
+                )
                 .route("/files/{id}/download", web::get().to(files::download))
                 .route("/files/{id}/share", web::post().to(files::share))
                 .route("/files/{id}/unshare", web::post().to(files::unshare))

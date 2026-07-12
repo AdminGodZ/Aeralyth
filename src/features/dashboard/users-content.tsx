@@ -5,6 +5,7 @@ import {
   Check,
   Clipboard,
   Clock3,
+  ChevronRight,
   Ellipsis,
   KeyRound,
   MailPlus,
@@ -18,6 +19,7 @@ import {
   Users,
 } from "lucide-react";
 import { useEffect, useId, useState } from "react";
+import Link from "next/link";
 
 import {
   Alert,
@@ -91,6 +93,7 @@ type UsersContentProps = {
   csrfToken: string;
   adminUsersState?: AdminUsersState;
   invitationToken?: string;
+  initialQuery?: string;
 };
 
 export function UsersContent({
@@ -98,9 +101,10 @@ export function UsersContent({
   csrfToken,
   adminUsersState,
   invitationToken,
+  initialQuery = "",
 }: UsersContentProps) {
   const [activeTab, setActiveTab] = useState("accounts");
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(initialQuery);
 
   if (!adminUsersState || adminUsersState.status === "unavailable") {
     return (
@@ -120,7 +124,15 @@ export function UsersContent({
     return null;
   }
 
-  const { users, invitations, summary } = adminUsersState.data;
+  const {
+    invitations,
+    invitationsHasMore,
+    invitationsNextCursor,
+    summary,
+    users,
+    usersHasMore,
+    usersNextCursor,
+  } = adminUsersState.data;
   const normalizedQuery = query.trim().toLowerCase();
   const filteredUsers = normalizedQuery
     ? users.filter((user) =>
@@ -185,13 +197,15 @@ export function UsersContent({
           </TabsList>
 
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <div className="relative min-w-0 sm:w-72">
+            <form action="/users" method="get" className="flex gap-2">
+              <div className="relative min-w-0 sm:w-72">
               <Search
                 className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
                 aria-hidden="true"
               />
               <Input
                 type="search"
+                name="q"
                 value={query}
                 onChange={(event) => setQuery(event.currentTarget.value)}
                 placeholder={
@@ -206,7 +220,11 @@ export function UsersContent({
                 }
                 className="h-9 pl-9"
               />
-            </div>
+              </div>
+              <Button type="submit" variant="outline" size="sm">
+                Search
+              </Button>
+            </form>
             <div className="flex gap-2">
               <InviteUserDialog csrfToken={csrfToken} />
               <CreateUserDialog csrfToken={csrfToken} />
@@ -220,6 +238,12 @@ export function UsersContent({
             currentUserId={currentUser.id}
             csrfToken={csrfToken}
           />
+          <DirectoryPager
+            cursor={usersNextCursor}
+            hasMore={usersHasMore}
+            cursorKey="usersCursor"
+            query={initialQuery}
+          />
         </TabsContent>
 
         <TabsContent value="invitations" className="m-0 min-h-0">
@@ -227,8 +251,49 @@ export function UsersContent({
             invitations={filteredInvitations}
             csrfToken={csrfToken}
           />
+          <DirectoryPager
+            cursor={invitationsNextCursor}
+            hasMore={invitationsHasMore}
+            cursorKey="invitationsCursor"
+            query={initialQuery}
+          />
         </TabsContent>
       </Tabs>
+    </div>
+  );
+}
+
+function DirectoryPager({
+  cursor,
+  hasMore,
+  cursorKey,
+  query,
+}: {
+  cursor: string | null;
+  hasMore: boolean;
+  cursorKey: "usersCursor" | "invitationsCursor";
+  query?: string;
+}) {
+  if (!hasMore || !cursor) {
+    return null;
+  }
+
+  return (
+    <div className="flex justify-end border-t px-4 py-3">
+      <Button asChild variant="outline" size="sm">
+        <Link
+          href={{
+            pathname: "/users",
+            query: {
+              ...(query ? { q: query } : {}),
+              [cursorKey]: cursor,
+            },
+          }}
+        >
+          Next page
+          <ChevronRight className="size-4" aria-hidden="true" />
+        </Link>
+      </Button>
     </div>
   );
 }
