@@ -11,7 +11,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::auth::{AuthUser, require_csrf, require_user};
 use crate::state::AppState;
-use crate::storage::UploadedPart;
+use crate::storage::{ObjectMetadata, UploadedPart};
 
 const MAX_UPLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const DEFAULT_PAGE_SIZE: usize = 50;
@@ -72,13 +72,17 @@ pub(crate) struct UploadInitResponse {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UploadUrlResponse {
     url: String,
+    content_length: u64,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UploadCompleteResponse {
+    status: String,
     file_id: String,
     location: String,
+    poll_url: String,
+    retry_after_seconds: u64,
 }
 
 #[derive(Deserialize)]
@@ -177,6 +181,7 @@ struct UploadRecord {
     mime_type: Option<String>,
     size_bytes: i64,
     mode: String,
+    part_size_bytes: Option<i64>,
     multipart_upload_id: Option<String>,
     status: String,
     checksum_sha256: Option<String>,
@@ -228,7 +233,10 @@ pub async fn list_files(
         None
     };
     let breadcrumbs = get_breadcrumbs(&state, &user, current_folder_id.as_deref()).await?;
-    let page_size = query.limit.unwrap_or(DEFAULT_PAGE_SIZE).clamp(1, MAX_PAGE_SIZE);
+    let page_size = query
+        .limit
+        .unwrap_or(DEFAULT_PAGE_SIZE)
+        .clamp(1, MAX_PAGE_SIZE);
     let page = list_entries(
         &state,
         &user,
@@ -285,9 +293,7 @@ pub async fn init_upload(
     let mut parent_id = validate_folder(&state, &user, body.parent_id.as_deref()).await?;
 
     for folder_name in folder_names {
-        parent_id = Some(
-            ensure_folder(&state, &user, parent_id.as_deref(), folder_name).await?,
-        );
+        parent_id = Some(ensure_folder(&state, &user, parent_id.as_deref(), folder_name).await?);
     }
 
     let mime_type = body
@@ -312,32 +318,40 @@ pub async fn init_upload(
     )
     .await?
     {
-        if existing.status == "completing" {
+        if existing.status == "initializing" {
             return Ok(HttpResponse::Conflict()
-                .body("a matching upload is already being finalized"));
+                .body("a matching upload is still being initialized; retry shortly"));
+        }
+        if existing.status == "completing" {
+            return Ok(
+                HttpResponse::Conflict().body("a matching upload is already being finalized")
+            );
         }
 
-        let existing_parts = if let Some(multipart_upload_id) =
-            existing.multipart_upload_id.as_deref()
-        {
-            state
-                .storage
-                .uploaded_parts(&existing.object_key, multipart_upload_id)
-                .await
-                .map_err(error::ErrorBadGateway)?
+        let existing_parts =
+            if let Some(multipart_upload_id) = existing.multipart_upload_id.as_deref() {
+                state
+                    .storage
+                    .uploaded_parts(&existing.object_key, multipart_upload_id)
+                    .await
+                    .map_err(error::ErrorBadGateway)?
+            } else {
+                Vec::new()
+            };
+
+        let part_size_bytes = if existing.mode == "multipart" {
+            Some(upload_part_size(&existing)?)
         } else {
-            Vec::new()
+            None
         };
 
         return Ok(HttpResponse::Ok().json(UploadInitResponse {
             upload_id: existing.id.clone(),
             mode: existing.mode.clone(),
-            upload_url: (existing.mode == "local").then(|| {
-                format!("/api/files/uploads/{}/content", existing.id)
-            }),
+            upload_url: (existing.mode == "local")
+                .then(|| format!("/api/files/uploads/{}/content", existing.id)),
             existing_parts,
-            part_size_bytes: (existing.mode == "multipart")
-                .then_some(state.config.storage_multipart_part_bytes),
+            part_size_bytes,
             content_type,
         }));
     }
@@ -359,31 +373,22 @@ pub async fn init_upload(
         file_id,
         create_storage_name()?
     );
-    let prepared = state
-        .storage
-        .prepare_upload(
-            &upload_id,
-            &object_key,
-            Some(&content_type),
-            body.size_bytes,
+    let upload_mode = state.storage.upload_mode(body.size_bytes).to_owned();
+    let part_size_bytes = if upload_mode == "multipart" {
+        Some(
+            i64::try_from(state.config.storage_multipart_part_bytes)
+                .map_err(|_| error::ErrorInternalServerError("invalid multipart part size"))?,
         )
-        .await
-        .map_err(error::ErrorBadGateway)?;
+    } else {
+        None
+    };
     let mut client = match state.db.get().await {
         Ok(client) => client,
-        Err(database_error) => {
-            abort_started_multipart(&state, &object_key, prepared.multipart_upload_id.as_deref())
-                .await;
-            return Err(error::ErrorInternalServerError(database_error));
-        }
+        Err(database_error) => return Err(error::ErrorInternalServerError(database_error)),
     };
     let transaction = match client.transaction().await {
         Ok(transaction) => transaction,
-        Err(database_error) => {
-            abort_started_multipart(&state, &object_key, prepared.multipart_upload_id.as_deref())
-                .await;
-            return Err(error::ErrorInternalServerError(database_error));
-        }
+        Err(database_error) => return Err(error::ErrorInternalServerError(database_error)),
     };
     let counter = match transaction
         .query_one(
@@ -393,12 +398,7 @@ pub async fn init_upload(
         .await
     {
         Ok(counter) => counter,
-        Err(database_error) => {
-            drop(transaction);
-            abort_started_multipart(&state, &object_key, prepared.multipart_upload_id.as_deref())
-                .await;
-            return Err(error::ErrorInternalServerError(database_error));
-        }
+        Err(database_error) => return Err(error::ErrorInternalServerError(database_error)),
     };
     let pending = match transaction
         .query_one(
@@ -408,20 +408,17 @@ pub async fn init_upload(
                   count(*)::bigint AS pending_uploads
                 FROM file_uploads
                 WHERE owner_id = $1
-                  AND status IN ('pending', 'completing')
-                  AND expires_at > now()
+                  AND (
+                    (status IN ('initializing', 'pending', 'completing') AND expires_at > now())
+                    OR status = 'aborting'
+                  )
             ",
             &[&user.id],
         )
         .await
     {
         Ok(pending) => pending,
-        Err(database_error) => {
-            drop(transaction);
-            abort_started_multipart(&state, &object_key, prepared.multipart_upload_id.as_deref())
-                .await;
-            return Err(error::ErrorInternalServerError(database_error));
-        }
+        Err(database_error) => return Err(error::ErrorInternalServerError(database_error)),
     };
     let used_bytes: i64 = counter.get("used_bytes");
     let pending_bytes: i64 = pending.get("pending_bytes");
@@ -433,9 +430,6 @@ pub async fn init_upload(
         .is_none_or(|reserved| reserved > state.config.storage_quota_bytes);
 
     if quota_exceeded || pending_uploads >= 20 {
-        drop(transaction);
-        abort_started_multipart(&state, &object_key, prepared.multipart_upload_id.as_deref())
-            .await;
         return if quota_exceeded {
             Err(error::ErrorPayloadTooLarge("storage quota exceeded"))
         } else {
@@ -456,10 +450,12 @@ pub async fn init_upload(
                   mime_type,
                   size_bytes,
                   upload_mode,
+                  part_size_bytes,
                   multipart_upload_id,
+                  status,
                   expires_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, now() + interval '24 hours')
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, 'initializing', now() + interval '24 hours')
             ",
             &[
                 &upload_id,
@@ -470,16 +466,13 @@ pub async fn init_upload(
                 &object_key,
                 &mime_type,
                 &size_bytes,
-                &prepared.mode,
-                &prepared.multipart_upload_id,
+                &upload_mode,
+                &part_size_bytes,
             ],
         )
         .await;
 
     if let Err(database_error) = insert_result {
-        drop(transaction);
-        abort_started_multipart(&state, &object_key, prepared.multipart_upload_id.as_deref())
-            .await;
         return Err(error::ErrorInternalServerError(database_error));
     }
     if let Err(commit_error) = transaction.commit().await {
@@ -497,12 +490,6 @@ pub async fn init_upload(
                 );
             }
             Ok(None) => {
-                abort_started_multipart(
-                    &state,
-                    &object_key,
-                    prepared.multipart_upload_id.as_deref(),
-                )
-                .await;
                 return Err(error::ErrorInternalServerError(commit_error));
             }
             Err(reconciliation_error) => {
@@ -514,12 +501,97 @@ pub async fn init_upload(
         }
     }
 
+    let prepared = match state
+        .storage
+        .prepare_upload(
+            &upload_id,
+            &object_key,
+            Some(&content_type),
+            body.size_bytes,
+        )
+        .await
+    {
+        Ok(prepared) => prepared,
+        Err(storage_error) => {
+            let grace_seconds =
+                i64::try_from(state.config.storage_multipart_orphan_grace_seconds).unwrap_or(3_600);
+            let _ = state
+                .db
+                .execute(
+                    "UPDATE file_uploads SET expires_at = now() + ($1::bigint * interval '1 second') WHERE id = $2 AND owner_id = $3 AND status = 'initializing'",
+                    &[&grace_seconds, &upload_id, &user.id],
+                )
+                .await;
+            return Err(error::ErrorBadGateway(storage_error));
+        }
+    };
+
+    let prepared_part_size_bytes = prepared
+        .part_size_bytes
+        .and_then(|value| i64::try_from(value).ok());
+
+    if prepared.mode != upload_mode || prepared_part_size_bytes != part_size_bytes {
+        log::error!(
+            "storage upload plan changed while initializing {upload_id}: expected {upload_mode}/{part_size_bytes:?}, got {}/{prepared_part_size_bytes:?}",
+            prepared.mode,
+        );
+        let _ = enqueue_upload_cleanup(
+            &state,
+            &upload_id,
+            &user.id,
+            &object_key,
+            prepared.multipart_upload_id.as_deref(),
+            &["initializing"],
+        )
+        .await;
+        return Err(error::ErrorInternalServerError(
+            "storage upload plan changed during initialization",
+        ));
+    }
+
+    let activated = state
+        .db
+        .execute(
+            "UPDATE file_uploads SET multipart_upload_id = $1, status = 'pending', expires_at = now() + interval '24 hours' WHERE id = $2 AND owner_id = $3 AND status = 'initializing'",
+            &[&prepared.multipart_upload_id, &upload_id, &user.id],
+        )
+        .await;
+
+    match activated {
+        Ok(1) => {}
+        Ok(_) => {
+            let _ = enqueue_upload_cleanup(
+                &state,
+                &upload_id,
+                &user.id,
+                &object_key,
+                prepared.multipart_upload_id.as_deref(),
+                &["initializing"],
+            )
+            .await;
+            return Ok(HttpResponse::Conflict().body("upload initialization was canceled"));
+        }
+        Err(database_error) => {
+            log::error!("could not persist provider upload id for {upload_id}: {database_error}");
+            let _ = enqueue_upload_cleanup(
+                &state,
+                &upload_id,
+                &user.id,
+                &object_key,
+                prepared.multipart_upload_id.as_deref(),
+                &["initializing"],
+            )
+            .await;
+            return Err(error::ErrorInternalServerError(database_error));
+        }
+    }
+
     Ok(HttpResponse::Created().json(UploadInitResponse {
         upload_id,
         mode: prepared.mode.to_owned(),
         upload_url: prepared.upload_url,
         existing_parts: prepared.parts,
-        part_size_bytes: prepared.part_size_bytes,
+        part_size_bytes: part_size_bytes.and_then(|value| u64::try_from(value).ok()),
         content_type,
     }))
 }
@@ -593,7 +665,9 @@ pub async fn upload_content(
 
     if written_bytes != expected_bytes {
         let _ = tokio::fs::remove_file(&temporary_path).await;
-        return Err(error::ErrorBadRequest("uploaded byte count does not match declaration"));
+        return Err(error::ErrorBadRequest(
+            "uploaded byte count does not match declaration",
+        ));
     }
 
     if let Err(rename_error) = tokio::fs::rename(&temporary_path, &object_path).await {
@@ -621,25 +695,38 @@ pub async fn presign_upload_content(
     }
 
     let checksum = validate_sha256_checksum(&body.checksum_sha256)?;
+    let content_length = u64::try_from(upload.size_bytes)
+        .map_err(|_| error::ErrorInternalServerError("invalid upload size"))?;
+    let write_lifetime_seconds = i64::try_from(state.config.storage_presign_seconds)
+        .ok()
+        .and_then(|seconds| seconds.checked_add(60))
+        .ok_or_else(|| error::ErrorInternalServerError("invalid upload signature lifetime"))?;
+    let checksum_reserved = state
+        .db
+        .execute(
+            "UPDATE file_uploads SET checksum_sha256 = $1, write_expires_at = GREATEST(COALESCE(write_expires_at, now()), now() + ($4::bigint * interval '1 second')) WHERE id = $2 AND owner_id = $3 AND status = 'pending' AND (checksum_sha256 IS NULL OR checksum_sha256 = $1)",
+            &[&checksum, &upload.id, &user.id, &write_lifetime_seconds],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    if checksum_reserved != 1 {
+        return Ok(HttpResponse::Conflict().body("upload checksum changed"));
+    }
     let content_type = upload
         .mime_type
         .as_deref()
         .unwrap_or("application/octet-stream");
     let url = state
         .storage
-        .presign_single_upload(&upload.object_key, content_type, &checksum)
+        .presign_single_upload(&upload.object_key, content_type, &checksum, content_length)
         .await
         .map_err(error::ErrorBadGateway)?;
-    state
-        .db
-        .execute(
-            "UPDATE file_uploads SET checksum_sha256 = $1 WHERE id = $2 AND owner_id = $3 AND status = 'pending'",
-            &[&checksum, &upload.id, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
 
-    Ok(HttpResponse::Ok().json(UploadUrlResponse { url }))
+    Ok(HttpResponse::Ok().json(UploadUrlResponse {
+        url,
+        content_length,
+    }))
 }
 
 pub async fn presign_upload_part(
@@ -661,13 +748,22 @@ pub async fn presign_upload_part(
 
     let size_bytes = u64::try_from(upload.size_bytes)
         .map_err(|_| error::ErrorInternalServerError("invalid upload size"))?;
-    let part_count = size_bytes.div_ceil(state.config.storage_multipart_part_bytes);
-    let part_number_u64 = u64::try_from(part_number)
-        .map_err(|_| error::ErrorBadRequest("invalid upload part"))?;
+    let part_size_bytes = upload_part_size(&upload)?;
+    let part_count = size_bytes.div_ceil(part_size_bytes);
+    let part_number_u64 =
+        u64::try_from(part_number).map_err(|_| error::ErrorBadRequest("invalid upload part"))?;
 
     if part_number_u64 == 0 || part_number_u64 > part_count {
         return Err(error::ErrorBadRequest("invalid upload part"));
     }
+    let part_offset = (part_number_u64 - 1)
+        .checked_mul(part_size_bytes)
+        .ok_or_else(|| error::ErrorBadRequest("invalid upload part"))?;
+    let content_length = size_bytes
+        .checked_sub(part_offset)
+        .map(|remaining| remaining.min(part_size_bytes))
+        .filter(|length| *length > 0)
+        .ok_or_else(|| error::ErrorBadRequest("invalid upload part"))?;
 
     let checksum = validate_sha256_checksum(&body.checksum_sha256)?;
     let multipart_upload_id = upload
@@ -681,11 +777,15 @@ pub async fn presign_upload_part(
             multipart_upload_id,
             part_number,
             &checksum,
+            content_length,
         )
         .await
         .map_err(error::ErrorBadGateway)?;
 
-    Ok(HttpResponse::Ok().json(UploadUrlResponse { url }))
+    Ok(HttpResponse::Ok().json(UploadUrlResponse {
+        url,
+        content_length,
+    }))
 }
 
 pub async fn complete_upload(
@@ -699,20 +799,12 @@ pub async fn complete_upload(
     let Some(upload) = get_upload(&state, &user, &path.into_inner()).await? else {
         return Ok(HttpResponse::NotFound().finish());
     };
-    let location = upload_redirect_location(upload.parent_id.as_deref(), "uploaded");
-
     if upload.status == "completed" {
-        return Ok(HttpResponse::Ok().json(UploadCompleteResponse {
-            file_id: upload.file_id,
-            location,
-        }));
+        return Ok(HttpResponse::Ok().json(upload_complete_response(&upload, "completed")));
     }
 
     if upload.status == "completing" {
-        return Ok(HttpResponse::Accepted().json(UploadCompleteResponse {
-            file_id: upload.file_id,
-            location,
-        }));
+        return reconcile_completing_upload_response(&state, &upload).await;
     }
 
     if upload.status != "pending" {
@@ -724,8 +816,7 @@ pub async fn complete_upload(
     let mut completed_parts = Vec::new();
 
     if upload.mode == "multipart" {
-        let expected_part_count = expected_size
-            .div_ceil(state.config.storage_multipart_part_bytes);
+        let expected_part_count = expected_size.div_ceil(upload_part_size(&upload)?);
 
         if body.parts.is_empty()
             || body.parts.len() > 10_000
@@ -743,16 +834,11 @@ pub async fn complete_upload(
         }
         completed_parts.sort_by_key(|part| part.part_number);
 
-        if completed_parts
-            .iter()
-            .enumerate()
-            .any(|(index, part)| {
-                part.part_number != i32::try_from(index + 1).unwrap_or(-1)
-                    || part.etag.is_empty()
-            })
-            || completed_parts
-                .windows(2)
-                .any(|parts| parts[0].part_number == parts[1].part_number)
+        if completed_parts.iter().enumerate().any(|(index, part)| {
+            part.part_number != i32::try_from(index + 1).unwrap_or(-1) || part.etag.is_empty()
+        }) || completed_parts
+            .windows(2)
+            .any(|parts| parts[0].part_number == parts[1].part_number)
         {
             return Err(error::ErrorBadRequest("multipart parts are invalid"));
         }
@@ -779,15 +865,11 @@ pub async fn complete_upload(
         };
 
         return if current.status == "completed" {
-            Ok(HttpResponse::Ok().json(UploadCompleteResponse {
-                file_id: current.file_id,
-                location,
-            }))
+            Ok(HttpResponse::Ok().json(upload_complete_response(&current, "completed")))
+        } else if current.status == "completing" {
+            reconcile_completing_upload_response(&state, &current).await
         } else {
-            Ok(HttpResponse::Accepted().json(UploadCompleteResponse {
-                file_id: current.file_id,
-                location,
-            }))
+            Ok(HttpResponse::Conflict().json(upload_complete_response(&current, &current.status)))
         };
     }
 
@@ -801,11 +883,7 @@ pub async fn complete_upload(
 
         if let Err(complete_error) = state
             .storage
-            .complete_multipart(
-                &upload.object_key,
-                multipart_upload_id,
-                &completed_parts,
-            )
+            .complete_multipart(&upload.object_key, multipart_upload_id, &completed_parts)
             .await
         {
             match state.storage.object_metadata(&upload.object_key).await {
@@ -829,7 +907,13 @@ pub async fn complete_upload(
                         upload.id,
                         complete_error
                     );
-                    return Err(error::ErrorBadGateway(metadata_error));
+                    log::warn!(
+                        "could not verify uncertain multipart completion {}: {}",
+                        upload.id,
+                        metadata_error
+                    );
+                    return Ok(HttpResponse::Accepted()
+                        .json(upload_complete_response(&upload, "completing")));
                 }
             }
         }
@@ -837,11 +921,19 @@ pub async fn complete_upload(
 
     let metadata = match metadata {
         Some(metadata) => metadata,
-        None => state
-            .storage
-            .object_metadata(&upload.object_key)
-            .await
-            .map_err(error::ErrorBadGateway)?,
+        None => match state.storage.object_metadata(&upload.object_key).await {
+            Ok(metadata) => metadata,
+            Err(metadata_error) => {
+                log::warn!(
+                    "could not verify completing upload {}: {}",
+                    upload.id,
+                    metadata_error
+                );
+                return Ok(
+                    HttpResponse::Accepted().json(upload_complete_response(&upload, "completing"))
+                );
+            }
+        },
     };
     let checksum_mismatch = upload.mode == "single"
         && upload
@@ -850,38 +942,98 @@ pub async fn complete_upload(
             .is_none_or(|expected| metadata.checksum_sha256.as_deref() != Some(expected));
 
     if metadata.size_bytes != expected_size || checksum_mismatch {
-        let mut client = state
-            .db
-            .get()
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        let transaction = client
-            .transaction()
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        transaction
-            .execute(
-                "INSERT INTO storage_deletion_jobs (object_key) VALUES ($1) ON CONFLICT (object_key) DO NOTHING",
-                &[&upload.object_key],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        transaction
-            .execute(
-                "UPDATE file_uploads SET status = 'aborted' WHERE id = $1 AND owner_id = $2 AND status = 'completing'",
-                &[&upload.id, &user.id],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        transaction
-            .commit()
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+        enqueue_upload_cleanup(
+            &state,
+            &upload.id,
+            &user.id,
+            &upload.object_key,
+            upload.multipart_upload_id.as_deref(),
+            &["completing"],
+        )
+        .await?;
         return Err(error::ErrorBadRequest(
             "uploaded object integrity check failed",
         ));
     }
 
+    finalize_upload_record(&state, &upload, &metadata).await?;
+
+    Ok(HttpResponse::Created().json(upload_complete_response(&upload, "completed")))
+}
+
+pub async fn upload_status(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    path: web::Path<String>,
+) -> Result<HttpResponse> {
+    let user = require_user(&state, &request).await?;
+    let Some(upload) = get_upload(&state, &user, &path.into_inner()).await? else {
+        return Ok(HttpResponse::NotFound().finish());
+    };
+
+    if upload.status == "completing" {
+        return reconcile_completing_upload_response(&state, &upload).await;
+    }
+
+    let response = upload_complete_response(&upload, &upload.status);
+
+    match upload.status.as_str() {
+        "completed" | "pending" | "initializing" => Ok(HttpResponse::Ok().json(response)),
+        "aborting" | "aborted" => Ok(HttpResponse::Conflict().json(response)),
+        _ => Ok(HttpResponse::Conflict().finish()),
+    }
+}
+
+async fn reconcile_completing_upload_response(
+    state: &AppState,
+    upload: &UploadRecord,
+) -> Result<HttpResponse> {
+    let metadata = match state.storage.object_metadata(&upload.object_key).await {
+        Ok(metadata) => metadata,
+        Err(metadata_error) => {
+            if !metadata_error.is_not_found() {
+                log::warn!(
+                    "could not poll completing upload {}: {}",
+                    upload.id,
+                    metadata_error
+                );
+            }
+            return Ok(
+                HttpResponse::Accepted().json(upload_complete_response(upload, "completing"))
+            );
+        }
+    };
+    let expected_size = u64::try_from(upload.size_bytes)
+        .map_err(|_| error::ErrorInternalServerError("invalid upload size"))?;
+    let checksum_mismatch = upload.mode == "single"
+        && upload
+            .checksum_sha256
+            .as_deref()
+            .is_none_or(|expected| metadata.checksum_sha256.as_deref() != Some(expected));
+
+    if metadata.size_bytes != expected_size || checksum_mismatch {
+        enqueue_upload_cleanup(
+            state,
+            &upload.id,
+            &upload.owner_id,
+            &upload.object_key,
+            upload.multipart_upload_id.as_deref(),
+            &["completing"],
+        )
+        .await?;
+        return Ok(HttpResponse::Conflict().json(upload_complete_response(upload, "aborting")));
+    }
+
+    finalize_upload_record(state, upload, &metadata).await?;
+
+    Ok(HttpResponse::Ok().json(upload_complete_response(upload, "completed")))
+}
+
+async fn finalize_upload_record(
+    state: &AppState,
+    upload: &UploadRecord,
+    metadata: &ObjectMetadata,
+) -> Result<()> {
     let mut client = state
         .db
         .get()
@@ -891,6 +1043,29 @@ pub async fn complete_upload(
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
+    let current = transaction
+        .query_opt(
+            "SELECT status FROM file_uploads WHERE id = $1 AND owner_id = $2 FOR UPDATE",
+            &[&upload.id, &upload.owner_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let Some(current) = current else {
+        return Err(error::ErrorNotFound("upload no longer exists"));
+    };
+    let current_status: String = current.get("status");
+
+    if current_status == "completed" {
+        transaction
+            .commit()
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        return Ok(());
+    }
+    if current_status != "completing" {
+        return Err(error::ErrorConflict("upload is no longer completing"));
+    }
+
     transaction
         .execute(
             "
@@ -926,7 +1101,7 @@ pub async fn complete_upload(
     transaction
         .execute(
             "UPDATE file_uploads SET status = 'completed', completed_at = now() WHERE id = $1 AND owner_id = $2 AND status = 'completing'",
-            &[&upload.id, &user.id],
+            &[&upload.id, &upload.owner_id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -935,10 +1110,17 @@ pub async fn complete_upload(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    Ok(HttpResponse::Created().json(UploadCompleteResponse {
-        file_id: upload.file_id,
-        location,
-    }))
+    Ok(())
+}
+
+fn upload_complete_response(upload: &UploadRecord, status: &str) -> UploadCompleteResponse {
+    UploadCompleteResponse {
+        status: status.to_owned(),
+        file_id: upload.file_id.clone(),
+        location: upload_redirect_location(upload.parent_id.as_deref(), "uploaded"),
+        poll_url: format!("/api/files/uploads/{}/status", upload.id),
+        retry_after_seconds: 2,
+    }
 }
 
 pub async fn abort_upload(
@@ -952,42 +1134,16 @@ pub async fn abort_upload(
         return Ok(HttpResponse::NoContent().finish());
     };
 
-    if upload.status == "pending" {
-        let mut client = state
-            .db
-            .get()
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        let transaction = client
-            .transaction()
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        transaction
-            .execute(
-                "
-                    INSERT INTO storage_deletion_jobs (object_key, multipart_upload_id)
-                    VALUES ($1, $2)
-                    ON CONFLICT (object_key) DO UPDATE SET
-                      multipart_upload_id = COALESCE(
-                        EXCLUDED.multipart_upload_id,
-                        storage_deletion_jobs.multipart_upload_id
-                      )
-                ",
-                &[&upload.object_key, &upload.multipart_upload_id],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        transaction
-            .execute(
-                "UPDATE file_uploads SET status = 'aborted' WHERE id = $1 AND owner_id = $2 AND status = 'pending'",
-                &[&upload.id, &user.id],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        transaction
-            .commit()
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+    if matches!(upload.status.as_str(), "initializing" | "pending") {
+        enqueue_upload_cleanup(
+            &state,
+            &upload.id,
+            &user.id,
+            &upload.object_key,
+            upload.multipart_upload_id.as_deref(),
+            &["initializing", "pending"],
+        )
+        .await?;
         if let Some(object_path) = state.storage.local_path(&upload.object_key) {
             let temporary_path = object_path.with_extension(format!("part-{}", upload.id));
             let _ = tokio::fs::remove_file(temporary_path).await;
@@ -1337,15 +1493,28 @@ pub async fn delete(
                   INNER JOIN subtree AS parent ON child.parent_id = parent.id
                   WHERE child.owner_id = $2
                 )
-                INSERT INTO storage_deletion_jobs (object_key)
-                SELECT CASE
-                  WHEN position('/' IN storage_name) = 0
-                    THEN owner_id || '/' || storage_name
-                  ELSE storage_name
-                END
+                INSERT INTO storage_deletion_jobs (object_key, available_at)
+                SELECT
+                  CASE
+                    WHEN position('/' IN subtree.storage_name) = 0
+                      THEN subtree.owner_id || '/' || subtree.storage_name
+                    ELSE subtree.storage_name
+                  END,
+                  CASE
+                    WHEN uploads.upload_mode = 'single'
+                      THEN GREATEST(COALESCE(uploads.write_expires_at, now()), now())
+                    ELSE now()
+                  END
                 FROM subtree
-                WHERE entry_type = 'file'
-                ON CONFLICT (object_key) DO NOTHING
+                LEFT JOIN file_uploads AS uploads
+                  ON uploads.file_id = subtree.id
+                 AND uploads.status = 'completed'
+                WHERE subtree.entry_type = 'file'
+                ON CONFLICT (object_key) DO UPDATE SET
+                  available_at = GREATEST(
+                    storage_deletion_jobs.available_at,
+                    EXCLUDED.available_at
+                  )
             ",
             &[&file.id, &user.id],
         )
@@ -1551,11 +1720,12 @@ async fn list_entries(
 
     let predicate = match view {
         "files" => "files.state = 'active' AND files.parent_id IS NOT DISTINCT FROM $2",
-        "trash" =>
+        "trash" => {
             "files.state = 'trashed' AND NOT EXISTS (
               SELECT 1 FROM files AS parent
               WHERE parent.id = files.parent_id AND parent.state = 'trashed'
-            )",
+            )"
+        }
         "favorites" => "files.state = 'active' AND files.favorite = true",
         "recent" => "files.state = 'active'",
         _ => "files.state = 'active'",
@@ -1853,7 +2023,9 @@ fn decode_file_cursor(
         || cursor.sort != sort
         || cursor.direction != direction
     {
-        return Err(error::ErrorBadRequest("file cursor does not match this view"));
+        return Err(error::ErrorBadRequest(
+            "file cursor does not match this view",
+        ));
     }
 
     Ok(Some(cursor))
@@ -2001,6 +2173,7 @@ async fn get_upload(
                   mime_type,
                   size_bytes,
                   upload_mode,
+                  part_size_bytes,
                   multipart_upload_id,
                   status,
                   checksum_sha256
@@ -2025,6 +2198,7 @@ async fn get_upload(
         mime_type: row.get("mime_type"),
         size_bytes: row.get("size_bytes"),
         mode: row.get("upload_mode"),
+        part_size_bytes: row.get("part_size_bytes"),
         multipart_upload_id: row.get("multipart_upload_id"),
         status: row.get("status"),
         checksum_sha256: row.get("checksum_sha256"),
@@ -2054,6 +2228,7 @@ async fn find_resumable_upload(
                   mime_type,
                   size_bytes,
                   upload_mode,
+                  part_size_bytes,
                   multipart_upload_id,
                   status,
                   checksum_sha256
@@ -2063,12 +2238,18 @@ async fn find_resumable_upload(
                   AND original_name = $3
                   AND size_bytes = $4
                   AND mime_type IS NOT DISTINCT FROM $5
-                  AND status IN ('pending', 'completing')
+                  AND status IN ('initializing', 'pending', 'completing')
                   AND expires_at > now()
                 ORDER BY created_at DESC
                 LIMIT 1
             ",
-            &[&user.id, &parent_id, &original_name, &size_bytes, &mime_type],
+            &[
+                &user.id,
+                &parent_id,
+                &original_name,
+                &size_bytes,
+                &mime_type,
+            ],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -2083,6 +2264,7 @@ async fn find_resumable_upload(
         mime_type: row.get("mime_type"),
         size_bytes: row.get("size_bytes"),
         mode: row.get("upload_mode"),
+        part_size_bytes: row.get("part_size_bytes"),
         multipart_upload_id: row.get("multipart_upload_id"),
         status: row.get("status"),
         checksum_sha256: row.get("checksum_sha256"),
@@ -2105,8 +2287,10 @@ async fn current_reserved_bytes(state: &AppState, user: &AuthUser) -> Result<u64
                     SELECT sum(size_bytes)
                     FROM file_uploads
                     WHERE owner_id = $1
-                      AND status IN ('pending', 'completing')
-                      AND expires_at > now()
+                      AND (
+                        (status IN ('initializing', 'pending', 'completing') AND expires_at > now())
+                        OR status = 'aborting'
+                      )
                   ), 0)::bigint AS reserved_bytes
             ",
             &[&user.id],
@@ -2129,22 +2313,79 @@ async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<
     require_csrf(state, request, csrf_token).await
 }
 
-async fn abort_started_multipart(
+async fn enqueue_upload_cleanup(
     state: &AppState,
+    upload_id: &str,
+    owner_id: &str,
     object_key: &str,
     multipart_upload_id: Option<&str>,
-) {
-    let Some(multipart_upload_id) = multipart_upload_id else {
-        return;
-    };
-
-    if let Err(storage_error) = state
-        .storage
-        .abort_multipart(object_key, multipart_upload_id)
+    from_statuses: &[&str],
+) -> Result<bool> {
+    let statuses = from_statuses
+        .iter()
+        .map(|status| (*status).to_owned())
+        .collect::<Vec<_>>();
+    let transitioned = state
+        .db
+        .query_opt(
+            "
+                WITH transitioned AS (
+                  UPDATE file_uploads
+                  SET status = 'aborting',
+                      multipart_upload_id = COALESCE($1, multipart_upload_id),
+                      expires_at = now() + interval '24 hours'
+                  WHERE id = $2
+                    AND owner_id = $3
+                    AND object_key = $4
+                    AND status = ANY($5)
+                  RETURNING object_key, multipart_upload_id, upload_mode, write_expires_at
+                )
+                INSERT INTO storage_deletion_jobs (
+                  object_key,
+                  multipart_upload_id,
+                  available_at
+                )
+                SELECT
+                  object_key,
+                  multipart_upload_id,
+                  CASE
+                    WHEN upload_mode = 'single'
+                      THEN GREATEST(COALESCE(write_expires_at, now()), now())
+                    ELSE now()
+                  END
+                FROM transitioned
+                ON CONFLICT (object_key) DO UPDATE SET
+                  multipart_upload_id = COALESCE(
+                    EXCLUDED.multipart_upload_id,
+                    storage_deletion_jobs.multipart_upload_id
+                  ),
+                  available_at = GREATEST(
+                    storage_deletion_jobs.available_at,
+                    EXCLUDED.available_at
+                  )
+                RETURNING object_key
+            ",
+            &[
+                &multipart_upload_id,
+                &upload_id,
+                &owner_id,
+                &object_key,
+                &statuses,
+            ],
+        )
         .await
-    {
-        log::warn!("could not abort unreserved multipart upload: {storage_error}");
-    }
+        .map_err(error::ErrorInternalServerError)?;
+    let did_transition = transitioned.is_some();
+
+    Ok(did_transition)
+}
+
+fn upload_part_size(upload: &UploadRecord) -> Result<u64> {
+    upload
+        .part_size_bytes
+        .and_then(|value| u64::try_from(value).ok())
+        .filter(|value| *value > 0)
+        .ok_or_else(|| error::ErrorInternalServerError("multipart part size is missing"))
 }
 
 fn validate_sha256_checksum(value: &str) -> Result<String> {

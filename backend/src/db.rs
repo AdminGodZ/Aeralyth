@@ -2,9 +2,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::time::Duration;
 
-use deadpool_postgres::{
-    Hook, HookError, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime,
-};
+use deadpool_postgres::{Hook, HookError, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{NoTls, Row};
 
