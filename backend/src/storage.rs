@@ -1,20 +1,22 @@
+use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_config::BehaviorVersion;
 use aws_credential_types::Credentials;
 use aws_sdk_s3::presigning::PresigningConfig;
-use aws_sdk_s3::types::{
-    ChecksumAlgorithm, ChecksumMode, CompletedMultipartUpload, CompletedPart,
-};
+use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode, CompletedMultipartUpload, CompletedPart};
 use aws_types::region::Region;
 use serde::Serialize;
 use tokio::time::{MissedTickBehavior, interval};
 
 use crate::config::Config;
 use crate::db::Database;
+
+const MULTIPART_RECONCILIATION_LOCK_ID: i64 = 4_133_797_884_291_001;
+const STORAGE_OBJECT_PREFIX: &str = "users/";
 
 #[derive(Clone)]
 pub enum Storage {
@@ -28,6 +30,7 @@ pub enum Storage {
         presign_seconds: u64,
         multipart_threshold_bytes: u64,
         multipart_part_bytes: u64,
+        multipart_orphan_grace_seconds: u64,
     },
 }
 
@@ -80,6 +83,18 @@ pub struct ObjectMetadata {
     pub etag: Option<String>,
 }
 
+pub struct MultipartUploadSession {
+    pub object_key: String,
+    pub upload_id: String,
+    pub initiated_epoch_seconds: i64,
+}
+
+pub struct MultipartUploadPage {
+    pub uploads: Vec<MultipartUploadSession>,
+    pub next_key_marker: Option<String>,
+    pub next_upload_id_marker: Option<String>,
+}
+
 impl Storage {
     pub async fn create(config: &Config) -> Result<Self, StorageError> {
         if config.storage_backend == "local" {
@@ -94,10 +109,8 @@ impl Storage {
         let bucket = required(config.s3_bucket.clone(), "S3 bucket")?;
         let endpoint = required(config.s3_endpoint.clone(), "S3 endpoint")?;
         let access_key_id = required(config.s3_access_key_id.clone(), "S3 access key")?;
-        let secret_access_key = required(
-            config.s3_secret_access_key.clone(),
-            "S3 secret access key",
-        )?;
+        let secret_access_key =
+            required(config.s3_secret_access_key.clone(), "S3 secret access key")?;
         let credentials = Credentials::new(
             access_key_id,
             secret_access_key,
@@ -122,6 +135,7 @@ impl Storage {
             presign_seconds: config.storage_presign_seconds,
             multipart_threshold_bytes: config.storage_multipart_threshold_bytes,
             multipart_part_bytes: config.storage_multipart_part_bytes,
+            multipart_orphan_grace_seconds: config.storage_multipart_orphan_grace_seconds,
         })
     }
 
@@ -129,6 +143,17 @@ impl Storage {
         match self {
             Self::Local { .. } => "local",
             Self::S3 { .. } => "s3",
+        }
+    }
+
+    pub fn upload_mode(&self, size_bytes: u64) -> &'static str {
+        match self {
+            Self::Local { .. } => "local",
+            Self::S3 {
+                multipart_threshold_bytes,
+                ..
+            } if size_bytes >= *multipart_threshold_bytes => "multipart",
+            Self::S3 { .. } => "single",
         }
     }
 
@@ -210,6 +235,7 @@ impl Storage {
         object_key: &str,
         content_type: &str,
         checksum_sha256: &str,
+        content_length: u64,
     ) -> Result<String, StorageError> {
         let Self::S3 {
             client,
@@ -218,14 +244,19 @@ impl Storage {
             ..
         } = self
         else {
-            return Err(storage_message("single-object presigning requires S3 storage"));
+            return Err(storage_message(
+                "single-object presigning requires S3 storage",
+            ));
         };
+        let content_length = i64::try_from(content_length)
+            .map_err(|_| storage_message("upload content length is invalid"))?;
         let request = client
             .put_object()
             .bucket(bucket)
             .key(object_key)
             .content_type(content_type)
             .checksum_sha256(checksum_sha256)
+            .content_length(content_length)
             .presigned(presigning_config(*presign_seconds)?)
             .await
             .map_err(storage_error)?;
@@ -239,6 +270,7 @@ impl Storage {
         multipart_upload_id: &str,
         part_number: i32,
         checksum_sha256: &str,
+        content_length: u64,
     ) -> Result<String, StorageError> {
         let Self::S3 {
             client,
@@ -249,6 +281,8 @@ impl Storage {
         else {
             return Err(storage_message("multipart presigning requires S3 storage"));
         };
+        let content_length = i64::try_from(content_length)
+            .map_err(|_| storage_message("upload part length is invalid"))?;
         let request = client
             .upload_part()
             .bucket(bucket)
@@ -256,6 +290,7 @@ impl Storage {
             .upload_id(multipart_upload_id)
             .part_number(part_number)
             .checksum_sha256(checksum_sha256)
+            .content_length(content_length)
             .presigned(presigning_config(*presign_seconds)?)
             .await
             .map_err(storage_error)?;
@@ -312,6 +347,71 @@ impl Storage {
         Ok(parts)
     }
 
+    pub async fn multipart_upload_page(
+        &self,
+        prefix: &str,
+        key_marker: Option<&str>,
+        upload_id_marker: Option<&str>,
+    ) -> Result<MultipartUploadPage, StorageError> {
+        let Self::S3 { client, bucket, .. } = self else {
+            return Ok(MultipartUploadPage {
+                uploads: Vec::new(),
+                next_key_marker: None,
+                next_upload_id_marker: None,
+            });
+        };
+        let output = client
+            .list_multipart_uploads()
+            .bucket(bucket)
+            .prefix(prefix)
+            .set_key_marker(key_marker.map(str::to_owned))
+            .set_upload_id_marker(upload_id_marker.map(str::to_owned))
+            .max_uploads(1_000)
+            .send()
+            .await
+            .map_err(storage_error)?;
+        let mut uploads = Vec::new();
+
+        for upload in output.uploads() {
+            let (Some(object_key), Some(upload_id), Some(initiated)) =
+                (upload.key(), upload.upload_id(), upload.initiated())
+            else {
+                log::warn!("S3 returned an incomplete multipart upload listing entry");
+                continue;
+            };
+            uploads.push(MultipartUploadSession {
+                object_key: object_key.to_owned(),
+                upload_id: upload_id.to_owned(),
+                initiated_epoch_seconds: initiated.secs(),
+            });
+        }
+        let is_truncated = output.is_truncated() == Some(true);
+        let next_key_marker = output.next_key_marker().map(str::to_owned);
+        let next_upload_id_marker = output.next_upload_id_marker().map(str::to_owned);
+
+        if is_truncated && (next_key_marker.is_none() || next_upload_id_marker.is_none()) {
+            return Err(storage_message(
+                "S3 multipart listing omitted required pagination markers",
+            ));
+        }
+
+        Ok(MultipartUploadPage {
+            uploads,
+            next_key_marker: is_truncated.then_some(next_key_marker).flatten(),
+            next_upload_id_marker: is_truncated.then_some(next_upload_id_marker).flatten(),
+        })
+    }
+
+    pub fn multipart_orphan_grace_seconds(&self) -> Option<u64> {
+        match self {
+            Self::Local { .. } => None,
+            Self::S3 {
+                multipart_orphan_grace_seconds,
+                ..
+            } => Some(*multipart_orphan_grace_seconds),
+        }
+    }
+
     pub async fn complete_multipart(
         &self,
         object_key: &str,
@@ -357,14 +457,22 @@ impl Storage {
             return Ok(());
         };
 
-        client
+        let result = client
             .abort_multipart_upload()
             .bucket(bucket)
             .key(object_key)
             .upload_id(multipart_upload_id)
             .send()
-            .await
-            .map_err(storage_error)?;
+            .await;
+
+        match result {
+            Ok(_) => {}
+            Err(error)
+                if error
+                    .as_service_error()
+                    .is_some_and(|service_error| service_error.is_no_such_upload()) => {}
+            Err(error) => return Err(storage_error(error)),
+        }
 
         Ok(())
     }
@@ -375,9 +483,9 @@ impl Storage {
                 let path = self
                     .local_path(object_key)
                     .ok_or_else(|| storage_message("invalid local object key"))?;
-                let metadata = tokio::fs::metadata(path).await.map_err(|error| {
-                    storage_io_error(error)
-                })?;
+                let metadata = tokio::fs::metadata(path)
+                    .await
+                    .map_err(|error| storage_io_error(error))?;
                 Ok(ObjectMetadata {
                     size_bytes: metadata.len(),
                     checksum_sha256: None,
@@ -496,7 +604,7 @@ impl Storage {
 pub async fn run_maintenance(db: Database, storage: Storage) {
     let mut maintenance_interval = interval(Duration::from_secs(10));
     maintenance_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut reconciliation_ticks = 0_u16;
+    let mut reconciliation_ticks = 359_u16;
 
     loop {
         maintenance_interval.tick().await;
@@ -514,11 +622,174 @@ pub async fn run_maintenance(db: Database, storage: Storage) {
         reconciliation_ticks = reconciliation_ticks.saturating_add(1);
         if reconciliation_ticks >= 360 {
             reconciliation_ticks = 0;
+            if let Err(error) = reconcile_orphaned_multipart_uploads(&db, &storage).await {
+                log::error!("multipart upload reconciliation failed: {error}");
+            }
             if let Err(error) = reconcile_counters(&db).await {
                 log::error!("counter reconciliation failed: {error}");
             }
         }
     }
+}
+
+async fn reconcile_orphaned_multipart_uploads(
+    db: &Database,
+    storage: &Storage,
+) -> Result<(), Box<dyn StdError + Send + Sync>> {
+    let Some(grace_seconds) = storage.multipart_orphan_grace_seconds() else {
+        return Ok(());
+    };
+    let client = db.get().await?;
+    let lock_row = client
+        .query_one(
+            "SELECT pg_try_advisory_lock($1)",
+            &[&MULTIPART_RECONCILIATION_LOCK_ID],
+        )
+        .await?;
+    let lock_acquired: bool = lock_row.get(0);
+
+    if !lock_acquired {
+        return Ok(());
+    }
+
+    let sweep_result = sweep_orphaned_multipart_uploads(&client, storage, grace_seconds).await;
+    let unlock_result = client
+        .query_one(
+            "SELECT pg_advisory_unlock($1)",
+            &[&MULTIPART_RECONCILIATION_LOCK_ID],
+        )
+        .await;
+
+    if let Err(error) = unlock_result {
+        log::error!("could not release multipart reconciliation lock: {error}");
+        if sweep_result.is_ok() {
+            return Err(error.into());
+        }
+    }
+
+    sweep_result
+}
+
+async fn sweep_orphaned_multipart_uploads(
+    client: &deadpool_postgres::Client,
+    storage: &Storage,
+    grace_seconds: u64,
+) -> Result<(), Box<dyn StdError + Send + Sync>> {
+    let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
+    let cutoff = now.saturating_sub(grace_seconds);
+    let cutoff = i64::try_from(cutoff).unwrap_or(i64::MAX);
+    let mut key_marker: Option<String> = None;
+    let mut upload_id_marker: Option<String> = None;
+
+    loop {
+        let page = storage
+            .multipart_upload_page(
+                STORAGE_OBJECT_PREFIX,
+                key_marker.as_deref(),
+                upload_id_marker.as_deref(),
+            )
+            .await?;
+        let object_keys = page
+            .uploads
+            .iter()
+            .map(|upload| upload.object_key.clone())
+            .collect::<Vec<_>>();
+        let intent_rows = if object_keys.is_empty() {
+            Vec::new()
+        } else {
+            client
+                .query(
+                    "SELECT object_key, status, multipart_upload_id FROM file_uploads WHERE object_key = ANY($1)",
+                    &[&object_keys],
+                )
+                .await?
+        };
+        let intents = intent_rows
+            .into_iter()
+            .map(|row| {
+                (
+                    row.get::<_, String>("object_key"),
+                    (
+                        row.get::<_, String>("status"),
+                        row.get::<_, Option<String>>("multipart_upload_id"),
+                    ),
+                )
+            })
+            .collect::<HashMap<_, _>>();
+
+        for upload in page.uploads {
+            if upload.initiated_epoch_seconds > cutoff {
+                continue;
+            }
+
+            if let Some((status, Some(known_upload_id))) = intents.get(&upload.object_key)
+                && matches!(status.as_str(), "pending" | "completing" | "aborting")
+                && known_upload_id == &upload.upload_id
+            {
+                continue;
+            }
+
+            if matches!(
+                intents.get(&upload.object_key),
+                Some((status, None)) if status == "initializing"
+            ) {
+                let adopted = client
+                    .execute(
+                        "UPDATE file_uploads SET multipart_upload_id = $1, status = 'pending', expires_at = now() + interval '24 hours' WHERE object_key = $2 AND status = 'initializing' AND multipart_upload_id IS NULL",
+                        &[&upload.upload_id, &upload.object_key],
+                    )
+                    .await?;
+
+                if adopted == 1 {
+                    log::warn!(
+                        "adopted multipart upload {} for durable intent {}",
+                        upload.upload_id,
+                        upload.object_key
+                    );
+                    continue;
+                }
+
+                let known_after_race = client
+                    .query_opt(
+                        "SELECT 1 FROM file_uploads WHERE object_key = $1 AND multipart_upload_id = $2 AND status IN ('pending', 'completing', 'aborting') LIMIT 1",
+                        &[&upload.object_key, &upload.upload_id],
+                    )
+                    .await?
+                    .is_some();
+
+                if known_after_race {
+                    continue;
+                }
+            }
+
+            storage
+                .abort_multipart(&upload.object_key, &upload.upload_id)
+                .await?;
+            log::warn!(
+                "aborted orphaned multipart upload {} for {}",
+                upload.upload_id,
+                upload.object_key
+            );
+        }
+
+        let next_key_marker = page.next_key_marker;
+        let next_upload_id_marker = page.next_upload_id_marker;
+
+        if next_key_marker.is_none() {
+            break;
+        }
+        if next_key_marker == key_marker && next_upload_id_marker == upload_id_marker {
+            return Err(std::io::Error::other(
+                "S3 multipart listing returned unchanged pagination markers",
+            )
+            .into());
+        }
+
+        key_marker = next_key_marker;
+        upload_id_marker = next_upload_id_marker;
+    }
+
+    Ok(())
 }
 
 async fn process_deletion_jobs(
@@ -559,9 +830,9 @@ async fn process_deletion_jobs(
 
         let deletion_result = async {
             if let Some(multipart_upload_id) = multipart_upload_id.as_deref() {
-                let _ = storage
+                storage
                     .abort_multipart(&object_key, multipart_upload_id)
-                    .await;
+                    .await?;
             }
             storage.delete_object(&object_key).await
         }
@@ -569,8 +840,18 @@ async fn process_deletion_jobs(
 
         match deletion_result {
             Ok(()) => {
-                db.execute("DELETE FROM storage_deletion_jobs WHERE id = $1", &[&id])
+                let mut client = db.get().await?;
+                let transaction = client.transaction().await?;
+                transaction
+                    .execute(
+                        "UPDATE file_uploads SET status = 'aborted' WHERE object_key = $1 AND status = 'aborting'",
+                        &[&object_key],
+                    )
                     .await?;
+                transaction
+                    .execute("DELETE FROM storage_deletion_jobs WHERE id = $1", &[&id])
+                    .await?;
+                transaction.commit().await?;
             }
             Err(error) => {
                 let delay_seconds = retry_delay_seconds(attempts);
@@ -604,7 +885,8 @@ async fn expire_abandoned_uploads(
                 WITH claimed AS (
                   SELECT id
                   FROM file_uploads
-                  WHERE status IN ('pending', 'completing') AND expires_at <= now()
+                  WHERE status IN ('initializing', 'pending', 'completing', 'aborting')
+                    AND expires_at <= now()
                   ORDER BY expires_at
                   LIMIT 25
                   FOR UPDATE SKIP LOCKED
@@ -635,7 +917,6 @@ async fn expire_abandoned_uploads(
         let id: String = upload.get("id");
         let status: String = upload.get("status");
         let object_key: String = upload.get("object_key");
-        let multipart_upload_id: Option<String> = upload.get("multipart_upload_id");
 
         if status == "completing" {
             let expected_size: i64 = upload.get("size_bytes");
@@ -661,6 +942,21 @@ async fn expire_abandoned_uploads(
                 if size_matches && checksum_matches {
                     let mut client = db.get().await?;
                     let transaction = client.transaction().await?;
+                    let current = transaction
+                        .query_opt(
+                            "SELECT status FROM file_uploads WHERE id = $1 FOR UPDATE",
+                            &[&id],
+                        )
+                        .await?;
+
+                    if current
+                        .as_ref()
+                        .is_none_or(|row| row.get::<_, String>("status") != "completing")
+                    {
+                        transaction.commit().await?;
+                        continue;
+                    }
+
                     let file_id: String = upload.get("file_id");
                     let owner_id: String = upload.get("owner_id");
                     let parent_id: Option<String> = upload.get("parent_id");
@@ -709,36 +1005,53 @@ async fn expire_abandoned_uploads(
             }
         }
 
-        let cleanup_result = async {
-            if let Some(multipart_upload_id) = multipart_upload_id.as_deref() {
-                let _ = storage
-                    .abort_multipart(&object_key, multipart_upload_id)
-                    .await;
-            }
-            storage.delete_object(&object_key).await
-        }
-        .await;
-
-        match cleanup_result {
-            Ok(()) => {
-                db.execute(
-                    "UPDATE file_uploads SET status = 'aborted' WHERE id = $1 AND status IN ('pending', 'completing')",
-                    &[&id],
-                )
-                .await?;
-            }
-            Err(error) => {
-                log::warn!("could not clean abandoned upload {id}: {error}");
-            }
-        }
+        let mut client = db.get().await?;
+        let transaction = client.transaction().await?;
+        transaction
+            .execute(
+                "
+                    WITH transitioned AS (
+                      UPDATE file_uploads
+                      SET status = 'aborting',
+                          expires_at = now() + interval '24 hours'
+                      WHERE id = $1
+                        AND status IN ('initializing', 'pending', 'completing', 'aborting')
+                      RETURNING object_key, multipart_upload_id, upload_mode, write_expires_at
+                    )
+                    INSERT INTO storage_deletion_jobs (
+                      object_key,
+                      multipart_upload_id,
+                      available_at
+                    )
+                    SELECT
+                      object_key,
+                      multipart_upload_id,
+                      CASE
+                        WHEN upload_mode = 'single'
+                          THEN GREATEST(COALESCE(write_expires_at, now()), now())
+                        ELSE now()
+                      END
+                    FROM transitioned
+                    ON CONFLICT (object_key) DO UPDATE SET
+                      multipart_upload_id = COALESCE(
+                        EXCLUDED.multipart_upload_id,
+                        storage_deletion_jobs.multipart_upload_id
+                      ),
+                      available_at = GREATEST(
+                        storage_deletion_jobs.available_at,
+                        EXCLUDED.available_at
+                      )
+                ",
+                &[&id],
+            )
+            .await?;
+        transaction.commit().await?;
     }
 
     Ok(())
 }
 
-async fn expire_invitations_batch(
-    db: &Database,
-) -> Result<(), Box<dyn StdError + Send + Sync>> {
+async fn expire_invitations_batch(db: &Database) -> Result<(), Box<dyn StdError + Send + Sync>> {
     db.execute(
         "
             WITH expired AS (
@@ -887,7 +1200,9 @@ fn safe_local_path(root: &Path, object_key: &str) -> Option<PathBuf> {
         return None;
     }
 
-    Some(object_key.split('/').fold(root.to_path_buf(), |path, segment| {
-        path.join(segment)
-    }))
+    Some(
+        object_key
+            .split('/')
+            .fold(root.to_path_buf(), |path, segment| path.join(segment)),
+    )
 }

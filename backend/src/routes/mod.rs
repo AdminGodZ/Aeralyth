@@ -48,10 +48,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
                             web::post().to(admin::update_user_status),
                         ),
                 )
-                .route(
-                    "/invitations/{token}",
-                    web::get().to(invitations::details),
-                )
+                .route("/invitations/{token}", web::get().to(invitations::details))
                 .route(
                     "/invitations/{token}/accept",
                     web::post().to(invitations::accept),
@@ -75,9 +72,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
                     web::post().to(files::complete_upload),
                 )
                 .route(
-                    "/files/uploads/{id}",
-                    web::delete().to(files::abort_upload),
+                    "/files/uploads/{id}/status",
+                    web::get().to(files::upload_status),
                 )
+                .route("/files/uploads/{id}", web::delete().to(files::abort_upload))
                 .route("/files/{id}/download", web::get().to(files::download))
                 .route("/files/{id}/share", web::post().to(files::share))
                 .route("/files/{id}/unshare", web::post().to(files::unshare))

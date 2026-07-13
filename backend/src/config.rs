@@ -15,6 +15,7 @@ pub struct Config {
     pub storage_presign_seconds: u64,
     pub storage_multipart_threshold_bytes: u64,
     pub storage_multipart_part_bytes: u64,
+    pub storage_multipart_orphan_grace_seconds: u64,
     pub s3_bucket: Option<String>,
     pub s3_endpoint: Option<String>,
     pub s3_region: String,
@@ -46,8 +47,7 @@ impl Config {
         let s3_bucket = first_env(&["AERALYTH_S3_BUCKET", "AWS_S3_BUCKET_NAME", "BUCKET"]);
         let s3_endpoint = first_env(&["AERALYTH_S3_ENDPOINT", "AWS_ENDPOINT_URL", "ENDPOINT"]);
         let s3_access_key_id = first_env(&["AWS_ACCESS_KEY_ID", "ACCESS_KEY_ID"]);
-        let s3_secret_access_key =
-            first_env(&["AWS_SECRET_ACCESS_KEY", "SECRET_ACCESS_KEY"]);
+        let s3_secret_access_key = first_env(&["AWS_SECRET_ACCESS_KEY", "SECRET_ACCESS_KEY"]);
         let explicit_storage_backend = env::var("AERALYTH_STORAGE_BACKEND")
             .ok()
             .map(|value| value.trim().to_ascii_lowercase())
@@ -79,8 +79,7 @@ impl Config {
             }
             None if is_production => {
                 return Err(
-                    "AERALYTH_STORAGE_BACKEND=s3 must be set explicitly in production"
-                        .to_owned(),
+                    "AERALYTH_STORAGE_BACKEND=s3 must be set explicitly in production".to_owned(),
                 );
             }
             None if s3_configured => "s3".to_owned(),
@@ -108,12 +107,7 @@ impl Config {
                 1024 * 1024,
                 u64::MAX,
             ),
-            storage_presign_seconds: env_u64(
-                "AERALYTH_STORAGE_PRESIGN_SECONDS",
-                900,
-                60,
-                3_600,
-            ),
+            storage_presign_seconds: env_u64("AERALYTH_STORAGE_PRESIGN_SECONDS", 900, 60, 3_600),
             storage_multipart_threshold_bytes: env_u64(
                 "AERALYTH_MULTIPART_THRESHOLD_BYTES",
                 100 * 1024 * 1024,
@@ -125,6 +119,12 @@ impl Config {
                 64 * 1024 * 1024,
                 5 * 1024 * 1024,
                 512 * 1024 * 1024,
+            ),
+            storage_multipart_orphan_grace_seconds: env_u64(
+                "AERALYTH_MULTIPART_ORPHAN_GRACE_SECONDS",
+                60 * 60,
+                5 * 60,
+                7 * 24 * 60 * 60,
             ),
             s3_bucket,
             s3_endpoint,

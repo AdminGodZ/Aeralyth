@@ -24,8 +24,8 @@ async fn main() -> std::io::Result<()> {
         config.database_pool_max,
         Duration::from_millis(config.database_pool_wait_ms),
     )
-        .await
-        .map_err(|error| io::Error::other(format!("failed to connect to postgres: {error}")))?;
+    .await
+    .map_err(|error| io::Error::other(format!("failed to connect to postgres: {error}")))?;
     let storage = storage::Storage::create(&config)
         .await
         .map_err(|error| io::Error::other(format!("failed to initialize storage: {error}")))?;

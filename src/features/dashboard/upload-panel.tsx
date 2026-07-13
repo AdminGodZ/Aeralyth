@@ -69,12 +69,22 @@ type UploadedPart = {
 
 type UploadUrl = {
   url: string;
+  contentLength: number;
+};
+
+type UploadCompletion = {
+  status: "initializing" | "pending" | "completing" | "aborting" | "completed" | "aborted";
+  fileId: string;
+  location: string;
+  pollUrl: string;
+  retryAfterSeconds: number;
 };
 
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_SELECTION_FILES = 1000;
 const MULTIPART_CONCURRENCY = 4;
 const UPLOAD_RETRY_COUNT = 3;
+const UPLOAD_FINALIZATION_TIMEOUT_MS = 45_000;
 
 export function UploadPanel({
   csrfToken,
@@ -221,6 +231,7 @@ export function UploadPanel({
         signal,
       },
     );
+    let completionStarted = false;
 
     try {
       let parts: UploadedPart[] = [];
@@ -272,6 +283,12 @@ export function UploadPanel({
                 signal,
               },
             );
+
+            if (signedPart.contentLength !== blob.size) {
+              throw new Error(
+                "The storage service returned an invalid signed part length.",
+              );
+            }
             const response = await putBlobWithRetry(
               signedPart.url,
               blob,
@@ -297,10 +314,9 @@ export function UploadPanel({
           plan.mode === "single"
             ? await sha256Base64(selection.file)
             : null;
-        const uploadUrl =
+        const signedUpload =
           plan.mode === "single"
-            ? (
-                await requestJson<UploadUrl>(
+            ? await requestJson<UploadUrl>(
                   `/api/files/uploads/${encodeURIComponent(plan.uploadId)}/content-url`,
                   {
                     method: "POST",
@@ -312,11 +328,19 @@ export function UploadPanel({
                     signal,
                   },
                 )
-              ).url
-            : plan.uploadUrl;
+            : null;
+        const uploadUrl = signedUpload?.url ?? plan.uploadUrl;
 
         if (!uploadUrl) {
           throw new Error("The storage service did not return an upload URL.");
+        }
+        if (
+          signedUpload &&
+          signedUpload.contentLength !== selection.file.size
+        ) {
+          throw new Error(
+            "The storage service returned an invalid signed upload length.",
+          );
         }
 
         await putBlobWithRetry(
@@ -335,20 +359,15 @@ export function UploadPanel({
         );
       }
 
-      await requestJson(
+      completionStarted = true;
+      await completeUploadWithPolling(
         `/api/files/uploads/${encodeURIComponent(plan.uploadId)}/complete`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-CSRF-Token": csrfToken,
-          },
-          body: JSON.stringify({ parts }),
-          signal,
-        },
+        { parts },
+        csrfToken,
+        signal,
       );
     } catch (error) {
-      if (signal.aborted || plan.mode !== "multipart") {
+      if (signal.aborted || (!completionStarted && plan.mode !== "multipart")) {
         await fetch(`/api/files/uploads/${encodeURIComponent(plan.uploadId)}`, {
           method: "DELETE",
           headers: { "X-CSRF-Token": csrfToken },
@@ -833,6 +852,82 @@ async function requestJson<T = unknown>(
   }
 
   return (await response.json()) as T;
+}
+
+async function completeUploadWithPolling(
+  completeUrl: string,
+  body: { parts: UploadedPart[] },
+  csrfToken: string,
+  signal: AbortSignal,
+) {
+  const deadline = Date.now() + UPLOAD_FINALIZATION_TIMEOUT_MS;
+  let completion = await requestUploadCompletion(completeUrl, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CSRF-Token": csrfToken,
+    },
+    body: JSON.stringify(body),
+    signal,
+  });
+  let delayMs = completionRetryDelay(completion.retryAfterSeconds);
+
+  while (completion.status !== "completed") {
+    if (completion.status !== "completing") {
+      throw new Error(`Upload finalization stopped (${completion.status}).`);
+    }
+    if (Date.now() + delayMs > deadline) {
+      throw new Error(
+        "The file is still being finalized. Its upload state was preserved; try refreshing shortly.",
+      );
+    }
+
+    await wait(delayMs, signal);
+    completion = await requestUploadCompletion(completion.pollUrl, {
+      method: "GET",
+      signal,
+    });
+    delayMs = Math.min(
+      5_000,
+      Math.max(delayMs * 1.5, completionRetryDelay(completion.retryAfterSeconds)),
+    );
+  }
+}
+
+async function requestUploadCompletion(
+  input: string,
+  init: RequestInit,
+): Promise<UploadCompletion> {
+  const response = await fetch(input, init);
+  const contentType = response.headers.get("content-type") ?? "";
+
+  if (!contentType.includes("application/json")) {
+    const message = (await response.text()).trim();
+    throw new Error(message || `Upload finalization failed (${response.status}).`);
+  }
+
+  const completion = (await response.json()) as Partial<UploadCompletion>;
+
+  if (!response.ok) {
+    throw new Error(
+      completion.status === "aborting" || completion.status === "aborted"
+        ? "Upload finalization failed and the stored data is being cleaned up."
+        : `Upload finalization failed (${response.status}).`,
+    );
+  }
+  if (
+    typeof completion.status !== "string" ||
+    typeof completion.pollUrl !== "string" ||
+    typeof completion.retryAfterSeconds !== "number"
+  ) {
+    throw new Error("The storage service returned an invalid completion status.");
+  }
+
+  return completion as UploadCompletion;
+}
+
+function completionRetryDelay(retryAfterSeconds: number) {
+  return Math.min(5_000, Math.max(500, retryAfterSeconds * 1_000));
 }
 
 async function sha256Base64(blob: Blob) {

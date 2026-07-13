@@ -1,8 +1,8 @@
 use actix_web::http::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION};
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use serde::{Deserialize, Serialize};
 use deadpool_postgres::Transaction;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::{AuthUser, SESSION_COOKIE, require_admin, require_csrf};
 use crate::state::AppState;
@@ -287,9 +287,7 @@ pub async fn create_invitation(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    Ok(redirect(format!(
-        "/users?invite=created&token={token}"
-    )))
+    Ok(redirect(format!("/users?invite=created&token={token}")))
 }
 
 pub async fn create_user(
@@ -635,24 +633,48 @@ pub async fn delete_user(
     transaction
         .execute(
             "
-                INSERT INTO storage_deletion_jobs (object_key, multipart_upload_id)
+                INSERT INTO storage_deletion_jobs (
+                  object_key,
+                  multipart_upload_id,
+                  available_at
+                )
                 SELECT
                   CASE
-                    WHEN position('/' IN storage_name) = 0
-                      THEN owner_id || '/' || storage_name
-                    ELSE storage_name
+                    WHEN position('/' IN files.storage_name) = 0
+                      THEN files.owner_id || '/' || files.storage_name
+                    ELSE files.storage_name
                   END,
-                  NULL::text
+                  NULL::text,
+                  CASE
+                    WHEN uploads.upload_mode = 'single'
+                      THEN GREATEST(COALESCE(uploads.write_expires_at, now()), now())
+                    ELSE now()
+                  END
                 FROM files
-                WHERE owner_id = $1 AND entry_type = 'file'
+                LEFT JOIN file_uploads AS uploads
+                  ON uploads.file_id = files.id
+                 AND uploads.status = 'completed'
+                WHERE files.owner_id = $1 AND files.entry_type = 'file'
                 UNION ALL
-                SELECT object_key, multipart_upload_id
+                SELECT
+                  object_key,
+                  multipart_upload_id,
+                  CASE
+                    WHEN upload_mode = 'single'
+                      THEN GREATEST(COALESCE(write_expires_at, now()), now())
+                    ELSE now()
+                  END
                 FROM file_uploads
-                WHERE owner_id = $1 AND status IN ('pending', 'completing')
+                WHERE owner_id = $1
+                  AND status IN ('initializing', 'pending', 'completing', 'aborting')
                 ON CONFLICT (object_key) DO UPDATE SET
                   multipart_upload_id = COALESCE(
                     EXCLUDED.multipart_upload_id,
                     storage_deletion_jobs.multipart_upload_id
+                  ),
+                  available_at = GREATEST(
+                    storage_deletion_jobs.available_at,
+                    EXCLUDED.available_at
                   )
             ",
             &[&target_user.id],
@@ -757,9 +779,7 @@ pub async fn rotate_invitation(
         return Ok(redirect("/users?invite=missing"));
     }
 
-    Ok(redirect(format!(
-        "/users?invite=created&token={token}"
-    )))
+    Ok(redirect(format!("/users?invite=created&token={token}")))
 }
 
 pub async fn revoke_invitation(
@@ -996,7 +1016,9 @@ fn decode_admin_cursor(
         .map_err(|_| error::ErrorBadRequest("invalid admin cursor"))?;
 
     if cursor.kind != expected_kind || cursor.query.as_deref() != search {
-        return Err(error::ErrorBadRequest("admin cursor does not match this list"));
+        return Err(error::ErrorBadRequest(
+            "admin cursor does not match this list",
+        ));
     }
 
     Ok(Some(cursor))

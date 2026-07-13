@@ -25,10 +25,7 @@ pub(crate) struct AcceptInvitationForm {
     password: String,
 }
 
-pub async fn details(
-    state: web::Data<AppState>,
-    path: web::Path<String>,
-) -> Result<HttpResponse> {
+pub async fn details(state: web::Data<AppState>, path: web::Path<String>) -> Result<HttpResponse> {
     let token = path.into_inner();
 
     if !is_valid_token(&token) {
@@ -81,9 +78,7 @@ pub async fn accept(
     let password = form.password.trim();
 
     if !(MIN_PASSWORD_BYTES..=MAX_PASSWORD_BYTES).contains(&password.len()) {
-        return Ok(redirect(format!(
-            "/invite/{token}?error=weak-password"
-        )));
+        return Ok(redirect(format!("/invite/{token}?error=weak-password")));
     }
 
     let accepted_user = state

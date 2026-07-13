@@ -197,9 +197,11 @@ CREATE TABLE IF NOT EXISTS file_uploads (
   mime_type TEXT,
   size_bytes BIGINT NOT NULL CHECK (size_bytes BETWEEN 0 AND 2147483648),
   upload_mode TEXT NOT NULL CHECK (upload_mode IN ('local', 'single', 'multipart')),
+  part_size_bytes BIGINT,
   multipart_upload_id TEXT,
   status TEXT NOT NULL DEFAULT 'pending',
   checksum_sha256 TEXT,
+  write_expires_at TIMESTAMPTZ,
   expires_at TIMESTAMPTZ NOT NULL,
   completed_at TIMESTAMPTZ,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -209,11 +211,24 @@ ALTER TABLE file_uploads
   ADD COLUMN IF NOT EXISTS checksum_sha256 TEXT;
 
 ALTER TABLE file_uploads
+  ADD COLUMN IF NOT EXISTS part_size_bytes BIGINT;
+
+ALTER TABLE file_uploads
+  ADD COLUMN IF NOT EXISTS write_expires_at TIMESTAMPTZ;
+
+ALTER TABLE file_uploads
+  DROP CONSTRAINT IF EXISTS file_uploads_part_size_check;
+
+ALTER TABLE file_uploads
+  ADD CONSTRAINT file_uploads_part_size_check
+  CHECK (part_size_bytes IS NULL OR part_size_bytes BETWEEN 5242880 AND 536870912);
+
+ALTER TABLE file_uploads
   DROP CONSTRAINT IF EXISTS file_uploads_status_check;
 
 ALTER TABLE file_uploads
   ADD CONSTRAINT file_uploads_status_check
-  CHECK (status IN ('pending', 'completing', 'completed', 'aborted'));
+  CHECK (status IN ('initializing', 'pending', 'completing', 'aborting', 'completed', 'aborted'));
 
 CREATE TABLE IF NOT EXISTS user_file_counters (
   owner_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
@@ -240,6 +255,42 @@ CREATE TABLE IF NOT EXISTS storage_deletion_jobs (
 
 ALTER TABLE storage_deletion_jobs
   ADD COLUMN IF NOT EXISTS multipart_upload_id TEXT;
+
+-- Existing multipart reservations predate durable part sizing and cannot be
+-- resumed safely after a configuration change. Queue them for cleanup once.
+INSERT INTO storage_deletion_jobs (object_key, multipart_upload_id)
+SELECT object_key, multipart_upload_id
+FROM file_uploads
+WHERE upload_mode = 'multipart'
+  AND part_size_bytes IS NULL
+  AND status IN ('initializing', 'pending', 'completing', 'aborting')
+ON CONFLICT (object_key) DO UPDATE SET
+  multipart_upload_id = COALESCE(
+    EXCLUDED.multipart_upload_id,
+    storage_deletion_jobs.multipart_upload_id
+  );
+
+UPDATE file_uploads
+SET status = 'aborting',
+    expires_at = now() + interval '24 hours'
+WHERE upload_mode = 'multipart'
+  AND part_size_bytes IS NULL
+  AND status IN ('initializing', 'pending', 'completing');
+
+-- Old single-upload signatures may remain valid for up to the configured
+-- maximum of one hour. Preserve that window before allowing object deletion.
+UPDATE file_uploads
+SET write_expires_at = now() + interval '1 hour'
+WHERE upload_mode = 'single'
+  AND write_expires_at IS NULL
+  AND status IN ('pending', 'completing', 'aborting', 'completed');
+
+UPDATE storage_deletion_jobs AS jobs
+SET available_at = GREATEST(jobs.available_at, uploads.write_expires_at)
+FROM file_uploads AS uploads
+WHERE jobs.object_key = uploads.object_key
+  AND uploads.upload_mode = 'single'
+  AND uploads.write_expires_at IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS admin_directory_counters (
   singleton BOOLEAN PRIMARY KEY DEFAULT TRUE CHECK (singleton),

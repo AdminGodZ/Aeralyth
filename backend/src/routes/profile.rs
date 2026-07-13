@@ -87,11 +87,8 @@ pub async fn update(
                     return Ok(redirect("/settings?profile=invalid-image"));
                 }
 
-                let Some(bytes) = read_limited_binary_field(
-                    &mut field,
-                    MAX_PROFILE_IMAGE_BYTES,
-                )
-                .await?
+                let Some(bytes) =
+                    read_limited_binary_field(&mut field, MAX_PROFILE_IMAGE_BYTES).await?
                 else {
                     return Ok(redirect("/settings?profile=image-too-large"));
                 };
