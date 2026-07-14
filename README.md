@@ -21,11 +21,16 @@ npm run build
 cargo build --manifest-path backend/Cargo.toml
 ```
 
+The encrypted vault design and rollout procedure are documented in
+[docs/e2ee.md](docs/e2ee.md). Object-storage configuration is documented in
+[docs/storage.md](docs/storage.md).
+
 ## Local Database
 
 ```bash
 docker compose up -d postgres
 docker compose exec -T postgres psql -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/001_auth.sql
+docker compose exec -T postgres psql -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/002_e2ee.sql
 ```
 
 In local development, the Actix backend uses this Docker database by default
@@ -79,7 +84,8 @@ AERALYTH_API_HOST=0.0.0.0
 AERALYTH_API_PORT=8080
 DATABASE_URL=postgres://aeralyth:aeralyth@localhost:5432/aeralyth
 AERALYTH_COOKIE_SECURE=false
-AERALYTH_STORAGE_PATH=./data/files
+AERALYTH_STORAGE_BACKEND=s3
+AERALYTH_E2EE_MODE=migrate
 ```
 
 `AERALYTH_COOKIE_SECURE` defaults to `false` for debug builds and `true` for

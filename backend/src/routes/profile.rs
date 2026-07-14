@@ -15,6 +15,7 @@ struct ProfileUpdate {
     theme_preference: Option<String>,
     accent_color: Option<String>,
     folder_zip_prompt_enabled: Option<bool>,
+    vault_auto_lock_minutes: Option<i32>,
     remove_profile_image: bool,
     profile_image: Option<ProfileImage>,
 }
@@ -61,6 +62,10 @@ pub async fn update(
             "folder_zip_prompt_enabled" => {
                 let value = read_limited_text_field(&mut field, 32).await?;
                 update.folder_zip_prompt_enabled = normalize_boolean_preference(&value);
+            }
+            "vault_auto_lock_minutes" => {
+                let value = read_limited_text_field(&mut field, 8).await?;
+                update.vault_auto_lock_minutes = normalize_vault_auto_lock_minutes(&value);
             }
             "remove_profile_image" => {
                 let value = read_limited_text_field(&mut field, 32).await?;
@@ -124,7 +129,8 @@ pub async fn update(
                   display_name,
                   COALESCE(theme_preference, 'system') AS theme_preference,
                   COALESCE(accent_color, '#3088f0') AS accent_color,
-                  COALESCE(folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled
+                  COALESCE(folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
+                  COALESCE(vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes
                 FROM users
                 WHERE id = $1
                 LIMIT 1
@@ -138,6 +144,7 @@ pub async fn update(
     let existing_accent_color: String = existing_settings.get("accent_color");
     let existing_folder_zip_prompt_enabled: bool =
         existing_settings.get("folder_zip_prompt_enabled");
+    let existing_vault_auto_lock_minutes: i32 = existing_settings.get("vault_auto_lock_minutes");
     let display_name = match update.display_name.as_deref() {
         Some(display_name) => normalize_display_name(Some(display_name)),
         None => existing_display_name,
@@ -156,6 +163,9 @@ pub async fn update(
     let folder_zip_prompt_enabled = update
         .folder_zip_prompt_enabled
         .unwrap_or(existing_folder_zip_prompt_enabled);
+    let vault_auto_lock_minutes = update
+        .vault_auto_lock_minutes
+        .unwrap_or(existing_vault_auto_lock_minutes);
 
     if update.remove_profile_image {
         state
@@ -167,18 +177,20 @@ pub async fn update(
                         theme_preference = $2,
                         accent_color = $3,
                         folder_zip_prompt_enabled = $4,
+                        vault_auto_lock_minutes = $5,
                         profile_image_bytes = NULL,
                         profile_image_mime_type = NULL,
                         profile_image_size_bytes = NULL,
                         profile_image_updated_at = NULL,
                         updated_at = now()
-                    WHERE id = $5
+                    WHERE id = $6
                 ",
                 &[
                     &display_name,
                     &theme_preference,
                     &accent_color,
                     &folder_zip_prompt_enabled,
+                    &vault_auto_lock_minutes,
                     &user.id,
                 ],
             )
@@ -194,18 +206,20 @@ pub async fn update(
                         theme_preference = $2,
                         accent_color = $3,
                         folder_zip_prompt_enabled = $4,
-                        profile_image_bytes = $5,
-                        profile_image_mime_type = $6,
-                        profile_image_size_bytes = $7,
+                        vault_auto_lock_minutes = $5,
+                        profile_image_bytes = $6,
+                        profile_image_mime_type = $7,
+                        profile_image_size_bytes = $8,
                         profile_image_updated_at = now(),
                         updated_at = now()
-                    WHERE id = $8
+                    WHERE id = $9
                 ",
                 &[
                     &display_name,
                     &theme_preference,
                     &accent_color,
                     &folder_zip_prompt_enabled,
+                    &vault_auto_lock_minutes,
                     &profile_image.bytes,
                     &profile_image.mime_type,
                     &profile_image.size_bytes,
@@ -224,14 +238,16 @@ pub async fn update(
                         theme_preference = $2,
                         accent_color = $3,
                         folder_zip_prompt_enabled = $4,
+                        vault_auto_lock_minutes = $5,
                         updated_at = now()
-                    WHERE id = $5
+                    WHERE id = $6
                 ",
                 &[
                     &display_name,
                     &theme_preference,
                     &accent_color,
                     &folder_zip_prompt_enabled,
+                    &vault_auto_lock_minutes,
                     &user.id,
                 ],
             )
@@ -360,6 +376,13 @@ fn normalize_boolean_preference(value: &str) -> Option<bool> {
     match value.trim() {
         "1" | "true" | "on" => Some(true),
         "0" | "false" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn normalize_vault_auto_lock_minutes(value: &str) -> Option<i32> {
+    match value.trim().parse::<i32>().ok()? {
+        value @ (5 | 15 | 30 | 60) => Some(value),
         _ => None,
     }
 }

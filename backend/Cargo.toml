@@ -13,11 +13,13 @@ aws-types = "1"
 base64 = "0.22.1"
 deadpool-postgres = "0.14.1"
 dotenvy = "0.15"
+ed25519-dalek = "2.2.0"
 env_logger = "0.11"
 futures-util = "0.3.32"
 getrandom = "0.4.2"
 log = "0.4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10.9"
 tokio = { version = "1", features = ["fs", "io-util", "time"] }
 tokio-postgres = "0.7.17"

@@ -51,6 +51,13 @@ const accentColorScript = `
 })();
 `;
 
-export function AccentColorScript() {
-  return <script dangerouslySetInnerHTML={{ __html: accentColorScript }} />;
+export function AccentColorScript({ nonce }: { nonce?: string }) {
+  return (
+    <script
+      nonce={nonce}
+      suppressHydrationWarning
+      // biome-ignore lint/security/noDangerouslySetInnerHtml: Static nonce-bound bootstrap prevents a theme flash before hydration.
+      dangerouslySetInnerHTML={{ __html: accentColorScript }}
+    />
+  );
 }
