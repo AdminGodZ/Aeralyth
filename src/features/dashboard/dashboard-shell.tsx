@@ -1,21 +1,11 @@
 import {
-  ArrowDown,
-  ArrowUp,
   ChevronRight,
-  ChevronsUpDown,
-  Download,
-  FileArchive,
   FileText,
   Folder,
   HardDrive,
-  ImageIcon,
-  ListFilter,
-  RotateCcw,
   Search,
   Share2,
   Star,
-  Trash2,
-  X,
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
@@ -40,7 +30,6 @@ import { VaultFileList } from "@/features/vault/vault-file-list";
 import type {
   AdminUsersState,
   CurrentUser,
-  FileEntry,
   FileSort,
   FileSortDirection,
   FolderBreadcrumb,
@@ -369,8 +358,6 @@ function FileContent({
     nextCursor,
     summary,
   } = filesState.data;
-  const isTrash = section.key === "trash";
-  const isShared = section.key === "shared";
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-4 py-5 sm:px-6">
       <div className="grid shrink-0 gap-3 md:grid-cols-2 xl:grid-cols-5">
@@ -409,6 +396,7 @@ function FileContent({
                 breadcrumbs={breadcrumbs}
                 sort={fileSort}
                 direction={fileSortDirection}
+                basePath={section.key === "shared" ? "/shared" : "/files"}
               />
             ) : (
               <VaultBreadcrumbs
@@ -431,39 +419,14 @@ function FileContent({
 
         {entries.length ? (
           <>
-            {e2eeMode === "off" ? (
-              <>
-                <FileTableHeader
-                  sectionKey={section.key}
-                  currentFolderId={currentFolderId}
-                  isShared={isShared}
-                  isTrash={isTrash}
-                  sort={fileSort}
-                  direction={fileSortDirection}
-                />
-                <div className="min-h-0 flex-1 divide-y overflow-auto">
-                  {entries.map((file) => (
-                    <FileRow
-                      key={file.id}
-                      file={file}
-                      sectionKey={section.key}
-                      csrfToken={csrfToken}
-                      sort={fileSort}
-                      direction={fileSortDirection}
-                    />
-                  ))}
-                </div>
-              </>
-            ) : (
-              <VaultFileList
-                entries={entries}
-                sectionKey={section.key}
-                csrfToken={csrfToken}
-                currentUserId={currentUserId}
-                initialSort={fileSort}
-                initialDirection={fileSortDirection}
-              />
-            )}
+            <VaultFileList
+              entries={entries}
+              sectionKey={section.key}
+              csrfToken={csrfToken}
+              currentUserId={currentUserId}
+              initialSort={fileSort}
+              initialDirection={fileSortDirection}
+            />
             {hasMore && nextCursor ? (
               <div className="flex shrink-0 justify-end border-t px-4 py-3">
                 <Button asChild variant="outline">
@@ -501,10 +464,12 @@ function FolderBreadcrumbs({
   breadcrumbs,
   sort,
   direction,
+  basePath,
 }: {
   breadcrumbs: FolderBreadcrumb[];
   sort?: FileSort;
   direction?: FileSortDirection;
+  basePath: "/files" | "/shared";
 }) {
   const isRoot = breadcrumbs.length === 0;
 
@@ -514,7 +479,7 @@ function FolderBreadcrumbs({
       className="flex min-h-8 min-w-0 items-center gap-1 overflow-x-auto text-sm"
     >
       <Link
-        href={{ pathname: "/files", query: getSortQuery(sort, direction) }}
+        href={{ pathname: basePath, query: getSortQuery(sort, direction) }}
         aria-current={isRoot ? "page" : undefined}
         className={
           isRoot
@@ -522,7 +487,7 @@ function FolderBreadcrumbs({
             : "shrink-0 text-muted-foreground transition-colors hover:text-foreground"
         }
       >
-        Files
+        {basePath === "/shared" ? "Shared" : "Files"}
       </Link>
       {breadcrumbs.map((breadcrumb, index) => {
         const isCurrent = index === breadcrumbs.length - 1;
@@ -540,7 +505,7 @@ function FolderBreadcrumbs({
             ) : (
               <Link
                 href={{
-                  pathname: "/files",
+                  pathname: basePath,
                   query: {
                     folder: breadcrumb.id,
                     ...getSortQuery(sort, direction),
@@ -555,345 +520,6 @@ function FolderBreadcrumbs({
         );
       })}
     </nav>
-  );
-}
-
-function FileTableHeader({
-  sectionKey,
-  currentFolderId,
-  isTrash,
-  isShared,
-  sort,
-  direction,
-}: {
-  sectionKey: DashboardSectionKey;
-  currentFolderId: string | null;
-  isTrash: boolean;
-  isShared: boolean;
-  sort?: FileSort;
-  direction?: FileSortDirection;
-}) {
-  const dateLabel = isTrash ? "Deleted" : isShared ? "Shared" : "Updated";
-
-  return (
-    <div className="grid min-h-14 grid-cols-[2rem_minmax(0,1fr)_7rem] gap-3 border-b px-4 py-3 text-sm font-medium text-muted-foreground md:grid-cols-[2rem_minmax(12rem,1fr)_7rem_7rem_9rem_minmax(18rem,22rem)] md:items-center">
-      <span
-        role="columnheader"
-        className="flex items-center justify-center"
-      >
-        <input
-          type="checkbox"
-          aria-label="Select all files"
-          disabled
-          className="size-4 rounded border border-border bg-transparent"
-        />
-      </span>
-      <SortableFileHeader
-        field="name"
-        label="Name"
-        sectionKey={sectionKey}
-        currentFolderId={currentFolderId}
-        sort={sort}
-        direction={direction}
-      />
-      <span role="columnheader">Kind</span>
-      <SortableFileHeader
-        field="size"
-        label="Size"
-        sectionKey={sectionKey}
-        currentFolderId={currentFolderId}
-        sort={sort}
-        direction={direction}
-        className="hidden md:flex"
-      />
-      <SortableFileHeader
-        field="updated"
-        label={dateLabel}
-        sectionKey={sectionKey}
-        currentFolderId={currentFolderId}
-        sort={sort}
-        direction={direction}
-        className="hidden md:flex"
-      />
-      <span
-        role="columnheader"
-        className="hidden items-center justify-end gap-1.5 md:flex"
-      >
-        Actions
-        <ListFilter className="size-3.5" aria-hidden="true" />
-      </span>
-    </div>
-  );
-}
-
-function SortableFileHeader({
-  field,
-  label,
-  sectionKey,
-  currentFolderId,
-  sort,
-  direction,
-  className,
-}: {
-  field: FileSort;
-  label: string;
-  sectionKey: DashboardSectionKey;
-  currentFolderId: string | null;
-  sort?: FileSort;
-  direction?: FileSortDirection;
-  className?: string;
-}) {
-  const isActive = sort === field;
-  const activeDirection =
-    direction ?? (field === "name" ? "asc" : "desc");
-  const nextDirection = isActive
-    ? activeDirection === "asc"
-      ? "desc"
-      : "asc"
-    : field === "name"
-      ? "asc"
-      : "desc";
-  const SortIcon = isActive
-    ? activeDirection === "asc"
-      ? ArrowUp
-      : ArrowDown
-    : ChevronsUpDown;
-  const ariaSort = isActive
-    ? activeDirection === "asc"
-      ? "ascending"
-      : "descending"
-    : "none";
-
-  return (
-    <span
-      role="columnheader"
-      aria-sort={ariaSort}
-      className={className}
-    >
-      <Link
-        href={{
-          pathname: "/" + sectionKey,
-          query: {
-            ...(sectionKey === "files" && currentFolderId
-              ? { folder: currentFolderId }
-              : {}),
-            sort: field,
-            direction: nextDirection,
-          },
-        }}
-        aria-label={
-          "Sort by " +
-          label.toLowerCase() +
-          " " +
-          (nextDirection === "asc" ? "ascending" : "descending")
-        }
-        className={
-          "inline-flex items-center gap-1.5 rounded-sm border border-transparent outline-none transition-colors focus-visible:border-primary " +
-          (isActive
-            ? "text-foreground"
-            : "text-muted-foreground hover:text-foreground")
-        }
-      >
-        {label}
-        <SortIcon className="size-3.5" aria-hidden="true" />
-      </Link>
-    </span>
-  );
-}
-
-function FileRow({
-  file,
-  sectionKey,
-  csrfToken,
-  sort,
-  direction,
-}: {
-  file: FileEntry;
-  sectionKey: DashboardSectionKey;
-  csrfToken: string;
-  sort?: FileSort;
-  direction?: FileSortDirection;
-}) {
-  const FileIcon = getFileIcon(file);
-  const isTrash = sectionKey === "trash";
-  const isShared = sectionKey === "shared";
-  const isFolder = isFolderEntry(file);
-  const rowDate =
-    isTrash && file.trashedAt
-      ? file.trashedAt
-      : isShared && file.sharedAt
-        ? file.sharedAt
-        : file.updatedAt;
-
-  return (
-    <div className="grid gap-3 px-4 py-3 text-sm md:min-h-16 md:grid-cols-[2rem_minmax(12rem,1fr)_7rem_7rem_9rem_minmax(18rem,22rem)] md:items-center">
-      <span className="hidden items-center justify-center md:flex">
-        <input
-          type="checkbox"
-          aria-label={`Select ${file.name}`}
-          disabled
-          className="size-4 rounded border border-border bg-transparent"
-        />
-      </span>
-      {isFolder && !isTrash ? (
-        <Link
-          href={{
-            pathname: "/files",
-            query: {
-              folder: file.id,
-              ...getSortQuery(sort, direction),
-            },
-          }}
-          className="flex min-w-0 items-center gap-3 rounded-sm border border-transparent outline-none focus-visible:border-primary"
-        >
-          <FileIcon className="size-5 shrink-0 text-primary" aria-hidden="true" />
-          <div className="min-w-0">
-            <p className="truncate font-medium">{file.name}</p>
-            <p className="text-xs text-muted-foreground md:hidden">Folder</p>
-          </div>
-        </Link>
-      ) : (
-        <div className="flex min-w-0 items-center gap-3">
-          <FileIcon className="size-5 shrink-0 text-primary" aria-hidden="true" />
-          <div className="min-w-0">
-            <p className="truncate font-medium">{file.name}</p>
-            <p className="text-xs text-muted-foreground md:hidden">
-              {file.kind} · {formatBytes(file.sizeBytes)}
-            </p>
-            {isShared && file.ownerUsername ? (
-              <p className="truncate text-xs text-muted-foreground">
-                Shared by {file.ownerUsername}
-              </p>
-            ) : null}
-          </div>
-        </div>
-      )}
-      <span className="text-muted-foreground">{file.kind}</span>
-      <span className="hidden text-muted-foreground md:block">
-        {isFolder ? "—" : formatBytes(file.sizeBytes)}
-      </span>
-      <span className="hidden text-muted-foreground md:block">
-        {formatDate(rowDate)}
-      </span>
-      <div className="flex min-w-0 flex-wrap items-center justify-start gap-2 md:flex-nowrap md:justify-end">
-        {isTrash ? (
-          <>
-            <form action={`/api/files/${file.id}/restore`} method="post">
-              <input type="hidden" name="csrf_token" value={csrfToken} />
-              <Button
-                type="submit"
-                variant="outline"
-                className="rounded-full"
-              >
-                <RotateCcw className="size-4" aria-hidden="true" />
-                Restore
-              </Button>
-            </form>
-            <form action={`/api/files/${file.id}/delete`} method="post">
-              <input type="hidden" name="csrf_token" value={csrfToken} />
-              <Button
-                type="submit"
-                variant="secondary"
-                className="rounded-md text-destructive hover:text-destructive"
-              >
-                <Trash2 className="size-4" aria-hidden="true" />
-                Delete
-              </Button>
-            </form>
-          </>
-        ) : isShared ? (
-          <>
-            <Button
-              asChild
-              variant="secondary"
-              className="rounded-md text-primary hover:text-primary"
-            >
-              <a href={`/api/files/${file.id}/download`}>
-                <Download className="size-4" aria-hidden="true" />
-                Download
-              </a>
-            </Button>
-            <form action={`/api/files/${file.id}/unshare`} method="post">
-              <input type="hidden" name="csrf_token" value={csrfToken} />
-              <Button
-                type="submit"
-                variant="outline"
-                className="rounded-full"
-              >
-                <X className="size-4" aria-hidden="true" />
-                Remove
-              </Button>
-            </form>
-          </>
-        ) : isFolder ? (
-          <>
-            <form action={`/api/files/${file.id}/favorite`} method="post">
-              <input type="hidden" name="csrf_token" value={csrfToken} />
-              <Button
-                type="submit"
-                variant="secondary"
-                className="rounded-md text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
-              >
-                <Star
-                  className={file.favorite ? "size-4 fill-current" : "size-4"}
-                  aria-hidden="true"
-                />
-                {file.favorite ? "Unstar" : "Star"}
-              </Button>
-            </form>
-            <form action={`/api/files/${file.id}/trash`} method="post">
-              <input type="hidden" name="csrf_token" value={csrfToken} />
-              <Button
-                type="submit"
-                variant="secondary"
-                className="rounded-md text-destructive hover:text-destructive"
-              >
-                <Trash2 className="size-4" aria-hidden="true" />
-                Trash
-              </Button>
-            </form>
-          </>
-        ) : (
-          <>
-            <Button
-              asChild
-              variant="secondary"
-              className="rounded-md text-primary hover:text-primary"
-            >
-              <a href={`/api/files/${file.id}/download`}>
-                <Download className="size-4" aria-hidden="true" />
-                Download
-              </a>
-            </Button>
-            <form action={`/api/files/${file.id}/favorite`} method="post">
-              <input type="hidden" name="csrf_token" value={csrfToken} />
-              <Button
-                type="submit"
-                variant="secondary"
-                className="rounded-md text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
-              >
-                <Star
-                  className={file.favorite ? "size-4 fill-current" : "size-4"}
-                  aria-hidden="true"
-                />
-                {file.favorite ? "Unstar" : "Star"}
-              </Button>
-            </form>
-            <form action={`/api/files/${file.id}/trash`} method="post">
-              <input type="hidden" name="csrf_token" value={csrfToken} />
-              <Button
-                type="submit"
-                variant="secondary"
-                className="rounded-md text-destructive hover:text-destructive"
-              >
-                <Trash2 className="size-4" aria-hidden="true" />
-                Trash
-              </Button>
-            </form>
-          </>
-        )}
-      </div>
-    </div>
   );
 }
 
@@ -1030,20 +656,6 @@ function getSortQuery(
   };
 }
 
-function formatDate(value: string) {
-  const date = new Date(value);
-
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-
-  return new Intl.DateTimeFormat("en", {
-    month: "short",
-    day: "2-digit",
-    year: "numeric",
-  }).format(date);
-}
-
 function formatBytes(value: number) {
   if (!Number.isFinite(value) || value <= 0) {
     return "0 B";
@@ -1069,33 +681,6 @@ function percentage(used: number, total: number) {
   }
 
   return Math.min(100, Math.max(0, Math.round((used / total) * 100)));
-}
-
-function getFileIcon(file: FileEntry) {
-  const kind = file.kind.toLowerCase();
-
-  if (isFolderEntry(file)) {
-    return Folder;
-  }
-
-  if (kind.includes("image")) {
-    return ImageIcon;
-  }
-
-  if (
-    kind.includes("zip") ||
-    kind.includes("archive") ||
-    kind.includes("tar") ||
-    kind.includes("rar")
-  ) {
-    return FileArchive;
-  }
-
-  return FileText;
-}
-
-function isFolderEntry(entry: FileEntry) {
-  return entry.entryType === "folder";
 }
 
 function emptyFilesText(sectionKey: DashboardSectionKey) {
