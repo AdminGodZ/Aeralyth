@@ -1,5 +1,29 @@
 use std::env;
 
+use serde::Serialize;
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum E2eeMode {
+    Off,
+    Migrate,
+    Required,
+}
+
+impl E2eeMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Migrate => "migrate",
+            Self::Required => "required",
+        }
+    }
+
+    pub fn is_enabled(self) -> bool {
+        self != Self::Off
+    }
+}
+
 #[derive(Clone)]
 pub struct Config {
     host: String,
@@ -16,6 +40,7 @@ pub struct Config {
     pub storage_multipart_threshold_bytes: u64,
     pub storage_multipart_part_bytes: u64,
     pub storage_multipart_orphan_grace_seconds: u64,
+    pub e2ee_mode: E2eeMode,
     pub s3_bucket: Option<String>,
     pub s3_endpoint: Option<String>,
     pub s3_region: String,
@@ -85,6 +110,25 @@ impl Config {
             None if s3_configured => "s3".to_owned(),
             None => "local".to_owned(),
         };
+        let e2ee_mode = match env::var("AERALYTH_E2EE_MODE")
+            .unwrap_or_else(|_| "off".to_owned())
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "off" => E2eeMode::Off,
+            "migrate" => E2eeMode::Migrate,
+            "required" => E2eeMode::Required,
+            value => {
+                return Err(format!("unsupported AERALYTH_E2EE_MODE value: {value}"));
+            }
+        };
+
+        if e2ee_mode.is_enabled() && storage_backend != "s3" {
+            return Err(
+                "AERALYTH_E2EE_MODE=migrate|required requires S3 object storage".to_owned(),
+            );
+        }
         let s3_region = first_env(&["AERALYTH_S3_REGION", "AWS_DEFAULT_REGION", "REGION"])
             .unwrap_or_else(|| "auto".to_owned());
         let s3_force_path_style = first_env(&["AERALYTH_S3_URL_STYLE", "AWS_S3_URL_STYLE"])
@@ -126,6 +170,7 @@ impl Config {
                 5 * 60,
                 7 * 24 * 60 * 60,
             ),
+            e2ee_mode,
             s3_bucket,
             s3_endpoint,
             s3_region,

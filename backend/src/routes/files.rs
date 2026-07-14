@@ -132,6 +132,7 @@ pub struct FilesSummary {
 pub struct FolderBreadcrumb {
     id: String,
     name: String,
+    e2ee_state: String,
 }
 
 #[derive(Serialize)]
@@ -151,6 +152,7 @@ pub struct FileEntry {
     created_at: String,
     updated_at: String,
     trashed_at: Option<String>,
+    e2ee_state: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -227,12 +229,16 @@ pub async fn list_files(
         "updated"
     }));
     let direction = normalize_sort_direction(query.direction.as_deref(), sort);
-    let current_folder_id = if view == "files" {
-        validate_folder(&state, &user, query.folder.as_deref()).await?
-    } else {
-        None
+    let current_folder_id = match view {
+        "files" => validate_folder(&state, &user, query.folder.as_deref()).await?,
+        "shared" => validate_shared_folder(&state, &user, query.folder.as_deref()).await?,
+        _ => None,
     };
-    let breadcrumbs = get_breadcrumbs(&state, &user, current_folder_id.as_deref()).await?;
+    let breadcrumbs = if view == "shared" {
+        get_shared_breadcrumbs(&state, &user, current_folder_id.as_deref()).await?
+    } else {
+        get_breadcrumbs(&state, &user, current_folder_id.as_deref()).await?
+    };
     let page_size = query
         .limit
         .unwrap_or(DEFAULT_PAGE_SIZE)
@@ -277,6 +283,11 @@ pub async fn init_upload(
 ) -> Result<HttpResponse> {
     let user = require_user(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+
+    if state.config.e2ee_mode.is_enabled() {
+        return Ok(HttpResponse::Conflict()
+            .body("plaintext uploads are disabled; use the encrypted vault upload API"));
+    }
 
     if body.size_bytes > MAX_UPLOAD_BYTES {
         return Err(error::ErrorPayloadTooLarge("file exceeds the 2 GB limit"));
@@ -1230,6 +1241,9 @@ pub async fn share(
 ) -> Result<HttpResponse> {
     let user = require_user(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
+    if state.config.e2ee_mode.is_enabled() {
+        return Ok(redirect("/files?file=encrypted-share-required"));
+    }
     let file_id = path.into_inner();
     let username = normalize_username(&form.username);
 
@@ -1567,6 +1581,50 @@ async fn validate_folder(
         .map(Some)
 }
 
+async fn validate_shared_folder(
+    state: &AppState,
+    user: &AuthUser,
+    folder_id: Option<&str>,
+) -> Result<Option<String>> {
+    let Some(folder_id) = folder_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    let accessible = state
+        .db
+        .query_opt(
+            "
+                WITH RECURSIVE ancestors AS (
+                  SELECT id, parent_id, owner_id
+                  FROM files
+                  WHERE id = $1 AND entry_type = 'folder' AND state = 'active'
+                  UNION ALL
+                  SELECT parent.id, parent.parent_id, parent.owner_id
+                  FROM files AS parent
+                  INNER JOIN ancestors AS child ON child.parent_id = parent.id
+                  WHERE parent.owner_id = child.owner_id AND parent.state = 'active'
+                )
+                SELECT $1::text AS id
+                FROM ancestors
+                INNER JOIN vault_shares AS shares
+                  ON shares.root_node_id = ancestors.id
+                 AND shares.owner_id = ancestors.owner_id
+                 AND shares.status = 'active'
+                INNER JOIN vault_share_recipients AS recipients
+                  ON recipients.share_id = shares.id
+                 AND recipients.recipient_id = $2
+                 AND recipients.status = 'active'
+                LIMIT 1
+            ",
+            &[&folder_id, &user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    accessible
+        .map(|row| row.get("id"))
+        .ok_or_else(|| error::ErrorNotFound("shared folder not found"))
+        .map(Some)
+}
+
 async fn get_breadcrumbs(
     state: &AppState,
     user: &AuthUser,
@@ -1580,18 +1638,18 @@ async fn get_breadcrumbs(
         .query(
             "
                 WITH RECURSIVE ancestors AS (
-                  SELECT id, original_name, parent_id, 0 AS depth
+                  SELECT id, original_name, parent_id, e2ee_state, 0 AS depth
                   FROM files
                   WHERE id = $1 AND owner_id = $2
 
                   UNION ALL
 
-                  SELECT parent.id, parent.original_name, parent.parent_id, child.depth + 1
+                  SELECT parent.id, parent.original_name, parent.parent_id, parent.e2ee_state, child.depth + 1
                   FROM files AS parent
                   INNER JOIN ancestors AS child ON child.parent_id = parent.id
                   WHERE parent.owner_id = $2
                 )
-                SELECT id, original_name
+                SELECT id, original_name, e2ee_state
                 FROM ancestors
                 ORDER BY depth DESC
             ",
@@ -1605,6 +1663,61 @@ async fn get_breadcrumbs(
         .map(|row| FolderBreadcrumb {
             id: row.get("id"),
             name: row.get("original_name"),
+            e2ee_state: row.get("e2ee_state"),
+        })
+        .collect())
+}
+
+async fn get_shared_breadcrumbs(
+    state: &AppState,
+    user: &AuthUser,
+    folder_id: Option<&str>,
+) -> Result<Vec<FolderBreadcrumb>> {
+    let Some(folder_id) = folder_id else {
+        return Ok(Vec::new());
+    };
+    let rows = state
+        .db
+        .query(
+            "
+                WITH RECURSIVE ancestors AS (
+                  SELECT id, original_name, parent_id, owner_id, e2ee_state, 0 AS depth
+                  FROM files WHERE id = $1
+                  UNION ALL
+                  SELECT parent.id, parent.original_name, parent.parent_id,
+                         parent.owner_id, parent.e2ee_state, child.depth + 1
+                  FROM files AS parent
+                  INNER JOIN ancestors AS child ON child.parent_id = parent.id
+                  WHERE parent.owner_id = child.owner_id
+                ), access AS (
+                  SELECT ancestors.depth AS root_depth
+                  FROM ancestors
+                  INNER JOIN vault_shares AS shares
+                    ON shares.root_node_id = ancestors.id
+                   AND shares.owner_id = ancestors.owner_id
+                   AND shares.status = 'active'
+                  INNER JOIN vault_share_recipients AS recipients
+                    ON recipients.share_id = shares.id
+                   AND recipients.recipient_id = $2
+                   AND recipients.status = 'active'
+                  ORDER BY ancestors.depth
+                  LIMIT 1
+                )
+                SELECT id, original_name, e2ee_state
+                FROM ancestors, access
+                WHERE ancestors.depth <= access.root_depth
+                ORDER BY ancestors.depth DESC
+            ",
+            &[&folder_id, &user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    Ok(rows
+        .into_iter()
+        .map(|row| FolderBreadcrumb {
+            id: row.get("id"),
+            name: row.get("original_name"),
+            e2ee_state: row.get("e2ee_state"),
         })
         .collect())
 }
@@ -1687,6 +1800,7 @@ async fn ensure_folder(
     Ok(folder_id)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn list_entries(
     state: &AppState,
     user: &AuthUser,
@@ -1698,18 +1812,13 @@ async fn list_entries(
     page_size: usize,
 ) -> Result<FilePage> {
     let effective_sort = sort.unwrap_or(if view == "files" { "name" } else { "updated" });
-    let cursor = decode_file_cursor(
-        encoded_cursor,
-        view,
-        folder_id.as_deref(),
-        effective_sort,
-        direction,
-    )?;
+    let cursor = decode_file_cursor(encoded_cursor, view, folder_id, effective_sort, direction)?;
 
     if view == "shared" {
         return list_shared_entries(
             state,
             user,
+            folder_id,
             effective_sort,
             direction,
             cursor.as_ref(),
@@ -1776,9 +1885,19 @@ async fn list_entries(
               files.parent_id,
               files.size_bytes,
               files.state,
+              files.e2ee_state,
               files.favorite,
               NULL::text AS owner_username,
-              false AS shared,
+              EXISTS (
+                SELECT 1 FROM file_shares
+                WHERE file_shares.file_id = files.id
+                  AND file_shares.owner_id = files.owner_id
+              ) OR EXISTS (
+                SELECT 1 FROM vault_shares
+                WHERE vault_shares.root_node_id = files.id
+                  AND vault_shares.owner_id = files.owner_id
+                  AND vault_shares.status IN ('active', 'rotating')
+              ) AS shared,
               NULL::text AS shared_at,
               to_char(files.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
               to_char(files.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
@@ -1831,11 +1950,18 @@ async fn list_entries(
 async fn list_shared_entries(
     state: &AppState,
     user: &AuthUser,
+    folder_id: Option<&str>,
     sort: &str,
     direction: &str,
     cursor: Option<&FileCursor>,
     page_size: usize,
 ) -> Result<FilePage> {
+    if let Some(folder_id) = folder_id {
+        return list_shared_folder_entries(
+            state, user, folder_id, sort, direction, cursor, page_size,
+        )
+        .await;
+    }
     let name = "lower(files.original_name)";
     let date = "file_shares.created_at";
     let comparison = if direction == "ASC" { ">" } else { "<" };
@@ -1876,6 +2002,7 @@ async fn list_shared_entries(
               files.parent_id,
               files.size_bytes,
               files.state,
+              files.e2ee_state,
               false AS favorite,
               owners.username AS owner_username,
               true AS shared,
@@ -1895,7 +2022,6 @@ async fn list_shared_entries(
               AND ($5::text IS NULL OR $5::text IS NOT NULL)
               AND ($6::text IS NULL OR $6::text IS NOT NULL)
               AND files.state = 'active'
-              AND files.entry_type = 'file'
               AND owners.status = 'active'
               AND ({cursor_predicate})
             ORDER BY {order}
@@ -1920,6 +2046,112 @@ async fn list_shared_entries(
         .map_err(error::ErrorInternalServerError)?;
 
     file_page_from_rows(rows, "shared", None, sort, direction, page_size)
+}
+
+async fn list_shared_folder_entries(
+    state: &AppState,
+    user: &AuthUser,
+    folder_id: &str,
+    sort: &str,
+    direction: &str,
+    cursor: Option<&FileCursor>,
+    page_size: usize,
+) -> Result<FilePage> {
+    let rank = "CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END";
+    let name = "lower(files.original_name)";
+    let date = "access.created_at";
+    let comparison = if direction == "ASC" { ">" } else { "<" };
+    let (cursor_predicate, order) = match sort {
+        "size" => (
+            format!(
+                "$3::integer IS NULL OR {rank} > $3 OR ({rank} = $3 AND (files.size_bytes {comparison} $5 OR (files.size_bytes = $5 AND ({name} > $4 OR ({name} = $4 AND files.id > $7)))))"
+            ),
+            format!("{rank} ASC, files.size_bytes {direction}, {name} ASC, files.id ASC"),
+        ),
+        "updated" => (
+            format!(
+                "$3::integer IS NULL OR {rank} > $3 OR ({rank} = $3 AND ({date} {comparison} $6::text::timestamptz OR ({date} = $6::text::timestamptz AND ({name} > $4 OR ({name} = $4 AND files.id > $7)))))"
+            ),
+            format!("{rank} ASC, {date} {direction}, {name} ASC, files.id ASC"),
+        ),
+        _ => (
+            format!(
+                "$3::integer IS NULL OR {rank} > $3 OR ({rank} = $3 AND ({name} {comparison} $4 OR ({name} = $4 AND files.id > $7)))"
+            ),
+            format!("{rank} ASC, {name} {direction}, files.id ASC"),
+        ),
+    };
+    let cursor_rank = cursor.map(|value| value.rank);
+    let cursor_name = cursor.map(|value| value.name.clone());
+    let cursor_size = cursor.map(|value| value.size);
+    let cursor_date = cursor.map(|value| value.date.clone());
+    let cursor_id = cursor.map(|value| value.id.clone());
+    let row_limit = i64::try_from(page_size + 1)
+        .map_err(|_| error::ErrorInternalServerError("invalid page size"))?;
+    let sql = format!(
+        "
+            WITH RECURSIVE ancestors AS (
+              SELECT id, parent_id, owner_id FROM files WHERE id = $2
+              UNION ALL
+              SELECT parent.id, parent.parent_id, parent.owner_id
+              FROM files AS parent
+              INNER JOIN ancestors AS child ON child.parent_id = parent.id
+              WHERE parent.owner_id = child.owner_id
+            ), access AS (
+              SELECT shares.id, shares.owner_id, shares.created_at
+              FROM ancestors
+              INNER JOIN vault_shares AS shares
+                ON shares.root_node_id = ancestors.id
+               AND shares.owner_id = ancestors.owner_id
+               AND shares.status = 'active'
+              INNER JOIN vault_share_recipients AS recipients
+                ON recipients.share_id = shares.id
+               AND recipients.recipient_id = $1
+               AND recipients.status = 'active'
+              ORDER BY shares.created_at
+              LIMIT 1
+            )
+            SELECT files.id, files.original_name, files.mime_type,
+                   files.entry_type, files.parent_id, files.size_bytes,
+                   files.state, files.e2ee_state, false AS favorite,
+                   owners.username AS owner_username, true AS shared,
+                   to_char(access.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS shared_at,
+                   to_char(files.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
+                   to_char(files.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
+                   NULL::text AS trashed_at, {rank}::integer AS cursor_rank,
+                   {name} AS cursor_name,
+                   to_char({date} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_date
+            FROM access
+            INNER JOIN files ON files.owner_id = access.owner_id
+              AND files.parent_id = $2 AND files.state = 'active'
+            INNER JOIN users AS owners ON owners.id = files.owner_id
+            WHERE ($4::text IS NULL OR $4::text IS NOT NULL)
+              AND ($5::bigint IS NULL OR $5::bigint IS NOT NULL)
+              AND ($6::text IS NULL OR $6::text IS NOT NULL)
+              AND ($7::text IS NULL OR $7::text IS NOT NULL)
+              AND ({cursor_predicate})
+            ORDER BY {order}
+            LIMIT $8
+        "
+    );
+    let rows = state
+        .db
+        .query(
+            &sql,
+            &[
+                &user.id,
+                &folder_id,
+                &cursor_rank,
+                &cursor_name,
+                &cursor_size,
+                &cursor_date,
+                &cursor_id,
+                &row_limit,
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    file_page_from_rows(rows, "shared", Some(folder_id), sort, direction, page_size)
 }
 
 fn listed_file_from_row(row: tokio_postgres::Row) -> ListedFile {
@@ -1951,6 +2183,7 @@ fn listed_file_from_row(row: tokio_postgres::Row) -> ListedFile {
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
             trashed_at: row.get("trashed_at"),
+            e2ee_state: row.get("e2ee_state"),
         },
     }
 }
@@ -2126,6 +2359,7 @@ async fn get_download_file(
                 WHERE files.id = $1
                   AND files.state = 'active'
                   AND files.entry_type = 'file'
+                  AND files.e2ee_state IN ('legacy', 'staged')
                   AND (
                     files.owner_id = $2
                     OR (
@@ -2465,12 +2699,12 @@ fn is_valid_username(username: &str) -> bool {
 }
 
 fn file_kind(name: &str, mime_type: Option<&str>) -> String {
-    if let Some(mime_type) = mime_type {
-        if let Some(kind) = mime_type.split('/').next() {
-            if !kind.is_empty() && kind != "application" {
-                return kind.to_owned();
-            }
-        }
+    if let Some(mime_type) = mime_type
+        && let Some(kind) = mime_type.split('/').next()
+        && !kind.is_empty()
+        && kind != "application"
+    {
+        return kind.to_owned();
     }
 
     name.rsplit('.')

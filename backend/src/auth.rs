@@ -17,7 +17,10 @@ pub struct AuthUser {
     pub theme_preference: String,
     pub accent_color: String,
     pub folder_zip_prompt_enabled: bool,
+    pub vault_auto_lock_minutes: i32,
     pub profile_image_url: Option<String>,
+    pub e2ee_mode: String,
+    pub vault_configured: bool,
 }
 
 impl AuthUser {
@@ -44,11 +47,13 @@ pub async fn authenticate_password(
                   COALESCE(theme_preference, 'system') AS theme_preference,
                   COALESCE(accent_color, '#3088f0') AS accent_color,
                   COALESCE(folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
+                  COALESCE(vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes,
                   profile_image_bytes IS NOT NULL AS has_profile_image,
                   to_char(
                     COALESCE(profile_image_updated_at, updated_at) AT TIME ZONE 'UTC',
                     'YYYYMMDDHH24MISSMS'
-                  ) AS profile_image_version
+                  ) AS profile_image_version,
+                  EXISTS (SELECT 1 FROM user_vaults WHERE user_id = users.id) AS vault_configured
                 FROM users
                 WHERE username = $1
                   AND status = 'active'
@@ -60,7 +65,7 @@ pub async fn authenticate_password(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    Ok(user.map(auth_user_from_row))
+    Ok(user.map(|row| auth_user_from_row(row, state.config.e2ee_mode.as_str())))
 }
 
 pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Option<AuthUser>> {
@@ -81,11 +86,13 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
                   COALESCE(users.theme_preference, 'system') AS theme_preference,
                   COALESCE(users.accent_color, '#3088f0') AS accent_color,
                   COALESCE(users.folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
+                  COALESCE(users.vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes,
                   users.profile_image_bytes IS NOT NULL AS has_profile_image,
                   to_char(
                     COALESCE(users.profile_image_updated_at, users.updated_at) AT TIME ZONE 'UTC',
                     'YYYYMMDDHH24MISSMS'
-                  ) AS profile_image_version
+                  ) AS profile_image_version,
+                  EXISTS (SELECT 1 FROM user_vaults WHERE user_id = users.id) AS vault_configured
                 FROM sessions
                 INNER JOIN users ON users.id = sessions.user_id
                 WHERE sessions.token_hash = encode(digest($1::text, 'sha256'), 'hex')
@@ -98,7 +105,7 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    Ok(user.map(auth_user_from_row))
+    Ok(user.map(|row| auth_user_from_row(row, state.config.e2ee_mode.as_str())))
 }
 
 pub async fn require_user(state: &AppState, request: &HttpRequest) -> Result<AuthUser> {
@@ -153,7 +160,7 @@ pub async fn require_csrf(state: &AppState, request: &HttpRequest, csrf_token: &
     Err(error::ErrorForbidden("csrf token invalid"))
 }
 
-fn auth_user_from_row(row: tokio_postgres::Row) -> AuthUser {
+fn auth_user_from_row(row: tokio_postgres::Row, e2ee_mode: &str) -> AuthUser {
     let has_profile_image: bool = row.get("has_profile_image");
     let profile_image_version: Option<String> = row.get("profile_image_version");
     let profile_image_url = has_profile_image.then(|| {
@@ -173,6 +180,9 @@ fn auth_user_from_row(row: tokio_postgres::Row) -> AuthUser {
         theme_preference: row.get("theme_preference"),
         accent_color: row.get("accent_color"),
         folder_zip_prompt_enabled: row.get("folder_zip_prompt_enabled"),
+        vault_auto_lock_minutes: row.get("vault_auto_lock_minutes"),
         profile_image_url,
+        e2ee_mode: e2ee_mode.to_owned(),
+        vault_configured: row.get("vault_configured"),
     }
 }

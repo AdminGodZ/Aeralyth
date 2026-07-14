@@ -30,6 +30,8 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Progress } from "@/components/ui/progress";
 import type { FolderZipWorkerResponse } from "@/features/dashboard/folder-zip-messages";
+import { uploadEncryptedSelections } from "@/features/vault/encrypted-upload";
+import { useVault } from "@/features/vault/vault-provider";
 
 type UploadSelection = {
   file: File;
@@ -88,19 +90,23 @@ const UPLOAD_FINALIZATION_TIMEOUT_MS = 45_000;
 
 export function UploadPanel({
   csrfToken,
+  e2eeMode,
   folderZipPromptEnabled,
   parentFolderId,
 }: {
   csrfToken: string;
+  e2eeMode: "off" | "migrate" | "required";
   folderZipPromptEnabled: boolean;
   parentFolderId?: string | null;
 }) {
   const router = useRouter();
+  const vault = useVault();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const zipWorkerRef = useRef<Worker | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
   const activeUploadRequestsRef = useRef(new Set<XMLHttpRequest>());
+  const queuedVaultSelectionRef = useRef<UploadSelection[] | null>(null);
   const [selectedFileCount, setSelectedFileCount] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState<number | null>(null);
@@ -126,6 +132,15 @@ export function UploadPanel({
     };
   }, []);
 
+  useEffect(() => {
+    const queued = queuedVaultSelectionRef.current;
+    if (e2eeMode === "off" || vault.state !== "unlocked" || !queued) {
+      return;
+    }
+    queuedVaultSelectionRef.current = null;
+    submitFiles(queued);
+  }, [e2eeMode, vault.state]);
+
   function submitFiles(files: UploadSelection[]) {
     if (files.length === 0 || isUploading) {
       return;
@@ -135,6 +150,12 @@ export function UploadPanel({
       setUploadError(
         `Choose no more than ${MAX_SELECTION_FILES.toLocaleString()} files at once.`,
       );
+      return;
+    }
+
+    if (e2eeMode !== "off" && vault.state !== "unlocked") {
+      queuedVaultSelectionRef.current = files;
+      vault.requestUnlock();
       return;
     }
 
@@ -167,6 +188,35 @@ export function UploadPanel({
     };
 
     try {
+      if (e2eeMode !== "off") {
+        if (!vault.client) {
+          throw new Error("The encrypted vault worker is not available.");
+        }
+        if (parentFolderId) {
+          await vault.openNode(parentFolderId);
+        }
+        await uploadEncryptedSelections({
+          selections: files,
+          parentFolderId: parentFolderId ?? null,
+          csrfToken,
+          client: vault.client,
+          signal: controller.signal,
+          onProgress: (processedBytes, encryptedTotalBytes) => {
+            setUploadProgress(
+              encryptedTotalBytes === 0
+                ? 100
+                : Math.min(100, (processedBytes / encryptedTotalBytes) * 100),
+            );
+          },
+        });
+        setUploadProgress(100);
+        setIsUploading(false);
+        setSelectedFileCount(0);
+        uploadAbortRef.current = null;
+        router.refresh();
+        return;
+      }
+
       for (const [fileIndex, selection] of files.entries()) {
         if (controller.signal.aborted) {
           throw new DOMException("Upload canceled", "AbortError");

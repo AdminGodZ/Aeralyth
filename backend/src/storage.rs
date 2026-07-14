@@ -14,6 +14,7 @@ use tokio::time::{MissedTickBehavior, interval};
 
 use crate::config::Config;
 use crate::db::Database;
+use crate::e2ee::UPLOAD_PART_BYTES;
 
 const MULTIPART_RECONCILIATION_LOCK_ID: i64 = 4_133_797_884_291_001;
 const STORAGE_OBJECT_PREFIX: &str = "users/";
@@ -228,6 +229,50 @@ impl Storage {
                 part_size_bytes: None,
             }),
         }
+    }
+
+    pub async fn prepare_vault_upload(
+        &self,
+        object_key: &str,
+        size_bytes: u64,
+    ) -> Result<PreparedUpload, StorageError> {
+        let Self::S3 { client, bucket, .. } = self else {
+            return Err(storage_message(
+                "encrypted vault uploads require S3 storage",
+            ));
+        };
+
+        if size_bytes >= UPLOAD_PART_BYTES {
+            let output = client
+                .create_multipart_upload()
+                .bucket(bucket)
+                .key(object_key)
+                .content_type("application/octet-stream")
+                .checksum_algorithm(ChecksumAlgorithm::Sha256)
+                .send()
+                .await
+                .map_err(storage_error)?;
+            let multipart_upload_id = output
+                .upload_id()
+                .map(str::to_owned)
+                .ok_or_else(|| storage_message("S3 did not return a multipart upload id"))?;
+
+            return Ok(PreparedUpload {
+                mode: "multipart",
+                upload_url: None,
+                parts: Vec::new(),
+                multipart_upload_id: Some(multipart_upload_id),
+                part_size_bytes: Some(UPLOAD_PART_BYTES),
+            });
+        }
+
+        Ok(PreparedUpload {
+            mode: "single",
+            upload_url: None,
+            parts: Vec::new(),
+            multipart_upload_id: None,
+            part_size_bytes: None,
+        })
     }
 
     pub async fn presign_single_upload(
@@ -483,9 +528,7 @@ impl Storage {
                 let path = self
                     .local_path(object_key)
                     .ok_or_else(|| storage_message("invalid local object key"))?;
-                let metadata = tokio::fs::metadata(path)
-                    .await
-                    .map_err(|error| storage_io_error(error))?;
+                let metadata = tokio::fs::metadata(path).await.map_err(storage_io_error)?;
                 Ok(ObjectMetadata {
                     size_bytes: metadata.len(),
                     checksum_sha256: None,
@@ -615,6 +658,9 @@ pub async fn run_maintenance(db: Database, storage: Storage) {
         if let Err(error) = expire_abandoned_uploads(&db, &storage).await {
             log::error!("abandoned upload cleanup failed: {error}");
         }
+        if let Err(error) = expire_abandoned_vault_uploads(&db, &storage).await {
+            log::error!("abandoned encrypted upload cleanup failed: {error}");
+        }
         if let Err(error) = expire_invitations_batch(&db).await {
             log::error!("invitation expiry worker failed: {error}");
         }
@@ -630,6 +676,80 @@ pub async fn run_maintenance(db: Database, storage: Storage) {
             }
         }
     }
+}
+
+async fn expire_abandoned_vault_uploads(
+    db: &Database,
+    storage: &Storage,
+) -> Result<(), Box<dyn StdError + Send + Sync>> {
+    let uploads = db
+        .query(
+            "
+                WITH claimed AS (
+                  SELECT id
+                  FROM vault_uploads
+                  WHERE status IN ('initializing', 'pending', 'completing', 'aborting')
+                    AND expires_at <= now()
+                  ORDER BY expires_at
+                  LIMIT 25
+                  FOR UPDATE SKIP LOCKED
+                )
+                UPDATE vault_uploads AS uploads
+                SET status = 'aborting', expires_at = now() + interval '5 minutes'
+                FROM claimed
+                WHERE uploads.id = claimed.id
+                RETURNING uploads.id, uploads.object_key,
+                          uploads.multipart_upload_id, uploads.write_expires_at
+            ",
+            &[],
+        )
+        .await?;
+
+    for upload in uploads {
+        let id: String = upload.get("id");
+        let object_key: Option<String> = upload.get("object_key");
+        let multipart_upload_id: Option<String> = upload.get("multipart_upload_id");
+        let write_expires_at: Option<SystemTime> = upload.get("write_expires_at");
+
+        if write_expires_at.is_some_and(|expires_at| expires_at > SystemTime::now()) {
+            db.execute(
+                "UPDATE vault_uploads SET expires_at = write_expires_at WHERE id = $1 AND status = 'aborting'",
+                &[&id],
+            )
+            .await?;
+            continue;
+        }
+
+        let cleanup = async {
+            if let (Some(object_key), Some(multipart_upload_id)) =
+                (object_key.as_deref(), multipart_upload_id.as_deref())
+            {
+                storage
+                    .abort_multipart(object_key, multipart_upload_id)
+                    .await?;
+            }
+            if let Some(object_key) = object_key.as_deref() {
+                storage.delete_object(object_key).await?;
+            }
+            Ok::<(), StorageError>(())
+        }
+        .await;
+
+        match cleanup {
+            Ok(()) => {
+                db.execute(
+                    "UPDATE vault_uploads SET status = 'aborted' WHERE id = $1 AND status = 'aborting'",
+                    &[&id],
+                )
+                .await?;
+            }
+            Err(error) => {
+                log::warn!("encrypted upload {id} cleanup will retry: {error}");
+            }
+        }
+    }
+
+    Ok(())
 }
 
 async fn reconcile_orphaned_multipart_uploads(
@@ -845,6 +965,22 @@ async fn process_deletion_jobs(
                 transaction
                     .execute(
                         "UPDATE file_uploads SET status = 'aborted' WHERE object_key = $1 AND status = 'aborting'",
+                        &[&object_key],
+                    )
+                    .await?;
+                transaction
+                    .execute(
+                        "UPDATE vault_uploads SET status = 'aborted' WHERE object_key = $1 AND status = 'aborting'",
+                        &[&object_key],
+                    )
+                    .await?;
+                transaction
+                    .execute(
+                        "
+                            UPDATE vault_migrations
+                            SET state = 'complete', updated_at = now()
+                            WHERE legacy_object_key = $1 AND state = 'cleanup_queued'
+                        ",
                         &[&object_key],
                     )
                     .await?;

@@ -1,15 +1,36 @@
 # Object storage
 
-Aeralyth uses local asynchronous file storage in development and a private
-S3-compatible bucket in production. Metadata, quota reservations, counters,
-and deletion jobs stay in PostgreSQL. Object bytes travel directly between the
-browser and S3 through short-lived presigned URLs.
+Aeralyth uses a private S3-compatible bucket for encrypted vault data in both
+development and production. Metadata, quota reservations, counters, and
+deletion jobs stay in PostgreSQL. Encrypted object bytes travel directly between
+the browser and S3 through short-lived presigned URLs.
 
 ## Local development
 
-Keep `AERALYTH_STORAGE_BACKEND=local`. Objects are written below
-`AERALYTH_STORAGE_PATH`; the same upload control API is used, but the PUT body
-is sent to the Actix development endpoint.
+Use Railway S3 locally with `AERALYTH_STORAGE_BACKEND=s3`. The API accepts the
+same bucket variables as production and issues presigned URLs to the browser.
+Set bucket CORS for the exact local frontend origin and set
+`AERALYTH_S3_CSP_ORIGIN` to the presigned URL origin.
+
+Apply the checked-in development policy with the standard AWS CLI after loading
+the bucket credentials into the current shell:
+
+```sh
+aws s3api put-bucket-cors \
+  --bucket "$AWS_S3_BUCKET_NAME" \
+  --endpoint-url "$AWS_ENDPOINT_URL" \
+  --region "$AWS_DEFAULT_REGION" \
+  --cors-configuration file://docs/railway-s3-cors.local.json
+```
+
+This policy allows only `http://localhost:3000` and
+`http://127.0.0.1:3000`. Create a separate production policy containing the
+deployed frontend's exact HTTPS origin; do not add a wildcard origin to the
+development policy.
+
+The local filesystem backend remains available only while
+`AERALYTH_E2EE_MODE=off` so old installations can be migrated. The API refuses
+`migrate` or `required` mode unless S3 is configured.
 
 ## Railway production
 
@@ -34,13 +55,15 @@ than `AERALYTH_MULTIPART_ORPHAN_GRACE_SECONDS` are aborted. Known cancellations
 and expirations remain in the database-backed deletion queue until both the
 multipart abort and object deletion succeed.
 
-Legacy development objects remain readable from
+Legacy development objects remain readable during migration from
 `AERALYTH_STORAGE_PATH/<owner>/<storage-name>` on the original host. Before an
 existing installation switches to replicated production services, copy those
 objects into the bucket and rewrite their `files.storage_name` values to the
 new object keys. Do not depend on the legacy filesystem fallback in Railway.
 
-The initial defaults are a 100 MiB multipart threshold, 64 MiB parts, four
+The legacy upload defaults are a 100 MiB multipart threshold and 64 MiB parts.
+Encrypted vault uploads use fixed 32 MiB multipart parts over 4 MiB
+authenticated-encryption chunks. Other defaults include four
 concurrent browser part uploads, a 15-minute signature lifetime, a one-hour
 orphan grace period, and a 10 GiB per-user quota. Presigned PUTs bind the exact
 reserved object or part length; the browser verifies that length before sending
@@ -50,3 +73,6 @@ across configuration changes. Single-object deletion is deferred until every
 issued PUT signature has expired, preventing a late write from recreating a
 cleaned-up key. Tune these values from production measurements rather than
 increasing them globally.
+
+See [Encrypted vault](./e2ee.md) for the cryptographic design, CORS contract,
+and staged migration runbook.

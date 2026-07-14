@@ -10,7 +10,6 @@ import {
   Sun,
   Undo2,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import {
   useEffect,
@@ -31,6 +30,13 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import {
@@ -38,6 +44,12 @@ import {
   ToggleGroupItem,
 } from "@/components/ui/toggle-group";
 import { AccentColorPreference } from "@/features/dashboard/accent-color-preference";
+import {
+  normalizeVaultAutoLockMinutes,
+  VAULT_AUTO_LOCK_CHANGE_EVENT,
+  VAULT_AUTO_LOCK_OPTIONS,
+} from "@/features/vault/vault-preferences";
+import { VaultMigrationControl } from "@/features/vault/vault-migration-control";
 import type { CurrentUser } from "@/lib/api";
 
 type ProfileSettingsFormProps = {
@@ -54,8 +66,8 @@ export function ProfileSettingsForm({
   const themeLabelId = useId();
   const accentLabelId = useId();
   const folderZipPromptId = useId();
+  const vaultAutoLockId = useId();
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const router = useRouter();
   const { setTheme } = useTheme();
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [removeImage, setRemoveImage] = useState(false);
@@ -66,6 +78,9 @@ export function ProfileSettingsForm({
   );
   const [folderZipPromptEnabled, setFolderZipPromptEnabled] = useState(
     currentUser.folderZipPromptEnabled !== false,
+  );
+  const [vaultAutoLockMinutes, setVaultAutoLockMinutes] = useState(() =>
+    normalizeVaultAutoLockMinutes(currentUser.vaultAutoLockMinutes),
   );
   const displayName = currentUser.displayName?.trim() || currentUser.username;
   const avatarUrl = removeImage
@@ -165,7 +180,11 @@ export function ProfileSettingsForm({
         fileInputRef.current.value = "";
       }
 
-      router.refresh();
+      window.dispatchEvent(
+        new CustomEvent(VAULT_AUTO_LOCK_CHANGE_EVENT, {
+          detail: vaultAutoLockMinutes,
+        }),
+      );
     } catch (error) {
       setSaveError(
         error instanceof Error
@@ -200,6 +219,11 @@ export function ProfileSettingsForm({
         type="hidden"
         name="folder_zip_prompt_enabled"
         value={folderZipPromptEnabled ? "1" : "0"}
+      />
+      <input
+        type="hidden"
+        name="vault_auto_lock_minutes"
+        value={vaultAutoLockMinutes}
       />
 
       <SettingsSection title="Profile" description="Photo and display name">
@@ -355,23 +379,70 @@ export function ProfileSettingsForm({
 
       <Separator />
 
-      <SettingsSection title="Uploads" description="Folder handling">
-        <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-          <div className="min-w-0">
-            <Label htmlFor={folderZipPromptId}>Ask how to upload folders</Label>
-            <p
-              id={`${folderZipPromptId}-description`}
-              className="mt-1 text-xs leading-5 text-muted-foreground"
+      {currentUser.e2eeMode === "migrate" ? (
+        <>
+          <SettingsSection
+            title="Encrypted vault"
+            description="Convert existing content"
+          >
+            <VaultMigrationControl csrfToken={csrfToken} />
+          </SettingsSection>
+          <Separator />
+        </>
+      ) : null}
+
+      <SettingsSection title="Security" description="Vault and upload behavior">
+        <div className="space-y-6">
+          <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <div className="min-w-0">
+              <Label id={vaultAutoLockId}>Lock encrypted vault</Label>
+              <p className="mt-1 text-xs leading-5 text-muted-foreground">
+                Require the vault password again after a period without activity.
+              </p>
+            </div>
+            <Select
+              value={String(vaultAutoLockMinutes)}
+              onValueChange={(value) =>
+                setVaultAutoLockMinutes(
+                  normalizeVaultAutoLockMinutes(Number(value)),
+                )
+              }
             >
-              Choose between a browsable folder structure and one client-side ZIP archive.
-            </p>
+              <SelectTrigger
+                className="h-10 w-full min-w-40 sm:w-44"
+                aria-labelledby={vaultAutoLockId}
+              >
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                {VAULT_AUTO_LOCK_OPTIONS.map((minutes) => (
+                  <SelectItem key={minutes} value={String(minutes)}>
+                    After {minutes} minutes
+                  </SelectItem>
+                ))}
+              </SelectContent>
+            </Select>
           </div>
-          <Switch
-            id={folderZipPromptId}
-            checked={folderZipPromptEnabled}
-            onCheckedChange={setFolderZipPromptEnabled}
-            aria-describedby={`${folderZipPromptId}-description`}
-          />
+
+          <Separator />
+
+          <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+            <div className="min-w-0">
+              <Label htmlFor={folderZipPromptId}>Ask how to upload folders</Label>
+              <p
+                id={`${folderZipPromptId}-description`}
+                className="mt-1 text-xs leading-5 text-muted-foreground"
+              >
+                Choose between a browsable folder structure and one client-side ZIP archive.
+              </p>
+            </div>
+            <Switch
+              id={folderZipPromptId}
+              checked={folderZipPromptEnabled}
+              onCheckedChange={setFolderZipPromptEnabled}
+              aria-describedby={`${folderZipPromptId}-description`}
+            />
+          </div>
         </div>
       </SettingsSection>
 

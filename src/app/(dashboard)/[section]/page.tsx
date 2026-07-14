@@ -86,7 +86,9 @@ export default async function SectionPage({
   const filesPromise = sectionNeedsFiles(section.key)
     ? getFilesState(
         getFileView(section.key) ?? "files",
-        section.key === "files" ? folder?.trim() : undefined,
+        section.key === "files" || section.key === "shared"
+          ? folder?.trim()
+          : undefined,
         fileSort,
         fileSortDirection,
         cursor?.trim() || undefined,

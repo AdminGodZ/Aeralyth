@@ -34,6 +34,9 @@ import { ProfileSettingsForm } from "@/features/dashboard/profile-settings-form"
 import { UploadPanel } from "@/features/dashboard/upload-panel";
 import { UserPreferenceHydrator } from "@/features/dashboard/user-preference-hydrator";
 import { UsersContent as UsersDirectory } from "@/features/dashboard/users-content";
+import { VaultProvider } from "@/features/vault/vault-provider";
+import { VaultBreadcrumbs } from "@/features/vault/vault-breadcrumbs";
+import { VaultFileList } from "@/features/vault/vault-file-list";
 import type {
   AdminUsersState,
   CurrentUser,
@@ -93,15 +96,22 @@ export function DashboardFrame({
         accentColor={accentColor}
         themePreference={currentUser.themePreference}
       />
-      <DashboardSidebar
-        canViewSystemNavigation={currentUser.role === "admin"}
+      <VaultProvider
         csrfToken={csrfToken}
-        initialCollapsed={initialSidebarCollapsed}
-      />
+        e2eeMode={currentUser.e2eeMode}
+        vaultConfigured={currentUser.vaultConfigured}
+        autoLockMinutes={currentUser.vaultAutoLockMinutes}
+      >
+        <DashboardSidebar
+          canViewSystemNavigation={currentUser.role === "admin"}
+          csrfToken={csrfToken}
+          initialCollapsed={initialSidebarCollapsed}
+        />
 
-      <section className="dashboard-main-panel flex min-w-0 flex-1 flex-col bg-background lg:mt-4 lg:min-h-[calc(100dvh-1rem)] lg:overflow-hidden lg:rounded-tl-3xl">
-        {children}
-      </section>
+        <section className="dashboard-main-panel flex min-w-0 flex-1 flex-col bg-background lg:mt-4 lg:min-h-[calc(100dvh-1rem)] lg:overflow-hidden lg:rounded-tl-3xl">
+          {children}
+        </section>
+      </VaultProvider>
     </main>
   );
 }
@@ -291,6 +301,8 @@ function DashboardContent({
       filesState={filesState}
       csrfToken={csrfToken}
       folderZipPromptEnabled={currentUser.folderZipPromptEnabled !== false}
+      e2eeMode={currentUser.e2eeMode}
+      currentUserId={currentUser.id}
       fileSort={fileSort}
       fileSortDirection={fileSortDirection}
     />
@@ -322,6 +334,8 @@ function FileContent({
   filesState,
   csrfToken,
   folderZipPromptEnabled,
+  e2eeMode,
+  currentUserId,
   fileSort,
   fileSortDirection,
 }: {
@@ -329,6 +343,8 @@ function FileContent({
   filesState: FilesState;
   csrfToken: string;
   folderZipPromptEnabled: boolean;
+  e2eeMode: "off" | "migrate" | "required";
+  currentUserId: string;
   fileSort?: FileSort;
   fileSortDirection?: FileSortDirection;
 }) {
@@ -386,43 +402,68 @@ function FileContent({
       </div>
 
       <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md border">
-        {section.key === "files" ? (
+        {section.key === "files" || section.key === "shared" ? (
           <div className="flex min-h-16 shrink-0 flex-col justify-center gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-            <FolderBreadcrumbs
-              breadcrumbs={breadcrumbs}
-              sort={fileSort}
-              direction={fileSortDirection}
-            />
-            <UploadPanel
-              csrfToken={csrfToken}
-              parentFolderId={currentFolderId}
-              folderZipPromptEnabled={folderZipPromptEnabled}
-            />
+            {e2eeMode === "off" ? (
+              <FolderBreadcrumbs
+                breadcrumbs={breadcrumbs}
+                sort={fileSort}
+                direction={fileSortDirection}
+              />
+            ) : (
+              <VaultBreadcrumbs
+                breadcrumbs={breadcrumbs}
+                sort={fileSort}
+                direction={fileSortDirection}
+                basePath={section.key === "shared" ? "/shared" : "/files"}
+              />
+            )}
+            {section.key === "files" ? (
+              <UploadPanel
+                csrfToken={csrfToken}
+                e2eeMode={e2eeMode}
+                parentFolderId={currentFolderId}
+                folderZipPromptEnabled={folderZipPromptEnabled}
+              />
+            ) : null}
           </div>
         ) : null}
 
         {entries.length ? (
           <>
-            <FileTableHeader
-              sectionKey={section.key}
-              currentFolderId={currentFolderId}
-              isShared={isShared}
-              isTrash={isTrash}
-              sort={fileSort}
-              direction={fileSortDirection}
-            />
-            <div className="min-h-0 flex-1 divide-y overflow-auto">
-              {entries.map((file) => (
-                <FileRow
-                  key={file.id}
-                  file={file}
+            {e2eeMode === "off" ? (
+              <>
+                <FileTableHeader
                   sectionKey={section.key}
-                  csrfToken={csrfToken}
+                  currentFolderId={currentFolderId}
+                  isShared={isShared}
+                  isTrash={isTrash}
                   sort={fileSort}
                   direction={fileSortDirection}
                 />
-              ))}
-            </div>
+                <div className="min-h-0 flex-1 divide-y overflow-auto">
+                  {entries.map((file) => (
+                    <FileRow
+                      key={file.id}
+                      file={file}
+                      sectionKey={section.key}
+                      csrfToken={csrfToken}
+                      sort={fileSort}
+                      direction={fileSortDirection}
+                    />
+                  ))}
+                </div>
+              </>
+            ) : (
+              <VaultFileList
+                entries={entries}
+                sectionKey={section.key}
+                csrfToken={csrfToken}
+                currentUserId={currentUserId}
+                initialSort={fileSort}
+                initialDirection={fileSortDirection}
+              />
+            )}
             {hasMore && nextCursor ? (
               <div className="flex shrink-0 justify-end border-t px-4 py-3">
                 <Button asChild variant="outline">

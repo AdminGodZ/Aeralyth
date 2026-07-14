@@ -13,7 +13,10 @@ export type CurrentUser = {
   themePreference: "system" | "light" | "dark";
   accentColor: string;
   folderZipPromptEnabled: boolean;
+  vaultAutoLockMinutes: number;
   profileImageUrl: string | null;
+  e2eeMode: "off" | "migrate" | "required";
+  vaultConfigured: boolean;
 };
 
 export type AuthState =
@@ -128,11 +131,13 @@ export type FileEntry = {
   createdAt: string;
   updatedAt: string;
   trashedAt: string | null;
+  e2eeState: "legacy" | "staged" | "encrypted";
 };
 
 export type FolderBreadcrumb = {
   id: string;
   name: string;
+  e2eeState: "legacy" | "staged" | "encrypted";
 };
 
 export type StorageStats = {
@@ -432,7 +437,10 @@ function isFilesData(data: Partial<FilesData>): data is FilesData {
     data.breadcrumbs.every(
       (breadcrumb) =>
         typeof breadcrumb.id === "string" &&
-        typeof breadcrumb.name === "string",
+        typeof breadcrumb.name === "string" &&
+        (breadcrumb.e2eeState === "legacy" ||
+          breadcrumb.e2eeState === "staged" ||
+          breadcrumb.e2eeState === "encrypted"),
     ) &&
     data.summary !== undefined &&
     typeof data.summary.totalFiles === "number" &&
@@ -466,7 +474,10 @@ function isFileEntry(entry: unknown): entry is FileEntry {
     typeof fileEntry.sizeBytes === "number" &&
     typeof fileEntry.state === "string" &&
     typeof fileEntry.favorite === "boolean" &&
-    typeof fileEntry.shared === "boolean"
+    typeof fileEntry.shared === "boolean" &&
+    (fileEntry.e2eeState === "legacy" ||
+      fileEntry.e2eeState === "staged" ||
+      fileEntry.e2eeState === "encrypted")
   );
 }
 

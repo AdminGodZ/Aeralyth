@@ -1,0 +1,398 @@
+import type {
+  VaultActiveShareContext,
+  VaultDownloadPlan,
+  VaultNodeRecord,
+  VaultPublicIdentity,
+  VaultRewrapPayload,
+  VaultSetupPayload,
+  VaultShareNodeSnapshot,
+  VaultUnlockMaterial,
+} from "@/features/vault/protocol";
+
+export type VaultStatus = {
+  mode: "off" | "migrate" | "required";
+  configured: boolean;
+  vaultVersion: number | null;
+  migration: {
+    legacyNodes: number;
+    incompleteNodes: number;
+    readyForRequired: boolean;
+  };
+};
+
+export type VaultMigrationNode = {
+  nodeId: string;
+  parentId: string | null;
+  entryType: "file" | "folder";
+  name: string;
+  mimeType: string | null;
+  plaintextBytes: number;
+  lastModified: number;
+  downloadUrl: string | null;
+};
+
+export type VaultMigrationClaim = {
+  node: VaultMigrationNode | null;
+  migration: VaultStatus["migration"];
+};
+
+export type VaultUploadPlan = {
+  uploadId: string;
+  nodeId: string;
+  mode: "none" | "single" | "multipart";
+  partSizeBytes: number | null;
+  existingParts: Array<{
+    partNumber: number;
+    etag: string;
+    checksumSha256: string | null;
+  }>;
+};
+
+export type VaultUploadUrl = {
+  url: string;
+  contentLength: number;
+};
+
+export type VaultPublishResponse = {
+  nodeId: string;
+  generationNumber: number;
+  generationId: string;
+  recordVersion: number;
+  recordHash: string;
+};
+
+export type VaultCompletedPart = {
+  partNumber: number;
+  etag: string;
+  checksumSha256: string;
+};
+
+export type VaultSharePayload = {
+  shareId: string;
+  rootNodeId: string;
+  recipientId: string;
+  recipientKeyVersion: number;
+  wrappers: string[];
+  envelopes: Array<{ canonicalCbor: string; signature: string }>;
+  ownerEpochKey: { wrapperId: string; ciphertext: string };
+};
+
+export type VaultShareMutation = {
+  shareId: string;
+  activeEpoch: number;
+  recordHash: string;
+  limitation: string;
+};
+
+export type VaultOwnedShare = {
+  shareId: string;
+  rootNodeId: string;
+  activeEpoch: number;
+  pendingEpoch: number | null;
+  pendingRevokedRecipientId: string | null;
+  status: "active" | "rotating";
+  recipients: Array<{
+    userId: string;
+    username: string;
+    keyVersion: number;
+  }>;
+};
+
+export type VaultEpochRotationPlan = {
+  shareId: string;
+  pendingEpoch: number;
+  fenceSnapshotHash: string;
+  nodes: VaultShareNodeSnapshot[];
+  retainedRecipients: Array<{
+    userId: string;
+    keyVersion: number;
+    x25519PublicKey: string;
+    ed25519PublicKey: string;
+    fingerprintSha256: string;
+  }>;
+  recordVersion: number;
+  previousRecordHash: string;
+};
+
+export class VaultApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "VaultApiError";
+  }
+}
+
+export function getVaultStatus(signal?: AbortSignal): Promise<VaultStatus> {
+  return vaultRequest("/api/vault", { signal });
+}
+
+export function getUnlockMaterial(
+  signal?: AbortSignal,
+): Promise<VaultUnlockMaterial> {
+  return vaultRequest("/api/vault/unlock-material", { signal });
+}
+
+export function setupVault(
+  csrfToken: string,
+  payload: VaultSetupPayload,
+  signal?: AbortSignal,
+): Promise<{ vaultVersion: number }> {
+  return vaultMutation("/api/vault/setup", csrfToken, payload, signal);
+}
+
+export function rewrapVault(
+  csrfToken: string,
+  payload: VaultRewrapPayload,
+  signal?: AbortSignal,
+): Promise<{ vaultVersion: number }> {
+  return vaultMutation("/api/vault/rewrap", csrfToken, payload, signal);
+}
+
+export function initVaultUpload(
+  csrfToken: string,
+  payload: {
+    nodeId: string;
+    parentId: string | null;
+    entryType: "file" | "folder";
+    generationNumber: number;
+    generationId: string;
+    ciphertextLength: number;
+    chunkCount: number;
+    migration?: boolean;
+  },
+  signal?: AbortSignal,
+): Promise<VaultUploadPlan> {
+  return vaultMutation("/api/vault/uploads", csrfToken, payload, signal);
+}
+
+export function claimVaultMigration(
+  csrfToken: string,
+  signal?: AbortSignal,
+): Promise<VaultMigrationClaim> {
+  return vaultMutation("/api/vault/migrations/claim", csrfToken, {}, signal);
+}
+
+export function getVaultContentUrl(
+  csrfToken: string,
+  uploadId: string,
+  checksumSha256: string,
+  signal?: AbortSignal,
+): Promise<VaultUploadUrl> {
+  return vaultMutation(
+    `/api/vault/uploads/${encodeURIComponent(uploadId)}/content-url`,
+    csrfToken,
+    { checksumSha256 },
+    signal,
+  );
+}
+
+export function getVaultPartUrl(
+  csrfToken: string,
+  uploadId: string,
+  partNumber: number,
+  checksumSha256: string,
+  signal?: AbortSignal,
+): Promise<VaultUploadUrl> {
+  return vaultMutation(
+    `/api/vault/uploads/${encodeURIComponent(uploadId)}/parts/${partNumber}`,
+    csrfToken,
+    { checksumSha256 },
+    signal,
+  );
+}
+
+export function publishVaultUpload(
+  csrfToken: string,
+  uploadId: string,
+  parts: VaultCompletedPart[],
+  record: VaultNodeRecord,
+  signal?: AbortSignal,
+): Promise<VaultPublishResponse> {
+  return vaultMutation(
+    `/api/vault/uploads/${encodeURIComponent(uploadId)}/publish`,
+    csrfToken,
+    { parts, ...record },
+    signal,
+  );
+}
+
+export async function abortVaultUpload(
+  csrfToken: string,
+  uploadId: string,
+): Promise<void> {
+  await vaultRequest(
+    `/api/vault/uploads/${encodeURIComponent(uploadId)}`,
+    {
+      method: "DELETE",
+      headers: { "X-CSRF-Token": csrfToken },
+    },
+    true,
+  );
+}
+
+export function getVaultDownloadPlan(
+  nodeId: string,
+  signal?: AbortSignal,
+): Promise<VaultDownloadPlan> {
+  return vaultRequest(
+    `/api/vault/nodes/${encodeURIComponent(nodeId)}/download-plan`,
+    { signal },
+  );
+}
+
+export function getVaultIdentity(
+  username: string,
+  signal?: AbortSignal,
+): Promise<VaultPublicIdentity> {
+  return vaultRequest(`/api/vault/identities/${encodeURIComponent(username)}`, {
+    signal,
+  });
+}
+
+export async function trustVaultIdentity(
+  csrfToken: string,
+  identity: VaultPublicIdentity,
+  signal?: AbortSignal,
+): Promise<void> {
+  await vaultMutation(
+    `/api/vault/identities/${encodeURIComponent(identity.userId)}/trust`,
+    csrfToken,
+    {
+      keyVersion: identity.keyVersion,
+      fingerprintSha256: identity.fingerprintSha256,
+    },
+    signal,
+  );
+}
+
+export function getVaultSharePlan(
+  nodeId: string,
+  signal?: AbortSignal,
+): Promise<{ nodes: VaultShareNodeSnapshot[] }> {
+  return vaultRequest(
+    `/api/vault/nodes/${encodeURIComponent(nodeId)}/share-plan`,
+    { signal },
+  );
+}
+
+export function getActiveShareContexts(
+  nodeId: string,
+  signal?: AbortSignal,
+): Promise<VaultActiveShareContext[]> {
+  return vaultRequest(
+    `/api/vault/nodes/${encodeURIComponent(nodeId)}/share-contexts`,
+    { signal },
+  );
+}
+
+export function createVaultShare(
+  csrfToken: string,
+  payload: VaultSharePayload,
+  signal?: AbortSignal,
+): Promise<VaultShareMutation> {
+  return vaultMutation("/api/vault/shares", csrfToken, payload, signal);
+}
+
+export function getOwnedVaultShares(
+  signal?: AbortSignal,
+): Promise<VaultOwnedShare[]> {
+  return vaultRequest("/api/vault/shares", { signal });
+}
+
+export function beginVaultEpochRotation(
+  csrfToken: string,
+  shareId: string,
+  revokedRecipientId: string,
+  signal?: AbortSignal,
+): Promise<VaultEpochRotationPlan> {
+  return vaultMutation(
+    `/api/vault/shares/${encodeURIComponent(shareId)}/epochs`,
+    csrfToken,
+    { revokedRecipientId },
+    signal,
+  );
+}
+
+export function getPendingVaultEpochRotation(
+  shareId: string,
+  signal?: AbortSignal,
+): Promise<VaultEpochRotationPlan> {
+  return vaultRequest(
+    `/api/vault/shares/${encodeURIComponent(shareId)}/epochs/pending`,
+    { signal },
+  );
+}
+
+export function publishVaultEpochRotation(
+  csrfToken: string,
+  shareId: string,
+  epoch: number,
+  payload: {
+    fenceSnapshotHash: string;
+    wrappers: string[];
+    envelopes: Array<{ canonicalCbor: string; signature: string }>;
+    ownerEpochKey: { wrapperId: string; ciphertext: string };
+  },
+  signal?: AbortSignal,
+): Promise<VaultShareMutation> {
+  return vaultMutation(
+    `/api/vault/shares/${encodeURIComponent(shareId)}/epochs/${epoch}/publish`,
+    csrfToken,
+    payload,
+    signal,
+  );
+}
+
+export async function abortVaultEpochRotation(
+  csrfToken: string,
+  shareId: string,
+  epoch: number,
+): Promise<void> {
+  await vaultMutation(
+    `/api/vault/shares/${encodeURIComponent(shareId)}/epochs/${epoch}/abort`,
+    csrfToken,
+    {},
+  );
+}
+
+async function vaultMutation<T>(
+  url: string,
+  csrfToken: string,
+  payload: unknown,
+  signal?: AbortSignal,
+): Promise<T> {
+  return vaultRequest(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-CSRF-Token": csrfToken,
+    },
+    body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+async function vaultRequest<T>(
+  url: string,
+  init: RequestInit,
+  allowEmpty = false,
+): Promise<T> {
+  const response = await fetch(url, {
+    cache: "no-store",
+    credentials: "same-origin",
+    ...init,
+  });
+  if (!response.ok) {
+    const message = (await response.text()).trim();
+    throw new VaultApiError(
+      message || `Vault request failed with status ${response.status}.`,
+      response.status,
+    );
+  }
+  if (allowEmpty || response.status === 204) {
+    return undefined as T;
+  }
+  return (await response.json()) as T;
+}

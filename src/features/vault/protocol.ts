@@ -1,0 +1,495 @@
+export const VAULT_FORMAT_VERSION = 1;
+export const VAULT_SUITE_ID = 1;
+export const VAULT_AAD_SCHEMA_ID = 1;
+export const VAULT_CRYPTO_CHUNK_BYTES = 4 * 1024 * 1024;
+export const VAULT_UPLOAD_PART_BYTES = 32 * 1024 * 1024;
+export const VAULT_MAX_CIPHERTEXT_BYTES = 2_415_919_104;
+
+export const ARGON2ID_PROFILE = Object.freeze({
+  algorithm: "argon2id13",
+  operations: 3,
+  memoryBytes: 256 * 1024 * 1024,
+  outputBytes: 32,
+});
+
+export type VaultEntryType = "file" | "folder";
+
+export type VaultKdf = {
+  algorithm: string;
+  salt: string;
+  operations: number;
+  memoryBytes: number;
+  outputBytes: number;
+};
+
+export type VaultUnlockMaterial = {
+  formatVersion: number;
+  vaultVersion: number;
+  kdf: VaultKdf;
+  passwordWrapper: { id: string; ciphertext: string };
+  recoveryWrapper: { salt: string; id: string; ciphertext: string };
+  identity: {
+    keyVersion: number;
+    x25519PublicKey: string;
+    ed25519PublicKey: string;
+    fingerprintSha256: string;
+    privateRecordId: string;
+    privateCiphertext: string;
+  };
+  accountStateRecordId: string | null;
+  encryptedAccountState: string;
+};
+
+export type VaultSetupPayload = {
+  formatVersion: number;
+  kdf: VaultKdf;
+  passwordWrapper: { id: string; ciphertext: string };
+  recoveryWrapper: { salt: string; id: string; ciphertext: string };
+  identity: {
+    keyVersion: number;
+    x25519PublicKey: string;
+    ed25519PublicKey: string;
+    fingerprintSha256: string;
+    privateRecordId: string;
+    privateCiphertext: string;
+  };
+  accountStateRecordId: string;
+  encryptedAccountState: string;
+};
+
+export type VaultRewrapPayload = Omit<
+  VaultSetupPayload,
+  "formatVersion" | "identity"
+> & {
+  expectedVaultVersion: number;
+  recovery: boolean;
+  proofSignature: string;
+};
+
+export type VaultWrapperRecord = {
+  formatVersion: number;
+  wrapperId: Uint8Array;
+  kind: 1 | 2 | 3 | 4;
+  nodeId: string;
+  parentNodeId: string | null;
+  generationId: Uint8Array | null;
+  shareId: string | null;
+  epoch: number | null;
+  recordVersion: number;
+  ciphertext: Uint8Array;
+  aadSchemaId: number;
+};
+
+export type VaultBootstrapRecord = {
+  formatVersion: number;
+  suiteId: number;
+  aadSchemaId: number;
+  nodeId: string;
+  generationNumber: number;
+  generationId: Uint8Array;
+  manifestIv: Uint8Array;
+  wrapperIds: Uint8Array[];
+  ciphertextLength: number;
+  signerKeyVersion: number;
+  recordVersion: number;
+  previousRecordHash: Uint8Array | null;
+  manifestHash: Uint8Array;
+  wrapperHashes: Uint8Array[];
+  ciphertextMerkleRoot: Uint8Array;
+};
+
+export type VaultManifest = {
+  name: string;
+  mimeType: string | null;
+  entryType: VaultEntryType;
+  plaintextBytes: number;
+  paddedBytes: number;
+  lastModified: number;
+  parentId: string | null;
+  chunkCount: number;
+  generationId: Uint8Array;
+  createdAt: number;
+};
+
+export type VaultNodeRecord = {
+  bootstrapCbor: string;
+  bootstrapSignature: string;
+  encryptedManifest: string;
+  wrappers: string[];
+};
+
+export type VaultDownloadPlan = {
+  nodeId: string;
+  entryType: VaultEntryType;
+  generationNumber: number;
+  generationId: string;
+  ciphertextLength: number;
+  cryptoChunkBytes: number;
+  chunkCount: number;
+  ciphertextMerkleRoot: string;
+  downloadUrl: string | null;
+  bootstrapCbor: string;
+  bootstrapSignature: string;
+  encryptedManifest: string;
+  wrappers: string[];
+  signerKeyVersion: number;
+  signerEd25519PublicKey: string;
+  recordVersion: number;
+  recordHash: string;
+  share: VaultShareDownloadMaterial | null;
+};
+
+export type VaultShareDownloadMaterial = {
+  shareId: string;
+  epoch: number;
+  rootNodeId: string;
+  senderId: string;
+  recipientId: string;
+  recordVersion: number;
+  previousRecordHash: string | null;
+  envelopeCbor: string;
+  envelopeSignature: string;
+  envelopeHash: string;
+  senderKeyVersion: number;
+  senderX25519PublicKey: string;
+  senderEd25519PublicKey: string;
+  senderFingerprintSha256: string;
+  recipientKeyVersion: number;
+};
+
+export type VaultPublicIdentity = {
+  userId: string;
+  username: string;
+  keyVersion: number;
+  x25519PublicKey: string;
+  ed25519PublicKey: string;
+  fingerprintSha256: string;
+  trustStatus: "unverified" | "accepted" | "changed";
+};
+
+export type VaultShareNodeSnapshot = {
+  nodeId: string;
+  entryType: VaultEntryType;
+  generationNumber: number;
+  generationId: string | null;
+  recordVersion: number;
+  recordHash: string;
+};
+
+export type VaultActiveShareContext = {
+  shareId: string;
+  epoch: number;
+  wrapperId: string;
+  ciphertext: string;
+};
+
+export type VaultShareEnvelopeRecord = {
+  formatVersion: number;
+  suiteId: number;
+  envelopeId: Uint8Array;
+  shareId: string;
+  epoch: number;
+  senderId: string;
+  senderKeyVersion: number;
+  recipientId: string;
+  recipientKeyVersion: number;
+  nodeId: string;
+  permissions: 1;
+  generationScope: number | null;
+  recordVersion: number;
+  previousRecordHash: Uint8Array | null;
+  encapsulatedKey: Uint8Array;
+  ciphertext: Uint8Array;
+  aadSchemaId: number;
+  wrapperHashes: Uint8Array[];
+};
+
+export type VaultShareContextMaterial = {
+  shareId: string;
+  epoch: number;
+  epochKey: Uint8Array;
+};
+
+export function assertArgon2idProfile(kdf: VaultKdf): void {
+  if (
+    kdf.algorithm !== ARGON2ID_PROFILE.algorithm ||
+    kdf.operations !== ARGON2ID_PROFILE.operations ||
+    kdf.memoryBytes !== ARGON2ID_PROFILE.memoryBytes ||
+    kdf.outputBytes !== ARGON2ID_PROFILE.outputBytes
+  ) {
+    throw new Error("The server returned an unsupported vault KDF profile.");
+  }
+}
+
+export function randomBytes(length: number): Uint8Array {
+  const output = new Uint8Array(length);
+  crypto.getRandomValues(output);
+  return output;
+}
+
+export function randomPrefixedId(prefix: string): string {
+  return `${prefix}${toBase64Url(randomBytes(18))}`;
+}
+
+export function toBase64Url(value: ArrayBuffer | Uint8Array): string {
+  const bytes = value instanceof Uint8Array ? value : new Uint8Array(value);
+  let binary = "";
+  const blockSize = 0x8000;
+
+  for (let offset = 0; offset < bytes.length; offset += blockSize) {
+    binary += String.fromCharCode(
+      ...bytes.subarray(offset, offset + blockSize),
+    );
+  }
+
+  return btoa(binary)
+    .replaceAll("+", "-")
+    .replaceAll("/", "_")
+    .replace(/=+$/u, "");
+}
+
+export function fromBase64Url(value: string): Uint8Array {
+  if (!/^[A-Za-z0-9_-]*$/u.test(value)) {
+    throw new Error("Invalid base64url value.");
+  }
+  const padded =
+    value.replaceAll("-", "+").replaceAll("_", "/") +
+    "=".repeat((4 - (value.length % 4)) % 4);
+  const binary = atob(padded);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
+export function concatBytes(...values: Uint8Array[]): Uint8Array {
+  const length = values.reduce((total, value) => total + value.length, 0);
+  const output = new Uint8Array(length);
+  let offset = 0;
+
+  for (const value of values) {
+    output.set(value, offset);
+    offset += value.length;
+  }
+
+  return output;
+}
+
+export function encodeVaultRewrapProof(
+  payload: Omit<VaultRewrapPayload, "proofSignature">,
+): Uint8Array {
+  assertArgon2idProfile(payload.kdf);
+  const accountStateRecordId = fromBase64Url(payload.accountStateRecordId);
+  const fields = [
+    utf8("aeralyth/vault-rewrap-proof/v1"),
+    encodeUnsigned64(VAULT_FORMAT_VERSION),
+    encodeUnsigned64(payload.expectedVaultVersion),
+    Uint8Array.of(payload.recovery ? 1 : 0),
+    encodeLengthPrefixed(utf8(payload.kdf.algorithm)),
+    encodeLengthPrefixed(fromBase64Url(payload.kdf.salt)),
+    encodeUnsigned64(payload.kdf.operations),
+    encodeUnsigned64(payload.kdf.memoryBytes),
+    encodeUnsigned64(payload.kdf.outputBytes),
+    encodeLengthPrefixed(fromBase64Url(payload.passwordWrapper.id)),
+    encodeLengthPrefixed(fromBase64Url(payload.passwordWrapper.ciphertext)),
+    encodeLengthPrefixed(fromBase64Url(payload.recoveryWrapper.salt)),
+    encodeLengthPrefixed(fromBase64Url(payload.recoveryWrapper.id)),
+    encodeLengthPrefixed(fromBase64Url(payload.recoveryWrapper.ciphertext)),
+    Uint8Array.of(1),
+    encodeLengthPrefixed(accountStateRecordId),
+    encodeLengthPrefixed(fromBase64Url(payload.encryptedAccountState)),
+  ];
+  try {
+    return concatBytes(...fields);
+  } finally {
+    wipe(accountStateRecordId, ...fields.slice(4));
+  }
+}
+
+function encodeUnsigned64(value: number): Uint8Array {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("Invalid unsigned protocol integer.");
+  }
+  const output = new Uint8Array(8);
+  new DataView(output.buffer).setBigUint64(0, BigInt(value), false);
+  return output;
+}
+
+function encodeLengthPrefixed(value: Uint8Array): Uint8Array {
+  return concatBytes(encodeUnsigned64(value.length), value);
+}
+
+export function utf8(value: string): Uint8Array {
+  return new TextEncoder().encode(value);
+}
+
+export function equalBytes(left: Uint8Array, right: Uint8Array): boolean {
+  if (left.length !== right.length) {
+    return false;
+  }
+  let difference = 0;
+  for (let index = 0; index < left.length; index += 1) {
+    difference |= left[index] ^ right[index];
+  }
+  return difference === 0;
+}
+
+export function wipe(...values: Array<Uint8Array | null | undefined>): void {
+  for (const value of values) {
+    value?.fill(0);
+  }
+}
+
+export function chunkNonce(chunkIndex: number): Uint8Array {
+  if (!Number.isSafeInteger(chunkIndex) || chunkIndex < 0) {
+    throw new Error("Invalid encryption chunk index.");
+  }
+  const nonce = new Uint8Array(12);
+  const view = new DataView(nonce.buffer);
+  const high = Math.floor(chunkIndex / 0x1_0000_0000);
+  const low = chunkIndex >>> 0;
+  view.setUint32(4, high, false);
+  view.setUint32(8, low, false);
+  return nonce;
+}
+
+export function zeroNonce(): Uint8Array {
+  return new Uint8Array(12);
+}
+
+export function encodeChunkAad(input: {
+  nodeId: string;
+  generationNumber: number;
+  generationId: Uint8Array;
+  chunkIndex: number;
+  plaintextLength: number;
+}): Uint8Array {
+  const node = utf8(input.nodeId);
+  if (node.length > 96 || input.generationId.length !== 16) {
+    throw new Error("Invalid chunk AAD fields.");
+  }
+  const fixed = new Uint8Array(2 + node.length + 8 + 16 + 8 + 4 + 2);
+  const view = new DataView(fixed.buffer);
+  let offset = 0;
+  view.setUint16(offset, VAULT_AAD_SCHEMA_ID, false);
+  offset += 2;
+  fixed.set(node, offset);
+  offset += node.length;
+  view.setBigUint64(offset, BigInt(input.generationNumber), false);
+  offset += 8;
+  fixed.set(input.generationId, offset);
+  offset += 16;
+  view.setBigUint64(offset, BigInt(input.chunkIndex), false);
+  offset += 8;
+  view.setUint32(offset, input.plaintextLength, false);
+  offset += 4;
+  view.setUint16(offset, node.length, false);
+  return fixed;
+}
+
+export function encodeRecordAad(
+  purpose: string,
+  recordId: string,
+  recordVersion: number,
+): Uint8Array {
+  const purposeBytes = utf8(purpose);
+  const idBytes = utf8(recordId);
+  const output = new Uint8Array(
+    2 + 2 + purposeBytes.length + 2 + idBytes.length + 8,
+  );
+  const view = new DataView(output.buffer);
+  let offset = 0;
+  view.setUint16(offset, VAULT_AAD_SCHEMA_ID, false);
+  offset += 2;
+  view.setUint16(offset, purposeBytes.length, false);
+  offset += 2;
+  output.set(purposeBytes, offset);
+  offset += purposeBytes.length;
+  view.setUint16(offset, idBytes.length, false);
+  offset += 2;
+  output.set(idBytes, offset);
+  offset += idBytes.length;
+  view.setBigUint64(offset, BigInt(recordVersion), false);
+  return output;
+}
+
+export function padmeLength(plaintextBytes: number): number {
+  if (!Number.isSafeInteger(plaintextBytes) || plaintextBytes < 0) {
+    throw new Error("Invalid plaintext length.");
+  }
+  const minimum = Math.max(plaintextBytes, 1, 4096);
+  const exponent = Math.floor(Math.log2(minimum));
+  const significantBits = Math.max(1, Math.floor(Math.log2(exponent)));
+  const quantum = 2 ** Math.max(0, exponent - significantBits);
+  return Math.ceil(minimum / quantum) * quantum;
+}
+
+export function encryptedLength(paddedBytes: number): {
+  chunkCount: number;
+  ciphertextBytes: number;
+} {
+  if (!Number.isSafeInteger(paddedBytes) || paddedBytes < 4096) {
+    throw new Error("Invalid padded payload length.");
+  }
+  const chunkCount = Math.ceil(paddedBytes / VAULT_CRYPTO_CHUNK_BYTES);
+  return {
+    chunkCount,
+    ciphertextBytes: paddedBytes + chunkCount * 16,
+  };
+}
+
+export function ciphertextChunkLength(
+  ciphertextBytes: number,
+  chunkCount: number,
+  chunkIndex: number,
+): number {
+  if (chunkIndex < 0 || chunkIndex >= chunkCount) {
+    throw new Error("Invalid ciphertext chunk index.");
+  }
+  if (chunkIndex < chunkCount - 1) {
+    return VAULT_CRYPTO_CHUNK_BYTES + 16;
+  }
+  return ciphertextBytes - (chunkCount - 1) * (VAULT_CRYPTO_CHUNK_BYTES + 16);
+}
+
+export async function sha256(value: Uint8Array): Promise<Uint8Array> {
+  return new Uint8Array(
+    await crypto.subtle.digest("SHA-256", toArrayBuffer(value)),
+  );
+}
+
+export async function merkleRootFromLeaves(
+  leaves: Uint8Array[],
+): Promise<Uint8Array> {
+  if (leaves.length === 0) {
+    return sha256(new Uint8Array());
+  }
+  let level: Uint8Array[] = leaves.map((leaf) => Uint8Array.from(leaf));
+  while (level.length > 1) {
+    const next: Uint8Array[] = [];
+    for (let index = 0; index < level.length; index += 2) {
+      if (index + 1 === level.length) {
+        next.push(level[index]);
+      } else {
+        next.push(
+          await sha256(
+            concatBytes(Uint8Array.of(1), level[index], level[index + 1]),
+          ),
+        );
+      }
+    }
+    level = next;
+  }
+  return level[0];
+}
+
+export async function ciphertextLeafHash(
+  chunkIndex: number,
+  ciphertext: Uint8Array,
+): Promise<Uint8Array> {
+  const index = new Uint8Array(8);
+  new DataView(index.buffer).setBigUint64(0, BigInt(chunkIndex), false);
+  return sha256(concatBytes(Uint8Array.of(0), index, ciphertext));
+}
+
+export function toArrayBuffer(value: Uint8Array): ArrayBuffer {
+  const copy = Uint8Array.from(value);
+  return copy.buffer;
+}
