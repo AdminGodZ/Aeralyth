@@ -1,4 +1,6 @@
-use actix_web::http::header::{CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION};
+use actix_web::http::header::{
+    ACCEPT, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION,
+};
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{
     Engine as _,
@@ -100,6 +102,25 @@ pub(crate) struct UnshareForm {
 #[derive(Deserialize)]
 pub(crate) struct CsrfForm {
     csrf_token: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FavoriteResponse {
+    favorite: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareResponse {
+    recipient_username: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FileMutationResponse {
+    status: &'static str,
+    file_id: String,
 }
 
 #[derive(Serialize)]
@@ -1241,13 +1262,22 @@ pub async fn share(
 ) -> Result<HttpResponse> {
     let user = require_user(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
+    let wants_json = request_wants_json(&request);
     if state.config.e2ee_mode.is_enabled() {
+        if wants_json {
+            return Err(error::ErrorConflict(
+                "encrypt this item before sharing it",
+            ));
+        }
         return Ok(redirect("/files?file=encrypted-share-required"));
     }
     let file_id = path.into_inner();
     let username = normalize_username(&form.username);
 
     if !is_valid_username(&username) {
+        if wants_json {
+            return Err(error::ErrorBadRequest("enter a valid username"));
+        }
         return Ok(redirect("/files?file=share-invalid"));
     }
 
@@ -1255,7 +1285,7 @@ pub async fn share(
         .db
         .query_opt(
             "
-                SELECT id
+                SELECT id, username
                 FROM users
                 WHERE lower(username) = lower($1)
                   AND status = 'active'
@@ -1266,12 +1296,21 @@ pub async fn share(
         .await
         .map_err(error::ErrorInternalServerError)?
     else {
+        if wants_json {
+            return Err(error::ErrorNotFound("recipient not found"));
+        }
         return Ok(redirect("/files?file=share-user-missing"));
     };
 
     let recipient_id: String = recipient_row.get("id");
+    let recipient_username: String = recipient_row.get("username");
 
     if recipient_id == user.id {
+        if wants_json {
+            return Err(error::ErrorBadRequest(
+                "you cannot share an item with yourself",
+            ));
+        }
         return Ok(redirect("/files?file=share-self"));
     }
 
@@ -1279,12 +1318,11 @@ pub async fn share(
         .db
         .query_opt(
             "
-                SELECT id
+                SELECT id, entry_type
                 FROM files
                 WHERE id = $1
                   AND owner_id = $2
                   AND state = 'active'
-                  AND entry_type = 'file'
                 LIMIT 1
             ",
             &[&file_id, &user.id],
@@ -1292,22 +1330,35 @@ pub async fn share(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    if owned_file.is_none() {
+    let Some(owned_file) = owned_file else {
+        if wants_json {
+            return Err(error::ErrorNotFound("item not found"));
+        }
         return Ok(redirect("/files?file=missing"));
-    }
+    };
+    let entry_type: String = owned_file.get("entry_type");
+    let counts_toward_shared = entry_type == "file";
 
     state
         .db
         .execute(
             "
-                INSERT INTO file_shares (id, file_id, owner_id, recipient_id)
-                VALUES (gen_random_uuid()::text, $1, $2, $3)
+                INSERT INTO file_shares (
+                  id, file_id, owner_id, recipient_id, counts_toward_shared
+                )
+                VALUES (gen_random_uuid()::text, $1, $2, $3, $4)
                 ON CONFLICT (file_id, recipient_id) DO NOTHING
             ",
-            &[&file_id, &user.id, &recipient_id],
+            &[&file_id, &user.id, &recipient_id, &counts_toward_shared],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
+
+    if wants_json {
+        return Ok(HttpResponse::Ok().json(ShareResponse {
+            recipient_username,
+        }));
+    }
 
     Ok(redirect("/files?file=shared"))
 }
@@ -1369,6 +1420,8 @@ pub async fn trash(
 ) -> Result<HttpResponse> {
     let user = require_user(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
+    let wants_json = request_wants_json(&request);
+    let file_id = path.into_inner();
 
     state
         .db
@@ -1394,10 +1447,17 @@ pub async fn trash(
                     updated_at = now()
                 WHERE id IN (SELECT id FROM subtree)
             ",
-            &[&path.into_inner(), &user.id],
+            &[&file_id, &user.id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
+
+    if wants_json {
+        return Ok(HttpResponse::Ok().json(FileMutationResponse {
+            status: "trashed",
+            file_id,
+        }));
+    }
 
     Ok(redirect("/files?file=trashed"))
 }
@@ -1451,10 +1511,12 @@ pub async fn toggle_favorite(
 ) -> Result<HttpResponse> {
     let user = require_user(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
+    let wants_json = request_wants_json(&request);
+    let file_id = path.into_inner();
 
-    state
+    let updated = state
         .db
-        .execute(
+        .query_opt(
             "
                 UPDATE files
                 SET favorite = NOT favorite,
@@ -1462,11 +1524,21 @@ pub async fn toggle_favorite(
                 WHERE id = $1
                   AND owner_id = $2
                   AND state = 'active'
+                RETURNING favorite
             ",
-            &[&path.into_inner(), &user.id],
+            &[&file_id, &user.id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
+
+    if wants_json {
+        return match updated {
+            Some(row) => Ok(HttpResponse::Ok().json(FavoriteResponse {
+                favorite: row.get("favorite"),
+            })),
+            None => Ok(HttpResponse::NotFound().finish()),
+        };
+    }
 
     Ok(redirect("/files?file=updated"))
 }
@@ -1605,14 +1677,23 @@ async fn validate_shared_folder(
                 )
                 SELECT $1::text AS id
                 FROM ancestors
-                INNER JOIN vault_shares AS shares
-                  ON shares.root_node_id = ancestors.id
-                 AND shares.owner_id = ancestors.owner_id
-                 AND shares.status = 'active'
-                INNER JOIN vault_share_recipients AS recipients
-                  ON recipients.share_id = shares.id
-                 AND recipients.recipient_id = $2
-                 AND recipients.status = 'active'
+                WHERE EXISTS (
+                  SELECT 1
+                  FROM file_shares AS shares
+                  WHERE shares.file_id = ancestors.id
+                    AND shares.owner_id = ancestors.owner_id
+                    AND shares.recipient_id = $2
+                ) OR EXISTS (
+                  SELECT 1
+                  FROM vault_shares AS shares
+                  INNER JOIN vault_share_recipients AS recipients
+                    ON recipients.share_id = shares.id
+                   AND recipients.recipient_id = $2
+                   AND recipients.status = 'active'
+                  WHERE shares.root_node_id = ancestors.id
+                    AND shares.owner_id = ancestors.owner_id
+                    AND shares.status = 'active'
+                )
                 LIMIT 1
             ",
             &[&folder_id, &user.id],
@@ -1689,7 +1770,14 @@ async fn get_shared_breadcrumbs(
                   FROM files AS parent
                   INNER JOIN ancestors AS child ON child.parent_id = parent.id
                   WHERE parent.owner_id = child.owner_id
-                ), access AS (
+                ), legacy_access AS (
+                  SELECT ancestors.depth AS root_depth
+                  FROM ancestors
+                  INNER JOIN file_shares AS shares
+                    ON shares.file_id = ancestors.id
+                   AND shares.owner_id = ancestors.owner_id
+                   AND shares.recipient_id = $2
+                ), vault_access AS (
                   SELECT ancestors.depth AS root_depth
                   FROM ancestors
                   INNER JOIN vault_shares AS shares
@@ -1700,7 +1788,14 @@ async fn get_shared_breadcrumbs(
                     ON recipients.share_id = shares.id
                    AND recipients.recipient_id = $2
                    AND recipients.status = 'active'
-                  ORDER BY ancestors.depth
+                ), access AS (
+                  SELECT candidates.root_depth
+                  FROM (
+                    SELECT root_depth FROM legacy_access
+                    UNION ALL
+                    SELECT root_depth FROM vault_access
+                  ) AS candidates
+                  ORDER BY candidates.root_depth
                   LIMIT 1
                 )
                 SELECT id, original_name, e2ee_state
@@ -2097,7 +2192,14 @@ async fn list_shared_folder_entries(
               FROM files AS parent
               INNER JOIN ancestors AS child ON child.parent_id = parent.id
               WHERE parent.owner_id = child.owner_id
-            ), access AS (
+            ), legacy_access AS (
+              SELECT shares.id, shares.owner_id, shares.created_at
+              FROM ancestors
+              INNER JOIN file_shares AS shares
+                ON shares.file_id = ancestors.id
+               AND shares.owner_id = ancestors.owner_id
+               AND shares.recipient_id = $1
+            ), vault_access AS (
               SELECT shares.id, shares.owner_id, shares.created_at
               FROM ancestors
               INNER JOIN vault_shares AS shares
@@ -2108,7 +2210,14 @@ async fn list_shared_folder_entries(
                 ON recipients.share_id = shares.id
                AND recipients.recipient_id = $1
                AND recipients.status = 'active'
-              ORDER BY shares.created_at
+            ), access AS (
+              SELECT candidates.id, candidates.owner_id, candidates.created_at
+              FROM (
+                SELECT id, owner_id, created_at FROM legacy_access
+                UNION ALL
+                SELECT id, owner_id, created_at FROM vault_access
+              ) AS candidates
+              ORDER BY candidates.created_at
               LIMIT 1
             )
             SELECT files.id, files.original_name, files.mime_type,
@@ -2348,6 +2457,18 @@ async fn get_download_file(
         .db
         .query_opt(
             "
+                WITH RECURSIVE ancestors AS (
+                  SELECT id, parent_id, owner_id
+                  FROM files
+                  WHERE id = $1
+
+                  UNION ALL
+
+                  SELECT parent.id, parent.parent_id, parent.owner_id
+                  FROM files AS parent
+                  INNER JOIN ancestors AS child ON child.parent_id = parent.id
+                  WHERE parent.owner_id = child.owner_id
+                )
                 SELECT
                   files.id,
                   files.owner_id,
@@ -2366,9 +2487,11 @@ async fn get_download_file(
                       owners.status = 'active'
                       AND EXISTS (
                         SELECT 1
-                        FROM file_shares
-                        WHERE file_shares.file_id = files.id
-                          AND file_shares.recipient_id = $2
+                        FROM ancestors
+                        INNER JOIN file_shares
+                          ON file_shares.file_id = ancestors.id
+                         AND file_shares.owner_id = ancestors.owner_id
+                        WHERE file_shares.recipient_id = $2
                       )
                     )
                   )
@@ -2753,6 +2876,14 @@ fn storage_stats(state: &AppState, used_bytes: i64) -> StorageStats {
         system_used_bytes: used_bytes,
         aeralyth_used_bytes: used_bytes,
     }
+}
+
+fn request_wants_json(request: &HttpRequest) -> bool {
+    request
+        .headers()
+        .get(ACCEPT)
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.contains("application/json"))
 }
 
 fn redirect(location: impl Into<String>) -> HttpResponse {

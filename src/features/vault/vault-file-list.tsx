@@ -5,6 +5,7 @@ import {
   ArrowUp,
   ChevronsUpDown,
   Download,
+  Ellipsis,
   FileArchive,
   FileText,
   Folder,
@@ -21,6 +22,15 @@ import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { LegacyShareDialog } from "@/features/dashboard/legacy-share-dialog";
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import { useVault } from "@/features/vault/vault-provider";
@@ -29,6 +39,15 @@ import type { FileEntry, FileSort, FileSortDirection } from "@/lib/api";
 
 type ResolvedEntry = FileEntry & {
   resolved: boolean;
+};
+
+type ResolvedMetadata = Pick<
+  ResolvedEntry,
+  "name" | "kind" | "sizeBytes" | "resolved"
+>;
+
+type FavoriteResponse = {
+  favorite: boolean;
 };
 
 export function VaultFileList({
@@ -47,29 +66,56 @@ export function VaultFileList({
   initialDirection?: FileSortDirection;
 }) {
   const vault = useVault();
-  const [resolved, setResolved] = useState<Record<string, ResolvedEntry>>({});
+  const [localEntries, setLocalEntries] = useState(entries);
+  const [resolved, setResolved] = useState<Record<string, ResolvedMetadata>>({});
   const [sort, setSort] = useState<FileSort>(initialSort ?? "name");
   const [direction, setDirection] = useState<FileSortDirection>(
     initialDirection ?? (initialSort === "name" ? "asc" : "desc"),
   );
   const [downloadId, setDownloadId] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [favoriteError, setFavoriteError] = useState<string | null>(null);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [favoritePendingIds, setFavoritePendingIds] = useState<Set<string>>(
+    () => new Set(),
+  );
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(
+    () => new Set(),
+  );
   const [shareEntry, setShareEntry] = useState<ResolvedEntry | null>(null);
+
+  useEffect(() => {
+    setLocalEntries(entries);
+  }, [entries]);
+
+  useEffect(() => {
+    const availableIds = new Set(localEntries.map((entry) => entry.id));
+    setSelectedIds((current) => {
+      const next = new Set(
+        [...current].filter((entryId) => availableIds.has(entryId)),
+      );
+      return next.size === current.size ? current : next;
+    });
+  }, [localEntries]);
 
   useEffect(() => {
     if (vault.state !== "unlocked") return;
     let canceled = false;
     void (async () => {
-      const next: Record<string, ResolvedEntry> = {};
+      const next: Record<string, ResolvedMetadata> = {};
       for (const entry of entries) {
         if (entry.e2eeState !== "encrypted") {
-          next[entry.id] = { ...entry, resolved: true };
+          next[entry.id] = {
+            name: entry.name,
+            kind: entry.kind,
+            sizeBytes: entry.sizeBytes,
+            resolved: true,
+          };
           continue;
         }
         try {
           const manifest = await vault.openNode(entry.id);
           next[entry.id] = {
-            ...entry,
             name: manifest.name,
             kind:
               manifest.entryType === "folder"
@@ -80,12 +126,12 @@ export function VaultFileList({
           };
         } catch {
           next[entry.id] = {
-            ...entry,
             name:
               entry.entryType === "folder"
                 ? "Encrypted folder"
                 : "Encrypted file",
             kind: entry.entryType === "folder" ? "Folder" : "Encrypted",
+            sizeBytes: entry.sizeBytes,
             resolved: false,
           };
         }
@@ -98,25 +144,25 @@ export function VaultFileList({
   }, [entries, vault]);
 
   const displayed = useMemo(() => {
-    const values = entries.map(
-      (entry) =>
-        resolved[entry.id] ?? {
-          ...entry,
-          name:
-            entry.e2eeState === "encrypted"
-              ? entry.entryType === "folder"
-                ? "Encrypted folder"
-                : "Encrypted file"
-              : entry.name,
-          kind:
-            entry.e2eeState === "encrypted"
-              ? entry.entryType === "folder"
-                ? "Folder"
-                : "Encrypted"
-              : entry.kind,
-          resolved: entry.e2eeState !== "encrypted",
-        },
-    );
+    const values = localEntries.map((entry) => {
+      const metadata = resolved[entry.id] ?? {
+        ...entry,
+        name:
+          entry.e2eeState === "encrypted"
+            ? entry.entryType === "folder"
+              ? "Encrypted folder"
+              : "Encrypted file"
+            : entry.name,
+        kind:
+          entry.e2eeState === "encrypted"
+            ? entry.entryType === "folder"
+              ? "Folder"
+              : "Encrypted"
+            : entry.kind,
+        resolved: entry.e2eeState !== "encrypted",
+      };
+      return { ...entry, ...metadata };
+    });
     return values.sort((left, right) => {
       if (left.entryType !== right.entryType)
         return left.entryType === "folder" ? -1 : 1;
@@ -131,7 +177,22 @@ export function VaultFileList({
       if (comparison === 0) comparison = left.id.localeCompare(right.id);
       return direction === "asc" ? comparison : -comparison;
     });
-  }, [direction, entries, resolved, sort]);
+  }, [direction, localEntries, resolved, sort]);
+
+  const selectedCount = displayed.reduce(
+    (count, entry) => count + Number(selectedIds.has(entry.id)),
+    0,
+  );
+  const selectedEntries = displayed.filter((entry) => selectedIds.has(entry.id));
+  const singleSelectedEntry =
+    selectedEntries.length === 1 ? selectedEntries[0] : null;
+  const allDisplayedSelected =
+    displayed.length > 0 && selectedCount === displayed.length;
+  const selectAllState = allDisplayedSelected
+    ? true
+    : selectedCount > 0
+      ? "indeterminate"
+      : false;
 
   function changeSort(field: FileSort): void {
     if (sort === field) {
@@ -140,6 +201,118 @@ export function VaultFileList({
       setSort(field);
       setDirection(field === "name" ? "asc" : "desc");
     }
+  }
+
+  function setEntrySelected(entryId: string, selected: boolean): void {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      if (selected) next.add(entryId);
+      else next.delete(entryId);
+      return next;
+    });
+  }
+
+  function setAllDisplayedSelected(selected: boolean): void {
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      for (const entry of displayed) {
+        if (selected) next.add(entry.id);
+        else next.delete(entry.id);
+      }
+      return next;
+    });
+  }
+
+  async function toggleFavorite(entry: ResolvedEntry): Promise<void> {
+    if (favoritePendingIds.has(entry.id)) return;
+
+    const nextFavorite = !entry.favorite;
+    const originalEntry: FileEntry = entry;
+    setFavoriteError(null);
+    setFavoritePendingIds((current) => new Set(current).add(entry.id));
+    setLocalEntries((current) =>
+      sectionKey === "favorites" && !nextFavorite
+        ? current.filter((candidate) => candidate.id !== entry.id)
+        : current.map((candidate) =>
+            candidate.id === entry.id
+              ? { ...candidate, favorite: nextFavorite }
+              : candidate,
+          ),
+    );
+
+    try {
+      const favorite = await requestFavorite(
+        entry.id,
+        csrfToken,
+        nextFavorite,
+      );
+      setLocalEntries((current) =>
+        sectionKey === "favorites" && !favorite
+          ? current.filter((candidate) => candidate.id !== entry.id)
+          : current.map((candidate) =>
+              candidate.id === entry.id
+                ? { ...candidate, favorite }
+                : candidate,
+            ),
+      );
+    } catch (failure) {
+      setLocalEntries((current) => {
+        if (current.some((candidate) => candidate.id === entry.id)) {
+          return current.map((candidate) =>
+            candidate.id === entry.id ? originalEntry : candidate,
+          );
+        }
+        return [...current, originalEntry];
+      });
+      setFavoriteError(
+        failure instanceof Error
+          ? failure.message
+          : "The favorite could not be updated.",
+      );
+    } finally {
+      setFavoritePendingIds((current) => {
+        const next = new Set(current);
+        next.delete(entry.id);
+        return next;
+      });
+    }
+  }
+
+  async function moveToTrash(targets: ResolvedEntry[]): Promise<void> {
+    if (targets.length === 0) return;
+
+    const targetIds = new Set(targets.map((entry) => entry.id));
+    setDeleteError(null);
+    setLocalEntries((current) =>
+      current.filter((entry) => !targetIds.has(entry.id)),
+    );
+    setSelectedIds((current) => {
+      const next = new Set(current);
+      for (const entryId of targetIds) next.delete(entryId);
+      return next;
+    });
+
+    const results = await Promise.allSettled(
+      targets.map((entry) => requestTrash(entry.id, csrfToken)),
+    );
+    const failed = targets.filter(
+      (_entry, index) => results[index]?.status === "rejected",
+    );
+    if (failed.length === 0) return;
+
+    const failedIds = new Set(failed.map((entry) => entry.id));
+    setLocalEntries((current) => [
+      ...current,
+      ...failed.filter(
+        (entry) => !current.some((candidate) => candidate.id === entry.id),
+      ),
+    ]);
+    setSelectedIds((current) => new Set([...current, ...failedIds]));
+    setDeleteError(
+      failed.length === 1
+        ? "The item could not be deleted."
+        : `${failed.length} items could not be deleted.`,
+    );
   }
 
   async function download(entry: ResolvedEntry): Promise<void> {
@@ -167,8 +340,20 @@ export function VaultFileList({
 
   return (
     <>
-      <div className="grid min-h-14 grid-cols-[2rem_minmax(0,1fr)_7rem] gap-3 border-b px-4 py-3 text-sm font-medium text-muted-foreground md:grid-cols-[2rem_minmax(12rem,1fr)_7rem_7rem_9rem_minmax(18rem,22rem)] md:items-center">
-        <span />
+      <div className="grid min-h-14 grid-cols-[2rem_minmax(0,1fr)_7rem] gap-3 border-b px-4 py-3 text-sm font-medium text-muted-foreground md:grid-cols-[2rem_minmax(12rem,1fr)_7rem_7rem_9rem_6rem] md:items-center">
+        <span className="flex items-center justify-center">
+          <Checkbox
+            checked={selectAllState}
+            onCheckedChange={(checked) =>
+              setAllDisplayedSelected(checked === true)
+            }
+            aria-label={
+              allDisplayedSelected
+                ? "Deselect all files and folders"
+                : "Select all files and folders"
+            }
+          />
+        </span>
         <SortButton
           field="name"
           label="Name"
@@ -198,7 +383,52 @@ export function VaultFileList({
           <ListFilter className="size-3.5" aria-hidden="true" />
         </span>
       </div>
-      {vault.state !== "unlocked" ? (
+      {selectedCount > 0 ? (
+        <div className="flex min-h-11 shrink-0 items-center justify-between gap-3 border-b bg-muted/20 px-4 py-2 text-sm">
+          <span className="font-medium">
+            {selectedCount} {selectedCount === 1 ? "item" : "items"} selected
+          </span>
+          <div className="flex items-center gap-2">
+            {!isTrash && !isShared && singleSelectedEntry ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                disabled={
+                  singleSelectedEntry.e2eeState === "encrypted" &&
+                  !singleSelectedEntry.resolved
+                }
+                onClick={() => setShareEntry(singleSelectedEntry)}
+              >
+                <Share2 className="size-4" aria-hidden="true" />
+                Share
+              </Button>
+            ) : null}
+            {!isTrash && !isShared ? (
+              <Button
+                type="button"
+                variant="secondary"
+                size="sm"
+                className="text-destructive hover:text-destructive"
+                onClick={() => void moveToTrash(selectedEntries)}
+              >
+                <Trash2 className="size-4" aria-hidden="true" />
+                Delete
+              </Button>
+            ) : null}
+            <Button
+              type="button"
+              variant="ghost"
+              size="sm"
+              onClick={() => setSelectedIds(new Set())}
+            >
+              <X className="size-4" aria-hidden="true" />
+              Clear
+            </Button>
+          </div>
+        </div>
+      ) : null}
+      {vault.enabled && vault.state !== "unlocked" ? (
         <button
           type="button"
           onClick={vault.requestUnlock}
@@ -213,6 +443,16 @@ export function VaultFileList({
           {downloadError}
         </p>
       ) : null}
+      {favoriteError ? (
+        <p role="alert" className="border-b px-4 py-2 text-sm text-destructive">
+          {favoriteError}
+        </p>
+      ) : null}
+      {deleteError ? (
+        <p role="alert" className="border-b px-4 py-2 text-sm text-destructive">
+          {deleteError}
+        </p>
+      ) : null}
       <div className="min-h-0 flex-1 divide-y overflow-auto">
         {displayed.map((entry) => (
           <VaultFileRow
@@ -221,12 +461,18 @@ export function VaultFileList({
             sectionKey={sectionKey}
             csrfToken={csrfToken}
             downloading={downloadId === entry.id}
+            selected={selectedIds.has(entry.id)}
             onDownload={() => void download(entry)}
+            onDelete={() => void moveToTrash([entry])}
+            onFavorite={() => void toggleFavorite(entry)}
+            onSelectedChange={(selected) =>
+              setEntrySelected(entry.id, selected)
+            }
             onShare={() => setShareEntry(entry)}
           />
         ))}
       </div>
-      {shareEntry ? (
+      {shareEntry?.e2eeState === "encrypted" ? (
         <VaultShareDialog
           open
           onOpenChange={(open) => {
@@ -235,6 +481,17 @@ export function VaultFileList({
           nodeId={shareEntry.id}
           nodeName={shareEntry.name}
           currentUserId={currentUserId}
+          csrfToken={csrfToken}
+        />
+      ) : shareEntry ? (
+        <LegacyShareDialog
+          open
+          onOpenChange={(open) => {
+            if (!open) setShareEntry(null);
+          }}
+          itemId={shareEntry.id}
+          itemName={shareEntry.name}
+          itemType={shareEntry.entryType}
           csrfToken={csrfToken}
         />
       ) : null}
@@ -280,14 +537,22 @@ function VaultFileRow({
   sectionKey,
   csrfToken,
   downloading,
+  selected,
   onDownload,
+  onDelete,
+  onFavorite,
+  onSelectedChange,
   onShare,
 }: {
   entry: ResolvedEntry;
   sectionKey: string;
   csrfToken: string;
   downloading: boolean;
+  selected: boolean;
   onDownload(): void;
+  onDelete(): void;
+  onFavorite(): void;
+  onSelectedChange(selected: boolean): void;
   onShare(): void;
 }) {
   const isTrash = sectionKey === "trash";
@@ -302,8 +567,17 @@ function VaultFileRow({
         : entry.updatedAt;
 
   return (
-    <div className="grid gap-3 px-4 py-3 text-sm md:min-h-16 md:grid-cols-[2rem_minmax(12rem,1fr)_7rem_7rem_9rem_minmax(18rem,22rem)] md:items-center">
-      <span className="hidden md:block" />
+    <div
+      data-selected={selected || undefined}
+      className="grid gap-3 px-4 py-3 text-sm transition-colors data-[selected=true]:bg-primary/5 md:min-h-16 md:grid-cols-[2rem_minmax(12rem,1fr)_7rem_7rem_9rem_6rem] md:items-center"
+    >
+      <span className="flex items-center justify-center">
+        <Checkbox
+          checked={selected}
+          onCheckedChange={(checked) => onSelectedChange(checked === true)}
+          aria-label={`${selected ? "Deselect" : "Select"} ${entry.name}`}
+        />
+      </span>
       {isFolder && !isTrash ? (
         <Link
           href={{
@@ -335,128 +609,138 @@ function VaultFileRow({
       <span className="hidden text-muted-foreground md:block">
         {formatDate(rowDate)}
       </span>
-      <div className="flex flex-wrap items-center justify-start gap-2 md:justify-end">
-        {isTrash ? (
-          <>
-            <ActionForm
-              action={`/api/files/${entry.id}/restore`}
-              csrfToken={csrfToken}
+      <div className="flex items-center justify-end">
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              type="button"
+              variant="secondary"
+              size="icon"
+              aria-label={`Actions for ${entry.name}`}
+              title={`Actions for ${entry.name}`}
             >
-              <RotateCcw className="size-4" aria-hidden="true" />
-              Restore
-            </ActionForm>
-            <ActionForm
-              action={`/api/files/${entry.id}/delete`}
-              csrfToken={csrfToken}
-              destructive
-            >
-              <Trash2 className="size-4" aria-hidden="true" />
-              Delete
-            </ActionForm>
-          </>
-        ) : (
-          <>
-            {!isFolder ? (
-              entry.e2eeState === "encrypted" ? (
-                <Button
-                  type="button"
-                  variant="secondary"
-                  className="text-primary hover:text-primary"
-                  disabled={downloading || !entry.resolved}
-                  onClick={onDownload}
+              <Ellipsis className="size-4" aria-hidden="true" />
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="min-w-44">
+            {isTrash ? (
+              <>
+                <ActionMenuForm
+                  action={`/api/files/${entry.id}/restore`}
+                  csrfToken={csrfToken}
                 >
-                  <Download className="size-4" aria-hidden="true" />
-                  {downloading ? "Decrypting..." : "Download"}
-                </Button>
-              ) : (
-                <Button
-                  asChild
-                  variant="secondary"
-                  className="text-primary hover:text-primary"
+                  <RotateCcw className="size-4" aria-hidden="true" />
+                  Restore
+                </ActionMenuForm>
+                <DropdownMenuSeparator />
+                <ActionMenuForm
+                  action={`/api/files/${entry.id}/delete`}
+                  csrfToken={csrfToken}
+                  destructive
                 >
-                  <a href={`/api/files/${entry.id}/download`}>
-                    <Download className="size-4" aria-hidden="true" />
-                    Download
-                  </a>
-                </Button>
-              )
-            ) : null}
-            {!isShared && entry.e2eeState === "encrypted" ? (
-              <Button
-                type="button"
-                variant="secondary"
-                onClick={onShare}
-                disabled={!entry.resolved}
-              >
-                <Share2 className="size-4" aria-hidden="true" />
-                Share
-              </Button>
-            ) : null}
-            <ActionForm
-              action={`/api/files/${entry.id}/favorite`}
-              csrfToken={csrfToken}
-              amber
-            >
-              <Star
-                className={entry.favorite ? "size-4 fill-current" : "size-4"}
-                aria-hidden="true"
-              />
-              {entry.favorite ? "Unstar" : "Star"}
-            </ActionForm>
-            {isShared ? (
-              <ActionForm
-                action={`/api/files/${entry.id}/unshare`}
-                csrfToken={csrfToken}
-              >
-                <X className="size-4" aria-hidden="true" />
-                Remove
-              </ActionForm>
+                  <Trash2 className="size-4" aria-hidden="true" />
+                  Delete
+                </ActionMenuForm>
+              </>
             ) : (
-              <ActionForm
-                action={`/api/files/${entry.id}/trash`}
-                csrfToken={csrfToken}
-                destructive
-              >
-                <Trash2 className="size-4" aria-hidden="true" />
-                Trash
-              </ActionForm>
+              <>
+                {!isFolder ? (
+                  entry.e2eeState === "encrypted" ? (
+                    <DropdownMenuItem
+                      className="text-primary focus:text-primary"
+                      disabled={downloading || !entry.resolved}
+                      onSelect={onDownload}
+                    >
+                      <Download className="size-4" aria-hidden="true" />
+                      {downloading ? "Decrypting..." : "Download"}
+                    </DropdownMenuItem>
+                  ) : (
+                    <DropdownMenuItem
+                      asChild
+                      className="text-primary focus:text-primary"
+                    >
+                      <a href={`/api/files/${entry.id}/download`}>
+                        <Download className="size-4" aria-hidden="true" />
+                        Download
+                      </a>
+                    </DropdownMenuItem>
+                  )
+                ) : null}
+                {!isShared ? (
+                  <>
+                    <DropdownMenuItem
+                      disabled={
+                        entry.e2eeState === "encrypted" && !entry.resolved
+                      }
+                      onSelect={onShare}
+                    >
+                      <Share2 className="size-4" aria-hidden="true" />
+                      Share
+                    </DropdownMenuItem>
+                    <DropdownMenuItem
+                      className="text-amber-600 focus:text-amber-700 dark:text-amber-400 dark:focus:text-amber-300"
+                      onSelect={onFavorite}
+                    >
+                      <Star
+                        className={
+                          entry.favorite ? "size-4 fill-current" : "size-4"
+                        }
+                        aria-hidden="true"
+                      />
+                      {entry.favorite ? "Unstar" : "Star"}
+                    </DropdownMenuItem>
+                    <DropdownMenuSeparator />
+                    <DropdownMenuItem
+                      variant="destructive"
+                      onSelect={onDelete}
+                    >
+                      <Trash2 className="size-4" aria-hidden="true" />
+                      Delete
+                    </DropdownMenuItem>
+                  </>
+                ) : (
+                  <>
+                    {!isFolder ? <DropdownMenuSeparator /> : null}
+                    <ActionMenuForm
+                      action={`/api/files/${entry.id}/unshare`}
+                      csrfToken={csrfToken}
+                    >
+                      <X className="size-4" aria-hidden="true" />
+                      Remove
+                    </ActionMenuForm>
+                  </>
+                )}
+              </>
             )}
-          </>
-        )}
+          </DropdownMenuContent>
+        </DropdownMenu>
       </div>
     </div>
   );
 }
 
-function ActionForm({
+function ActionMenuForm({
   action,
   csrfToken,
   children,
   destructive,
-  amber,
 }: {
   action: string;
   csrfToken: string;
   children: React.ReactNode;
   destructive?: boolean;
-  amber?: boolean;
 }) {
   return (
-    <form action={action} method="post">
+    <form action={action} method="post" className="contents">
       <input type="hidden" name="csrf_token" value={csrfToken} />
-      <Button
-        type="submit"
-        variant="secondary"
-        className={
-          destructive
-            ? "text-destructive hover:text-destructive"
-            : amber
-              ? "text-amber-600 hover:text-amber-700 dark:text-amber-400 dark:hover:text-amber-300"
-              : undefined
-        }
+      <DropdownMenuItem
+        asChild
+        variant={destructive ? "destructive" : "default"}
       >
-        {children}
-      </Button>
+        <button type="submit" className="w-full">
+          {children}
+        </button>
+      </DropdownMenuItem>
     </form>
   );
 }
@@ -466,6 +750,78 @@ function getIcon(entry: FileEntry) {
   if (entry.kind === "Image") return ImageIcon;
   if (entry.kind === "Archive") return FileArchive;
   return FileText;
+}
+
+async function requestFavorite(
+  entryId: string,
+  csrfToken: string,
+  expectedFavorite: boolean,
+): Promise<boolean> {
+  const body = new URLSearchParams({ csrf_token: csrfToken });
+  const response = await fetch(
+    `/api/files/${encodeURIComponent(entryId)}/favorite`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body,
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error("The favorite could not be updated.");
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/json")) {
+    const responsePath = new URL(response.url).pathname;
+    if (response.redirected && responsePath === "/files") {
+      return expectedFavorite;
+    }
+    throw new Error("The favorite endpoint returned an invalid response.");
+  }
+
+  const payload = (await response.json()) as Partial<FavoriteResponse>;
+  if (typeof payload.favorite !== "boolean") {
+    throw new Error("The favorite response was invalid.");
+  }
+
+  return payload.favorite;
+}
+
+async function requestTrash(entryId: string, csrfToken: string): Promise<void> {
+  const response = await fetch(
+    `/api/files/${encodeURIComponent(entryId)}/trash`,
+    {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ csrf_token: csrfToken }),
+    },
+  );
+
+  if (!response.ok) {
+    throw new Error("The item could not be deleted.");
+  }
+
+  const contentType = response.headers.get("content-type") ?? "";
+  if (contentType.includes("application/json")) return;
+
+  if (response.redirected) {
+    const responseUrl = new URL(response.url);
+    if (
+      responseUrl.pathname === "/files" &&
+      responseUrl.searchParams.get("file") === "trashed"
+    ) {
+      return;
+    }
+  }
+
+  throw new Error("The delete endpoint returned an invalid response.");
 }
 
 function fileKind(name: string, mimeType: string | null): string {
