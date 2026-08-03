@@ -12,6 +12,9 @@ use tokio::fs::File as AsyncFile;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::auth::{AuthUser, require_csrf, require_user};
+use crate::routes::share_links::{
+    EditorShareGrant, editor_grant_from_header, editor_parent, validate_editor_replacement,
+};
 use crate::state::AppState;
 use crate::storage::{ObjectMetadata, UploadedPart};
 
@@ -37,6 +40,7 @@ pub(crate) struct UploadInitRequest {
     size_bytes: u64,
     mime_type: Option<String>,
     parent_id: Option<String>,
+    replacement_file_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -169,6 +173,7 @@ pub struct FileEntry {
     favorite: bool,
     owner_username: Option<String>,
     shared: bool,
+    has_active_share_link: bool,
     shared_at: Option<String>,
     created_at: String,
     updated_at: String,
@@ -208,6 +213,13 @@ struct UploadRecord {
     multipart_upload_id: Option<String>,
     status: String,
     checksum_sha256: Option<String>,
+    replacement_file_id: Option<String>,
+}
+
+struct UploadActor {
+    owner_id: String,
+    share_link_id: Option<String>,
+    editor_grant: Option<EditorShareGrant>,
 }
 
 struct FilePage {
@@ -251,7 +263,7 @@ pub async fn list_files(
     }));
     let direction = normalize_sort_direction(query.direction.as_deref(), sort);
     let current_folder_id = match view {
-        "files" => validate_folder(&state, &user, query.folder.as_deref()).await?,
+        "files" => validate_folder(&state, &user.id, query.folder.as_deref()).await?,
         "shared" => validate_shared_folder(&state, &user, query.folder.as_deref()).await?,
         _ => None,
     };
@@ -302,8 +314,7 @@ pub async fn init_upload(
     request: HttpRequest,
     body: web::Json<UploadInitRequest>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
-    require_header_csrf(&state, &request).await?;
+    let actor = require_upload_actor(&state, &request, true).await?;
 
     if state.config.e2ee_mode.is_enabled() {
         return Ok(HttpResponse::Conflict()
@@ -322,10 +333,30 @@ pub async fn init_upload(
     let Some((display_name, folder_names)) = upload_path.split_last() else {
         return Err(error::ErrorBadRequest("invalid upload path"));
     };
-    let mut parent_id = validate_folder(&state, &user, body.parent_id.as_deref()).await?;
+    let (mut parent_id, replacement_file_id) = if let Some(grant) = &actor.editor_grant {
+        let replacement_file_id =
+            validate_editor_replacement(grant, body.replacement_file_id.as_deref())?;
+        let parent_id = if replacement_file_id.is_some() {
+            None
+        } else {
+            Some(editor_parent(&state, grant, body.parent_id.as_deref()).await?)
+        };
+        (parent_id, replacement_file_id)
+    } else {
+        if body.replacement_file_id.is_some() {
+            return Err(error::ErrorBadRequest(
+                "file replacement requires an editor share link",
+            ));
+        }
+        (
+            validate_folder(&state, &actor.owner_id, body.parent_id.as_deref()).await?,
+            None,
+        )
+    };
 
     for folder_name in folder_names {
-        parent_id = Some(ensure_folder(&state, &user, parent_id.as_deref(), folder_name).await?);
+        parent_id =
+            Some(ensure_folder(&state, &actor.owner_id, parent_id.as_deref(), folder_name).await?);
     }
 
     let mime_type = body
@@ -342,7 +373,9 @@ pub async fn init_upload(
 
     if let Some(existing) = find_resumable_upload(
         &state,
-        &user,
+        &actor.owner_id,
+        actor.share_link_id.as_deref(),
+        replacement_file_id.as_deref(),
         parent_id.as_deref(),
         display_name,
         &mime_type,
@@ -388,7 +421,7 @@ pub async fn init_upload(
         }));
     }
 
-    let reserved_bytes = current_reserved_bytes(&state, &user).await?;
+    let reserved_bytes = current_reserved_bytes(&state, &actor.owner_id).await?;
     let requested_total = reserved_bytes
         .checked_add(body.size_bytes)
         .ok_or_else(|| error::ErrorPayloadTooLarge("storage quota exceeded"))?;
@@ -401,7 +434,7 @@ pub async fn init_upload(
     let file_id = format!("fil_{}", create_storage_name()?);
     let object_key = format!(
         "users/{}/files/{}/{}",
-        user.id,
+        actor.owner_id,
         file_id,
         create_storage_name()?
     );
@@ -425,7 +458,7 @@ pub async fn init_upload(
     let counter = match transaction
         .query_one(
             "SELECT used_bytes FROM user_file_counters WHERE owner_id = $1 FOR UPDATE",
-            &[&user.id],
+            &[&actor.owner_id],
         )
         .await
     {
@@ -445,7 +478,7 @@ pub async fn init_upload(
                     OR status = 'aborting'
                   )
             ",
-            &[&user.id],
+            &[&actor.owner_id],
         )
         .await
     {
@@ -484,15 +517,17 @@ pub async fn init_upload(
                   upload_mode,
                   part_size_bytes,
                   multipart_upload_id,
+                  share_link_id,
+                  replacement_file_id,
                   status,
                   expires_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, 'initializing', now() + interval '24 hours')
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, 'initializing', now() + interval '24 hours')
             ",
             &[
                 &upload_id,
                 &file_id,
-                &user.id,
+                &actor.owner_id,
                 &parent_id,
                 &display_name,
                 &object_key,
@@ -500,6 +535,8 @@ pub async fn init_upload(
                 &size_bytes,
                 &upload_mode,
                 &part_size_bytes,
+                &actor.share_link_id,
+                &replacement_file_id,
             ],
         )
         .await;
@@ -512,7 +549,7 @@ pub async fn init_upload(
             .db
             .query_opt(
                 "SELECT id FROM file_uploads WHERE id = $1 AND owner_id = $2 LIMIT 1",
-                &[&upload_id, &user.id],
+                &[&upload_id, &actor.owner_id],
             )
             .await
         {
@@ -551,7 +588,7 @@ pub async fn init_upload(
                 .db
                 .execute(
                     "UPDATE file_uploads SET expires_at = now() + ($1::bigint * interval '1 second') WHERE id = $2 AND owner_id = $3 AND status = 'initializing'",
-                    &[&grace_seconds, &upload_id, &user.id],
+                    &[&grace_seconds, &upload_id, &actor.owner_id],
                 )
                 .await;
             return Err(error::ErrorBadGateway(storage_error));
@@ -570,7 +607,7 @@ pub async fn init_upload(
         let _ = enqueue_upload_cleanup(
             &state,
             &upload_id,
-            &user.id,
+            &actor.owner_id,
             &object_key,
             prepared.multipart_upload_id.as_deref(),
             &["initializing"],
@@ -585,7 +622,7 @@ pub async fn init_upload(
         .db
         .execute(
             "UPDATE file_uploads SET multipart_upload_id = $1, status = 'pending', expires_at = now() + interval '24 hours' WHERE id = $2 AND owner_id = $3 AND status = 'initializing'",
-            &[&prepared.multipart_upload_id, &upload_id, &user.id],
+            &[&prepared.multipart_upload_id, &upload_id, &actor.owner_id],
         )
         .await;
 
@@ -595,7 +632,7 @@ pub async fn init_upload(
             let _ = enqueue_upload_cleanup(
                 &state,
                 &upload_id,
-                &user.id,
+                &actor.owner_id,
                 &object_key,
                 prepared.multipart_upload_id.as_deref(),
                 &["initializing"],
@@ -608,7 +645,7 @@ pub async fn init_upload(
             let _ = enqueue_upload_cleanup(
                 &state,
                 &upload_id,
-                &user.id,
+                &actor.owner_id,
                 &object_key,
                 prepared.multipart_upload_id.as_deref(),
                 &["initializing"],
@@ -634,9 +671,8 @@ pub async fn upload_content(
     path: web::Path<String>,
     mut payload: web::Payload,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
-    require_header_csrf(&state, &request).await?;
-    let Some(upload) = get_upload(&state, &user, &path.into_inner()).await? else {
+    let actor = require_upload_actor(&state, &request, true).await?;
+    let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
         return Ok(HttpResponse::NotFound().finish());
     };
 
@@ -716,9 +752,8 @@ pub async fn presign_upload_content(
     path: web::Path<String>,
     body: web::Json<UploadChecksumRequest>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
-    require_header_csrf(&state, &request).await?;
-    let Some(upload) = get_upload(&state, &user, &path.into_inner()).await? else {
+    let actor = require_upload_actor(&state, &request, true).await?;
+    let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
         return Ok(HttpResponse::NotFound().finish());
     };
 
@@ -737,7 +772,12 @@ pub async fn presign_upload_content(
         .db
         .execute(
             "UPDATE file_uploads SET checksum_sha256 = $1, write_expires_at = GREATEST(COALESCE(write_expires_at, now()), now() + ($4::bigint * interval '1 second')) WHERE id = $2 AND owner_id = $3 AND status = 'pending' AND (checksum_sha256 IS NULL OR checksum_sha256 = $1)",
-            &[&checksum, &upload.id, &user.id, &write_lifetime_seconds],
+            &[
+                &checksum,
+                &upload.id,
+                &upload.owner_id,
+                &write_lifetime_seconds,
+            ],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -767,10 +807,9 @@ pub async fn presign_upload_part(
     path: web::Path<(String, i32)>,
     body: web::Json<UploadChecksumRequest>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
-    require_header_csrf(&state, &request).await?;
+    let actor = require_upload_actor(&state, &request, true).await?;
     let (upload_id, part_number) = path.into_inner();
-    let Some(upload) = get_upload(&state, &user, &upload_id).await? else {
+    let Some(upload) = get_upload(&state, &actor, &upload_id).await? else {
         return Ok(HttpResponse::NotFound().finish());
     };
 
@@ -826,9 +865,8 @@ pub async fn complete_upload(
     path: web::Path<String>,
     body: web::Json<UploadCompleteRequest>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
-    require_header_csrf(&state, &request).await?;
-    let Some(upload) = get_upload(&state, &user, &path.into_inner()).await? else {
+    let actor = require_upload_actor(&state, &request, true).await?;
+    let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
         return Ok(HttpResponse::NotFound().finish());
     };
     if upload.status == "completed" {
@@ -886,13 +924,13 @@ pub async fn complete_upload(
                 SET status = 'completing', expires_at = now() + interval '5 minutes'
                 WHERE id = $1 AND owner_id = $2 AND status = 'pending'
             ",
-            &[&upload.id, &user.id],
+            &[&upload.id, &upload.owner_id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
 
     if claimed == 0 {
-        let Some(current) = get_upload(&state, &user, &upload.id).await? else {
+        let Some(current) = get_upload(&state, &actor, &upload.id).await? else {
             return Ok(HttpResponse::NotFound().finish());
         };
 
@@ -927,7 +965,7 @@ pub async fn complete_upload(
                         .db
                         .execute(
                             "UPDATE file_uploads SET status = 'pending', expires_at = now() + interval '24 hours' WHERE id = $1 AND owner_id = $2 AND status = 'completing'",
-                            &[&upload.id, &user.id],
+                            &[&upload.id, &upload.owner_id],
                         )
                         .await
                         .map_err(error::ErrorInternalServerError)?;
@@ -977,7 +1015,7 @@ pub async fn complete_upload(
         enqueue_upload_cleanup(
             &state,
             &upload.id,
-            &user.id,
+            &upload.owner_id,
             &upload.object_key,
             upload.multipart_upload_id.as_deref(),
             &["completing"],
@@ -998,8 +1036,8 @@ pub async fn upload_status(
     request: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
-    let Some(upload) = get_upload(&state, &user, &path.into_inner()).await? else {
+    let actor = require_upload_actor(&state, &request, false).await?;
+    let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
         return Ok(HttpResponse::NotFound().finish());
     };
 
@@ -1098,38 +1136,108 @@ async fn finalize_upload_record(
         return Err(error::ErrorConflict("upload is no longer completing"));
     }
 
-    transaction
-        .execute(
-            "
-                INSERT INTO files (
-                  id,
-                  owner_id,
-                  original_name,
-                  storage_name,
-                  mime_type,
-                  size_bytes,
-                  entry_type,
-                  parent_id,
-                  checksum_sha256,
-                  object_etag
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, 'file', $7, $8, $9)
-                ON CONFLICT (id) DO NOTHING
-            ",
-            &[
-                &upload.file_id,
-                &upload.owner_id,
-                &upload.original_name,
-                &upload.object_key,
-                &upload.mime_type,
-                &upload.size_bytes,
-                &upload.parent_id,
-                &metadata.checksum_sha256,
-                &metadata.etag,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    if let Some(replacement_file_id) = upload.replacement_file_id.as_deref() {
+        let target = transaction
+            .query_opt(
+                "
+                    SELECT storage_name
+                    FROM files
+                    WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
+                      AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
+                    FOR UPDATE
+                ",
+                &[&replacement_file_id, &upload.owner_id],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        let Some(target) = target else {
+            return Err(error::ErrorNotFound(
+                "the file selected for replacement is unavailable",
+            ));
+        };
+        let previous_storage_name: String = target.get("storage_name");
+        let previous_object_key = if previous_storage_name.contains('/') {
+            previous_storage_name
+        } else {
+            format!("{}/{}", upload.owner_id, previous_storage_name)
+        };
+        let presign_seconds = i64::try_from(state.config.storage_presign_seconds)
+            .map_err(|_| error::ErrorInternalServerError("invalid signature lifetime"))?;
+        transaction
+            .execute(
+                "
+                    INSERT INTO storage_deletion_jobs (object_key, available_at)
+                    VALUES ($1, now() + ($2::bigint * interval '1 second'))
+                    ON CONFLICT (object_key) DO UPDATE SET
+                      available_at = GREATEST(
+                        storage_deletion_jobs.available_at,
+                        EXCLUDED.available_at
+                      )
+                ",
+                &[&previous_object_key, &presign_seconds],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        transaction
+            .execute(
+                "
+                    UPDATE files
+                    SET original_name = $1,
+                        storage_name = $2,
+                        mime_type = $3,
+                        size_bytes = $4,
+                        checksum_sha256 = $5,
+                        object_etag = $6,
+                        updated_at = now()
+                    WHERE id = $7 AND owner_id = $8
+                ",
+                &[
+                    &upload.original_name,
+                    &upload.object_key,
+                    &upload.mime_type,
+                    &upload.size_bytes,
+                    &metadata.checksum_sha256,
+                    &metadata.etag,
+                    &replacement_file_id,
+                    &upload.owner_id,
+                ],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+    } else {
+        transaction
+            .execute(
+                "
+                    INSERT INTO files (
+                      id,
+                      owner_id,
+                      original_name,
+                      storage_name,
+                      mime_type,
+                      size_bytes,
+                      entry_type,
+                      parent_id,
+                      checksum_sha256,
+                      object_etag
+                    )
+                    VALUES ($1, $2, $3, $4, $5, $6, 'file', $7, $8, $9)
+                    ON CONFLICT (id) DO NOTHING
+                ",
+                &[
+                    &upload.file_id,
+                    &upload.owner_id,
+                    &upload.original_name,
+                    &upload.object_key,
+                    &upload.mime_type,
+                    &upload.size_bytes,
+                    &upload.parent_id,
+                    &metadata.checksum_sha256,
+                    &metadata.etag,
+                ],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+    }
     transaction
         .execute(
             "UPDATE file_uploads SET status = 'completed', completed_at = now() WHERE id = $1 AND owner_id = $2 AND status = 'completing'",
@@ -1148,7 +1256,10 @@ async fn finalize_upload_record(
 fn upload_complete_response(upload: &UploadRecord, status: &str) -> UploadCompleteResponse {
     UploadCompleteResponse {
         status: status.to_owned(),
-        file_id: upload.file_id.clone(),
+        file_id: upload
+            .replacement_file_id
+            .clone()
+            .unwrap_or_else(|| upload.file_id.clone()),
         location: upload_redirect_location(upload.parent_id.as_deref(), "uploaded"),
         poll_url: format!("/api/files/uploads/{}/status", upload.id),
         retry_after_seconds: 2,
@@ -1160,9 +1271,8 @@ pub async fn abort_upload(
     request: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
-    require_header_csrf(&state, &request).await?;
-    let Some(upload) = get_upload(&state, &user, &path.into_inner()).await? else {
+    let actor = require_upload_actor(&state, &request, true).await?;
+    let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
         return Ok(HttpResponse::NoContent().finish());
     };
 
@@ -1170,7 +1280,7 @@ pub async fn abort_upload(
         enqueue_upload_cleanup(
             &state,
             &upload.id,
-            &user.id,
+            &upload.owner_id,
             &upload.object_key,
             upload.multipart_upload_id.as_deref(),
             &["initializing", "pending"],
@@ -1620,7 +1730,7 @@ pub async fn delete(
 
 async fn validate_folder(
     state: &AppState,
-    user: &AuthUser,
+    owner_id: &str,
     folder_id: Option<&str>,
 ) -> Result<Option<String>> {
     let Some(folder_id) = folder_id.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -1638,7 +1748,7 @@ async fn validate_folder(
                   AND state = 'active'
                 LIMIT 1
             ",
-            &[&folder_id, &user.id],
+            &[&folder_id, &owner_id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -1815,7 +1925,7 @@ async fn get_shared_breadcrumbs(
 
 async fn ensure_folder(
     state: &AppState,
-    user: &AuthUser,
+    owner_id: &str,
     parent_id: Option<&str>,
     name: &str,
 ) -> Result<String> {
@@ -1832,7 +1942,7 @@ async fn ensure_folder(
     transaction
         .query_one(
             "SELECT pg_advisory_xact_lock(hashtextextended($1 || '|' || COALESCE($2, '') || '|' || lower($3), 0))",
-            &[&user.id, &parent_id, &name],
+            &[&owner_id, &parent_id, &name],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -1848,7 +1958,7 @@ async fn ensure_folder(
                   AND lower(original_name) = lower($3)
                 LIMIT 1
             ",
-            &[&user.id, &parent_id, &name],
+            &[&owner_id, &parent_id, &name],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -1878,7 +1988,7 @@ async fn ensure_folder(
                 VALUES (gen_random_uuid()::text, $1, $2, $3, 0, 'folder', $4)
                 RETURNING id
             ",
-            &[&user.id, &name, &storage_name, &parent_id],
+            &[&owner_id, &name, &storage_name, &parent_id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -1989,6 +2099,13 @@ async fn list_entries(
                   AND vault_shares.owner_id = files.owner_id
                   AND vault_shares.status IN ('active', 'rotating')
               ) AS shared,
+              EXISTS (
+                SELECT 1 FROM share_links
+                WHERE share_links.root_file_id = files.id
+                  AND share_links.owner_id = files.owner_id
+                  AND share_links.revoked_at IS NULL
+                  AND (share_links.expires_at IS NULL OR share_links.expires_at > now())
+              ) AS has_active_share_link,
               NULL::text AS shared_at,
               to_char(files.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
               to_char(files.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
@@ -2097,6 +2214,7 @@ async fn list_shared_entries(
               false AS favorite,
               owners.username AS owner_username,
               true AS shared,
+              false AS has_active_share_link,
               to_char(file_shares.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS shared_at,
               to_char(files.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
               to_char(files.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
@@ -2220,6 +2338,7 @@ async fn list_shared_folder_entries(
                    files.entry_type, files.parent_id, files.size_bytes,
                    files.state, files.e2ee_state, false AS favorite,
                    owners.username AS owner_username, true AS shared,
+                   false AS has_active_share_link,
                    to_char(access.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS shared_at,
                    to_char(files.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
                    to_char(files.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
@@ -2284,6 +2403,7 @@ fn listed_file_from_row(row: tokio_postgres::Row) -> ListedFile {
             favorite: row.get("favorite"),
             owner_username: row.get("owner_username"),
             shared: row.get("shared"),
+            has_active_share_link: row.get("has_active_share_link"),
             shared_at: row.get("shared_at"),
             created_at: row.get("created_at"),
             updated_at: row.get("updated_at"),
@@ -2509,7 +2629,7 @@ async fn get_download_file(
 
 async fn get_upload(
     state: &AppState,
-    user: &AuthUser,
+    actor: &UploadActor,
     upload_id: &str,
 ) -> Result<Option<UploadRecord>> {
     let row = state
@@ -2529,14 +2649,17 @@ async fn get_upload(
                   part_size_bytes,
                   multipart_upload_id,
                   status,
-                  checksum_sha256
+                  checksum_sha256,
+                  share_link_id,
+                  replacement_file_id
                 FROM file_uploads
                 WHERE id = $1
                   AND owner_id = $2
+                  AND ($3::text IS NULL OR share_link_id = $3)
                   AND (status = 'completed' OR expires_at > now())
                 LIMIT 1
             ",
-            &[&upload_id, &user.id],
+            &[&upload_id, &actor.owner_id, &actor.share_link_id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -2555,12 +2678,15 @@ async fn get_upload(
         multipart_upload_id: row.get("multipart_upload_id"),
         status: row.get("status"),
         checksum_sha256: row.get("checksum_sha256"),
+        replacement_file_id: row.get("replacement_file_id"),
     }))
 }
 
 async fn find_resumable_upload(
     state: &AppState,
-    user: &AuthUser,
+    owner_id: &str,
+    share_link_id: Option<&str>,
+    replacement_file_id: Option<&str>,
     parent_id: Option<&str>,
     original_name: &str,
     mime_type: &Option<String>,
@@ -2584,24 +2710,30 @@ async fn find_resumable_upload(
                   part_size_bytes,
                   multipart_upload_id,
                   status,
-                  checksum_sha256
+                  checksum_sha256,
+                  share_link_id,
+                  replacement_file_id
                 FROM file_uploads
                 WHERE owner_id = $1
                   AND parent_id IS NOT DISTINCT FROM $2
                   AND original_name = $3
                   AND size_bytes = $4
                   AND mime_type IS NOT DISTINCT FROM $5
+                  AND share_link_id IS NOT DISTINCT FROM $6
+                  AND replacement_file_id IS NOT DISTINCT FROM $7
                   AND status IN ('initializing', 'pending', 'completing')
                   AND expires_at > now()
                 ORDER BY created_at DESC
                 LIMIT 1
             ",
             &[
-                &user.id,
+                &owner_id,
                 &parent_id,
                 &original_name,
                 &size_bytes,
                 &mime_type,
+                &share_link_id,
+                &replacement_file_id,
             ],
         )
         .await
@@ -2621,10 +2753,11 @@ async fn find_resumable_upload(
         multipart_upload_id: row.get("multipart_upload_id"),
         status: row.get("status"),
         checksum_sha256: row.get("checksum_sha256"),
+        replacement_file_id: row.get("replacement_file_id"),
     }))
 }
 
-async fn current_reserved_bytes(state: &AppState, user: &AuthUser) -> Result<u64> {
+async fn current_reserved_bytes(state: &AppState, owner_id: &str) -> Result<u64> {
     let row = state
         .db
         .query_one(
@@ -2646,7 +2779,7 @@ async fn current_reserved_bytes(state: &AppState, user: &AuthUser) -> Result<u64
                       )
                   ), 0)::bigint AS reserved_bytes
             ",
-            &[&user.id],
+            &[&owner_id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -2664,6 +2797,30 @@ async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<
         .ok_or_else(|| error::ErrorForbidden("csrf token required"))?;
 
     require_csrf(state, request, csrf_token).await
+}
+
+async fn require_upload_actor(
+    state: &AppState,
+    request: &HttpRequest,
+    require_mutation_csrf: bool,
+) -> Result<UploadActor> {
+    if let Some(grant) = editor_grant_from_header(state, request).await? {
+        return Ok(UploadActor {
+            owner_id: grant.owner_id.clone(),
+            share_link_id: Some(grant.id.clone()),
+            editor_grant: Some(grant),
+        });
+    }
+
+    let user = require_user(state, request).await?;
+    if require_mutation_csrf {
+        require_header_csrf(state, request).await?;
+    }
+    Ok(UploadActor {
+        owner_id: user.id,
+        share_link_id: None,
+        editor_grant: None,
+    })
 }
 
 async fn enqueue_upload_cleanup(

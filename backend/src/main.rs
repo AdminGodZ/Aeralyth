@@ -70,7 +70,7 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(state.clone())
             .app_data(web::JsonConfig::default().limit(8 * 1024 * 1024))
-            .wrap(Logger::default())
+            .wrap(Logger::default().exclude_regex(r"^/api/share-links/access/"))
             .configure(routes::configure)
     })
     .bind(&bind_addr)?

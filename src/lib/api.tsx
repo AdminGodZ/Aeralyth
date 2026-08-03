@@ -112,6 +112,49 @@ export type InvitationState =
       status: "unavailable";
     };
 
+export type SharedLinkEntry = {
+  id: string;
+  name: string;
+  mimeType: string | null;
+  entryType: "file" | "folder";
+  sizeBytes: number;
+  updatedAt: string;
+};
+
+export type SharedLinkBreadcrumb = {
+  id: string;
+  name: string;
+};
+
+export type SharedLinkData = {
+  accessScope: "public" | "account";
+  permission: "viewer" | "editor";
+  expiresAt: string | null;
+  ownerUsername: string;
+  root: SharedLinkEntry;
+  currentFolderId: string | null;
+  breadcrumbs: SharedLinkBreadcrumb[];
+  entries: SharedLinkEntry[];
+};
+
+export type ShareLinkState =
+  | {
+      status: "ready";
+      data: SharedLinkData;
+    }
+  | {
+      status: "authentication-required";
+    }
+  | {
+      status: "forbidden";
+    }
+  | {
+      status: "invalid";
+    }
+  | {
+      status: "unavailable";
+    };
+
 export type FileView = "files" | "recent" | "favorites" | "shared" | "trash";
 export type FileSort = "name" | "size" | "updated";
 export type FileSortDirection = "asc" | "desc";
@@ -127,6 +170,7 @@ export type FileEntry = {
   favorite: boolean;
   ownerUsername: string | null;
   shared: boolean;
+  hasActiveShareLink: boolean;
   sharedAt: string | null;
   createdAt: string;
   updatedAt: string;
@@ -340,6 +384,53 @@ export async function getInvitationState(
   }
 }
 
+export async function getShareLinkState(
+  token: string,
+  folderId?: string,
+): Promise<ShareLinkState> {
+  const requestHeaders = await headers();
+  const cookie = requestHeaders.get("cookie");
+  const query = folderId ? `?${new URLSearchParams({ folder: folderId })}` : "";
+
+  try {
+    return await requestApi<ShareLinkState>(
+      `${getApiOrigin()}/api/share-links/access/${encodeURIComponent(token)}${query}`,
+      {
+        headers: getForwardedHeaders(requestHeaders, cookie),
+        cache: "no-store",
+      },
+      async (response) => {
+        if (response.status === 401) {
+          return { status: "authentication-required" };
+        }
+
+        if (response.status === 403) {
+          return { status: "forbidden" };
+        }
+
+        if (
+          response.status === 400 ||
+          response.status === 404 ||
+          response.status === 410
+        ) {
+          return { status: "invalid" };
+        }
+
+        if (!response.ok) {
+          return { status: "unavailable" };
+        }
+
+        return {
+          status: "ready",
+          data: (await response.json()) as SharedLinkData,
+        };
+      },
+    );
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
 export async function getCsrfState(): Promise<CsrfState> {
   const requestHeaders = await headers();
   const cookie = requestHeaders.get("cookie");
@@ -475,6 +566,7 @@ function isFileEntry(entry: unknown): entry is FileEntry {
     typeof fileEntry.state === "string" &&
     typeof fileEntry.favorite === "boolean" &&
     typeof fileEntry.shared === "boolean" &&
+    typeof fileEntry.hasActiveShareLink === "boolean" &&
     (fileEntry.e2eeState === "legacy" ||
       fileEntry.e2eeState === "staged" ||
       fileEntry.e2eeState === "encrypted")

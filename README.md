@@ -86,10 +86,17 @@ DATABASE_URL=postgres://aeralyth:aeralyth@localhost:5432/aeralyth
 AERALYTH_COOKIE_SECURE=false
 AERALYTH_STORAGE_BACKEND=s3
 AERALYTH_E2EE_MODE=migrate
+AERALYTH_SHARE_LINK_SECRET=<at-least-32-random-bytes>
 ```
 
 `AERALYTH_COOKIE_SECURE` defaults to `false` for debug builds and `true` for
 release builds.
+
+`AERALYTH_SHARE_LINK_SECRET` is required in production so active share URLs can
+be shown to their owner again without storing bearer tokens in PostgreSQL.
+Generate it once with `openssl rand -base64 32` and keep it stable; changing it
+does not break links already distributed, but those links can no longer be
+redisplayed in the owner dialog until they are explicitly replaced.
 
 The Next.js frontend proxies browser `/api/*` requests to the Actix backend.
 Override the target when Actix is not reachable at the local default:

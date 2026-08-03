@@ -10,6 +10,7 @@ import {
   FileText,
   Folder,
   ImageIcon,
+  Link2,
   ListFilter,
   LockKeyhole,
   RotateCcw,
@@ -30,7 +31,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { LegacyShareDialog } from "@/features/dashboard/legacy-share-dialog";
+import { ShareLinkDialog } from "@/features/sharing/share-link-dialog";
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import { useVault } from "@/features/vault/vault-provider";
@@ -474,8 +475,12 @@ function VaultFileListView({
                 }
                 onClick={() => onShareEntryChange(singleSelectedEntry)}
               >
-                <Share2 className="size-4" aria-hidden="true" />
-                Share
+                {hasManagedSharing(singleSelectedEntry) ? (
+                  <Link2 className="size-4" aria-hidden="true" />
+                ) : (
+                  <Share2 className="size-4" aria-hidden="true" />
+                )}
+                {sharingActionLabel(singleSelectedEntry)}
               </Button>
             ) : null}
             {!isTrash && !isShared ? (
@@ -558,7 +563,7 @@ function VaultFileListView({
           csrfToken={csrfToken}
         />
       ) : shareEntry ? (
-        <LegacyShareDialog
+        <ShareLinkDialog
           open
           onOpenChange={(open) => {
             if (!open) onShareEntryChange(null);
@@ -566,6 +571,7 @@ function VaultFileListView({
           itemId={shareEntry.id}
           itemName={shareEntry.name}
           itemType={shareEntry.entryType}
+          initiallyShared={shareEntry.hasActiveShareLink}
           csrfToken={csrfToken}
         />
       ) : null}
@@ -748,8 +754,12 @@ function VaultFileRow({
                       }
                       onSelect={onShare}
                     >
-                      <Share2 className="size-4" aria-hidden="true" />
-                      Share
+                      {hasManagedSharing(entry) ? (
+                        <Link2 className="size-4" aria-hidden="true" />
+                      ) : (
+                        <Share2 className="size-4" aria-hidden="true" />
+                      )}
+                      {sharingActionLabel(entry)}
                     </DropdownMenuItem>
                     <DropdownMenuItem
                       className="text-amber-600 focus:text-amber-700 dark:text-amber-400 dark:focus:text-amber-300"
@@ -821,6 +831,17 @@ function getIcon(entry: FileEntry) {
   if (entry.kind === "Image") return ImageIcon;
   if (entry.kind === "Archive") return FileArchive;
   return FileText;
+}
+
+function hasManagedSharing(entry: FileEntry): boolean {
+  return entry.e2eeState === "encrypted"
+    ? entry.shared
+    : entry.hasActiveShareLink;
+}
+
+function sharingActionLabel(entry: FileEntry): string {
+  if (!hasManagedSharing(entry)) return "Share";
+  return entry.e2eeState === "encrypted" ? "Manage sharing" : "Manage link";
 }
 
 async function requestFavorite(

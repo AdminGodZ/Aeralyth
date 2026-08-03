@@ -15,6 +15,7 @@ pub struct LoginForm {
     username: String,
     password: String,
     remember: Option<String>,
+    next: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -38,13 +39,13 @@ pub async fn login(state: web::Data<AppState>, form: web::Form<LoginForm>) -> Re
     let username = form.username.trim();
 
     if username.is_empty() || form.password.is_empty() {
-        return Ok(redirect("/login?error=invalid"));
+        return Ok(redirect(login_error_location(form.next.as_deref())));
     }
 
     let user = authenticate_password(&state, username, &form.password).await?;
 
     let Some(user) = user else {
-        return Ok(redirect("/login?error=invalid"));
+        return Ok(redirect(login_error_location(form.next.as_deref())));
     };
 
     let session_seconds = if form.remember.is_some() {
@@ -79,8 +80,12 @@ pub async fn login(state: web::Data<AppState>, form: web::Form<LoginForm>) -> Re
         .await
         .map_err(error::ErrorInternalServerError)?;
 
+    let location = safe_next_path(form.next.as_deref())
+        .unwrap_or("/files")
+        .to_owned();
+
     Ok(HttpResponse::SeeOther()
-        .insert_header((LOCATION, "/files"))
+        .insert_header((LOCATION, location))
         .cookie(session_cookie(
             token,
             session_seconds,
@@ -208,8 +213,74 @@ fn expired_session_cookie(secure: bool) -> Cookie<'static> {
         .finish()
 }
 
-fn redirect(location: &'static str) -> HttpResponse {
+fn redirect(location: String) -> HttpResponse {
     HttpResponse::SeeOther()
         .insert_header((LOCATION, location))
         .finish()
+}
+
+fn safe_next_path(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|next| {
+        next.starts_with("/s/") && next.len() <= 512 && !next.contains(['\r', '\n', '#'])
+    })
+}
+
+fn login_error_location(next: Option<&str>) -> String {
+    let mut location = "/login?error=invalid".to_owned();
+    if let Some(next) = safe_next_path(next) {
+        location.push_str("&next=");
+        location.push_str(&encode_query_component(next));
+    }
+    location
+}
+
+fn encode_query_component(value: &str) -> String {
+    use std::fmt::Write as _;
+
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            let _ = write!(&mut encoded, "%{byte:02X}");
+        }
+    }
+    encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{encode_query_component, login_error_location, safe_next_path};
+
+    #[test]
+    fn accepts_only_local_share_return_paths() {
+        assert_eq!(
+            safe_next_path(Some("/s/abc_123?folder=fil_456")),
+            Some("/s/abc_123?folder=fil_456")
+        );
+        assert_eq!(safe_next_path(Some("https://example.com")), None);
+        assert_eq!(safe_next_path(Some("/files")), None);
+        assert_eq!(safe_next_path(Some("/s/token#fragment")), None);
+        assert_eq!(safe_next_path(Some("/s/token\r\nLocation: /admin")), None);
+    }
+
+    #[test]
+    fn preserves_a_safe_return_path_on_login_errors() {
+        assert_eq!(
+            login_error_location(Some("/s/token?folder=fil_1")),
+            "/login?error=invalid&next=%2Fs%2Ftoken%3Ffolder%3Dfil_1"
+        );
+        assert_eq!(
+            login_error_location(Some("https://example.com")),
+            "/login?error=invalid"
+        );
+    }
+
+    #[test]
+    fn encodes_every_non_unreserved_query_byte() {
+        assert_eq!(
+            encode_query_component("/s/a b?x=1&y=2"),
+            "%2Fs%2Fa%20b%3Fx%3D1%26y%3D2"
+        );
+    }
 }

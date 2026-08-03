@@ -39,6 +39,10 @@ Set `AERALYTH_ENV=production` and `AERALYTH_STORAGE_BACKEND=s3`, then provide `B
 The equivalent `AERALYTH_S3_*` and standard AWS variable names are also
 accepted. Keep the API and bucket in the same Railway region.
 
+Set a stable `AERALYTH_SHARE_LINK_SECRET` generated with
+`openssl rand -base64 32`. It is used only to reconstruct owner-visible share
+URLs; raw bearer tokens are never stored in PostgreSQL.
+
 Railway is detected as production automatically. The API refuses to start with
 local storage or incomplete bucket credentials in that environment; it never
 falls back to an ephemeral service filesystem.

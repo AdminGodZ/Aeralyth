@@ -89,7 +89,9 @@ type UploadCompletion = {
 };
 
 type UploadPanelProps = {
-  csrfToken: string;
+  csrfToken?: string;
+  shareToken?: string;
+  replacementFileId?: string;
   e2eeMode: "off" | "migrate" | "required";
   folderZipPromptEnabled: boolean;
   parentFolderId?: string | null;
@@ -108,6 +110,8 @@ export function UploadPanel(props: UploadPanelProps) {
 
 function useUploadPanelController({
   csrfToken,
+  shareToken,
+  replacementFileId,
   e2eeMode,
   folderZipPromptEnabled,
   parentFolderId,
@@ -135,6 +139,11 @@ function useUploadPanelController({
       currentPath: "",
     });
   const isBusy = isUploading || isCompressing;
+  const requestAuthHeaders: Record<string, string> = shareToken
+    ? { "X-Aeralyth-Share-Token": shareToken }
+    : csrfToken
+      ? { "X-CSRF-Token": csrfToken }
+      : {};
 
   useEffect(() => {
     return () => {
@@ -169,6 +178,11 @@ function useUploadPanelController({
       setUploadError(
         `Choose no more than ${MAX_SELECTION_FILES.toLocaleString()} files at once.`,
       );
+      return;
+    }
+
+    if (replacementFileId && files.length !== 1) {
+      setUploadError("Choose exactly one file to replace the shared file.");
       return;
     }
 
@@ -208,6 +222,9 @@ function useUploadPanelController({
 
     try {
       if (e2eeMode !== "off") {
+        if (!csrfToken) {
+          throw new Error("The encrypted upload session is unavailable.");
+        }
         if (!vault.client) {
           throw new Error("The encrypted vault worker is not available.");
         }
@@ -289,7 +306,7 @@ function useUploadPanelController({
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "X-CSRF-Token": csrfToken,
+        ...requestAuthHeaders,
       },
       body: JSON.stringify({
         name: selection.file.name,
@@ -297,6 +314,7 @@ function useUploadPanelController({
         sizeBytes: selection.file.size,
         mimeType: selection.file.type || null,
         parentId: parentFolderId ?? null,
+        replacementFileId: replacementFileId ?? null,
       }),
       signal,
     });
@@ -349,7 +367,7 @@ function useUploadPanelController({
                 method: "POST",
                 headers: {
                   "Content-Type": "application/json",
-                  "X-CSRF-Token": csrfToken,
+                  ...requestAuthHeaders,
                 },
                 body: JSON.stringify({ checksumSha256 }),
                 signal,
@@ -392,7 +410,7 @@ function useUploadPanelController({
                   method: "POST",
                   headers: {
                     "Content-Type": "application/json",
-                    "X-CSRF-Token": csrfToken,
+                    ...requestAuthHeaders,
                   },
                   body: JSON.stringify({ checksumSha256 }),
                   signal,
@@ -421,7 +439,7 @@ function useUploadPanelController({
             ...(checksumSha256
               ? { "x-amz-checksum-sha256": checksumSha256 }
               : {}),
-            ...(plan.mode === "local" ? { "X-CSRF-Token": csrfToken } : {}),
+            ...(plan.mode === "local" ? requestAuthHeaders : {}),
           },
           signal,
           activeUploadRequests,
@@ -433,14 +451,14 @@ function useUploadPanelController({
       await completeUploadWithPolling(
         `/api/files/uploads/${encodeURIComponent(plan.uploadId)}/complete`,
         { parts },
-        csrfToken,
+        requestAuthHeaders,
         signal,
       );
     } catch (error) {
       if (signal.aborted || (!completionStarted && plan.mode !== "multipart")) {
         await fetch(`/api/files/uploads/${encodeURIComponent(plan.uploadId)}`, {
           method: "DELETE",
-          headers: { "X-CSRF-Token": csrfToken },
+          headers: requestAuthHeaders,
         }).catch(() => undefined);
       }
       throw error;
@@ -460,6 +478,11 @@ function useUploadPanelController({
     }
 
     setUploadError(null);
+
+    if (replacementFileId && isFolderSelection(files)) {
+      setUploadError("Choose one file, not a folder, for this replacement.");
+      return;
+    }
 
     if (folderZipPromptEnabled && isFolderSelection(files)) {
       setCompressionError(null);
@@ -641,6 +664,7 @@ function useUploadPanelController({
     startFolderCompression,
     cancelCompression,
     cancelUpload,
+    replacementFileId,
   };
 }
 
@@ -662,6 +686,7 @@ function UploadPanelView({
   startFolderCompression,
   cancelCompression,
   cancelUpload,
+  replacementFileId,
 }: ReturnType<typeof useUploadPanelController>) {
   return (
     <div className="flex min-w-0 flex-col items-end gap-2 sm:flex-row sm:items-center">
@@ -709,6 +734,16 @@ function UploadPanelView({
             <X className="size-4" aria-hidden="true" />
           </Button>
         </div>
+      ) : replacementFileId ? (
+        <Button
+          type="button"
+          disabled={isBusy}
+          className="rounded-full"
+          onClick={() => fileInputRef.current?.click()}
+        >
+          <FileUp className="size-4" aria-hidden="true" />
+          Replace file
+        </Button>
       ) : (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -734,27 +769,33 @@ function UploadPanelView({
       <input
         ref={fileInputRef}
         type="file"
-        aria-label="Choose files to upload"
-        multiple
+        aria-label={
+          replacementFileId
+            ? "Choose replacement file"
+            : "Choose files to upload"
+        }
+        multiple={!replacementFileId}
         disabled={isBusy}
         className="sr-only"
         tabIndex={-1}
         onChange={handleFileChange}
       />
-      <input
-        ref={folderInputRef}
-        type="file"
-        aria-label="Choose a folder to upload"
-        multiple
-        disabled={isBusy}
-        className="sr-only"
-        tabIndex={-1}
-        onChange={handleFileChange}
-        {...({
-          webkitdirectory: "",
-          directory: "",
-        } as React.InputHTMLAttributes<HTMLInputElement>)}
-      />
+      {replacementFileId ? null : (
+        <input
+          ref={folderInputRef}
+          type="file"
+          aria-label="Choose a folder to upload"
+          multiple
+          disabled={isBusy}
+          className="sr-only"
+          tabIndex={-1}
+          onChange={handleFileChange}
+          {...({
+            webkitdirectory: "",
+            directory: "",
+          } as React.InputHTMLAttributes<HTMLInputElement>)}
+        />
+      )}
 
       {pendingFolderUpload ? (
         <FolderUploadDecisionDialog
@@ -973,7 +1014,7 @@ async function requestJson<T = unknown>(
 async function completeUploadWithPolling(
   completeUrl: string,
   body: { parts: UploadedPart[] },
-  csrfToken: string,
+  authHeaders: Record<string, string>,
   signal: AbortSignal,
 ) {
   const deadline = Date.now() + UPLOAD_FINALIZATION_TIMEOUT_MS;
@@ -981,7 +1022,7 @@ async function completeUploadWithPolling(
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      "X-CSRF-Token": csrfToken,
+      ...authHeaders,
     },
     body: JSON.stringify(body),
     signal,
@@ -1001,6 +1042,7 @@ async function completeUploadWithPolling(
     await wait(delayMs, signal);
     completion = await requestUploadCompletion(completion.pollUrl, {
       method: "GET",
+      headers: authHeaders,
       signal,
     });
     delayMs = Math.min(

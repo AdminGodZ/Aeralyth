@@ -58,7 +58,7 @@ function DropdownMenuItem({
       data-inset={inset}
       data-variant={variant}
       className={cn(
-        "relative my-0.5 flex min-h-9 cursor-pointer items-center gap-2 rounded-full px-3 py-2 text-sm outline-hidden select-none focus:bg-foreground/10 focus:text-foreground data-highlighted:bg-foreground/10 data-highlighted:text-foreground data-disabled:pointer-events-none data-disabled:opacity-50 data-inset:pl-9 data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:text-destructive",
+        "relative my-0.5 flex min-h-9 cursor-pointer items-center gap-2 rounded-[calc(var(--radius-2xl)-0.375rem)] px-3 py-2 text-sm outline-hidden select-none focus:bg-foreground/10 focus:text-foreground data-highlighted:bg-foreground/10 data-highlighted:text-foreground data-disabled:pointer-events-none data-disabled:opacity-50 data-inset:pl-9 data-[variant=destructive]:text-destructive data-[variant=destructive]:focus:text-destructive",
         className,
       )}
       {...props}
@@ -77,7 +77,7 @@ function DropdownMenuCheckboxItem({
       data-slot="dropdown-menu-checkbox-item"
       checked={checked}
       className={cn(
-        "relative my-0.5 flex min-h-9 cursor-pointer items-center gap-2 rounded-full py-2 pr-3 pl-9 text-sm outline-hidden select-none focus:bg-foreground/10 focus:text-foreground data-highlighted:bg-foreground/10 data-highlighted:text-foreground data-disabled:pointer-events-none data-disabled:opacity-50",
+        "relative my-0.5 flex min-h-9 cursor-pointer items-center gap-2 rounded-[calc(var(--radius-2xl)-0.375rem)] py-2 pr-3 pl-9 text-sm outline-hidden select-none focus:bg-foreground/10 focus:text-foreground data-highlighted:bg-foreground/10 data-highlighted:text-foreground data-disabled:pointer-events-none data-disabled:opacity-50",
         className,
       )}
       {...props}
@@ -101,7 +101,7 @@ function DropdownMenuRadioItem({
     <DropdownMenuPrimitive.RadioItem
       data-slot="dropdown-menu-radio-item"
       className={cn(
-        "relative my-0.5 flex min-h-9 cursor-pointer items-center gap-2 rounded-full py-2 pr-3 pl-9 text-sm outline-hidden select-none focus:bg-foreground/10 focus:text-foreground data-highlighted:bg-foreground/10 data-highlighted:text-foreground data-disabled:pointer-events-none data-disabled:opacity-50",
+        "relative my-0.5 flex min-h-9 cursor-pointer items-center gap-2 rounded-[calc(var(--radius-2xl)-0.375rem)] py-2 pr-3 pl-9 text-sm outline-hidden select-none focus:bg-foreground/10 focus:text-foreground data-highlighted:bg-foreground/10 data-highlighted:text-foreground data-disabled:pointer-events-none data-disabled:opacity-50",
         className,
       )}
       {...props}
@@ -165,7 +165,7 @@ function DropdownMenuSubTrigger({
       data-slot="dropdown-menu-sub-trigger"
       data-inset={inset}
       className={cn(
-        "my-0.5 flex min-h-9 cursor-pointer items-center gap-2 rounded-full px-3 py-2 text-sm outline-hidden select-none focus:bg-foreground/10 focus:text-foreground data-highlighted:bg-foreground/10 data-highlighted:text-foreground data-inset:pl-9",
+        "my-0.5 flex min-h-9 cursor-pointer items-center gap-2 rounded-[calc(var(--radius-2xl)-0.375rem)] px-3 py-2 text-sm outline-hidden select-none focus:bg-foreground/10 focus:text-foreground data-highlighted:bg-foreground/10 data-highlighted:text-foreground data-inset:pl-9",
         className,
       )}
       {...props}

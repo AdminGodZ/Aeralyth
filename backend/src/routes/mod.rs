@@ -4,6 +4,7 @@ mod files;
 mod health;
 mod invitations;
 mod profile;
+mod share_links;
 mod vault;
 
 use actix_web::web;
@@ -53,6 +54,25 @@ pub fn configure(config: &mut web::ServiceConfig) {
                 .route(
                     "/invitations/{token}/accept",
                     web::post().to(invitations::accept),
+                )
+                .route("/share-links", web::get().to(share_links::list_owned))
+                .route("/share-links", web::post().to(share_links::create))
+                .route(
+                    "/share-links/{id}/rotate",
+                    web::post().to(share_links::rotate),
+                )
+                .route("/share-links/{id}", web::delete().to(share_links::revoke))
+                .route(
+                    "/share-links/access/{token}",
+                    web::get().to(share_links::access),
+                )
+                .route(
+                    "/share-links/access/{token}/files/{file_id}/download",
+                    web::get().to(share_links::download),
+                )
+                .route(
+                    "/share-links/access/{token}/files/{file_id}",
+                    web::delete().to(share_links::remove_entry),
                 )
                 .route("/files", web::get().to(files::list_files))
                 .route("/files/uploads", web::post().to(files::init_upload))

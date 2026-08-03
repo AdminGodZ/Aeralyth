@@ -31,6 +31,7 @@ type LoginPageProps = {
   searchParams?: Promise<{
     error?: string;
     username?: string;
+    next?: string;
   }>;
 };
 
@@ -38,16 +39,19 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
   const resolvedSearchParams = await searchParams;
   const error = resolvedSearchParams?.error;
   const username = resolvedSearchParams?.username;
+  const nextPath = getSafeShareReturnPath(resolvedSearchParams?.next);
   const authState = await getAuthState();
 
   if (authState.status === "authenticated") {
-    redirect("/files");
+    redirect(nextPath ?? "/files");
   }
 
   if (error === "backend" && authState.status !== "unavailable") {
-    redirect(
-      username ? `/login?username=${encodeURIComponent(username)}` : "/login",
-    );
+    const cleanParams = new URLSearchParams({
+      ...(username ? { username } : {}),
+      ...(nextPath ? { next: nextPath } : {}),
+    });
+    redirect(cleanParams.size ? `/login?${cleanParams}` : "/login");
   }
 
   const invalidCredentials = error === "invalid";
@@ -139,6 +143,9 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                   method="post"
                   className="space-y-5"
                 >
+                  {nextPath ? (
+                    <input type="hidden" name="next" value={nextPath} />
+                  ) : null}
                   <div className="space-y-2">
                     <Label htmlFor="username" className="text-foreground">
                       Username
@@ -236,4 +243,16 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
       </div>
     </main>
   );
+}
+
+function getSafeShareReturnPath(value?: string): string | null {
+  const nextPath = value?.trim();
+  if (
+    !nextPath?.startsWith("/s/") ||
+    nextPath.length > 512 ||
+    /[\r\n#]/.test(nextPath)
+  ) {
+    return null;
+  }
+  return nextPath;
 }

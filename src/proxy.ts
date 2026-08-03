@@ -47,6 +47,10 @@ export function proxy(request: NextRequest) {
     "camera=(), microphone=(), geolocation=(), payment=(), usb=()",
   );
   response.headers.set("Cross-Origin-Opener-Policy", "same-origin");
+  if (request.nextUrl.pathname.startsWith("/s/")) {
+    response.headers.set("Cache-Control", "private, no-store");
+    response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
+  }
   return response;
 }
 

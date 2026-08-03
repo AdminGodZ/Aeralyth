@@ -41,6 +41,7 @@ pub struct Config {
     pub storage_multipart_part_bytes: u64,
     pub storage_multipart_orphan_grace_seconds: u64,
     pub e2ee_mode: E2eeMode,
+    pub share_link_secret: String,
     pub s3_bucket: Option<String>,
     pub s3_endpoint: Option<String>,
     pub s3_region: String,
@@ -85,6 +86,15 @@ impl Config {
             .map(|value| value.eq_ignore_ascii_case("production"))
             .unwrap_or(false)
             || first_env(&["RAILWAY_ENVIRONMENT_ID", "RAILWAY_PROJECT_ID"]).is_some();
+        let share_link_secret = first_env(&["AERALYTH_SHARE_LINK_SECRET"])
+            .or_else(|| (!is_production).then(|| database_url.clone()))
+            .ok_or_else(|| {
+                "AERALYTH_SHARE_LINK_SECRET is required in production and must contain at least 32 bytes"
+                    .to_owned()
+            })?;
+        if share_link_secret.as_bytes().len() < 32 {
+            return Err("AERALYTH_SHARE_LINK_SECRET must contain at least 32 bytes".to_owned());
+        }
         let storage_backend = match explicit_storage_backend.as_deref() {
             Some("s3") if s3_configured => "s3".to_owned(),
             Some("s3") => {
@@ -171,6 +181,7 @@ impl Config {
                 7 * 24 * 60 * 60,
             ),
             e2ee_mode,
+            share_link_secret,
             s3_bucket,
             s3_endpoint,
             s3_region,
