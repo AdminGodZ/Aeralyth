@@ -1,7 +1,5 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import {
   ChevronDown,
   FileArchive,
@@ -12,6 +10,8 @@ import {
   UploadCloud,
   X,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
+import { useEffect, useEffectEvent, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -75,11 +75,24 @@ type UploadUrl = {
 };
 
 type UploadCompletion = {
-  status: "initializing" | "pending" | "completing" | "aborting" | "completed" | "aborted";
+  status:
+    | "initializing"
+    | "pending"
+    | "completing"
+    | "aborting"
+    | "completed"
+    | "aborted";
   fileId: string;
   location: string;
   pollUrl: string;
   retryAfterSeconds: number;
+};
+
+type UploadPanelProps = {
+  csrfToken: string;
+  e2eeMode: "off" | "migrate" | "required";
+  folderZipPromptEnabled: boolean;
+  parentFolderId?: string | null;
 };
 
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
@@ -88,24 +101,24 @@ const MULTIPART_CONCURRENCY = 4;
 const UPLOAD_RETRY_COUNT = 3;
 const UPLOAD_FINALIZATION_TIMEOUT_MS = 45_000;
 
-export function UploadPanel({
+export function UploadPanel(props: UploadPanelProps) {
+  const controller = useUploadPanelController(props);
+  return <UploadPanelView {...controller} />;
+}
+
+function useUploadPanelController({
   csrfToken,
   e2eeMode,
   folderZipPromptEnabled,
   parentFolderId,
-}: {
-  csrfToken: string;
-  e2eeMode: "off" | "migrate" | "required";
-  folderZipPromptEnabled: boolean;
-  parentFolderId?: string | null;
-}) {
+}: UploadPanelProps) {
   const router = useRouter();
   const vault = useVault();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
   const zipWorkerRef = useRef<Worker | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
-  const activeUploadRequestsRef = useRef(new Set<XMLHttpRequest>());
+  const activeUploadRequests = useStableSet<XMLHttpRequest>();
   const queuedVaultSelectionRef = useRef<UploadSelection[] | null>(null);
   const [selectedFileCount, setSelectedFileCount] = useState(0);
   const [isUploading, setIsUploading] = useState(false);
@@ -127,10 +140,16 @@ export function UploadPanel({
     return () => {
       zipWorkerRef.current?.terminate();
       uploadAbortRef.current?.abort();
-      activeUploadRequestsRef.current.forEach((request) => request.abort());
-      activeUploadRequestsRef.current.clear();
+      for (const request of activeUploadRequests) {
+        request.abort();
+      }
+      activeUploadRequests.clear();
     };
-  }, []);
+  }, [activeUploadRequests]);
+
+  const submitQueuedFiles = useEffectEvent((files: UploadSelection[]) => {
+    submitFiles(files);
+  });
 
   useEffect(() => {
     const queued = queuedVaultSelectionRef.current;
@@ -138,7 +157,7 @@ export function UploadPanel({
       return;
     }
     queuedVaultSelectionRef.current = null;
-    submitFiles(queued);
+    submitQueuedFiles(queued);
   }, [e2eeMode, vault.state]);
 
   function submitFiles(files: UploadSelection[]) {
@@ -222,6 +241,9 @@ export function UploadPanel({
           throw new DOMException("Upload canceled", "AbortError");
         }
 
+        // Legacy uploads are deliberately serialized so per-file multipart
+        // concurrency cannot multiply memory and network pressure.
+        // react-doctor-disable-next-line react-doctor/async-await-in-loop
         await uploadSelection(
           selection,
           fileIndex,
@@ -263,35 +285,35 @@ export function UploadPanel({
       throw new Error(`${selection.file.name} exceeds the 2 GB upload limit.`);
     }
 
-    const plan = await requestJson<UploadPlan>(
-      "/api/files/uploads",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-CSRF-Token": csrfToken,
-        },
-        body: JSON.stringify({
-          name: selection.file.name,
-          relativePath: selection.relativePath,
-          sizeBytes: selection.file.size,
-          mimeType: selection.file.type || null,
-          parentId: parentFolderId ?? null,
-        }),
-        signal,
+    const plan = await requestJson<UploadPlan>("/api/files/uploads", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-CSRF-Token": csrfToken,
       },
-    );
+      body: JSON.stringify({
+        name: selection.file.name,
+        relativePath: selection.relativePath,
+        sizeBytes: selection.file.size,
+        mimeType: selection.file.type || null,
+        parentId: parentFolderId ?? null,
+      }),
+      signal,
+    });
     let completionStarted = false;
 
     try {
       let parts: UploadedPart[] = [];
 
       if (plan.mode === "multipart") {
-        if (!plan.partSizeBytes) {
-          throw new Error("The storage service returned an invalid multipart plan.");
+        const partSizeBytes = plan.partSizeBytes;
+        if (!partSizeBytes) {
+          throw new Error(
+            "The storage service returned an invalid multipart plan.",
+          );
         }
 
-        const partCount = Math.ceil(selection.file.size / plan.partSizeBytes);
+        const partCount = Math.ceil(selection.file.size / partSizeBytes);
         const uploadParts = Array.from({ length: partCount }, (_, index) => ({
           partNumber: index + 1,
         }));
@@ -302,8 +324,8 @@ export function UploadPanel({
           uploadParts,
           MULTIPART_CONCURRENCY,
           async (part) => {
-            const start = (part.partNumber - 1) * plan.partSizeBytes!;
-            const end = Math.min(start + plan.partSizeBytes!, selection.file.size);
+            const start = (part.partNumber - 1) * partSizeBytes;
+            const end = Math.min(start + partSizeBytes, selection.file.size);
             const blob = selection.file.slice(start, end, "");
             const progressKey = `${fileIndex}:${part.partNumber}`;
             const checksumSha256 = await sha256Base64(blob);
@@ -344,7 +366,7 @@ export function UploadPanel({
               blob,
               { "x-amz-checksum-sha256": checksumSha256 },
               signal,
-              activeUploadRequestsRef.current,
+              activeUploadRequests,
               (loaded) => reportProgress(progressKey, loaded),
             );
             const etag = response.getResponseHeader("ETag")?.trim();
@@ -361,23 +383,21 @@ export function UploadPanel({
         parts.sort((left, right) => left.partNumber - right.partNumber);
       } else {
         const checksumSha256 =
-          plan.mode === "single"
-            ? await sha256Base64(selection.file)
-            : null;
+          plan.mode === "single" ? await sha256Base64(selection.file) : null;
         const signedUpload =
           plan.mode === "single"
             ? await requestJson<UploadUrl>(
-                  `/api/files/uploads/${encodeURIComponent(plan.uploadId)}/content-url`,
-                  {
-                    method: "POST",
-                    headers: {
-                      "Content-Type": "application/json",
-                      "X-CSRF-Token": csrfToken,
-                    },
-                    body: JSON.stringify({ checksumSha256 }),
-                    signal,
+                `/api/files/uploads/${encodeURIComponent(plan.uploadId)}/content-url`,
+                {
+                  method: "POST",
+                  headers: {
+                    "Content-Type": "application/json",
+                    "X-CSRF-Token": csrfToken,
                   },
-                )
+                  body: JSON.stringify({ checksumSha256 }),
+                  signal,
+                },
+              )
             : null;
         const uploadUrl = signedUpload?.url ?? plan.uploadUrl;
 
@@ -404,7 +424,7 @@ export function UploadPanel({
             ...(plan.mode === "local" ? { "X-CSRF-Token": csrfToken } : {}),
           },
           signal,
-          activeUploadRequestsRef.current,
+          activeUploadRequests,
           (loaded) => reportProgress(`${fileIndex}:single`, loaded),
         );
       }
@@ -597,10 +617,52 @@ export function UploadPanel({
 
   function cancelUpload() {
     uploadAbortRef.current?.abort();
-    activeUploadRequestsRef.current.forEach((request) => request.abort());
-    activeUploadRequestsRef.current.clear();
+    for (const request of activeUploadRequests) {
+      request.abort();
+    }
+    activeUploadRequests.clear();
   }
 
+  return {
+    uploadError,
+    isUploading,
+    selectedFileCount,
+    uploadProgress,
+    isBusy,
+    fileInputRef,
+    folderInputRef,
+    handleFileChange,
+    pendingFolderUpload,
+    isCompressing,
+    compressionError,
+    compressionProgress,
+    closePendingFolderUpload: () => setPendingFolderUpload(null),
+    uploadPendingFolder,
+    startFolderCompression,
+    cancelCompression,
+    cancelUpload,
+  };
+}
+
+function UploadPanelView({
+  uploadError,
+  isUploading,
+  selectedFileCount,
+  uploadProgress,
+  isBusy,
+  fileInputRef,
+  folderInputRef,
+  handleFileChange,
+  pendingFolderUpload,
+  isCompressing,
+  compressionError,
+  compressionProgress,
+  closePendingFolderUpload,
+  uploadPendingFolder,
+  startFolderCompression,
+  cancelCompression,
+  cancelUpload,
+}: ReturnType<typeof useUploadPanelController>) {
   return (
     <div className="flex min-w-0 flex-col items-end gap-2 sm:flex-row sm:items-center">
       {uploadError ? (
@@ -627,10 +689,13 @@ export function UploadPanel({
               <span className="shrink-0 tabular-nums text-muted-foreground">
                 {uploadProgress === null
                   ? "Preparing"
-                  : String(Math.round(uploadProgress)) + "%"}
+                  : `${String(Math.round(uploadProgress))}%`}
               </span>
             </div>
-            <Progress value={uploadProgress ?? 0} aria-label="Upload progress" />
+            <Progress
+              value={uploadProgress ?? 0}
+              aria-label="Upload progress"
+            />
           </div>
           <Button
             type="button"
@@ -654,15 +719,11 @@ export function UploadPanel({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align="end" className="min-w-44">
-            <DropdownMenuItem
-              onSelect={() => fileInputRef.current?.click()}
-            >
+            <DropdownMenuItem onSelect={() => fileInputRef.current?.click()}>
               <FileUp className="size-4" aria-hidden="true" />
               Upload files
             </DropdownMenuItem>
-            <DropdownMenuItem
-              onSelect={() => folderInputRef.current?.click()}
-            >
+            <DropdownMenuItem onSelect={() => folderInputRef.current?.click()}>
               <FolderUp className="size-4" aria-hidden="true" />
               Upload folder
             </DropdownMenuItem>
@@ -673,6 +734,7 @@ export function UploadPanel({
       <input
         ref={fileInputRef}
         type="file"
+        aria-label="Choose files to upload"
         multiple
         disabled={isBusy}
         className="sr-only"
@@ -682,6 +744,7 @@ export function UploadPanel({
       <input
         ref={folderInputRef}
         type="file"
+        aria-label="Choose a folder to upload"
         multiple
         disabled={isBusy}
         className="sr-only"
@@ -699,7 +762,7 @@ export function UploadPanel({
           isCompressing={isCompressing}
           compressionError={compressionError}
           compressionProgress={compressionProgress}
-          onClose={() => setPendingFolderUpload(null)}
+          onClose={closePendingFolderUpload}
           onUploadFolder={uploadPendingFolder}
           onCreateZip={startFolderCompression}
           onCancelCompression={cancelCompression}
@@ -794,7 +857,10 @@ function FolderUploadDecisionDialog({
                   {Math.round(progress)}%
                 </span>
               </div>
-              <Progress value={progress} aria-label="ZIP compression progress" />
+              <Progress
+                value={progress}
+                aria-label="ZIP compression progress"
+              />
               <p className="text-xs text-muted-foreground">
                 {formatCompressionProgress(compressionProgress)}
               </p>
@@ -939,7 +1005,10 @@ async function completeUploadWithPolling(
     });
     delayMs = Math.min(
       5_000,
-      Math.max(delayMs * 1.5, completionRetryDelay(completion.retryAfterSeconds)),
+      Math.max(
+        delayMs * 1.5,
+        completionRetryDelay(completion.retryAfterSeconds),
+      ),
     );
   }
 }
@@ -951,26 +1020,34 @@ async function requestUploadCompletion(
   const response = await fetch(input, init);
   const contentType = response.headers.get("content-type") ?? "";
 
-  if (!contentType.includes("application/json")) {
+  if (!response.ok) {
+    if (contentType.includes("application/json")) {
+      const failure = (await response.json()) as Partial<UploadCompletion>;
+      throw new Error(
+        failure.status === "aborting" || failure.status === "aborted"
+          ? "Upload finalization failed and the stored data is being cleaned up."
+          : `Upload finalization failed (${response.status}).`,
+      );
+    }
     const message = (await response.text()).trim();
-    throw new Error(message || `Upload finalization failed (${response.status}).`);
+    throw new Error(
+      message || `Upload finalization failed (${response.status}).`,
+    );
+  }
+  if (!contentType.includes("application/json")) {
+    throw new Error(`Upload finalization failed (${response.status}).`);
   }
 
   const completion = (await response.json()) as Partial<UploadCompletion>;
 
-  if (!response.ok) {
-    throw new Error(
-      completion.status === "aborting" || completion.status === "aborted"
-        ? "Upload finalization failed and the stored data is being cleaned up."
-        : `Upload finalization failed (${response.status}).`,
-    );
-  }
   if (
     typeof completion.status !== "string" ||
     typeof completion.pollUrl !== "string" ||
     typeof completion.retryAfterSeconds !== "number"
   ) {
-    throw new Error("The storage service returned an invalid completion status.");
+    throw new Error(
+      "The storage service returned an invalid completion status.",
+    );
   }
 
   return completion as UploadCompletion;
@@ -982,7 +1059,9 @@ function completionRetryDelay(retryAfterSeconds: number) {
 
 async function sha256Base64(blob: Blob) {
   if (!globalThis.crypto?.subtle) {
-    throw new Error("This browser cannot verify upload integrity with SHA-256.");
+    throw new Error(
+      "This browser cannot verify upload integrity with SHA-256.",
+    );
   }
 
   const digest = await globalThis.crypto.subtle.digest(
@@ -1162,24 +1241,32 @@ function getFolderArchiveName(files: UploadSelection[]) {
     relativePath.replaceAll("\\", "/").replace(/^\/+/, ""),
   );
   const hasTopLevelFile = normalizedPaths.some((path) => !path.includes("/"));
-  const roots = new Set(
-    normalizedPaths
-      .filter((path) => path.includes("/"))
-      .map((path) => path.split("/", 1)[0])
-      .filter(Boolean),
-  );
-  const fallbackName =
-    "folder-upload-" + new Date().toISOString().slice(0, 10);
+  const roots = new Set<string>();
+  for (const path of normalizedPaths) {
+    if (!path.includes("/")) continue;
+    const root = path.split("/", 1)[0];
+    if (root) roots.add(root);
+  }
+  const fallbackName = `folder-upload-${new Date().toISOString().slice(0, 10)}`;
   const rootName =
     !hasTopLevelFile && roots.size === 1 ? Array.from(roots)[0] : fallbackName;
   const safeName = rootName
+    // biome-ignore lint/suspicious/noControlCharactersInRegex: Windows archive names must exclude ASCII control characters.
     .replace(/[<>:"/\\|?*\u0000-\u001f\u007f]/g, "-")
     .replace(/[. ]+$/g, "")
     .trim()
     .slice(0, 120);
   const archiveBaseName = (safeName || fallbackName).replace(/\.zip$/i, "");
 
-  return archiveBaseName + ".zip";
+  return `${archiveBaseName}.zip`;
+}
+
+function useStableSet<T>(): Set<T> {
+  const ref = useRef<Set<T> | null>(null);
+  if (ref.current === null) {
+    ref.current = new Set<T>();
+  }
+  return ref.current;
 }
 
 function formatUploadCount(fileCount: number) {
@@ -1187,25 +1274,20 @@ function formatUploadCount(fileCount: number) {
     return "Uploading 1 item";
   }
 
-  return "Uploading " + String(fileCount) + " items";
+  return `Uploading ${String(fileCount)} items`;
 }
 
 function formatFolderSelectionSummary(pendingUpload: PendingFolderUpload) {
   const fileCount =
     pendingUpload.files.length === 1
       ? "1 file"
-      : String(pendingUpload.files.length) + " files";
+      : `${String(pendingUpload.files.length)} files`;
 
-  return fileCount + " - " + formatUploadBytes(pendingUpload.totalBytes);
+  return `${fileCount} - ${formatUploadBytes(pendingUpload.totalBytes)}`;
 }
 
 function formatCompressionProgress(progress: CompressionProgress) {
-  return (
-    formatUploadBytes(progress.processedBytes) +
-    " of " +
-    formatUploadBytes(progress.totalBytes) +
-    " processed"
-  );
+  return `${formatUploadBytes(progress.processedBytes)} of ${formatUploadBytes(progress.totalBytes)} processed`;
 }
 
 function getProgressPercentage(processedBytes: number, totalBytes: number) {
@@ -1233,5 +1315,5 @@ function formatUploadBytes(value: number) {
   const formattedSize =
     size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1);
 
-  return formattedSize + " " + units[unitIndex];
+  return `${formattedSize} ${units[unitIndex]}`;
 }

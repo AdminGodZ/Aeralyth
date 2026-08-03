@@ -308,43 +308,46 @@ async function setupVault(password: string): Promise<VaultSetupResult> {
     passwordKeyMaterial = derivePasswordMaterial(password, kdfSalt);
     const passwordBase = await importHkdf(passwordKeyMaterial);
     const recoveryBase = await importHkdf(recoveryMaterial);
-    const passwordCiphertext = await wrapRootMaterial(
-      rootMaterial,
-      passwordBase,
-      "password-root",
-      passwordWrapperId,
-      passwordWrapperId,
-      1,
-    );
-    const recoveryCiphertext = await wrapRootMaterial(
-      rootMaterial,
-      recoveryBase,
-      "recovery-root",
-      concatBytes(recoverySalt, recoveryWrapperId),
-      recoveryWrapperId,
-      1,
-    );
+    const [passwordCiphertext, recoveryCiphertext] = await Promise.all([
+      wrapRootMaterial(
+        rootMaterial,
+        passwordBase,
+        "password-root",
+        passwordWrapperId,
+        passwordWrapperId,
+        1,
+      ),
+      wrapRootMaterial(
+        rootMaterial,
+        recoveryBase,
+        "recovery-root",
+        concatBytes(recoverySalt, recoveryWrapperId),
+        recoveryWrapperId,
+        1,
+      ),
+    ]);
 
     importedRoot = await importHkdf(rootMaterial);
     const x25519 = sodium.crypto_box_keypair();
     const ed25519 = sodium.crypto_sign_keypair();
-    const fingerprint = await sha256(
-      concatBytes(x25519.publicKey, ed25519.publicKey),
-    );
-    const privateCiphertext = await encryptRootRecord(
-      importedRoot,
-      "identity-private",
-      identityRecordId,
-      1,
-      concatBytes(x25519.privateKey, ed25519.privateKey),
-    );
-    const accountStateCiphertext = await encryptRootRecord(
-      importedRoot,
-      "account-state",
-      accountStateRecordId,
-      1,
-      utf8('{"formatVersion":1,"nodeKeyVersion":1}'),
-    );
+    const [fingerprint, privateCiphertext, accountStateCiphertext] =
+      await Promise.all([
+        sha256(concatBytes(x25519.publicKey, ed25519.publicKey)),
+        encryptRootRecord(
+          importedRoot,
+          "identity-private",
+          identityRecordId,
+          1,
+          concatBytes(x25519.privateKey, ed25519.privateKey),
+        ),
+        encryptRootRecord(
+          importedRoot,
+          "account-state",
+          accountStateRecordId,
+          1,
+          utf8('{"formatVersion":1,"nodeKeyVersion":1}'),
+        ),
+      ]);
     identity = {
       keyVersion: 1,
       x25519PublicKey: x25519.publicKey,
@@ -693,32 +696,37 @@ async function loadShareContexts(
   contexts: VaultActiveShareContext[],
 ): Promise<void> {
   const root = requireRootKey();
-  const loaded = new Map<string, { epoch: number; key: CryptoKey }>();
-  for (const context of contexts) {
-    if (context.epoch < 1 || !/^shr_[A-Za-z0-9_-]+$/u.test(context.shareId)) {
-      throw new Error("The server returned an invalid active share context.");
-    }
-    const wrapperId = fromBase64Url(context.wrapperId);
-    if (wrapperId.length !== 16)
-      throw new Error("The owner share wrapper is invalid.");
-    const raw = await decryptDerivedRecord(
-      root,
-      wrapperId,
-      shareOwnerPurpose(context.shareId, context.epoch),
-      toBase64Url(wrapperId),
-      context.epoch,
-      fromBase64Url(context.ciphertext),
-    );
-    try {
-      if (raw.length !== 32) throw new Error("The share epoch key is invalid.");
-      loaded.set(context.shareId, {
-        epoch: context.epoch,
-        key: await importHkdf(raw),
-      });
-    } finally {
-      wipe(wrapperId, raw);
-    }
-  }
+  const loadedEntries = await Promise.all(
+    contexts.map(async (context) => {
+      if (context.epoch < 1 || !/^shr_[A-Za-z0-9_-]+$/u.test(context.shareId)) {
+        throw new Error("The server returned an invalid active share context.");
+      }
+      const wrapperId = fromBase64Url(context.wrapperId);
+      if (wrapperId.length !== 16) {
+        throw new Error("The owner share wrapper is invalid.");
+      }
+      const raw = await decryptDerivedRecord(
+        root,
+        wrapperId,
+        shareOwnerPurpose(context.shareId, context.epoch),
+        toBase64Url(wrapperId),
+        context.epoch,
+        fromBase64Url(context.ciphertext),
+      );
+      try {
+        if (raw.length !== 32) {
+          throw new Error("The share epoch key is invalid.");
+        }
+        return [
+          context.shareId,
+          { epoch: context.epoch, key: await importHkdf(raw) },
+        ] as const;
+      } finally {
+        wipe(wrapperId, raw);
+      }
+    }),
+  );
+  const loaded = new Map(loadedEntries);
   activeShareKeys.clear();
   for (const [shareId, value] of loaded) activeShareKeys.set(shareId, value);
 }
@@ -944,13 +952,19 @@ async function finalizeEncryption(
       toArrayBuffer(manifestPlaintext),
     ),
   );
-  const canonicalWrappers = [session.ownerWrapper];
-  for (const context of session.shareContexts) {
-    canonicalWrappers.push(await createShareWrapper(session, context, 4));
-    if (session.manifest.entryType === "file") {
-      canonicalWrappers.push(await createShareWrapper(session, context, 3));
-    }
-  }
+  const sharedWrappers = await Promise.all(
+    session.shareContexts.map(async (context) => {
+      const metadataWrapper = createShareWrapper(session, context, 4);
+      if (session.manifest.entryType !== "file") {
+        return [await metadataWrapper];
+      }
+      return Promise.all([
+        metadataWrapper,
+        createShareWrapper(session, context, 3),
+      ]);
+    }),
+  );
+  const canonicalWrappers = [session.ownerWrapper, ...sharedWrappers.flat()];
   const decodedWrappers = canonicalWrappers.map(decodeWrapper);
   const wrapperHashes = await Promise.all(canonicalWrappers.map(sha256));
   const bootstrap: VaultBootstrapRecord = {
@@ -1196,6 +1210,7 @@ async function openAndVerifyPlan(plan: VaultDownloadPlan): Promise<OpenedPlan> {
         "The wrapper commitment count is invalid.",
       );
     }
+    const computedWrapperHashes = await Promise.all(wrapperBytes.map(sha256));
     for (let index = 0; index < wrappers.length; index += 1) {
       const wrapper = wrappers[index];
       if (
@@ -1203,7 +1218,7 @@ async function openAndVerifyPlan(plan: VaultDownloadPlan): Promise<OpenedPlan> {
         wrapper.recordVersion !== plan.recordVersion ||
         !equalBytes(wrapper.wrapperId, bootstrap.wrapperIds[index]) ||
         !equalBytes(
-          await sha256(wrapperBytes[index]),
+          computedWrapperHashes[index],
           bootstrap.wrapperHashes[index],
         )
       ) {
@@ -1382,10 +1397,9 @@ async function buildShareMaterial(input: {
       epochKey,
     );
     const wrapperHashes = await Promise.all(wrappers.map(sha256));
-    const envelopes = [] as Array<{ canonicalCbor: string; signature: string }>;
-    for (const recipient of input.recipients) {
-      envelopes.push(
-        await createHpkeEnvelope({
+    const envelopes = await Promise.all(
+      input.recipients.map((recipient) =>
+        createHpkeEnvelope({
           shareId: input.shareId,
           rootNodeId: input.rootNodeId,
           senderId: input.senderId,
@@ -1396,8 +1410,8 @@ async function buildShareMaterial(input: {
           wrapperHashes,
           epochMaterial,
         }),
-      );
-    }
+      ),
+    );
     const ownerCiphertext = await encryptDerivedRecord(
       root,
       wrapperId,
@@ -1425,26 +1439,26 @@ async function createSubtreeShareWrappers(
   epoch: number,
   epochKey: CryptoKey,
 ): Promise<Uint8Array[]> {
-  const wrappers: Uint8Array[] = [];
   const ordered = [...nodes].sort((left, right) =>
     left.nodeId.localeCompare(right.nodeId),
   );
-  for (const node of ordered) {
-    const nodeKey = nodeKeys.get(node.nodeId);
-    if (!nodeKey) {
-      throw vaultError(
-        "NODE_KEY_REQUIRED",
-        `Unlock every node in the shared subtree first:${node.nodeId}`,
-      );
-    }
-    const generationId = node.generationId
-      ? fromBase64Url(node.generationId)
-      : new Uint8Array(16);
-    if (generationId.length !== 16)
-      throw new Error("A share generation ID is invalid.");
-    const context = { shareId, epoch, epochKey };
-    wrappers.push(
-      await createShareWrapperFromNode(
+  const wrappersByNode = await Promise.all(
+    ordered.map(async (node) => {
+      const nodeKey = nodeKeys.get(node.nodeId);
+      if (!nodeKey) {
+        throw vaultError(
+          "NODE_KEY_REQUIRED",
+          `Unlock every node in the shared subtree first:${node.nodeId}`,
+        );
+      }
+      const generationId = node.generationId
+        ? fromBase64Url(node.generationId)
+        : new Uint8Array(16);
+      if (generationId.length !== 16) {
+        throw new Error("A share generation ID is invalid.");
+      }
+      const context = { shareId, epoch, epochKey };
+      const metadataWrapper = createShareWrapperFromNode(
         node.nodeId,
         node.recordVersion,
         node.generationNumber,
@@ -1452,11 +1466,13 @@ async function createSubtreeShareWrappers(
         nodeKey,
         context,
         4,
-      ),
-    );
-    if (node.entryType === "file") {
-      wrappers.push(
-        await createShareWrapperFromNode(
+      );
+      if (node.entryType !== "file") {
+        return [await metadataWrapper];
+      }
+      return Promise.all([
+        metadataWrapper,
+        createShareWrapperFromNode(
           node.nodeId,
           node.recordVersion,
           node.generationNumber,
@@ -1465,10 +1481,10 @@ async function createSubtreeShareWrappers(
           context,
           3,
         ),
-      );
-    }
-  }
-  return wrappers;
+      ]);
+    }),
+  );
+  return wrappersByNode.flat();
 }
 
 async function createShareWrapper(
@@ -1550,16 +1566,18 @@ async function createHpkeEnvelope(input: {
 }): Promise<{ canonicalCbor: string; signature: string }> {
   const activeIdentity = requireIdentity();
   const envelopeId = randomBytes(16);
-  const recipientPublic = await hpkeSuite.kem.importKey(
-    "raw",
-    toArrayBuffer(fromBase64Url(input.recipient.x25519PublicKey)),
-    true,
-  );
-  const senderPrivate = await hpkeSuite.kem.importKey(
-    "raw",
-    toArrayBuffer(activeIdentity.x25519PrivateKey),
-    false,
-  );
+  const [recipientPublic, senderPrivate] = await Promise.all([
+    hpkeSuite.kem.importKey(
+      "raw",
+      toArrayBuffer(fromBase64Url(input.recipient.x25519PublicKey)),
+      true,
+    ),
+    hpkeSuite.kem.importKey(
+      "raw",
+      toArrayBuffer(activeIdentity.x25519PrivateKey),
+      false,
+    ),
+  ]);
   const info = hpkeInfo(
     input.shareId,
     input.epoch,
@@ -1638,14 +1656,12 @@ async function openSharedKeys(
       "The share envelope signature is invalid.",
     );
   }
-  const envelopeHash = await sha256(
-    concatBytes(envelopeBytes, envelopeSignature),
-  );
   const envelope = decodeShareEnvelope(envelopeBytes);
   const senderX25519 = fromBase64Url(share.senderX25519PublicKey);
-  const senderFingerprint = await sha256(
-    concatBytes(senderX25519, senderEd25519),
-  );
+  const [envelopeHash, senderFingerprint] = await Promise.all([
+    sha256(concatBytes(envelopeBytes, envelopeSignature)),
+    sha256(concatBytes(senderX25519, senderEd25519)),
+  ]);
   const expectedPreviousRecordHash = share.previousRecordHash
     ? fromBase64Url(share.previousRecordHash)
     : null;
@@ -1684,8 +1700,10 @@ async function openSharedKeys(
     ...bootstrap.wrapperHashes.map(toBase64Url),
   ]);
   const seenWrapperHashes = new Set<string>();
-  for (const canonical of wrapperBytes) {
-    const hash = toBase64Url(await sha256(canonical));
+  const receivedWrapperHashes = await Promise.all(
+    wrapperBytes.map(async (canonical) => toBase64Url(await sha256(canonical))),
+  );
+  for (const hash of receivedWrapperHashes) {
     if (!committed.has(hash) || seenWrapperHashes.has(hash)) {
       throw vaultError(
         "AUTHENTICATION_FAILED",
@@ -1716,16 +1734,14 @@ async function openSharedKeys(
       );
     }
   }
-  const recipientPrivate = await hpkeSuite.kem.importKey(
-    "raw",
-    toArrayBuffer(activeIdentity.x25519PrivateKey),
-    false,
-  );
-  const senderPublic = await hpkeSuite.kem.importKey(
-    "raw",
-    toArrayBuffer(senderX25519),
-    true,
-  );
+  const [recipientPrivate, senderPublic] = await Promise.all([
+    hpkeSuite.kem.importKey(
+      "raw",
+      toArrayBuffer(activeIdentity.x25519PrivateKey),
+      false,
+    ),
+    hpkeSuite.kem.importKey("raw", toArrayBuffer(senderX25519), true),
+  ]);
   const info = hpkeInfo(
     envelope.shareId,
     envelope.epoch,

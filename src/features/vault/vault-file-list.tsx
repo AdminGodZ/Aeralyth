@@ -19,7 +19,7 @@ import {
   X,
 } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -50,6 +50,11 @@ type FavoriteResponse = {
   favorite: boolean;
 };
 
+const fileDateFormatter = new Intl.DateTimeFormat("en", {
+  dateStyle: "medium",
+  timeZone: "UTC",
+});
+
 export function VaultFileList({
   entries,
   sectionKey,
@@ -67,7 +72,9 @@ export function VaultFileList({
 }) {
   const vault = useVault();
   const [localEntries, setLocalEntries] = useState(entries);
-  const [resolved, setResolved] = useState<Record<string, ResolvedMetadata>>({});
+  const [resolved, setResolved] = useState<Record<string, ResolvedMetadata>>(
+    {},
+  );
   const [sort, setSort] = useState<FileSort>(initialSort ?? "name");
   const [direction, setDirection] = useState<FileSortDirection>(
     initialDirection ?? (initialSort === "name" ? "asc" : "desc"),
@@ -76,27 +83,26 @@ export function VaultFileList({
   const [downloadError, setDownloadError] = useState<string | null>(null);
   const [favoriteError, setFavoriteError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
-  const [favoritePendingIds, setFavoritePendingIds] = useState<Set<string>>(
-    () => new Set(),
-  );
-  const [selectedIds, setSelectedIds] = useState<Set<string>>(
-    () => new Set(),
-  );
+  const favoritePendingIdsRef = useRef<Set<string> | null>(null);
+  if (favoritePendingIdsRef.current === null) {
+    favoritePendingIdsRef.current = new Set();
+  }
+  const favoritePendingIds = favoritePendingIdsRef.current;
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [shareEntry, setShareEntry] = useState<ResolvedEntry | null>(null);
 
+  // localEntries is an optimistic overlay; server refreshes replace its base.
+  // react-doctor-disable-next-line react-doctor/no-mirror-prop-effect
   useEffect(() => {
     setLocalEntries(entries);
-  }, [entries]);
-
-  useEffect(() => {
-    const availableIds = new Set(localEntries.map((entry) => entry.id));
+    const availableIds = new Set(entries.map((entry) => entry.id));
     setSelectedIds((current) => {
       const next = new Set(
         [...current].filter((entryId) => availableIds.has(entryId)),
       );
       return next.size === current.size ? current : next;
     });
-  }, [localEntries]);
+  }, [entries]);
 
   useEffect(() => {
     if (vault.state !== "unlocked") return;
@@ -114,6 +120,9 @@ export function VaultFileList({
           continue;
         }
         try {
+          // Entries share one worker/key cache and may require parent keys;
+          // keep this bounded instead of fanning out an unbounded request set.
+          // react-doctor-disable-next-line react-doctor/async-await-in-loop
           const manifest = await vault.openNode(entry.id);
           next[entry.id] = {
             name: manifest.name,
@@ -179,21 +188,6 @@ export function VaultFileList({
     });
   }, [direction, localEntries, resolved, sort]);
 
-  const selectedCount = displayed.reduce(
-    (count, entry) => count + Number(selectedIds.has(entry.id)),
-    0,
-  );
-  const selectedEntries = displayed.filter((entry) => selectedIds.has(entry.id));
-  const singleSelectedEntry =
-    selectedEntries.length === 1 ? selectedEntries[0] : null;
-  const allDisplayedSelected =
-    displayed.length > 0 && selectedCount === displayed.length;
-  const selectAllState = allDisplayedSelected
-    ? true
-    : selectedCount > 0
-      ? "indeterminate"
-      : false;
-
   function changeSort(field: FileSort): void {
     if (sort === field) {
       setDirection((current) => (current === "asc" ? "desc" : "asc"));
@@ -229,7 +223,7 @@ export function VaultFileList({
     const nextFavorite = !entry.favorite;
     const originalEntry: FileEntry = entry;
     setFavoriteError(null);
-    setFavoritePendingIds((current) => new Set(current).add(entry.id));
+    favoritePendingIds.add(entry.id);
     setLocalEntries((current) =>
       sectionKey === "favorites" && !nextFavorite
         ? current.filter((candidate) => candidate.id !== entry.id)
@@ -241,11 +235,7 @@ export function VaultFileList({
     );
 
     try {
-      const favorite = await requestFavorite(
-        entry.id,
-        csrfToken,
-        nextFavorite,
-      );
+      const favorite = await requestFavorite(entry.id, csrfToken, nextFavorite);
       setLocalEntries((current) =>
         sectionKey === "favorites" && !favorite
           ? current.filter((candidate) => candidate.id !== entry.id)
@@ -270,11 +260,7 @@ export function VaultFileList({
           : "The favorite could not be updated.",
       );
     } finally {
-      setFavoritePendingIds((current) => {
-        const next = new Set(current);
-        next.delete(entry.id);
-        return next;
-      });
+      favoritePendingIds.delete(entry.id);
     }
   }
 
@@ -334,6 +320,94 @@ export function VaultFileList({
     }
   }
 
+  return (
+    <VaultFileListView
+      onAllDisplayedSelectedChange={setAllDisplayedSelected}
+      sort={sort}
+      direction={direction}
+      onSortChange={changeSort}
+      onShareEntryChange={setShareEntry}
+      onMoveToTrash={moveToTrash}
+      onClearSelection={() => setSelectedIds(new Set())}
+      vault={vault}
+      downloadError={downloadError}
+      favoriteError={favoriteError}
+      deleteError={deleteError}
+      displayed={displayed}
+      sectionKey={sectionKey}
+      csrfToken={csrfToken}
+      downloadId={downloadId}
+      selectedIds={selectedIds}
+      onDownload={download}
+      onFavorite={toggleFavorite}
+      onEntrySelectedChange={setEntrySelected}
+      shareEntry={shareEntry}
+      currentUserId={currentUserId}
+    />
+  );
+}
+
+function VaultFileListView({
+  onAllDisplayedSelectedChange,
+  sort,
+  direction,
+  onSortChange,
+  onShareEntryChange,
+  onMoveToTrash,
+  onClearSelection,
+  vault,
+  downloadError,
+  favoriteError,
+  deleteError,
+  displayed,
+  sectionKey,
+  csrfToken,
+  downloadId,
+  selectedIds,
+  onDownload,
+  onFavorite,
+  onEntrySelectedChange,
+  shareEntry,
+  currentUserId,
+}: {
+  onAllDisplayedSelectedChange(value: boolean): void;
+  sort: FileSort;
+  direction: FileSortDirection;
+  onSortChange(field: FileSort): void;
+  onShareEntryChange(entry: ResolvedEntry | null): void;
+  onMoveToTrash(entries: ResolvedEntry[]): Promise<void>;
+  onClearSelection(): void;
+  vault: ReturnType<typeof useVault>;
+  downloadError: string | null;
+  favoriteError: string | null;
+  deleteError: string | null;
+  displayed: ResolvedEntry[];
+  sectionKey: string;
+  csrfToken: string;
+  downloadId: string | null;
+  selectedIds: Set<string>;
+  onDownload(entry: ResolvedEntry): Promise<void>;
+  onFavorite(entry: ResolvedEntry): Promise<void>;
+  onEntrySelectedChange(entryId: string, selected: boolean): void;
+  shareEntry: ResolvedEntry | null;
+  currentUserId: string;
+}) {
+  const selectedCount = displayed.reduce(
+    (count, entry) => count + Number(selectedIds.has(entry.id)),
+    0,
+  );
+  const selectedEntries = displayed.filter((entry) =>
+    selectedIds.has(entry.id),
+  );
+  const singleSelectedEntry =
+    selectedEntries.length === 1 ? selectedEntries[0] : null;
+  const allDisplayedSelected =
+    displayed.length > 0 && selectedCount === displayed.length;
+  const selectAllState = allDisplayedSelected
+    ? true
+    : selectedCount > 0
+      ? "indeterminate"
+      : false;
   const isTrash = sectionKey === "trash";
   const isShared = sectionKey === "shared";
   const dateLabel = isTrash ? "Deleted" : isShared ? "Shared" : "Updated";
@@ -345,7 +419,7 @@ export function VaultFileList({
           <Checkbox
             checked={selectAllState}
             onCheckedChange={(checked) =>
-              setAllDisplayedSelected(checked === true)
+              onAllDisplayedSelectedChange(checked === true)
             }
             aria-label={
               allDisplayedSelected
@@ -359,7 +433,7 @@ export function VaultFileList({
           label="Name"
           sort={sort}
           direction={direction}
-          onChange={changeSort}
+          onChange={onSortChange}
         />
         <span>Kind</span>
         <SortButton
@@ -367,7 +441,7 @@ export function VaultFileList({
           label="Size"
           sort={sort}
           direction={direction}
-          onChange={changeSort}
+          onChange={onSortChange}
           className="hidden md:flex"
         />
         <SortButton
@@ -375,7 +449,7 @@ export function VaultFileList({
           label={dateLabel}
           sort={sort}
           direction={direction}
-          onChange={changeSort}
+          onChange={onSortChange}
           className="hidden md:flex"
         />
         <span className="hidden items-center justify-end gap-1.5 md:flex">
@@ -398,7 +472,7 @@ export function VaultFileList({
                   singleSelectedEntry.e2eeState === "encrypted" &&
                   !singleSelectedEntry.resolved
                 }
-                onClick={() => setShareEntry(singleSelectedEntry)}
+                onClick={() => onShareEntryChange(singleSelectedEntry)}
               >
                 <Share2 className="size-4" aria-hidden="true" />
                 Share
@@ -410,7 +484,7 @@ export function VaultFileList({
                 variant="secondary"
                 size="sm"
                 className="text-destructive hover:text-destructive"
-                onClick={() => void moveToTrash(selectedEntries)}
+                onClick={() => void onMoveToTrash(selectedEntries)}
               >
                 <Trash2 className="size-4" aria-hidden="true" />
                 Delete
@@ -420,7 +494,7 @@ export function VaultFileList({
               type="button"
               variant="ghost"
               size="sm"
-              onClick={() => setSelectedIds(new Set())}
+              onClick={onClearSelection}
             >
               <X className="size-4" aria-hidden="true" />
               Clear
@@ -462,13 +536,13 @@ export function VaultFileList({
             csrfToken={csrfToken}
             downloading={downloadId === entry.id}
             selected={selectedIds.has(entry.id)}
-            onDownload={() => void download(entry)}
-            onDelete={() => void moveToTrash([entry])}
-            onFavorite={() => void toggleFavorite(entry)}
+            onDownload={() => void onDownload(entry)}
+            onDelete={() => void onMoveToTrash([entry])}
+            onFavorite={() => void onFavorite(entry)}
             onSelectedChange={(selected) =>
-              setEntrySelected(entry.id, selected)
+              onEntrySelectedChange(entry.id, selected)
             }
-            onShare={() => setShareEntry(entry)}
+            onShare={() => onShareEntryChange(entry)}
           />
         ))}
       </div>
@@ -476,7 +550,7 @@ export function VaultFileList({
         <VaultShareDialog
           open
           onOpenChange={(open) => {
-            if (!open) setShareEntry(null);
+            if (!open) onShareEntryChange(null);
           }}
           nodeId={shareEntry.id}
           nodeName={shareEntry.name}
@@ -487,7 +561,7 @@ export function VaultFileList({
         <LegacyShareDialog
           open
           onOpenChange={(open) => {
-            if (!open) setShareEntry(null);
+            if (!open) onShareEntryChange(null);
           }}
           itemId={shareEntry.id}
           itemName={shareEntry.name}
@@ -690,10 +764,7 @@ function VaultFileRow({
                       {entry.favorite ? "Unstar" : "Star"}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem
-                      variant="destructive"
-                      onSelect={onDelete}
-                    >
+                    <DropdownMenuItem variant="destructive" onSelect={onDelete}>
                       <Trash2 className="size-4" aria-hidden="true" />
                       Delete
                     </DropdownMenuItem>
@@ -848,7 +919,5 @@ function formatBytes(bytes: number): string {
 
 function formatDate(value: string): string {
   const date = new Date(value);
-  return Number.isNaN(date.getTime())
-    ? value
-    : new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(date);
+  return Number.isNaN(date.getTime()) ? value : fileDateFormatter.format(date);
 }

@@ -7,8 +7,8 @@ import { Button } from "@/components/ui/button";
 import { ColorPicker } from "@/components/ui/color-picker";
 import {
   ACCENT_COLOR_PRESETS,
-  DEFAULT_ACCENT_COLOR,
   applyAccentColor,
+  DEFAULT_ACCENT_COLOR,
   normalizeAccentColor,
 } from "@/lib/accent-color";
 
@@ -26,7 +26,9 @@ export function AccentColorPreference({
   const valueId = useId();
   const normalizedInitialColor =
     normalizeAccentColor(initialColor) ?? DEFAULT_ACCENT_COLOR;
-  const [accentColor, setAccentColor] = useState<string>(normalizedInitialColor);
+  const [accentColor, setAccentColor] = useState<string>(
+    normalizedInitialColor,
+  );
 
   useEffect(() => {
     const nextColor =

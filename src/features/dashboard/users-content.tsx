@@ -3,9 +3,9 @@
 import {
   Ban,
   Check,
+  ChevronRight,
   Clipboard,
   Clock3,
-  ChevronRight,
   Ellipsis,
   KeyRound,
   MailPlus,
@@ -18,14 +18,10 @@ import {
   UserPlus,
   Users,
 } from "lucide-react";
-import { useEffect, useId, useState } from "react";
 import Link from "next/link";
+import { useId, useState, useSyncExternalStore } from "react";
 
-import {
-  Alert,
-  AlertDescription,
-  AlertTitle,
-} from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -75,18 +71,20 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import {
-  Tabs,
-  TabsContent,
-  TabsList,
-  TabsTrigger,
-} from "@/components/ui/tabs";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import type {
   AdminUser,
   AdminUsersState,
   CurrentUser,
   Invitation,
 } from "@/lib/api";
+
+const adminDateFormatter = new Intl.DateTimeFormat("en", {
+  month: "short",
+  day: "2-digit",
+  year: "numeric",
+  timeZone: "UTC",
+});
 
 type UsersContentProps = {
   currentUser: CurrentUser;
@@ -136,8 +134,8 @@ export function UsersContent({
   const normalizedQuery = query.trim().toLowerCase();
   const filteredUsers = normalizedQuery
     ? users.filter((user) =>
-        [user.username, user.displayName ?? "", user.role, user.status].some((value) =>
-          value.toLowerCase().includes(normalizedQuery),
+        [user.username, user.displayName ?? "", user.role, user.status].some(
+          (value) => value.toLowerCase().includes(normalizedQuery),
         ),
       )
     : users;
@@ -199,27 +197,27 @@ export function UsersContent({
           <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
             <form action="/users" method="get" className="flex gap-2">
               <div className="relative min-w-0 sm:w-72">
-              <Search
-                className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-                aria-hidden="true"
-              />
-              <Input
-                type="search"
-                name="q"
-                value={query}
-                onChange={(event) => setQuery(event.currentTarget.value)}
-                placeholder={
-                  activeTab === "accounts"
-                    ? "Search accounts"
-                    : "Search invitations"
-                }
-                aria-label={
-                  activeTab === "accounts"
-                    ? "Search accounts"
-                    : "Search invitations"
-                }
-                className="h-9 pl-9"
-              />
+                <Search
+                  className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+                  aria-hidden="true"
+                />
+                <Input
+                  type="search"
+                  name="q"
+                  value={query}
+                  onChange={(event) => setQuery(event.currentTarget.value)}
+                  placeholder={
+                    activeTab === "accounts"
+                      ? "Search accounts"
+                      : "Search invitations"
+                  }
+                  aria-label={
+                    activeTab === "accounts"
+                      ? "Search accounts"
+                      : "Search invitations"
+                  }
+                  className="h-9 pl-9"
+                />
               </div>
               <Button type="submit" variant="outline" size="sm">
                 Search
@@ -727,8 +725,8 @@ function UserActions({
             </AlertDialogMedia>
             <AlertDialogTitle>Disable {user.username}?</AlertDialogTitle>
             <AlertDialogDescription>
-              This account will no longer be able to sign in until it is
-              enabled again.
+              This account will no longer be able to sign in until it is enabled
+              again.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -973,8 +971,8 @@ function InvitationActions({
             </AlertDialogMedia>
             <AlertDialogTitle>Revoke this invitation?</AlertDialogTitle>
             <AlertDialogDescription>
-              The setup link for {invitation.invitedUsername} will stop
-              working immediately.
+              The setup link for {invitation.invitedUsername} will stop working
+              immediately.
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>
@@ -996,12 +994,12 @@ function InvitationActions({
 
 function InvitationLinkDialog({ token }: { token?: string }) {
   const [open, setOpen] = useState(Boolean(token));
-  const [origin, setOrigin] = useState("");
+  const origin = useSyncExternalStore(
+    subscribeToOrigin,
+    getBrowserOrigin,
+    getServerOrigin,
+  );
   const [copied, setCopied] = useState(false);
-
-  useEffect(() => {
-    setOrigin(window.location.origin);
-  }, []);
 
   if (!token) {
     return null;
@@ -1057,6 +1055,18 @@ function InvitationLinkDialog({ token }: { token?: string }) {
       </DialogContent>
     </Dialog>
   );
+}
+
+function subscribeToOrigin(): () => void {
+  return () => undefined;
+}
+
+function getBrowserOrigin(): string {
+  return window.location.origin;
+}
+
+function getServerOrigin(): string {
+  return "";
 }
 
 function RoleBadge({ role }: { role: AdminUser["role"] }) {
@@ -1131,9 +1141,5 @@ function formatDate(value: string) {
     return value;
   }
 
-  return new Intl.DateTimeFormat("en", {
-    month: "short",
-    day: "2-digit",
-    year: "numeric",
-  }).format(date);
+  return adminDateFormatter.format(date);
 }

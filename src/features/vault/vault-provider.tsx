@@ -7,6 +7,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -48,6 +49,8 @@ type VaultState =
   | "unlocked"
   | "unsupported";
 
+type VaultDialogMode = "setup" | "unlock" | "recover";
+
 type VaultContextValue = {
   enabled: boolean;
   state: VaultState;
@@ -77,12 +80,14 @@ export function VaultProvider({
   const [state, setState] = useState<VaultState>(
     enabled ? (vaultConfigured ? "locked" : "setup") : "off",
   );
+  // Setup can transition this value locally before server props refresh.
+  // react-doctor-disable-next-line react-doctor/no-derived-useState
   const [configured, setConfigured] = useState(vaultConfigured);
   const [activeAutoLockMinutes, setActiveAutoLockMinutes] = useState(() =>
     normalizeVaultAutoLockMinutes(autoLockMinutes),
   );
   const [dialogOpen, setDialogOpen] = useState(enabled);
-  const [mode, setMode] = useState<"setup" | "unlock" | "recover">(
+  const [mode, setMode] = useState<VaultDialogMode>(
     vaultConfigured ? "unlock" : "setup",
   );
   const [password, setPassword] = useState("");
@@ -135,21 +140,26 @@ export function VaultProvider({
       window.removeEventListener(VAULT_AUTO_LOCK_CHANGE_EVENT, updateAutoLock);
   }, []);
 
+  const scheduleLockForActivity = useEffectEvent(() => scheduleLock());
+  const lockForLifecycle = useEffectEvent(() => {
+    void lock();
+  });
+
   useEffect(() => {
     if (!enabled) return;
-    const activity = () => scheduleLock();
-    const lifecycleLock = () => void lock();
+    const activity = () => scheduleLockForActivity();
+    const lifecycleLock = () => lockForLifecycle();
     window.addEventListener("pointerdown", activity, { passive: true });
     window.addEventListener("keydown", activity);
     window.addEventListener("pagehide", lifecycleLock);
-    scheduleLock();
+    scheduleLockForActivity();
     return () => {
       window.removeEventListener("pointerdown", activity);
       window.removeEventListener("keydown", activity);
       window.removeEventListener("pagehide", lifecycleLock);
       if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
     };
-  }, [enabled, lock, scheduleLock]);
+  }, [enabled]);
 
   useEffect(() => {
     return () => {
@@ -262,25 +272,94 @@ export function VaultProvider({
   );
 
   return (
+    <VaultProviderView
+      context={context}
+      dialogOpen={dialogOpen && enabled}
+      canClose={state !== "setup" && !newRecoveryCode}
+      newRecoveryCode={newRecoveryCode}
+      recoveryConfirmed={recoveryConfirmed}
+      onRecoveryConfirmedChange={setRecoveryConfirmed}
+      onFinishRecoveryConfirmation={finishRecoveryConfirmation}
+      onDialogOpenChange={(open) => {
+        if (!busy && state !== "setup" && !newRecoveryCode) setDialogOpen(open);
+      }}
+      mode={mode}
+      recoveryCodeInput={recoveryCodeInput}
+      onRecoveryCodeInputChange={setRecoveryCodeInput}
+      password={password}
+      onPasswordChange={setPassword}
+      passwordConfirmation={passwordConfirmation}
+      onPasswordConfirmationChange={setPasswordConfirmation}
+      error={error}
+      configured={configured}
+      busy={busy}
+      onSwitchMode={() => {
+        setError(null);
+        setMode(mode === "recover" ? "unlock" : "recover");
+      }}
+      onSubmit={submit}
+    >
+      {children}
+    </VaultProviderView>
+  );
+}
+
+function VaultProviderView({
+  children,
+  context,
+  dialogOpen,
+  canClose,
+  newRecoveryCode,
+  recoveryConfirmed,
+  onRecoveryConfirmedChange,
+  onFinishRecoveryConfirmation,
+  onDialogOpenChange,
+  mode,
+  recoveryCodeInput,
+  onRecoveryCodeInputChange,
+  password,
+  onPasswordChange,
+  passwordConfirmation,
+  onPasswordConfirmationChange,
+  error,
+  configured,
+  busy,
+  onSwitchMode,
+  onSubmit,
+}: {
+  children: ReactNode;
+  context: VaultContextValue;
+  dialogOpen: boolean;
+  canClose: boolean;
+  newRecoveryCode: string | null;
+  recoveryConfirmed: boolean;
+  onRecoveryConfirmedChange(value: boolean): void;
+  onFinishRecoveryConfirmation(): void;
+  onDialogOpenChange(open: boolean): void;
+  mode: VaultDialogMode;
+  recoveryCodeInput: string;
+  onRecoveryCodeInputChange(value: string): void;
+  password: string;
+  onPasswordChange(value: string): void;
+  passwordConfirmation: string;
+  onPasswordConfirmationChange(value: string): void;
+  error: string | null;
+  configured: boolean;
+  busy: boolean;
+  onSwitchMode(): void;
+  onSubmit(): Promise<void>;
+}) {
+  return (
     <VaultContext.Provider value={context}>
       {children}
-      <Dialog
-        open={dialogOpen && enabled}
-        onOpenChange={(open) => {
-          if (!busy && state !== "setup" && !newRecoveryCode)
-            setDialogOpen(open);
-        }}
-      >
-        <DialogContent
-          className="sm:max-w-md"
-          showCloseButton={state !== "setup" && !newRecoveryCode}
-        >
+      <Dialog open={dialogOpen} onOpenChange={onDialogOpenChange}>
+        <DialogContent className="sm:max-w-md" showCloseButton={canClose}>
           {newRecoveryCode ? (
             <RecoveryKeyConfirmation
               recoveryCode={newRecoveryCode}
               confirmed={recoveryConfirmed}
-              onConfirmedChange={setRecoveryConfirmed}
-              onDone={finishRecoveryConfirmation}
+              onConfirmedChange={onRecoveryConfirmedChange}
+              onDone={onFinishRecoveryConfirmation}
             />
           ) : (
             <>
@@ -316,7 +395,7 @@ export function VaultProvider({
                 className="space-y-4"
                 onSubmit={(event) => {
                   event.preventDefault();
-                  void submit();
+                  void onSubmit();
                 }}
               >
                 {mode === "recover" ? (
@@ -326,7 +405,7 @@ export function VaultProvider({
                       id="vault-recovery-code"
                       value={recoveryCodeInput}
                       onChange={(event) =>
-                        setRecoveryCodeInput(event.target.value)
+                        onRecoveryCodeInputChange(event.target.value)
                       }
                       autoComplete="off"
                       spellCheck={false}
@@ -344,7 +423,7 @@ export function VaultProvider({
                     id="vault-password"
                     type="password"
                     value={password}
-                    onChange={(event) => setPassword(event.target.value)}
+                    onChange={(event) => onPasswordChange(event.target.value)}
                     autoComplete={
                       mode === "unlock" ? "current-password" : "new-password"
                     }
@@ -363,7 +442,7 @@ export function VaultProvider({
                       type="password"
                       value={passwordConfirmation}
                       onChange={(event) =>
-                        setPasswordConfirmation(event.target.value)
+                        onPasswordConfirmationChange(event.target.value)
                       }
                       autoComplete="new-password"
                       minLength={12}
@@ -382,10 +461,7 @@ export function VaultProvider({
                     <Button
                       type="button"
                       variant="ghost"
-                      onClick={() => {
-                        setError(null);
-                        setMode(mode === "recover" ? "unlock" : "recover");
-                      }}
+                      onClick={onSwitchMode}
                       disabled={busy}
                     >
                       <KeyRound className="size-4" aria-hidden="true" />

@@ -13,12 +13,7 @@ import { AeralythLogo } from "@/components/aeralyth-logo";
 import { DottedSurface } from "@/components/dotted-surface";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -52,12 +47,11 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
   const invalidCredentials = error === "invalid";
   const backendUnavailable =
     authState.status === "unavailable" || error === "backend";
-  const loginAlertMessage =
-    invalidCredentials
-      ? "Invalid username or password."
-      : backendUnavailable
-        ? "Backend unavailable. Start the Actix API and try again."
-        : null;
+  const loginAlertMessage = invalidCredentials
+    ? "Invalid username or password."
+    : backendUnavailable
+      ? "Backend unavailable. Start the Actix API and try again."
+      : null;
 
   return (
     <main className="relative isolate min-h-dvh overflow-hidden bg-background text-foreground">
@@ -106,10 +100,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
             <div className="mt-11 grid max-w-xl gap-6 text-base">
               <div className="flex items-center gap-5">
                 <span className="flex size-11 shrink-0 items-center justify-center text-primary">
-                  <ShieldCheck
-                    className="size-5"
-                    aria-hidden="true"
-                  />
+                  <ShieldCheck className="size-5" aria-hidden="true" />
                 </span>
                 <span className="text-muted-foreground">
                   Protected self-hosted sessions
@@ -117,10 +108,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
               </div>
               <div className="flex items-center gap-5">
                 <span className="flex size-11 shrink-0 items-center justify-center text-primary">
-                  <HardDrive
-                    className="size-5"
-                    aria-hidden="true"
-                  />
+                  <HardDrive className="size-5" aria-hidden="true" />
                 </span>
                 <span className="text-muted-foreground">
                   Direct access to your storage
@@ -173,7 +161,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                       />
                       <span
                         aria-hidden="true"
-                        className="pointer-events-none absolute inset-y-0 left-0 z-10 w-[170%] rounded-2xl bg-[linear-gradient(100deg,transparent_0%,rgb(255_255_255/0.025)_18%,rgb(255_255_255/0.13)_46%,rgb(255_255_255/0.055)_66%,transparent_100%)] opacity-0 will-change-transform group-focus-within/input:animate-[input-shimmer-sweep_820ms_ease-out]"
+                        className="pointer-events-none absolute inset-y-0 left-0 z-10 w-[170%] rounded-2xl bg-[linear-gradient(100deg,transparent_0%,rgb(255_255_255/0.025)_18%,rgb(255_255_255/0.13)_46%,rgb(255_255_255/0.055)_66%,transparent_100%)] opacity-0 group-focus-within/input:animate-[input-shimmer-sweep_820ms_ease-out]"
                       />
                     </div>
                   </div>
@@ -204,7 +192,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                       />
                       <span
                         aria-hidden="true"
-                        className="pointer-events-none absolute inset-y-0 left-0 z-10 w-[170%] rounded-2xl bg-[linear-gradient(100deg,transparent_0%,rgb(255_255_255/0.025)_18%,rgb(255_255_255/0.13)_46%,rgb(255_255_255/0.055)_66%,transparent_100%)] opacity-0 will-change-transform group-focus-within/input:animate-[input-shimmer-sweep_820ms_ease-out]"
+                        className="pointer-events-none absolute inset-y-0 left-0 z-10 w-[170%] rounded-2xl bg-[linear-gradient(100deg,transparent_0%,rgb(255_255_255/0.025)_18%,rgb(255_255_255/0.13)_46%,rgb(255_255_255/0.055)_66%,transparent_100%)] opacity-0 group-focus-within/input:animate-[input-shimmer-sweep_820ms_ease-out]"
                       />
                     </div>
                   </div>
@@ -231,7 +219,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
                   >
                     Sign in
                     <ArrowRight
-                      className="size-4 -translate-x-1 opacity-0 transition-all group-hover/button:translate-x-0 group-hover/button:opacity-100"
+                      className="size-4 -translate-x-1 opacity-0 transition-[transform,opacity] group-hover/button:translate-x-0 group-hover/button:opacity-100"
                       aria-hidden="true"
                     />
                   </Button>

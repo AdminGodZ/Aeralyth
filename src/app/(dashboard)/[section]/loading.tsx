@@ -5,6 +5,14 @@ import { usePathname } from "next/navigation";
 import { Skeleton } from "@/components/ui/skeleton";
 import { getDashboardSection } from "@/features/dashboard/config";
 
+const DASHBOARD_CARD_SKELETONS = [
+  "storage-used",
+  "storage-free",
+  "files",
+  "folders",
+  "shared",
+] as const;
+
 export default function SectionLoading() {
   const pathname = usePathname();
   const section =
@@ -46,7 +54,6 @@ function SettingsLoading() {
     <div
       className="flex flex-1 flex-col overflow-hidden px-4 sm:px-8"
       aria-busy="true"
-      aria-label="Loading settings"
     >
       <div className="mx-auto grid w-full max-w-5xl gap-8 py-6 lg:grid-cols-[13rem_minmax(0,1fr)]">
         <div className="space-y-3">
@@ -72,12 +79,11 @@ function DashboardDataLoading() {
     <div
       className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-4 py-5 sm:px-6"
       aria-busy="true"
-      aria-label="Loading section"
     >
       <div className="grid shrink-0 gap-3 md:grid-cols-2 xl:grid-cols-5">
-        {Array.from({ length: 5 }, (_, index) => (
+        {DASHBOARD_CARD_SKELETONS.map((skeleton) => (
           <div
-            key={index}
+            key={skeleton}
             className="flex min-h-24 items-center gap-4 rounded-md border p-4"
           >
             <Skeleton className="size-9 shrink-0" />

@@ -1,14 +1,13 @@
 import type { Metadata } from "next";
 import { notFound, redirect } from "next/navigation";
-
-import { DashboardPage } from "@/features/dashboard/dashboard-shell";
 import { getDashboardSection } from "@/features/dashboard/config";
 import { getDashboardSession } from "@/features/dashboard/dashboard-session";
+import { DashboardPage } from "@/features/dashboard/dashboard-shell";
 import {
   type FileSort,
   type FileSortDirection,
-  type FileView,
   type FilesState,
+  type FileView,
   getAdminUsersState,
   getFilesState,
 } from "@/lib/api";

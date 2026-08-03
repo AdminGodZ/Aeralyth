@@ -15,10 +15,10 @@ import {
 import { AeralythLogo } from "@/components/aeralyth-logo";
 import { Button } from "@/components/ui/button";
 import {
+  type DashboardSection,
   getDashboardSection,
   primaryDashboardSections,
   systemDashboardSections,
-  type DashboardSection,
 } from "@/features/dashboard/config";
 import { cn } from "@/lib/utils";
 
@@ -53,26 +53,23 @@ export function DashboardSidebar({
       visible: false,
     });
 
-  const moveNavigationIndicator = useCallback(
-    (element: HTMLElement) => {
-      const sidebar = sidebarRef.current;
+  const moveNavigationIndicator = useCallback((element: HTMLElement) => {
+    const sidebar = sidebarRef.current;
 
-      if (!sidebar) {
-        return;
-      }
+    if (!sidebar) {
+      return;
+    }
 
-      const sidebarBounds = sidebar.getBoundingClientRect();
-      const elementBounds = element.getBoundingClientRect();
+    const sidebarBounds = sidebar.getBoundingClientRect();
+    const elementBounds = element.getBoundingClientRect();
 
-      setNavigationIndicator({
-        animate: indicatorHasPosition.current,
-        top: elementBounds.top - sidebarBounds.top,
-        visible: true,
-      });
-      indicatorHasPosition.current = true;
-    },
-    [],
-  );
+    setNavigationIndicator({
+      animate: indicatorHasPosition.current,
+      top: elementBounds.top - sidebarBounds.top,
+      visible: true,
+    });
+    indicatorHasPosition.current = true;
+  }, []);
 
   const restoreActiveIndicator = useCallback(() => {
     const activeLink = sidebarRef.current?.querySelector<HTMLElement>(
@@ -84,6 +81,8 @@ export function DashboardSidebar({
     }
   }, [moveNavigationIndicator]);
 
+  // Route and collapse changes alter the measured DOM without changing this stable callback.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: Both values intentionally trigger a post-render remeasurement.
   useLayoutEffect(() => {
     restoreActiveIndicator();
   }, [pathnameSectionKey, isCollapsed, restoreActiveIndicator]);
@@ -100,6 +99,9 @@ export function DashboardSidebar({
     const nextCollapsed = !isCollapsed;
 
     setIsCollapsed(nextCollapsed);
+    // The server reads this preference during SSR, and the synchronous cookie API
+    // remains the broadly compatible way to persist a server-readable UI setting.
+    // biome-ignore lint/suspicious/noDocumentCookie: This is a non-sensitive SSR layout preference.
     document.cookie = `${SIDEBAR_COOKIE}=${nextCollapsed ? "1" : "0"}; Path=/; Max-Age=${SIDEBAR_COOKIE_MAX_AGE}; SameSite=Lax`;
   }
 
@@ -146,14 +148,7 @@ export function DashboardSidebar({
             </span>
           ) : null}
         </Link>
-        <div
-          role="separator"
-          aria-hidden="true"
-          className={cn(
-            "mt-5 h-px bg-border",
-            isCollapsed && "w-10",
-          )}
-        />
+        <hr className={cn("mt-5 border-border", isCollapsed && "w-10")} />
       </div>
 
       <div className="mt-6 space-y-7">
@@ -169,9 +164,7 @@ export function DashboardSidebar({
         </nav>
 
         {canViewSystemNavigation ? (
-          <section
-            className={cn("border-t pt-5", isCollapsed && "w-10")}
-          >
+          <section className={cn("border-t pt-5", isCollapsed && "w-10")}>
             <p
               className={cn(
                 "px-3 text-xs font-medium uppercase text-muted-foreground",

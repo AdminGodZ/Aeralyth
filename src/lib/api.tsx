@@ -481,7 +481,10 @@ function isFileEntry(entry: unknown): entry is FileEntry {
   );
 }
 
-function getForwardedHeaders(requestHeaders: HeaderSource, cookie: string | null) {
+function getForwardedHeaders(
+  requestHeaders: HeaderSource,
+  cookie: string | null,
+) {
   const forwardedHeaders = new Headers({
     accept: "application/json",
   });

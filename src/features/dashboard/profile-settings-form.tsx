@@ -12,20 +12,17 @@ import {
 } from "lucide-react";
 import { useTheme } from "next-themes";
 import {
+  type ChangeEvent,
+  type FormEvent,
+  type ReactNode,
+  type RefObject,
   useEffect,
   useId,
   useRef,
   useState,
-  type ChangeEvent,
-  type FormEvent,
-  type ReactNode,
 } from "react";
 
-import {
-  Avatar,
-  AvatarFallback,
-  AvatarImage,
-} from "@/components/ui/avatar";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -39,17 +36,14 @@ import {
 } from "@/components/ui/select";
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
-import {
-  ToggleGroup,
-  ToggleGroupItem,
-} from "@/components/ui/toggle-group";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { AccentColorPreference } from "@/features/dashboard/accent-color-preference";
+import { VaultMigrationControl } from "@/features/vault/vault-migration-control";
 import {
   normalizeVaultAutoLockMinutes,
   VAULT_AUTO_LOCK_CHANGE_EVENT,
   VAULT_AUTO_LOCK_OPTIONS,
 } from "@/features/vault/vault-preferences";
-import { VaultMigrationControl } from "@/features/vault/vault-migration-control";
 import type { CurrentUser } from "@/lib/api";
 
 type ProfileSettingsFormProps = {
@@ -73,6 +67,8 @@ export function ProfileSettingsForm({
   const [removeImage, setRemoveImage] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  // This is an editable form draft, not a rendered copy of immutable props.
+  // react-doctor-disable-next-line react-doctor/no-derived-useState
   const [themePreference, setThemePreference] = useState(
     currentUser.themePreference,
   );
@@ -99,6 +95,9 @@ export function ProfileSettingsForm({
     };
   }, [previewUrl]);
 
+  // A confirmed server avatar change resets the local upload draft atomically.
+  // react-doctor-disable-next-line react-doctor/no-adjust-state-on-prop-change
+  // biome-ignore lint/correctness/useExhaustiveDependencies: The server URL intentionally triggers the reset even though its value is not read.
   useEffect(() => {
     setPreviewUrl((currentPreviewUrl) => {
       if (currentPreviewUrl?.startsWith("blob:")) {
@@ -125,6 +124,9 @@ export function ProfileSettingsForm({
       URL.revokeObjectURL(previewUrl);
     }
 
+    // The previous URL is revoked above and the active URL is revoked by the
+    // previewUrl effect cleanup on replacement or unmount.
+    // react-doctor-disable-next-line react-doctor/no-create-object-url-without-revoke
     setPreviewUrl(URL.createObjectURL(file));
     setRemoveImage(false);
   }
@@ -187,9 +189,7 @@ export function ProfileSettingsForm({
       );
     } catch (error) {
       setSaveError(
-        error instanceof Error
-          ? error.message
-          : "Settings could not be saved.",
+        error instanceof Error ? error.message : "Settings could not be saved.",
       );
     } finally {
       setIsSaving(false);
@@ -197,12 +197,95 @@ export function ProfileSettingsForm({
   }
 
   return (
+    <ProfileSettingsFormView
+      currentUser={currentUser}
+      csrfToken={csrfToken}
+      fileInputId={fileInputId}
+      displayNameId={displayNameId}
+      themeLabelId={themeLabelId}
+      accentLabelId={accentLabelId}
+      folderZipPromptId={folderZipPromptId}
+      vaultAutoLockId={vaultAutoLockId}
+      fileInputRef={fileInputRef}
+      avatarUrl={avatarUrl}
+      displayName={displayName}
+      removeImage={removeImage}
+      isSaving={isSaving}
+      saveError={saveError}
+      themePreference={themePreference}
+      folderZipPromptEnabled={folderZipPromptEnabled}
+      vaultAutoLockMinutes={vaultAutoLockMinutes}
+      onSave={saveSettings}
+      onFileChange={handleFileChange}
+      onResetProfileImage={resetProfileImage}
+      onRestoreProfileImage={restoreProfileImage}
+      onThemePreferenceChange={updateThemePreference}
+      onFolderZipPromptEnabledChange={setFolderZipPromptEnabled}
+      onVaultAutoLockMinutesChange={setVaultAutoLockMinutes}
+    />
+  );
+}
+
+function ProfileSettingsFormView({
+  currentUser,
+  csrfToken,
+  fileInputId,
+  displayNameId,
+  themeLabelId,
+  accentLabelId,
+  folderZipPromptId,
+  vaultAutoLockId,
+  fileInputRef,
+  avatarUrl,
+  displayName,
+  removeImage,
+  isSaving,
+  saveError,
+  themePreference,
+  folderZipPromptEnabled,
+  vaultAutoLockMinutes,
+  onSave,
+  onFileChange,
+  onResetProfileImage,
+  onRestoreProfileImage,
+  onThemePreferenceChange,
+  onFolderZipPromptEnabledChange,
+  onVaultAutoLockMinutesChange,
+}: {
+  currentUser: CurrentUser;
+  csrfToken: string;
+  fileInputId: string;
+  displayNameId: string;
+  themeLabelId: string;
+  accentLabelId: string;
+  folderZipPromptId: string;
+  vaultAutoLockId: string;
+  fileInputRef: RefObject<HTMLInputElement | null>;
+  avatarUrl: string | null;
+  displayName: string;
+  removeImage: boolean;
+  isSaving: boolean;
+  saveError: string | null;
+  themePreference: CurrentUser["themePreference"];
+  folderZipPromptEnabled: boolean;
+  vaultAutoLockMinutes: number;
+  onSave(event: FormEvent<HTMLFormElement>): Promise<void>;
+  onFileChange(event: ChangeEvent<HTMLInputElement>): void;
+  onResetProfileImage(): void;
+  onRestoreProfileImage(): void;
+  onThemePreferenceChange(value: string): void;
+  onFolderZipPromptEnabledChange(value: boolean): void;
+  onVaultAutoLockMinutesChange(
+    value: ReturnType<typeof normalizeVaultAutoLockMinutes>,
+  ): void;
+}) {
+  return (
     <form
       action="/api/profile"
       method="post"
       encType="multipart/form-data"
       className="w-full"
-      onSubmit={saveSettings}
+      onSubmit={onSave}
     >
       <input type="hidden" name="csrf_token" value={csrfToken} />
       <input
@@ -210,11 +293,7 @@ export function ProfileSettingsForm({
         name="remove_profile_image"
         value={removeImage ? "1" : "0"}
       />
-      <input
-        type="hidden"
-        name="theme_preference"
-        value={themePreference}
-      />
+      <input type="hidden" name="theme_preference" value={themePreference} />
       <input
         type="hidden"
         name="folder_zip_prompt_enabled"
@@ -254,7 +333,9 @@ export function ProfileSettingsForm({
                 variant="secondary"
                 size="icon"
                 className="absolute -bottom-1 -right-1 z-20 shadow-sm"
-                onClick={removeImage ? restoreProfileImage : resetProfileImage}
+                onClick={
+                  removeImage ? onRestoreProfileImage : onResetProfileImage
+                }
                 aria-label={
                   removeImage
                     ? "Undo profile image reset"
@@ -280,10 +361,11 @@ export function ProfileSettingsForm({
             ref={fileInputRef}
             name="profile_image"
             type="file"
+            aria-label="Choose a profile image"
             accept="image/png,image/jpeg,image/webp,image/gif"
             className="sr-only"
             tabIndex={-1}
-            onChange={handleFileChange}
+            onChange={onFileChange}
           />
 
           <div className="grid w-full max-w-md gap-2">
@@ -323,59 +405,13 @@ export function ProfileSettingsForm({
 
       <Separator />
 
-      <SettingsSection title="Appearance" description="Theme and accent color">
-        <div className="space-y-6">
-          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-            <Label id={themeLabelId}>Theme</Label>
-            <ToggleGroup
-              type="single"
-              value={themePreference}
-              onValueChange={updateThemePreference}
-              aria-labelledby={themeLabelId}
-              className="w-full rounded-full border bg-muted/40 p-1 sm:w-auto"
-            >
-              <ToggleGroupItem
-                type="button"
-                value="system"
-                aria-label="Use system theme"
-                className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
-              >
-                <Monitor className="size-4" aria-hidden="true" />
-                System
-              </ToggleGroupItem>
-              <ToggleGroupItem
-                type="button"
-                value="light"
-                aria-label="Use light theme"
-                className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
-              >
-                <Sun className="size-4" aria-hidden="true" />
-                Light
-              </ToggleGroupItem>
-              <ToggleGroupItem
-                type="button"
-                value="dark"
-                aria-label="Use dark theme"
-                className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
-              >
-                <Moon className="size-4" aria-hidden="true" />
-                Dark
-              </ToggleGroupItem>
-            </ToggleGroup>
-          </div>
-
-          <Separator />
-
-          <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
-            <Label id={accentLabelId}>Accent color</Label>
-            <AccentColorPreference
-              initialColor={currentUser.accentColor}
-              inputName="accent_color"
-              labelId={accentLabelId}
-            />
-          </div>
-        </div>
-      </SettingsSection>
+      <AppearanceSettingsSection
+        currentUser={currentUser}
+        themeLabelId={themeLabelId}
+        accentLabelId={accentLabelId}
+        themePreference={themePreference}
+        onThemePreferenceChange={onThemePreferenceChange}
+      />
 
       <Separator />
 
@@ -397,13 +433,14 @@ export function ProfileSettingsForm({
             <div className="min-w-0">
               <Label id={vaultAutoLockId}>Lock encrypted vault</Label>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                Require the vault password again after a period without activity.
+                Require the vault password again after a period without
+                activity.
               </p>
             </div>
             <Select
               value={String(vaultAutoLockMinutes)}
               onValueChange={(value) =>
-                setVaultAutoLockMinutes(
+                onVaultAutoLockMinutesChange(
                   normalizeVaultAutoLockMinutes(Number(value)),
                 )
               }
@@ -428,18 +465,21 @@ export function ProfileSettingsForm({
 
           <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
             <div className="min-w-0">
-              <Label htmlFor={folderZipPromptId}>Ask how to upload folders</Label>
+              <Label htmlFor={folderZipPromptId}>
+                Ask how to upload folders
+              </Label>
               <p
                 id={`${folderZipPromptId}-description`}
                 className="mt-1 text-xs leading-5 text-muted-foreground"
               >
-                Choose between a browsable folder structure and one client-side ZIP archive.
+                Choose between a browsable folder structure and one client-side
+                ZIP archive.
               </p>
             </div>
             <Switch
               id={folderZipPromptId}
               checked={folderZipPromptEnabled}
-              onCheckedChange={setFolderZipPromptEnabled}
+              onCheckedChange={onFolderZipPromptEnabledChange}
               aria-describedby={`${folderZipPromptId}-description`}
             />
           </div>
@@ -462,6 +502,76 @@ export function ProfileSettingsForm({
         </Button>
       </div>
     </form>
+  );
+}
+
+function AppearanceSettingsSection({
+  currentUser,
+  themeLabelId,
+  accentLabelId,
+  themePreference,
+  onThemePreferenceChange,
+}: {
+  currentUser: CurrentUser;
+  themeLabelId: string;
+  accentLabelId: string;
+  themePreference: CurrentUser["themePreference"];
+  onThemePreferenceChange(value: string): void;
+}) {
+  return (
+    <SettingsSection title="Appearance" description="Theme and accent color">
+      <div className="space-y-6">
+        <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+          <Label id={themeLabelId}>Theme</Label>
+          <ToggleGroup
+            type="single"
+            value={themePreference}
+            onValueChange={onThemePreferenceChange}
+            aria-labelledby={themeLabelId}
+            className="w-full rounded-full border bg-muted/40 p-1 sm:w-auto"
+          >
+            <ToggleGroupItem
+              type="button"
+              value="system"
+              aria-label="Use system theme"
+              className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
+            >
+              <Monitor className="size-4" aria-hidden="true" />
+              System
+            </ToggleGroupItem>
+            <ToggleGroupItem
+              type="button"
+              value="light"
+              aria-label="Use light theme"
+              className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
+            >
+              <Sun className="size-4" aria-hidden="true" />
+              Light
+            </ToggleGroupItem>
+            <ToggleGroupItem
+              type="button"
+              value="dark"
+              aria-label="Use dark theme"
+              className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
+            >
+              <Moon className="size-4" aria-hidden="true" />
+              Dark
+            </ToggleGroupItem>
+          </ToggleGroup>
+        </div>
+
+        <Separator />
+
+        <div className="grid gap-3 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+          <Label id={accentLabelId}>Accent color</Label>
+          <AccentColorPreference
+            initialColor={currentUser.accentColor}
+            inputName="accent_color"
+            labelId={accentLabelId}
+          />
+        </div>
+      </div>
+    </SettingsSection>
   );
 }
 

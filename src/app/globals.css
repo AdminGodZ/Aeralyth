@@ -7,10 +7,12 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-display: var(--font-figtree), var(--font-geist-sans), ui-sans-serif,
-    system-ui, sans-serif;
-  --font-heading: var(--font-figtree), var(--font-geist-sans), ui-sans-serif,
-    system-ui, sans-serif;
+  --font-display:
+    var(--font-figtree), var(--font-geist-sans), ui-sans-serif, system-ui,
+    sans-serif;
+  --font-heading:
+    var(--font-figtree), var(--font-geist-sans), ui-sans-serif, system-ui,
+    sans-serif;
   --font-sans: var(--font-geist-sans), ui-sans-serif, system-ui, sans-serif;
   --font-mono: var(--font-geist-mono), ui-monospace, monospace;
   --color-sidebar-ring: var(--sidebar-ring);
@@ -58,8 +60,9 @@ body {
 h1,
 h2,
 h3 {
-  font-family: var(--font-figtree), var(--font-geist-sans), ui-sans-serif,
-    system-ui, sans-serif;
+  font-family:
+    var(--font-figtree), var(--font-geist-sans), ui-sans-serif, system-ui,
+    sans-serif;
 }
 
 :root {
@@ -272,7 +275,7 @@ h3 {
       color-mix(in srgb, currentColor 22%, transparent) 0%,
       color-mix(in srgb, currentColor 8%, transparent) 36%,
       transparent 84%
-  );
+    );
   filter: blur(0.4px);
   opacity: var(--upload-glow-high-opacity);
   border-radius: inherit;
@@ -290,16 +293,15 @@ h3 {
   position: absolute;
   inset: auto 0 0;
   height: 1px;
-  background:
-    linear-gradient(
-      to right,
-      transparent,
-      color-mix(in srgb, currentColor 92%, white 8%) 11%,
-      color-mix(in srgb, currentColor 38%, transparent) 32%,
-      color-mix(in srgb, currentColor 24%, transparent) 68%,
-      color-mix(in srgb, currentColor 92%, white 8%) 89%,
-      transparent
-    );
+  background: linear-gradient(
+    to right,
+    transparent,
+    color-mix(in srgb, currentColor 92%, white 8%) 11%,
+    color-mix(in srgb, currentColor 38%, transparent) 32%,
+    color-mix(in srgb, currentColor 24%, transparent) 68%,
+    color-mix(in srgb, currentColor 92%, white 8%) 89%,
+    transparent
+  );
   box-shadow:
     0 -1px 12px color-mix(in srgb, currentColor 34%, transparent),
     0 -16px 34px color-mix(in srgb, currentColor 11%, transparent);
@@ -389,7 +391,8 @@ h3 {
   body {
     @apply bg-background text-foreground;
   }
-  button:not(:disabled), [role="button"]:not(:disabled) {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
     cursor: pointer;
   }
   html {

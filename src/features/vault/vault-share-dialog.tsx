@@ -43,21 +43,28 @@ import {
 } from "@/features/vault/vault-api";
 import { useVault } from "@/features/vault/vault-provider";
 
-export function VaultShareDialog({
-  open,
-  onOpenChange,
-  nodeId,
-  nodeName,
-  currentUserId,
-  csrfToken,
-}: {
+type VaultShareDialogProps = {
   open: boolean;
   onOpenChange(open: boolean): void;
   nodeId: string;
   nodeName: string;
   currentUserId: string;
   csrfToken: string;
-}) {
+};
+
+export function VaultShareDialog(props: VaultShareDialogProps) {
+  const controller = useVaultShareDialogController(props);
+  return <VaultShareDialogView {...controller} />;
+}
+
+function useVaultShareDialogController({
+  open,
+  onOpenChange,
+  nodeId,
+  nodeName,
+  currentUserId,
+  csrfToken,
+}: VaultShareDialogProps) {
   const vault = useVault();
   const [username, setUsername] = useState("");
   const [identity, setIdentity] = useState<VaultPublicIdentity | null>(null);
@@ -108,7 +115,11 @@ export function VaultShareDialog({
         await trustVaultIdentity(csrfToken, identity);
       }
       const plan = await getVaultSharePlan(nodeId);
-      for (const node of plan.nodes) await vault.openNode(node.nodeId);
+      for (const node of plan.nodes) {
+        // Descendant node keys are opened from their already-cached parent keys.
+        // react-doctor-disable-next-line react-doctor/async-await-in-loop
+        await vault.openNode(node.nodeId);
+      }
       const shareId = randomPrefixedId("shr_");
       const material = await vault.client.createShareMaterial({
         shareId,
@@ -217,7 +228,11 @@ export function VaultShareDialog({
     plan: VaultEpochRotationPlan,
   ): Promise<void> {
     if (!vault.client) throw new Error("Unlock the vault first.");
-    for (const node of plan.nodes) await vault.openNode(node.nodeId);
+    for (const node of plan.nodes) {
+      // Rotation material must follow the parent-before-child share plan.
+      // react-doctor-disable-next-line react-doctor/async-await-in-loop
+      await vault.openNode(node.nodeId);
+    }
     const material = await vault.client.rotateShareMaterial({
       shareId: share.shareId,
       rootNodeId: nodeId,
@@ -257,6 +272,46 @@ export function VaultShareDialog({
     }
   }
 
+  return {
+    open,
+    nodeName,
+    username,
+    setUsername,
+    identity,
+    confirmed,
+    setConfirmed,
+    busy,
+    complete,
+    error,
+    ownedShares,
+    lookup,
+    share,
+    revoke,
+    resumeRotation,
+    cancelRotation,
+    close,
+  };
+}
+
+function VaultShareDialogView({
+  open,
+  nodeName,
+  username,
+  setUsername,
+  identity,
+  confirmed,
+  setConfirmed,
+  busy,
+  complete,
+  error,
+  ownedShares,
+  lookup,
+  share,
+  revoke,
+  resumeRotation,
+  cancelRotation,
+  close,
+}: ReturnType<typeof useVaultShareDialogController>) {
   return (
     <Dialog open={open} onOpenChange={close}>
       <DialogContent className="sm:max-w-lg">

@@ -1,67 +1,71 @@
-"use client"
+"use client";
 
-import type { PopoverContentProps } from "@radix-ui/react-popover"
+import type { PopoverContentProps } from "@radix-ui/react-popover";
 import {
   type HexColor,
-  hexToHsva,
   type HslaColor,
-  hslaToHsva,
   type HsvaColor,
+  hexToHsva,
+  hslaToHsva,
   hsvaToHex,
   hsvaToHsla,
   hsvaToRgba,
   type RgbaColor,
   rgbaToHsva,
-} from "@uiw/color-convert"
-import Hue from "@uiw/react-color-hue"
-import Saturation from "@uiw/react-color-saturation"
-import { ChevronDownIcon } from "lucide-react"
-import React from "react"
+} from "@uiw/color-convert";
+import Hue from "@uiw/react-color-hue";
+import Saturation from "@uiw/react-color-saturation";
+import { ChevronDownIcon } from "lucide-react";
+import React from "react";
 
-import { Button } from "@/components/ui/button"
+import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuCheckboxItem,
   DropdownMenuContent,
   DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu"
-import { Input } from "@/components/ui/input"
-import { Popover, PopoverContent, PopoverTrigger } from "@/components/ui/popover"
-import { Separator } from "@/components/ui/separator"
-import { cn } from "@/lib/utils"
+} from "@/components/ui/dropdown-menu";
+import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { Separator } from "@/components/ui/separator";
+import { cn } from "@/lib/utils";
 
 function getColorAsHsva(
-  color: `#${string}` | HsvaColor | HslaColor | RgbaColor
+  color: `#${string}` | HsvaColor | HslaColor | RgbaColor,
 ): HsvaColor {
   if (typeof color === "string") {
-    return hexToHsva(color)
+    return hexToHsva(color);
   }
 
   if ("h" in color && "s" in color && "v" in color) {
-    return color
+    return color;
   }
 
   if ("r" in color) {
-    return rgbaToHsva(color)
+    return rgbaToHsva(color);
   }
 
-  return hslaToHsva(color)
+  return hslaToHsva(color);
 }
 
 type ColorPickerValue = {
-  hex: string
-  hsl: HslaColor
-  rgb: RgbaColor
-}
+  hex: string;
+  hsl: HslaColor;
+  rgb: RgbaColor;
+};
 
 type ColorPickerProps = {
-  value?: `#${string}` | HsvaColor | HslaColor | RgbaColor
-  type?: "hsl" | "rgb" | "hex"
-  swatches?: HexColor[]
-  hideDefaultSwatches?: boolean
-  className?: string
-  onValueChange?: (value: ColorPickerValue) => void
-} & PopoverContentProps
+  value?: `#${string}` | HsvaColor | HslaColor | RgbaColor;
+  type?: "hsl" | "rgb" | "hex";
+  swatches?: HexColor[];
+  hideDefaultSwatches?: boolean;
+  className?: string;
+  onValueChange?: (value: ColorPickerValue) => void;
+} & PopoverContentProps;
 
 function ColorPicker({
   value,
@@ -73,10 +77,10 @@ function ColorPicker({
   className,
   ...props
 }: ColorPickerProps) {
-  const [colorType, setColorType] = React.useState(type)
+  const [colorType, setColorType] = React.useState(type);
   const [colorHsv, setColorHsv] = React.useState<HsvaColor>(
-    value ? getColorAsHsva(value) : { h: 0, s: 0, v: 0, a: 1 }
-  )
+    value ? getColorAsHsva(value) : { h: 0, s: 0, v: 0, a: 1 },
+  );
   const colorSwatches = hideDefaultSwatches
     ? swatches
     : [
@@ -87,24 +91,24 @@ function ColorPicker({
         "#2CADF6",
         "#6462FC",
         ...swatches,
-      ]
-  const hueThumbColor = `hsl(${Math.round(colorHsv.h)} 100% 50%)`
+      ];
+  const hueThumbColor = `hsl(${Math.round(colorHsv.h)} 100% 50%)`;
 
   React.useEffect(() => {
     if (value) {
-      setColorHsv(getColorAsHsva(value))
+      setColorHsv(getColorAsHsva(value));
     }
-  }, [value])
+  }, [value]);
 
   const handleValueChange = (color: HsvaColor) => {
     onValueChange?.({
       hex: hsvaToHex(color),
       hsl: hsvaToHsla(color),
       rgb: hsvaToRgba(color),
-    })
+    });
 
-    setColorHsv(color)
-  }
+    setColorHsv(color);
+  };
 
   return (
     <Popover>
@@ -122,7 +126,7 @@ function ColorPicker({
           <Saturation
             hsva={colorHsv}
             onChange={(newColor) => {
-              handleValueChange(newColor)
+              handleValueChange(newColor);
             }}
             radius="0.3rem"
             pointer={SaturationPointer}
@@ -139,7 +143,7 @@ function ColorPicker({
           <Hue
             hue={colorHsv.h}
             onChange={(newHue) => {
-              handleValueChange({ ...colorHsv, ...newHue })
+              handleValueChange({ ...colorHsv, ...newHue });
             }}
             className="[&>div:first-child]:overflow-hidden [&>div:first-child]:!rounded"
             style={
@@ -198,7 +202,7 @@ function ColorPicker({
                   value={hsvaToHsla(colorHsv)}
                   label="hsl"
                   onValueChange={(value) => {
-                    handleValueChange(hslaToHsva(value))
+                    handleValueChange(hslaToHsva(value));
                   }}
                 />
               )}
@@ -207,7 +211,7 @@ function ColorPicker({
                   value={hsvaToRgba(colorHsv)}
                   label="rgb"
                   onValueChange={(value) => {
-                    handleValueChange(rgbaToHsva(value))
+                    handleValueChange(rgbaToHsva(value));
                   }}
                 />
               )}
@@ -216,10 +220,10 @@ function ColorPicker({
                   className="flex focus-visible:border-transparent focus-visible:ring-0"
                   value={hsvaToHex(colorHsv)}
                   onChange={(event) => {
-                    const nextValue = event.target.value
+                    const nextValue = event.target.value;
 
                     if (/^#[0-9a-f]{6}$/i.test(nextValue)) {
-                      handleValueChange(hexToHsva(nextValue))
+                      handleValueChange(hexToHsva(nextValue));
                     }
                   }}
                 />
@@ -242,7 +246,7 @@ function ColorPicker({
                     }
                     onClick={() => handleValueChange(hexToHsva(color))}
                     aria-label={`Set color to ${color}`}
-                    className="size-5 cursor-pointer rounded bg-[var(--swatch-color)] ring-2 ring-[var(--swatch-color)00] ring-offset-1 ring-offset-background transition-all duration-100 hover:ring-[var(--swatch-color)]"
+                    className="size-5 cursor-pointer rounded bg-[var(--swatch-color)] ring-2 ring-[var(--swatch-color)00] ring-offset-1 ring-offset-background transition-shadow duration-100 hover:ring-[var(--swatch-color)]"
                   />
                 ))}
             </div>
@@ -250,20 +254,20 @@ function ColorPicker({
         </div>
       </PopoverContent>
     </Popover>
-  )
+  );
 }
 
 type ObjectColorInputProps =
   | {
-      label: "hsl"
-      value: HslaColor
-      onValueChange?: (value: HslaColor) => void
+      label: "hsl";
+      value: HslaColor;
+      onValueChange?: (value: HslaColor) => void;
     }
   | {
-      label: "rgb"
-      value: RgbaColor
-      onValueChange?: (value: RgbaColor) => void
-    }
+      label: "rgb";
+      value: RgbaColor;
+      onValueChange?: (value: RgbaColor) => void;
+    };
 
 function ObjectColorInput({
   value,
@@ -271,14 +275,14 @@ function ObjectColorInput({
   onValueChange,
 }: ObjectColorInputProps) {
   const inputClassName =
-    "h-full rounded-none border-0 bg-transparent shadow-none [direction:inherit] focus-visible:border-transparent focus-visible:ring-0"
+    "h-full rounded-none border-0 bg-transparent shadow-none [direction:inherit] focus-visible:border-transparent focus-visible:ring-0";
 
   function handleChange(val: Partial<HslaColor | RgbaColor>) {
     if (onValueChange) {
       onValueChange({
         ...value,
         ...val,
-      } as HslaColor & RgbaColor)
+      } as HslaColor & RgbaColor);
     }
   }
 
@@ -291,7 +295,7 @@ function ObjectColorInput({
           onChange={(event) =>
             handleChange({
               [label === "hsl" ? "h" : "r"]: getNumericColorValue(
-                event.target.value
+                event.target.value,
               ),
             })
           }
@@ -304,7 +308,7 @@ function ObjectColorInput({
           onChange={(event) =>
             handleChange({
               [label === "hsl" ? "s" : "g"]: getNumericColorValue(
-                event.target.value
+                event.target.value,
               ),
             })
           }
@@ -317,22 +321,22 @@ function ObjectColorInput({
           onChange={(event) =>
             handleChange({
               [label === "hsl" ? "l" : "b"]: getNumericColorValue(
-                event.target.value
+                event.target.value,
               ),
             })
           }
         />
       </div>
     </div>
-  )
+  );
 }
 
 type SaturationPointerProps = {
-  prefixCls?: string
-  left?: string | number
-  top?: string | number
-  color?: string
-}
+  prefixCls?: string;
+  left?: string | number;
+  top?: string | number;
+  color?: string;
+};
 
 function SaturationPointer({
   prefixCls,
@@ -340,8 +344,8 @@ function SaturationPointer({
   top,
   color,
 }: SaturationPointerProps) {
-  const offsetLeft = getClampedPointerOffset(left ?? "0%")
-  const offsetTop = getClampedPointerOffset(top ?? "0%")
+  const offsetLeft = getClampedPointerOffset(left ?? "0%");
+  const offsetTop = getClampedPointerOffset(top ?? "0%");
 
   return (
     <div
@@ -361,29 +365,28 @@ function SaturationPointer({
           border: "2px solid white",
           borderRadius: "50%",
           backgroundColor: color,
-          boxShadow:
-            "0 0 0 1px rgb(0 0 0 / 50%), 0 1px 3px rgb(0 0 0 / 35%)",
+          boxShadow: "0 0 0 1px rgb(0 0 0 / 50%), 0 1px 3px rgb(0 0 0 / 35%)",
         }}
       />
     </div>
-  )
+  );
 }
 
 function getClampedPointerOffset(value: string | number) {
-  const offset = typeof value === "number" ? `${value}px` : value
+  const offset = typeof value === "number" ? `${value}px` : value;
 
-  return `clamp(6px, ${offset}, calc(100% - 6px))`
+  return `clamp(6px, ${offset}, calc(100% - 6px))`;
 }
 
 function getNumericColorValue(value: string) {
-  const nextValue = Number.parseFloat(value)
+  const nextValue = Number.parseFloat(value);
 
   if (!Number.isFinite(nextValue)) {
-    return 0
+    return 0;
   }
 
-  return nextValue
+  return nextValue;
 }
 
-export { ColorPicker }
-export type { ColorPickerProps, ColorPickerValue }
+export type { ColorPickerProps, ColorPickerValue };
+export { ColorPicker };

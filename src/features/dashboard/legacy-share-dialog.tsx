@@ -192,7 +192,8 @@ async function requestLegacyShare(
     if (responseUrl.pathname === "/files") {
       const result = responseUrl.searchParams.get("file");
       if (result === "shared") return { recipientUsername: username };
-      if (result === "share-invalid") throw new Error("Enter a valid username.");
+      if (result === "share-invalid")
+        throw new Error("Enter a valid username.");
       if (result === "share-user-missing") throw new Error("User not found.");
       if (result === "share-self") {
         throw new Error("You cannot share an item with yourself.");

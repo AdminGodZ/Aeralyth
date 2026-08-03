@@ -1,10 +1,6 @@
 import { cn } from "@/lib/utils";
 
-export function FileEmptyIllustration({
-  className,
-}: {
-  className?: string;
-}) {
+export function FileEmptyIllustration({ className }: { className?: string }) {
   return (
     <svg
       viewBox="0 0 160 132"
@@ -66,20 +62,8 @@ export function FileEmptyIllustration({
         strokeWidth="2.5"
         className="drop-shadow-[0_14px_24px_rgb(0_0_0/0.18)]"
       />
-      <circle
-        cx="107"
-        cy="83"
-        r="12"
-        fill="var(--primary)"
-        opacity="0.12"
-      />
-      <circle
-        cx="107"
-        cy="83"
-        r="11"
-        stroke="var(--primary)"
-        strokeWidth="4"
-      />
+      <circle cx="107" cy="83" r="12" fill="var(--primary)" opacity="0.12" />
+      <circle cx="107" cy="83" r="11" stroke="var(--primary)" strokeWidth="4" />
       <path
         d="m115.5 91.5 11 11"
         stroke="var(--primary)"

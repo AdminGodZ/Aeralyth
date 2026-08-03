@@ -22,7 +22,7 @@ export function VaultMigrationControl({ csrfToken }: { csrfToken: string }) {
   const [migration, setMigration] = useState<VaultStatus["migration"] | null>(
     null,
   );
-  const [queued, setQueued] = useState(false);
+  const queuedRef = useRef(false);
   const [running, setRunning] = useState(false);
   const [currentName, setCurrentName] = useState<string | null>(null);
   const [progress, setProgress] = useState(0);
@@ -84,17 +84,17 @@ export function VaultMigrationControl({ csrfToken }: { csrfToken: string }) {
   }, []);
 
   useEffect(() => {
-    if (queued && vault.state === "unlocked") {
-      setQueued(false);
+    if (queuedRef.current && vault.state === "unlocked") {
+      queuedRef.current = false;
       void runMigration();
     }
-  }, [queued, runMigration, vault.state]);
+  }, [runMigration, vault.state]);
 
   useEffect(() => () => abortRef.current?.abort(), []);
 
   function start(): void {
     if (vault.state !== "unlocked") {
-      setQueued(true);
+      queuedRef.current = true;
       vault.requestUnlock();
       return;
     }

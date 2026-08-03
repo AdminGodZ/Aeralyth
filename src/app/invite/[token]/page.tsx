@@ -4,19 +4,10 @@ import Link from "next/link";
 
 import { AeralythLogo } from "@/components/aeralyth-logo";
 import { DottedSurface } from "@/components/dotted-surface";
-import {
-  Alert,
-  AlertDescription,
-  AlertTitle,
-} from "@/components/ui/alert";
+import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "@/components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { getInvitationState } from "@/lib/api";
@@ -27,6 +18,13 @@ export const metadata: Metadata = {
 };
 
 export const dynamic = "force-dynamic";
+
+const invitationDateFormatter = new Intl.DateTimeFormat("en", {
+  month: "short",
+  day: "numeric",
+  year: "numeric",
+  timeZone: "UTC",
+});
 
 type InvitationPageProps = {
   params: Promise<{
@@ -42,8 +40,10 @@ export default async function InvitationPage({
   searchParams,
 }: InvitationPageProps) {
   const { token } = await params;
-  const { error } = await searchParams;
-  const invitationState = await getInvitationState(token);
+  const [{ error }, invitationState] = await Promise.all([
+    searchParams,
+    getInvitationState(token),
+  ]);
 
   return (
     <main className="relative isolate flex min-h-dvh items-center justify-center overflow-hidden bg-background px-5 py-10 text-foreground">
@@ -155,9 +155,5 @@ function formatDate(value: string) {
     return value;
   }
 
-  return new Intl.DateTimeFormat("en", {
-    month: "short",
-    day: "numeric",
-    year: "numeric",
-  }).format(date);
+  return invitationDateFormatter.format(date);
 }

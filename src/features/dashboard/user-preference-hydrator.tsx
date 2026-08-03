@@ -1,12 +1,12 @@
 "use client";
 
-import { useEffect } from "react";
 import { useTheme } from "next-themes";
+import { useEffect } from "react";
 
 import {
   ACCENT_COLOR_STORAGE_KEY,
-  DEFAULT_ACCENT_COLOR,
   applyAccentColor,
+  DEFAULT_ACCENT_COLOR,
   normalizeAccentColor,
 } from "@/lib/accent-color";
 

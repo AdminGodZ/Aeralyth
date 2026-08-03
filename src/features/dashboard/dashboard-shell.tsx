@@ -3,11 +3,12 @@ import {
   FileText,
   Folder,
   HardDrive,
+  type LucideIcon,
   Search,
   Share2,
   Star,
-  type LucideIcon,
 } from "lucide-react";
+import Image from "next/image";
 import Link from "next/link";
 import type { CSSProperties, ReactNode } from "react";
 
@@ -15,32 +16,31 @@ import { AeralythLogo } from "@/components/aeralyth-logo";
 import { FileEmptyIllustration } from "@/components/file-empty-illustration";
 import { Button } from "@/components/ui/button";
 import {
-  getDashboardSection,
   type DashboardSection,
   type DashboardSectionKey,
+  getDashboardSection,
 } from "@/features/dashboard/config";
 import { DashboardSidebar } from "@/features/dashboard/dashboard-sidebar";
 import { ProfileSettingsForm } from "@/features/dashboard/profile-settings-form";
 import { UploadPanel } from "@/features/dashboard/upload-panel";
 import { UserPreferenceHydrator } from "@/features/dashboard/user-preference-hydrator";
 import { UsersContent as UsersDirectory } from "@/features/dashboard/users-content";
-import { VaultProvider } from "@/features/vault/vault-provider";
 import { VaultBreadcrumbs } from "@/features/vault/vault-breadcrumbs";
 import { VaultFileList } from "@/features/vault/vault-file-list";
-import type {
-  AdminUsersState,
-  CurrentUser,
-  FileSort,
-  FileSortDirection,
-  FolderBreadcrumb,
-  FilesState,
-  StorageStats,
-} from "@/lib/api";
+import { VaultProvider } from "@/features/vault/vault-provider";
 import {
   DEFAULT_ACCENT_COLOR,
   getAccentCssProperties,
   normalizeAccentColor,
 } from "@/lib/accent-color";
+import type {
+  AdminUsersState,
+  CurrentUser,
+  FileSort,
+  FileSortDirection,
+  FilesState,
+  FolderBreadcrumb,
+} from "@/lib/api";
 
 type DashboardFrameProps = {
   children: ReactNode;
@@ -71,9 +71,7 @@ export function DashboardFrame({
 }: DashboardFrameProps) {
   const accentColor =
     normalizeAccentColor(currentUser.accentColor) ?? DEFAULT_ACCENT_COLOR;
-  const dashboardStyle = getAccentCssProperties(
-    accentColor,
-  ) as CSSProperties;
+  const dashboardStyle = getAccentCssProperties(accentColor) as CSSProperties;
 
   return (
     <main
@@ -116,7 +114,8 @@ export function DashboardPage({
   fileSort,
   fileSortDirection,
 }: DashboardPageProps) {
-  const section = getDashboardSection(sectionKey) ?? getDashboardSection("files");
+  const section =
+    getDashboardSection(sectionKey) ?? getDashboardSection("files");
 
   if (!section) {
     return null;
@@ -205,9 +204,12 @@ function UserAvatar({ currentUser }: { currentUser: CurrentUser }) {
 
   if (currentUser.profileImageUrl) {
     return (
-      <img
+      <Image
         src={currentUser.profileImageUrl}
         alt=""
+        width={36}
+        height={36}
+        unoptimized
         className="size-full object-cover"
       />
     );
@@ -298,7 +300,6 @@ function DashboardContent({
   );
 }
 
-
 function SettingsContent({
   currentUser,
   csrfToken,
@@ -309,10 +310,7 @@ function SettingsContent({
   return (
     <div className="flex flex-1 flex-col overflow-auto px-4 sm:px-8">
       <div className="mx-auto w-full max-w-5xl">
-        <ProfileSettingsForm
-          currentUser={currentUser}
-          csrfToken={csrfToken}
-        />
+        <ProfileSettingsForm currentUser={currentUser} csrfToken={csrfToken} />
       </div>
     </div>
   );
@@ -432,7 +430,7 @@ function FileContent({
                 <Button asChild variant="outline">
                   <Link
                     href={{
-                      pathname: "/" + section.key,
+                      pathname: `/${section.key}`,
                       query: {
                         ...(section.key === "files" && currentFolderId
                           ? { folder: currentFolderId }
@@ -642,10 +640,7 @@ function getInitials(username: string) {
   return initials || "A";
 }
 
-function getSortQuery(
-  sort?: FileSort,
-  direction?: FileSortDirection,
-) {
+function getSortQuery(sort?: FileSort, direction?: FileSortDirection) {
   if (!sort) {
     return {};
   }
@@ -703,7 +698,9 @@ function emptyFilesText(sectionKey: DashboardSectionKey) {
   return "No files uploaded.";
 }
 
-function hasReadyFilesState(filesState: FilesState): filesState is ReadyFilesState {
+function hasReadyFilesState(
+  filesState: FilesState,
+): filesState is ReadyFilesState {
   if (filesState.status !== "ready") {
     return false;
   }

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://react.doctor/schema/config.json",
+  "ignore": {
+    "files": ["public/*.worker.js"],
+    "overrides": [
+      {
+        "files": ["src/features/dashboard/profile-settings-form.tsx"],
+        "rules": ["react-doctor/no-adjust-state-on-prop-change"]
+      },
+      {
+        "files": ["src/features/vault/vault-file-list.tsx"],
+        "rules": ["react-doctor/no-adjust-state-on-prop-change"]
+      }
+    ]
+  }
+}

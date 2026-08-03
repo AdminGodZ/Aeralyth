@@ -23,10 +23,7 @@ type LogoFacet = {
   to: LogoTone;
 };
 
-type AeralythLogoProps = Omit<
-  React.SVGProps<SVGSVGElement>,
-  "children"
-> & {
+type AeralythLogoProps = Omit<React.SVGProps<SVGSVGElement>, "children"> & {
   title?: string;
 };
 
@@ -263,7 +260,7 @@ export function AeralythLogo({
       className={cn("shrink-0", className)}
       {...props}
     >
-      {title ? <title id={titleId}>{title}</title> : null}
+      <title id={titleId}>{title ?? "Aeralyth"}</title>
       <defs>
         {logoFacets.map((facet) => {
           const gradientId = `${idPrefix}-${facet.id}`;

@@ -1265,9 +1265,7 @@ pub async fn share(
     let wants_json = request_wants_json(&request);
     if state.config.e2ee_mode.is_enabled() {
         if wants_json {
-            return Err(error::ErrorConflict(
-                "encrypt this item before sharing it",
-            ));
+            return Err(error::ErrorConflict("encrypt this item before sharing it"));
         }
         return Ok(redirect("/files?file=encrypted-share-required"));
     }
@@ -1355,9 +1353,7 @@ pub async fn share(
         .map_err(error::ErrorInternalServerError)?;
 
     if wants_json {
-        return Ok(HttpResponse::Ok().json(ShareResponse {
-            recipient_username,
-        }));
+        return Ok(HttpResponse::Ok().json(ShareResponse { recipient_username }));
     }
 
     Ok(redirect("/files?file=shared"))

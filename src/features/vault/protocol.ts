@@ -2,7 +2,6 @@ export const VAULT_FORMAT_VERSION = 1;
 export const VAULT_SUITE_ID = 1;
 export const VAULT_AAD_SCHEMA_ID = 1;
 export const VAULT_CRYPTO_CHUNK_BYTES = 4 * 1024 * 1024;
-export const VAULT_UPLOAD_PART_BYTES = 32 * 1024 * 1024;
 export const VAULT_MAX_CIPHERTEXT_BYTES = 2_415_919_104;
 
 export const ARGON2ID_PROFILE = Object.freeze({
@@ -463,18 +462,17 @@ export async function merkleRootFromLeaves(
   }
   let level: Uint8Array[] = leaves.map((leaf) => Uint8Array.from(leaf));
   while (level.length > 1) {
-    const next: Uint8Array[] = [];
-    for (let index = 0; index < level.length; index += 2) {
-      if (index + 1 === level.length) {
-        next.push(level[index]);
-      } else {
-        next.push(
-          await sha256(
-            concatBytes(Uint8Array.of(1), level[index], level[index + 1]),
-          ),
+    const next = await Promise.all(
+      Array.from({ length: Math.ceil(level.length / 2) }, (_, pairIndex) => {
+        const index = pairIndex * 2;
+        if (index + 1 === level.length) {
+          return level[index];
+        }
+        return sha256(
+          concatBytes(Uint8Array.of(1), level[index], level[index + 1]),
         );
-      }
-    }
+      }),
+    );
     level = next;
   }
   return level[0];

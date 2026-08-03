@@ -1,16 +1,9 @@
 {
   "CORSRules": [
     {
-      "AllowedOrigins": [
-        "http://localhost:3000",
-        "http://127.0.0.1:3000"
-      ],
+      "AllowedOrigins": ["http://localhost:3000", "http://127.0.0.1:3000"],
       "AllowedMethods": ["GET", "HEAD", "PUT"],
-      "AllowedHeaders": [
-        "content-type",
-        "range",
-        "x-amz-checksum-sha256"
-      ],
+      "AllowedHeaders": ["content-type", "range", "x-amz-checksum-sha256"],
       "ExposeHeaders": [
         "ETag",
         "Content-Length",

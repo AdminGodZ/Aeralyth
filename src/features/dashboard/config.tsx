@@ -1,3 +1,4 @@
+import type { LucideIcon } from "lucide-react";
 import {
   Clock,
   Folder,
@@ -8,7 +9,6 @@ import {
   Trash2,
   Users,
 } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
 
 export type DashboardSectionKey =
   | "files"

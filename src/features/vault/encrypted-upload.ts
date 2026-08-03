@@ -52,6 +52,8 @@ export async function uploadEncryptedSelections({
     if (parentId === undefined) {
       throw new Error("The selected folder hierarchy is invalid.");
     }
+    // Each folder must exist before its children can use the returned node ID.
+    // react-doctor-disable-next-line react-doctor/async-await-in-loop
     const result = await uploadEncryptedEntry({
       file: null,
       name: baseName(path),
@@ -73,6 +75,8 @@ export async function uploadEncryptedSelections({
     if (parentId === undefined) {
       throw new Error("The selected file hierarchy is invalid.");
     }
+    // Keep one encrypted multipart upload active to bound browser memory and I/O.
+    // react-doctor-disable-next-line react-doctor/async-await-in-loop
     await uploadEncryptedEntry({
       file: selection.file,
       name: baseName(path),

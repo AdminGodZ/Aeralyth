@@ -104,8 +104,16 @@ function normalizeArchivePath(value: string) {
   return value
     .replaceAll("\\", "/")
     .split("/")
-    .filter((segment) => segment && segment !== "." && segment !== "..")
-    .map((segment) => segment.replace(/[\u0000-\u001f\u007f]/g, "").trim())
-    .filter(Boolean)
+    .flatMap((segment) => {
+      if (!segment || segment === "." || segment === "..") return [];
+      const normalized = Array.from(segment)
+        .filter((character) => {
+          const code = character.charCodeAt(0);
+          return code > 31 && code !== 127;
+        })
+        .join("")
+        .trim();
+      return normalized ? [normalized] : [];
+    })
     .join("/");
 }

@@ -1,8 +1,7 @@
 import { cookies } from "next/headers";
 import type { ReactNode } from "react";
-
-import { DashboardFrame } from "@/features/dashboard/dashboard-shell";
 import { getDashboardSession } from "@/features/dashboard/dashboard-session";
+import { DashboardFrame } from "@/features/dashboard/dashboard-shell";
 
 export const dynamic = "force-dynamic";
 

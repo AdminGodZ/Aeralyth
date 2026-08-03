@@ -29,6 +29,8 @@ export function VaultBreadcrumbs({
       const resolved: Record<string, string> = {};
       for (const breadcrumb of breadcrumbs) {
         if (breadcrumb.e2eeState !== "encrypted") continue;
+        // Breadcrumbs are ordered parents first so each decrypted key seeds the next.
+        // react-doctor-disable-next-line react-doctor/async-await-in-loop
         const manifest = await vault.openNode(breadcrumb.id);
         resolved[breadcrumb.id] = manifest.name;
       }
