@@ -40,17 +40,22 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
   const username = resolvedSearchParams?.username;
   const authState = await getAuthState();
 
-  if (authState.status === "authenticated" && error !== "backend") {
+  if (authState.status === "authenticated") {
     redirect("/files");
   }
 
+  if (error === "backend" && authState.status !== "unavailable") {
+    redirect(
+      username ? `/login?username=${encodeURIComponent(username)}` : "/login",
+    );
+  }
+
   const invalidCredentials = error === "invalid";
-  const backendUnavailable =
-    authState.status === "unavailable" || error === "backend";
-  const loginAlertMessage = invalidCredentials
-    ? "Invalid username or password."
-    : backendUnavailable
-      ? "Backend unavailable. Start the Actix API and try again."
+  const backendUnavailable = authState.status === "unavailable";
+  const loginAlertMessage = backendUnavailable
+    ? "Backend unavailable. Start the Actix API and try again."
+    : invalidCredentials
+      ? "Invalid username or password."
       : null;
 
   return (
