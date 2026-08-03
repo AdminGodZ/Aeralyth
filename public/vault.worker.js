@@ -1,6 +1,10 @@
 var __getOwnPropNames = Object.getOwnPropertyNames;
 var __commonJS = (cb, mod2) => function __require() {
-  return mod2 || (0, cb[__getOwnPropNames(cb)[0]])((mod2 = { exports: {} }).exports, mod2), mod2.exports;
+  try {
+    return mod2 || (0, cb[__getOwnPropNames(cb)[0]])((mod2 = { exports: {} }).exports, mod2), mod2.exports;
+  } catch (e) {
+    throw mod2 = 0, e;
+  }
 };
 
 // (disabled):crypto
@@ -6578,6 +6582,7 @@ var Reader = class {
   constructor(input) {
     this.input = input;
   }
+  input;
   offset = 0;
   finish() {
     if (this.offset !== this.input.length) {
