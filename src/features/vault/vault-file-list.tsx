@@ -727,7 +727,6 @@ function VaultFileRow({
                 {!isFolder ? (
                   entry.e2eeState === "encrypted" ? (
                     <DropdownMenuItem
-                      className="text-primary focus:text-primary"
                       disabled={downloading || !entry.resolved}
                       onSelect={onDownload}
                     >
@@ -735,10 +734,7 @@ function VaultFileRow({
                       {downloading ? "Decrypting..." : "Download"}
                     </DropdownMenuItem>
                   ) : (
-                    <DropdownMenuItem
-                      asChild
-                      className="text-primary focus:text-primary"
-                    >
+                    <DropdownMenuItem asChild>
                       <a href={`/api/files/${entry.id}/download`}>
                         <Download className="size-4" aria-hidden="true" />
                         Download
@@ -761,10 +757,7 @@ function VaultFileRow({
                       )}
                       {sharingActionLabel(entry)}
                     </DropdownMenuItem>
-                    <DropdownMenuItem
-                      className="text-amber-600 focus:text-amber-700 dark:text-amber-400 dark:focus:text-amber-300"
-                      onSelect={onFavorite}
-                    >
+                    <DropdownMenuItem onSelect={onFavorite}>
                       <Star
                         className={
                           entry.favorite ? "size-4 fill-current" : "size-4"
