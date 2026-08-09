@@ -278,6 +278,12 @@ export type RepositoryDetailData = {
   entriesTruncated: boolean;
 };
 
+export type RepositoryArchiveManifest = {
+  repository: RepositorySummary;
+  entries: RepositoryEntry[];
+  totalBytes: number;
+};
+
 export type RepositoryDetailState =
   | { status: "ready"; data: RepositoryDetailData }
   | { status: "unauthorized" }

@@ -1,7 +1,14 @@
-export type FolderZipSource = {
-  file: File;
-  path: string;
-};
+export type FolderZipSource =
+  | {
+      directory?: false;
+      file: File;
+      path: string;
+    }
+  | {
+      directory: true;
+      lastModified: number;
+      path: string;
+    };
 
 export type FolderZipWorkerRequest =
   | {

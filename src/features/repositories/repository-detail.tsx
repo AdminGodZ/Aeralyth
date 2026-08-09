@@ -17,6 +17,7 @@ import Link from "next/link";
 import { useMemo } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { RepositoryCodeMenu } from "@/features/repositories/repository-code-menu";
 import { useResolvedVaultNames } from "@/features/repositories/use-resolved-vault-names";
 import type {
   RepositoryDetailData,
@@ -71,7 +72,7 @@ function ReadyRepositoryDetail({ data }: { data: RepositoryDetailData }) {
 
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto">
-      <div className="border-b bg-muted/20 px-4 pt-5 sm:px-6">
+      <div className="border-b px-4 pt-5 sm:px-6">
         <div className="mx-auto w-full max-w-7xl">
           <div className="flex flex-wrap items-center gap-2 pb-4">
             <BookMarked
@@ -122,10 +123,16 @@ function ReadyRepositoryDetail({ data }: { data: RepositoryDetailData }) {
                 )}
               </span>
             </div>
-            <span className="inline-flex items-center gap-2 text-sm text-muted-foreground">
-              <History className="size-4" aria-hidden="true" />
-              Imported {formatRepositoryDate(data.repository.createdAt)}
-            </span>
+            <div className="flex flex-wrap items-center gap-3 sm:justify-end">
+              <span className="inline-flex items-center gap-2 text-sm text-muted-foreground">
+                <History className="size-4" aria-hidden="true" />
+                Imported {formatRepositoryDate(data.repository.createdAt)}
+              </span>
+              <RepositoryCodeMenu
+                repository={data.repository}
+                repositoryName={repositoryName}
+              />
+            </div>
           </div>
 
           <section className="overflow-hidden rounded-md border">

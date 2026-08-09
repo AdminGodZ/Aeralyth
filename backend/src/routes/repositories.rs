@@ -6,6 +6,8 @@ use crate::auth::{AuthUser, require_csrf, require_user};
 use crate::state::AppState;
 
 const MAX_REPOSITORY_ENTRIES: i64 = 500;
+const MAX_REPOSITORY_ARCHIVE_ENTRIES: i64 = 50_000;
+const MAX_REPOSITORY_ARCHIVE_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -33,6 +35,14 @@ struct RepositoryDetailResponse {
     entries: Vec<RepositoryEntry>,
     summary: RepositoryTreeSummary,
     entries_truncated: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryArchiveManifestResponse {
+    repository: RepositorySummary,
+    entries: Vec<RepositoryEntry>,
+    total_bytes: i64,
 }
 
 #[derive(Serialize)]
@@ -292,22 +302,111 @@ pub async fn detail(
             .collect(),
         entries: entry_rows
             .into_iter()
-            .map(|row| RepositoryEntry {
-                id: row.get("id"),
-                name: row.get("original_name"),
-                mime_type: row.get("mime_type"),
-                entry_type: row.get("entry_type"),
-                parent_id: row.get("parent_id"),
-                size_bytes: row.get("size_bytes"),
-                e2ee_state: row.get("e2ee_state"),
-                updated_at: row.get("updated_at"),
-            })
+            .map(repository_entry_from_row)
             .collect(),
         summary: RepositoryTreeSummary {
             total_files: summary_row.get("total_files"),
             total_folders: summary_row.get("total_folders"),
         },
         entries_truncated,
+    }))
+}
+
+pub async fn archive_manifest(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    path: web::Path<String>,
+) -> Result<HttpResponse> {
+    let owner = require_user(&state, &request).await?;
+    let repository_id = path.into_inner();
+    let Some(repository) = get_repository_summary(&state, &owner, &repository_id).await? else {
+        return Ok(HttpResponse::NotFound().finish());
+    };
+    let root_folder_id = repository.root.id.clone();
+    let rows = state
+        .db
+        .query(
+            "
+                WITH RECURSIVE tree AS (
+                  SELECT
+                    id,
+                    original_name,
+                    mime_type,
+                    entry_type,
+                    parent_id,
+                    size_bytes,
+                    e2ee_state,
+                    updated_at,
+                    0::integer AS depth
+                  FROM files
+                  WHERE id = $1
+                    AND owner_id = $2
+                    AND entry_type = 'folder'
+                    AND state = 'active'
+
+                  UNION ALL
+
+                  SELECT
+                    child.id,
+                    child.original_name,
+                    child.mime_type,
+                    child.entry_type,
+                    child.parent_id,
+                    child.size_bytes,
+                    child.e2ee_state,
+                    child.updated_at,
+                    tree.depth + 1
+                  FROM files AS child
+                  INNER JOIN tree ON child.parent_id = tree.id
+                  WHERE child.owner_id = $2
+                    AND child.state = 'active'
+                    AND tree.depth < 100
+                )
+                SELECT
+                  id,
+                  original_name,
+                  mime_type,
+                  entry_type,
+                  parent_id,
+                  size_bytes,
+                  e2ee_state,
+                  to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at
+                FROM tree
+                WHERE id <> $1
+                ORDER BY depth,
+                         CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END,
+                         lower(original_name),
+                         id
+                LIMIT $3
+            ",
+            &[
+                &root_folder_id,
+                &owner.id,
+                &(MAX_REPOSITORY_ARCHIVE_ENTRIES + 1),
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    if rows.len() > MAX_REPOSITORY_ARCHIVE_ENTRIES as usize {
+        return Ok(HttpResponse::PayloadTooLarge()
+            .body("This repository has too many entries to download as one ZIP archive."));
+    }
+
+    let total_bytes = rows
+        .iter()
+        .filter(|row| row.get::<_, String>("entry_type") == "file")
+        .map(|row| row.get::<_, i64>("size_bytes").max(0))
+        .fold(0_i64, i64::saturating_add);
+    if total_bytes > MAX_REPOSITORY_ARCHIVE_BYTES {
+        return Ok(HttpResponse::PayloadTooLarge()
+            .body("This repository is larger than the 2 GB ZIP download limit."));
+    }
+
+    Ok(HttpResponse::Ok().json(RepositoryArchiveManifestResponse {
+        repository,
+        entries: rows.into_iter().map(repository_entry_from_row).collect(),
+        total_bytes,
     }))
 }
 
@@ -394,6 +493,19 @@ fn repository_summary_from_row(row: Row) -> RepositorySummary {
             updated_at: row.get("root_updated_at"),
         },
         created_at: row.get("created_at"),
+        updated_at: row.get("updated_at"),
+    }
+}
+
+fn repository_entry_from_row(row: Row) -> RepositoryEntry {
+    RepositoryEntry {
+        id: row.get("id"),
+        name: row.get("original_name"),
+        mime_type: row.get("mime_type"),
+        entry_type: row.get("entry_type"),
+        parent_id: row.get("parent_id"),
+        size_bytes: row.get("size_bytes"),
+        e2ee_state: row.get("e2ee_state"),
         updated_at: row.get("updated_at"),
     }
 }

@@ -32,7 +32,7 @@ async function createArchive(
   const controller = new AbortController();
   activeController = controller;
   const totalBytes = sources.reduce(
-    (total, source) => total + source.file.size,
+    (total, source) => total + (source.directory ? 0 : source.file.size),
     0,
   );
   let completedBytes = 0;
@@ -49,6 +49,22 @@ async function createArchive(
       const path = normalizeArchivePath(source.path);
 
       if (!path) {
+        continue;
+      }
+
+      if (source.directory) {
+        const directoryPath = path.endsWith("/") ? path : `${path}/`;
+        await zipWriter.add(directoryPath, undefined, {
+          directory: true,
+          lastModDate: new Date(source.lastModified),
+          signal: controller.signal,
+        });
+        workerScope.postMessage({
+          type: "progress",
+          processedBytes: completedBytes,
+          totalBytes,
+          currentPath: directoryPath,
+        });
         continue;
       }
 
