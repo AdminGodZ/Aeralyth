@@ -16,7 +16,6 @@
     "worker:build": "npm run worker:zip && npm run worker:vault",
     "worker:zip": "esbuild src/features/dashboard/folder-zip.worker.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=public/folder-zip.worker.js",
     "worker:vault": "esbuild src/features/vault/vault.worker.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=public/vault.worker.js",
-    "postinstall": "npm rebuild typescript-7",
     "start": "next start",
     "lint": "biome check",
     "test": "vitest run",
@@ -55,8 +54,7 @@
     "@types/react-dom": "^19",
     "esbuild": "^0.28.1",
     "tailwindcss": "^4",
-    "typescript": "npm:@typescript/typescript6@^6.0.2",
-    "typescript-7": "npm:typescript@^7.0.2",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.10"
   }
 }
