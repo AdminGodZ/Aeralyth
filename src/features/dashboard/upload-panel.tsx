@@ -2,9 +2,11 @@
 
 import {
   ChevronDown,
+  CircleAlert,
   FileArchive,
   FileUp,
   Folder,
+  FolderGit2,
   FolderUp,
   LoaderCircle,
   UploadCloud,
@@ -30,6 +32,16 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { Progress } from "@/components/ui/progress";
 import type { FolderZipWorkerResponse } from "@/features/dashboard/folder-zip-messages";
+import { filterGitIgnoredSelections } from "@/features/dashboard/gitignore-filter";
+import {
+  UploadProgressPanel,
+  type UploadProgressSession,
+} from "@/features/dashboard/upload-progress-panel";
+import {
+  detectProjectFolder,
+  getSelectionRootName,
+  type ProjectDetection,
+} from "@/features/repositories/project-detection";
 import { uploadEncryptedSelections } from "@/features/vault/encrypted-upload";
 import { useVault } from "@/features/vault/vault-provider";
 
@@ -42,6 +54,20 @@ type PendingFolderUpload = {
   files: UploadSelection[];
   archiveName: string;
   totalBytes: number;
+  ignoredFiles: number;
+};
+
+type PendingProjectUpload = {
+  files: UploadSelection[];
+  folderName: string;
+  detection: ProjectDetection;
+  ignoredFiles: number;
+};
+
+type QueuedUpload = {
+  files: UploadSelection[];
+  createRepository: boolean;
+  ignoredFiles: number;
 };
 
 type CompressionProgress = {
@@ -50,8 +76,11 @@ type CompressionProgress = {
   currentPath: string;
 };
 
+type UploadActivity = "idle" | "preparing" | "uploading" | "compressing";
+
 type UploadPlan = {
   uploadId: string;
+  rootFolderId: string | null;
   mode: "local" | "single" | "multipart";
   uploadUrl: string | null;
   existingParts: Array<{
@@ -95,11 +124,17 @@ type UploadPanelProps = {
   e2eeMode: "off" | "migrate" | "required";
   folderZipPromptEnabled: boolean;
   parentFolderId?: string | null;
+  surface?: "files" | "repositories" | "shared";
+};
+
+type CreatedRepository = {
+  id: string;
 };
 
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_SELECTION_FILES = 1000;
 const MULTIPART_CONCURRENCY = 4;
+const LOCAL_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 const UPLOAD_RETRY_COUNT = 3;
 const UPLOAD_FINALIZATION_TIMEOUT_MS = 45_000;
 
@@ -115,6 +150,7 @@ function useUploadPanelController({
   e2eeMode,
   folderZipPromptEnabled,
   parentFolderId,
+  surface = "shared",
 }: UploadPanelProps) {
   const router = useRouter();
   const vault = useVault();
@@ -123,13 +159,16 @@ function useUploadPanelController({
   const zipWorkerRef = useRef<Worker | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
   const activeUploadRequests = useStableSet<XMLHttpRequest>();
-  const queuedVaultSelectionRef = useRef<UploadSelection[] | null>(null);
-  const [selectedFileCount, setSelectedFileCount] = useState(0);
+  const queuedVaultSelectionRef = useRef<QueuedUpload | null>(null);
+  const [isPreparingSelection, setIsPreparingSelection] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
-  const [uploadProgress, setUploadProgress] = useState<number | null>(null);
+  const [uploadSession, setUploadSession] =
+    useState<UploadProgressSession | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [pendingFolderUpload, setPendingFolderUpload] =
     useState<PendingFolderUpload | null>(null);
+  const [pendingProjectUpload, setPendingProjectUpload] =
+    useState<PendingProjectUpload | null>(null);
   const [isCompressing, setIsCompressing] = useState(false);
   const [compressionError, setCompressionError] = useState<string | null>(null);
   const [compressionProgress, setCompressionProgress] =
@@ -138,7 +177,14 @@ function useUploadPanelController({
       totalBytes: 0,
       currentPath: "",
     });
-  const isBusy = isUploading || isCompressing;
+  const activity: UploadActivity = isPreparingSelection
+    ? "preparing"
+    : isUploading
+      ? "uploading"
+      : isCompressing
+        ? "compressing"
+        : "idle";
+  const isBusy = activity !== "idle";
   const requestAuthHeaders: Record<string, string> = shareToken
     ? { "X-Aeralyth-Share-Token": shareToken }
     : csrfToken
@@ -156,8 +202,8 @@ function useUploadPanelController({
     };
   }, [activeUploadRequests]);
 
-  const submitQueuedFiles = useEffectEvent((files: UploadSelection[]) => {
-    submitFiles(files);
+  const submitQueuedFiles = useEffectEvent((queued: QueuedUpload) => {
+    submitFiles(queued.files, queued.createRepository, queued.ignoredFiles);
   });
 
   useEffect(() => {
@@ -169,7 +215,11 @@ function useUploadPanelController({
     submitQueuedFiles(queued);
   }, [e2eeMode, vault.state]);
 
-  function submitFiles(files: UploadSelection[]) {
+  function submitFiles(
+    files: UploadSelection[],
+    createRepository = false,
+    ignoredFiles = 0,
+  ) {
     if (files.length === 0 || isUploading) {
       return;
     }
@@ -187,36 +237,84 @@ function useUploadPanelController({
     }
 
     if (e2eeMode !== "off" && vault.state !== "unlocked") {
-      queuedVaultSelectionRef.current = files;
+      queuedVaultSelectionRef.current = {
+        files,
+        createRepository,
+        ignoredFiles,
+      };
       vault.requestUnlock();
       return;
     }
 
-    setSelectedFileCount(files.length);
     setUploadError(null);
     setIsUploading(true);
-    setUploadProgress(0);
-    void uploadSelections(files);
+    setUploadSession(createUploadProgressSession(files, ignoredFiles));
+    void uploadSelections(files, createRepository);
   }
 
-  async function uploadSelections(files: UploadSelection[]) {
+  async function uploadSelections(
+    files: UploadSelection[],
+    createRepository: boolean,
+  ) {
     const controller = new AbortController();
     uploadAbortRef.current = controller;
-    const totalBytes = files.reduce(
-      (total, selection) => total + selection.file.size,
-      0,
-    );
     const uploadedByPart = new Map<string, number>();
-    const reportProgress = (key: string, loaded: number) => {
-      uploadedByPart.set(key, loaded);
-      const uploadedBytes = Array.from(uploadedByPart.values()).reduce(
-        (total, value) => total + value,
-        0,
+    const uploadedByFile = new Map<number, number>();
+    let uploadedBytes = 0;
+    let activeFileIndex: number | null = null;
+
+    const startFile = (fileIndex: number) => {
+      activeFileIndex = fileIndex;
+      setUploadSession((current) =>
+        current?.status === "uploading"
+          ? {
+              ...current,
+              activeFileIndex: fileIndex,
+              activeFileUploadedBytes: uploadedByFile.get(fileIndex) ?? 0,
+              updatedAt: Date.now(),
+            }
+          : current,
       );
-      setUploadProgress(
-        totalBytes === 0
-          ? 100
-          : Math.min(100, (uploadedBytes / totalBytes) * 100),
+    };
+    const reportProgress = (fileIndex: number, key: string, loaded: number) => {
+      const previousPartBytes = uploadedByPart.get(key) ?? 0;
+      const delta = Math.max(0, loaded - previousPartBytes);
+      uploadedByPart.set(key, loaded);
+      uploadedBytes += delta;
+      const fileBytes = (uploadedByFile.get(fileIndex) ?? 0) + delta;
+      uploadedByFile.set(fileIndex, fileBytes);
+      setUploadSession((current) =>
+        current?.status === "uploading"
+          ? {
+              ...current,
+              uploadedBytes: Math.min(current.totalBytes, uploadedBytes),
+              activeFileIndex: fileIndex,
+              activeFileUploadedBytes: Math.min(
+                current.items[fileIndex]?.sizeBytes ?? fileBytes,
+                fileBytes,
+              ),
+              updatedAt: Date.now(),
+            }
+          : current,
+      );
+    };
+    const completeFile = (fileIndex: number) => {
+      const fileSize = files[fileIndex]?.file.size ?? 0;
+      const recordedBytes = uploadedByFile.get(fileIndex) ?? 0;
+      uploadedBytes += Math.max(0, fileSize - recordedBytes);
+      uploadedByFile.set(fileIndex, fileSize);
+      activeFileIndex = null;
+      setUploadSession((current) =>
+        current?.status === "uploading"
+          ? {
+              ...current,
+              uploadedBytes: Math.min(current.totalBytes, uploadedBytes),
+              completedFiles: Math.max(current.completedFiles, fileIndex + 1),
+              activeFileIndex: null,
+              activeFileUploadedBytes: 0,
+              updatedAt: Date.now(),
+            }
+          : current,
       );
     };
 
@@ -231,56 +329,79 @@ function useUploadPanelController({
         if (parentFolderId) {
           await vault.openNode(parentFolderId);
         }
-        await uploadEncryptedSelections({
+        const encryptedUpload = await uploadEncryptedSelections({
           selections: files,
           parentFolderId: parentFolderId ?? null,
           csrfToken,
           client: vault.client,
           signal: controller.signal,
-          onProgress: (processedBytes, encryptedTotalBytes) => {
-            setUploadProgress(
-              encryptedTotalBytes === 0
-                ? 100
-                : Math.min(100, (processedBytes / encryptedTotalBytes) * 100),
+          onFileStart: startFile,
+          onFileComplete: completeFile,
+          onProgress: (
+            processedBytes,
+            encryptedTotalBytes,
+            fileIndex,
+            fileProcessedBytes,
+          ) => {
+            uploadedBytes = processedBytes;
+            uploadedByFile.set(fileIndex, fileProcessedBytes);
+            setUploadSession((current) =>
+              current?.status === "uploading"
+                ? {
+                    ...current,
+                    totalBytes: encryptedTotalBytes,
+                    uploadedBytes: Math.min(
+                      encryptedTotalBytes,
+                      processedBytes,
+                    ),
+                    activeFileIndex: fileIndex,
+                    activeFileUploadedBytes: fileProcessedBytes,
+                    updatedAt: Date.now(),
+                  }
+                : current,
             );
           },
         });
-        setUploadProgress(100);
-        setIsUploading(false);
-        setSelectedFileCount(0);
-        uploadAbortRef.current = null;
-        router.refresh();
+        await finishSuccessfulUpload(
+          encryptedUpload.rootFolderId,
+          createRepository,
+          controller.signal,
+        );
         return;
       }
 
+      let rootFolderId: string | null = null;
       for (const [fileIndex, selection] of files.entries()) {
         if (controller.signal.aborted) {
           throw new DOMException("Upload canceled", "AbortError");
         }
 
+        startFile(fileIndex);
+
         // Legacy uploads are deliberately serialized so per-file multipart
         // concurrency cannot multiply memory and network pressure.
         // react-doctor-disable-next-line react-doctor/async-await-in-loop
-        await uploadSelection(
+        const uploadedRootFolderId = await uploadSelection(
           selection,
           fileIndex,
           controller.signal,
-          reportProgress,
+          (key, loaded) => reportProgress(fileIndex, key, loaded),
         );
+        rootFolderId ??= uploadedRootFolderId;
+        completeFile(fileIndex);
       }
 
-      setUploadProgress(100);
-      setIsUploading(false);
-      setSelectedFileCount(0);
-      uploadAbortRef.current = null;
-      router.refresh();
+      await finishSuccessfulUpload(
+        rootFolderId,
+        createRepository,
+        controller.signal,
+      );
     } catch (uploadFailure) {
       uploadAbortRef.current = null;
 
       if (controller.signal.aborted || isAbortError(uploadFailure)) {
         setIsUploading(false);
-        setUploadProgress(null);
-        setSelectedFileCount(0);
+        setUploadSession(null);
         return;
       }
 
@@ -288,7 +409,48 @@ function useUploadPanelController({
         uploadFailure instanceof Error && uploadFailure.message
           ? uploadFailure.message
           : "Upload failed. Check the backend and try again.",
+        activeFileIndex,
       );
+    }
+  }
+
+  async function finishSuccessfulUpload(
+    rootFolderId: string | null,
+    createRepository: boolean,
+    signal: AbortSignal,
+  ) {
+    let repositoryId: string | null = null;
+    if (createRepository) {
+      if (!csrfToken) {
+        throw new Error("The repository session is unavailable.");
+      }
+      if (!rootFolderId) {
+        throw new Error(
+          "The folder was uploaded, but its repository root could not be identified.",
+        );
+      }
+      const repository = await requestJson<CreatedRepository>(
+        "/api/repositories",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-CSRF-Token": csrfToken,
+          },
+          body: JSON.stringify({ rootFolderId }),
+          signal,
+        },
+      );
+      repositoryId = repository.id;
+    }
+
+    setIsUploading(false);
+    setUploadSession(null);
+    uploadAbortRef.current = null;
+    if (repositoryId) {
+      router.push(`/repositories/${encodeURIComponent(repositoryId)}`);
+    } else {
+      router.refresh();
     }
   }
 
@@ -431,20 +593,34 @@ function useUploadPanelController({
           );
         }
 
-        await putBlobWithRetry(
-          uploadUrl,
-          selection.file,
-          {
-            "Content-Type": plan.contentType,
-            ...(checksumSha256
-              ? { "x-amz-checksum-sha256": checksumSha256 }
-              : {}),
-            ...(plan.mode === "local" ? requestAuthHeaders : {}),
-          },
-          signal,
-          activeUploadRequests,
-          (loaded) => reportProgress(`${fileIndex}:single`, loaded),
-        );
+        if (plan.mode === "local") {
+          await putLocalBlobWithRetry(
+            uploadUrl,
+            selection.file,
+            {
+              "Content-Type": plan.contentType,
+              ...requestAuthHeaders,
+            },
+            signal,
+            activeUploadRequests,
+            (chunkIndex, loaded) =>
+              reportProgress(`${fileIndex}:local:${chunkIndex}`, loaded),
+          );
+        } else {
+          await putBlobWithRetry(
+            uploadUrl,
+            selection.file,
+            {
+              "Content-Type": plan.contentType,
+              ...(checksumSha256
+                ? { "x-amz-checksum-sha256": checksumSha256 }
+                : {}),
+            },
+            signal,
+            activeUploadRequests,
+            (loaded) => reportProgress(`${fileIndex}:single`, loaded),
+          );
+        }
       }
 
       completionStarted = true;
@@ -463,27 +639,96 @@ function useUploadPanelController({
       }
       throw error;
     }
+
+    return plan.rootFolderId;
   }
 
-  function finishUploadWithError(message: string) {
+  function finishUploadWithError(
+    message: string,
+    activeFileIndex: number | null,
+  ) {
     setIsUploading(false);
-    setUploadProgress(null);
-    setSelectedFileCount(0);
-    setUploadError(message);
+    setUploadSession((current) =>
+      current
+        ? {
+            ...current,
+            activeFileIndex,
+            activeFileUploadedBytes:
+              activeFileIndex === null ? 0 : current.activeFileUploadedBytes,
+            status: "failed",
+            error: message,
+            updatedAt: Date.now(),
+          }
+        : current,
+    );
   }
 
-  function handleSelection(files: UploadSelection[]) {
+  async function handleSelection(files: UploadSelection[]) {
     if (files.length === 0 || isBusy) {
       return;
     }
 
     setUploadError(null);
 
-    if (replacementFileId && isFolderSelection(files)) {
+    const folderSelection = isFolderSelection(files);
+    if (replacementFileId && folderSelection) {
       setUploadError("Choose one file, not a folder, for this replacement.");
       return;
     }
 
+    let uploadFiles = files;
+    let ignoredFiles = 0;
+    if (folderSelection) {
+      setIsPreparingSelection(true);
+      try {
+        uploadFiles = await filterGitIgnoredSelections(files);
+      } catch (error) {
+        setIsPreparingSelection(false);
+        setUploadError(
+          error instanceof Error && error.message
+            ? error.message
+            : "The .gitignore rules could not be applied.",
+        );
+        return;
+      }
+      setIsPreparingSelection(false);
+      ignoredFiles = files.length - uploadFiles.length;
+
+      if (uploadFiles.length === 0) {
+        setUploadError(
+          "Every file in this folder is excluded by its .gitignore rules or Git metadata filtering.",
+        );
+        return;
+      }
+    }
+
+    if (surface === "repositories") {
+      if (!folderSelection) {
+        setUploadError("Choose a project folder to create a repository.");
+        return;
+      }
+      submitFiles(uploadFiles, true, ignoredFiles);
+      return;
+    }
+
+    if (surface === "files" && !shareToken && folderSelection) {
+      const relativePaths = uploadFiles.map(({ relativePath }) => relativePath);
+      const detection = detectProjectFolder(relativePaths);
+      if (detection.detected) {
+        setPendingProjectUpload({
+          files: uploadFiles,
+          folderName: getSelectionRootName(relativePaths),
+          detection,
+          ignoredFiles,
+        });
+        return;
+      }
+    }
+
+    queueFolderOrUpload(uploadFiles, ignoredFiles);
+  }
+
+  function queueFolderOrUpload(files: UploadSelection[], ignoredFiles = 0) {
     if (folderZipPromptEnabled && isFolderSelection(files)) {
       setCompressionError(null);
       setPendingFolderUpload({
@@ -493,11 +738,34 @@ function useUploadPanelController({
           (total, selection) => total + selection.file.size,
           0,
         ),
+        ignoredFiles,
       });
       return;
     }
 
-    submitFiles(files);
+    submitFiles(files, false, ignoredFiles);
+  }
+
+  function createDetectedRepository() {
+    if (!pendingProjectUpload) {
+      return;
+    }
+
+    const files = pendingProjectUpload.files;
+    const ignoredFiles = pendingProjectUpload.ignoredFiles;
+    setPendingProjectUpload(null);
+    submitFiles(files, true, ignoredFiles);
+  }
+
+  function keepDetectedProjectInFiles() {
+    if (!pendingProjectUpload) {
+      return;
+    }
+
+    const files = pendingProjectUpload.files;
+    const ignoredFiles = pendingProjectUpload.ignoredFiles;
+    setPendingProjectUpload(null);
+    queueFolderOrUpload(files, ignoredFiles);
   }
 
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
@@ -506,8 +774,8 @@ function useUploadPanelController({
       relativePath: getBrowserRelativePath(file),
     }));
 
-    handleSelection(files);
     event.currentTarget.value = "";
+    void handleSelection(files);
   }
 
   function startFolderCompression() {
@@ -579,12 +847,16 @@ function useUploadPanelController({
             },
           );
           setPendingFolderUpload(null);
-          submitFiles([
-            {
-              file: archiveFile,
-              relativePath: archiveFile.name,
-            },
-          ]);
+          submitFiles(
+            [
+              {
+                file: archiveFile,
+                relativePath: archiveFile.name,
+              },
+            ],
+            false,
+            pendingFolderUpload.ignoredFiles,
+          );
           return;
         }
 
@@ -626,8 +898,9 @@ function useUploadPanelController({
     }
 
     const files = pendingFolderUpload.files;
+    const ignoredFiles = pendingFolderUpload.ignoredFiles;
     setPendingFolderUpload(null);
-    submitFiles(files);
+    submitFiles(files, false, ignoredFiles);
   }
 
   function cancelCompression() {
@@ -648,92 +921,84 @@ function useUploadPanelController({
 
   return {
     uploadError,
-    isUploading,
-    selectedFileCount,
-    uploadProgress,
-    isBusy,
+    activity,
+    uploadSession,
     fileInputRef,
     folderInputRef,
     handleFileChange,
     pendingFolderUpload,
-    isCompressing,
+    pendingProjectUpload,
     compressionError,
     compressionProgress,
     closePendingFolderUpload: () => setPendingFolderUpload(null),
+    closePendingProjectUpload: () => setPendingProjectUpload(null),
+    createDetectedRepository,
+    keepDetectedProjectInFiles,
     uploadPendingFolder,
     startFolderCompression,
     cancelCompression,
     cancelUpload,
+    dismissUploadSession: () => setUploadSession(null),
     replacementFileId,
+    surface,
   };
 }
 
 function UploadPanelView({
   uploadError,
-  isUploading,
-  selectedFileCount,
-  uploadProgress,
-  isBusy,
+  activity,
+  uploadSession,
   fileInputRef,
   folderInputRef,
   handleFileChange,
   pendingFolderUpload,
-  isCompressing,
+  pendingProjectUpload,
   compressionError,
   compressionProgress,
   closePendingFolderUpload,
+  closePendingProjectUpload,
+  createDetectedRepository,
+  keepDetectedProjectInFiles,
   uploadPendingFolder,
   startFolderCompression,
   cancelCompression,
   cancelUpload,
+  dismissUploadSession,
   replacementFileId,
+  surface,
 }: ReturnType<typeof useUploadPanelController>) {
+  const isBusy = activity !== "idle";
+  const isCompressing = activity === "compressing";
+
   return (
     <div className="flex min-w-0 flex-col items-end gap-2 sm:flex-row sm:items-center">
       {uploadError ? (
-        <p
+        <div
           role="alert"
-          className="max-w-64 truncate text-xs text-destructive"
-          title={uploadError}
+          className="flex max-w-sm items-start gap-2 rounded-lg border border-destructive/30 bg-destructive/5 px-3 py-2 text-xs text-destructive"
         >
-          {uploadError}
-        </p>
-      ) : null}
-
-      {isUploading ? (
-        <div className="flex min-w-52 items-center gap-3">
-          <LoaderCircle
-            className="size-4 shrink-0 animate-spin text-primary"
+          <CircleAlert
+            className="mt-0.5 size-3.5 shrink-0"
             aria-hidden="true"
           />
-          <div className="min-w-0 flex-1">
-            <div className="mb-1 flex items-center justify-between gap-3 text-xs">
-              <span className="truncate">
-                {formatUploadCount(selectedFileCount)}
-              </span>
-              <span className="shrink-0 tabular-nums text-muted-foreground">
-                {uploadProgress === null
-                  ? "Preparing"
-                  : `${String(Math.round(uploadProgress))}%`}
-              </span>
-            </div>
-            <Progress
-              value={uploadProgress ?? 0}
-              aria-label="Upload progress"
-            />
-          </div>
-          <Button
-            type="button"
-            variant="secondary"
-            size="icon-sm"
-            className="rounded-md"
-            onClick={cancelUpload}
-            aria-label="Cancel upload"
-            title="Cancel upload"
-          >
-            <X className="size-4" aria-hidden="true" />
-          </Button>
+          <span className="leading-4">{uploadError}</span>
         </div>
+      ) : null}
+
+      {activity === "preparing" ? (
+        <div className="flex min-h-9 items-center gap-2 text-sm text-muted-foreground">
+          <LoaderCircle
+            className="size-4 animate-spin text-primary"
+            aria-hidden="true"
+          />
+          <span role="status">Applying .gitignore</span>
+        </div>
+      ) : uploadSession ? (
+        <UploadProgressPanel
+          session={uploadSession}
+          onCancel={cancelUpload}
+          onDismiss={dismissUploadSession}
+        />
       ) : replacementFileId ? (
         <Button
           type="button"
@@ -743,6 +1008,16 @@ function UploadPanelView({
         >
           <FileUp className="size-4" aria-hidden="true" />
           Replace file
+        </Button>
+      ) : surface === "repositories" ? (
+        <Button
+          type="button"
+          disabled={isBusy}
+          className="rounded-full"
+          onClick={() => folderInputRef.current?.click()}
+        >
+          <FolderGit2 className="size-4" aria-hidden="true" />
+          Add repository
         </Button>
       ) : (
         <DropdownMenu>
@@ -766,25 +1041,31 @@ function UploadPanelView({
         </DropdownMenu>
       )}
 
-      <input
-        ref={fileInputRef}
-        type="file"
-        aria-label={
-          replacementFileId
-            ? "Choose replacement file"
-            : "Choose files to upload"
-        }
-        multiple={!replacementFileId}
-        disabled={isBusy}
-        className="sr-only"
-        tabIndex={-1}
-        onChange={handleFileChange}
-      />
+      {surface === "repositories" ? null : (
+        <input
+          ref={fileInputRef}
+          type="file"
+          aria-label={
+            replacementFileId
+              ? "Choose replacement file"
+              : "Choose files to upload"
+          }
+          multiple={!replacementFileId}
+          disabled={isBusy}
+          className="sr-only"
+          tabIndex={-1}
+          onChange={handleFileChange}
+        />
+      )}
       {replacementFileId ? null : (
         <input
           ref={folderInputRef}
           type="file"
-          aria-label="Choose a folder to upload"
+          aria-label={
+            surface === "repositories"
+              ? "Choose a project folder to import"
+              : "Choose a folder to upload"
+          }
           multiple
           disabled={isBusy}
           className="sr-only"
@@ -796,6 +1077,15 @@ function UploadPanelView({
           } as React.InputHTMLAttributes<HTMLInputElement>)}
         />
       )}
+
+      {pendingProjectUpload ? (
+        <ProjectFolderDecisionDialog
+          pendingUpload={pendingProjectUpload}
+          onClose={closePendingProjectUpload}
+          onCreateRepository={createDetectedRepository}
+          onKeepInFiles={keepDetectedProjectInFiles}
+        />
+      ) : null}
 
       {pendingFolderUpload ? (
         <FolderUploadDecisionDialog
@@ -810,6 +1100,113 @@ function UploadPanelView({
         />
       ) : null}
     </div>
+  );
+}
+
+function ProjectFolderDecisionDialog({
+  pendingUpload,
+  onClose,
+  onCreateRepository,
+  onKeepInFiles,
+}: {
+  pendingUpload: PendingProjectUpload;
+  onClose: () => void;
+  onCreateRepository: () => void;
+  onKeepInFiles: () => void;
+}) {
+  const projectLabel = pendingUpload.detection.projectType
+    ? `${pendingUpload.detection.projectType} project`
+    : "software project";
+
+  return (
+    <Dialog
+      open
+      onOpenChange={(open) => {
+        if (!open) {
+          onClose();
+        }
+      }}
+    >
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>This folder looks like a project</DialogTitle>
+          <DialogDescription>
+            Aeralyth detected a {projectLabel}. Choose whether to add it as a
+            repository or keep it in regular file storage.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="flex items-start gap-3 rounded-md border bg-muted/25 p-3">
+          <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
+            <FolderGit2 className="size-5" aria-hidden="true" />
+          </span>
+          <div className="min-w-0">
+            <p className="truncate text-sm font-semibold">
+              {pendingUpload.folderName}
+            </p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Detected from {formatDetectionSignals(pendingUpload.detection)}
+            </p>
+            {pendingUpload.ignoredFiles > 0 ? (
+              <p className="mt-1 text-xs text-muted-foreground">
+                {formatIgnoredFiles(pendingUpload.ignoredFiles)} will stay on
+                this device
+              </p>
+            ) : null}
+          </div>
+        </div>
+
+        <div className="grid gap-3 sm:grid-cols-2">
+          <Button
+            type="button"
+            variant="secondary"
+            size="lg"
+            className="h-auto min-h-20 justify-start gap-3 rounded-md border border-primary/70 px-4 py-3 text-left whitespace-normal hover:border-primary"
+            onClick={onCreateRepository}
+          >
+            <FolderGit2
+              className="size-5 shrink-0 text-primary"
+              aria-hidden="true"
+            />
+            <span className="min-w-0">
+              <span className="block font-semibold">Create repository</span>
+              <span className="mt-0.5 block text-xs font-normal leading-4 text-muted-foreground">
+                Upload the folder and open its repository view
+              </span>
+            </span>
+          </Button>
+          <Button
+            type="button"
+            variant="secondary"
+            size="lg"
+            className="h-auto min-h-20 justify-start gap-3 rounded-md border border-transparent px-4 py-3 text-left whitespace-normal"
+            onClick={onKeepInFiles}
+          >
+            <FolderUp
+              className="size-5 shrink-0 text-primary"
+              aria-hidden="true"
+            />
+            <span className="min-w-0">
+              <span className="block font-semibold">Keep in Files</span>
+              <span className="mt-0.5 block text-xs font-normal leading-4 text-muted-foreground">
+                Continue with the normal folder upload choices
+              </span>
+            </span>
+          </Button>
+        </div>
+
+        <DialogFooter>
+          <Button
+            type="button"
+            variant="secondary"
+            className="rounded-md"
+            onClick={onClose}
+          >
+            Cancel
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1164,6 +1561,42 @@ async function putBlobWithRetry(
     : new Error("The object upload failed after multiple attempts.");
 }
 
+async function putLocalBlobWithRetry(
+  url: string,
+  file: File,
+  headers: Record<string, string>,
+  signal: AbortSignal,
+  activeRequests: Set<XMLHttpRequest>,
+  onProgress: (chunkIndex: number, loaded: number) => void,
+) {
+  const chunkCount = Math.max(
+    1,
+    Math.ceil(file.size / LOCAL_UPLOAD_CHUNK_BYTES),
+  );
+
+  for (let chunkIndex = 0; chunkIndex < chunkCount; chunkIndex += 1) {
+    const start = chunkIndex * LOCAL_UPLOAD_CHUNK_BYTES;
+    const end = Math.min(file.size, start + LOCAL_UPLOAD_CHUNK_BYTES);
+    const chunk = file.slice(start, end, file.type);
+
+    // Local chunks are serialized so the backend can append and retry them
+    // without buffering the complete object in Next.js.
+    // react-doctor-disable-next-line react-doctor/async-await-in-loop
+    await putBlobWithRetry(
+      url,
+      chunk,
+      {
+        ...headers,
+        "X-Aeralyth-Upload-Length": String(chunk.size),
+        "X-Aeralyth-Upload-Offset": String(start),
+      },
+      signal,
+      activeRequests,
+      (loaded) => onProgress(chunkIndex, loaded),
+    );
+  }
+}
+
 function putBlobOnce(
   url: string,
   blob: Blob,
@@ -1201,7 +1634,16 @@ function putBlobOnce(
         return;
       }
 
-      reject(new Error(`Object upload failed (${request.status}).`));
+      const responseMessage = getObjectUploadFailureMessage(
+        request.responseText,
+      );
+      reject(
+        new Error(
+          responseMessage
+            ? `Object upload failed (${request.status}): ${responseMessage}`
+            : `Object upload failed (${request.status}).`,
+        ),
+      );
     });
     request.addEventListener("error", () => {
       cleanup();
@@ -1214,6 +1656,33 @@ function putBlobOnce(
     signal.addEventListener("abort", abortRequest, { once: true });
     request.send(blob);
   });
+}
+
+function getObjectUploadFailureMessage(responseText: string) {
+  const trimmed = responseText.trim();
+  if (!trimmed) {
+    return "";
+  }
+
+  try {
+    const parsed = JSON.parse(trimmed) as {
+      error?: unknown;
+      message?: unknown;
+    };
+    const message =
+      typeof parsed.message === "string"
+        ? parsed.message
+        : typeof parsed.error === "string"
+          ? parsed.error
+          : "";
+    if (message) {
+      return message.slice(0, 300);
+    }
+  } catch {
+    // Plain-text proxy and storage errors are already suitable for display.
+  }
+
+  return trimmed.replace(/\s+/g, " ").slice(0, 300);
 }
 
 async function mapWithConcurrency<T, R>(
@@ -1311,12 +1780,38 @@ function useStableSet<T>(): Set<T> {
   return ref.current;
 }
 
-function formatUploadCount(fileCount: number) {
-  if (fileCount === 1) {
-    return "Uploading 1 item";
+function createUploadProgressSession(
+  files: UploadSelection[],
+  ignoredFiles: number,
+): UploadProgressSession {
+  const now = Date.now();
+  const items = files.map(({ file, relativePath }) => ({
+    name: file.name,
+    path: relativePath.replaceAll("\\", "/") || file.name,
+    sizeBytes: file.size,
+  }));
+
+  return {
+    items,
+    ignoredFiles,
+    totalBytes: items.reduce((total, item) => total + item.sizeBytes, 0),
+    uploadedBytes: 0,
+    completedFiles: 0,
+    activeFileIndex: null,
+    activeFileUploadedBytes: 0,
+    startedAt: now,
+    updatedAt: now,
+    status: "uploading",
+    error: null,
+  };
+}
+
+function formatDetectionSignals(detection: ProjectDetection) {
+  if (detection.signals.length === 0) {
+    return "its folder structure";
   }
 
-  return `Uploading ${String(fileCount)} items`;
+  return detection.signals.join(", ");
 }
 
 function formatFolderSelectionSummary(pendingUpload: PendingFolderUpload) {
@@ -1325,7 +1820,16 @@ function formatFolderSelectionSummary(pendingUpload: PendingFolderUpload) {
       ? "1 file"
       : `${String(pendingUpload.files.length)} files`;
 
-  return `${fileCount} - ${formatUploadBytes(pendingUpload.totalBytes)}`;
+  const ignoredSummary =
+    pendingUpload.ignoredFiles > 0
+      ? ` · ${formatIgnoredFiles(pendingUpload.ignoredFiles)} skipped`
+      : "";
+
+  return `${fileCount} · ${formatUploadBytes(pendingUpload.totalBytes)}${ignoredSummary}`;
+}
+
+function formatIgnoredFiles(fileCount: number) {
+  return `${fileCount.toLocaleString()} ${fileCount === 1 ? "file" : "files"}`;
 }
 
 function formatCompressionProgress(progress: CompressionProgress) {

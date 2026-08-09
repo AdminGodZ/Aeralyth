@@ -223,6 +223,67 @@ export type FilesState =
       status: "unavailable";
     };
 
+export type RepositoryRoot = {
+  id: string;
+  name: string;
+  e2eeState: "legacy" | "staged" | "encrypted";
+  updatedAt: string;
+};
+
+export type RepositorySummary = {
+  id: string;
+  ownerUsername: string;
+  defaultBranch: string;
+  root: RepositoryRoot;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RepositoriesData = {
+  repositories: RepositorySummary[];
+};
+
+export type RepositoriesState =
+  | { status: "ready"; data: RepositoriesData }
+  | { status: "unauthorized" }
+  | { status: "not-found" }
+  | { status: "unavailable" };
+
+export type RepositoryEntry = {
+  id: string;
+  name: string;
+  mimeType: string | null;
+  entryType: "file" | "folder";
+  parentId: string | null;
+  sizeBytes: number;
+  e2eeState: "legacy" | "staged" | "encrypted";
+  updatedAt: string;
+};
+
+export type RepositoryBreadcrumb = {
+  id: string;
+  name: string;
+  e2eeState: "legacy" | "staged" | "encrypted";
+};
+
+export type RepositoryDetailData = {
+  repository: RepositorySummary;
+  currentFolderId: string;
+  breadcrumbs: RepositoryBreadcrumb[];
+  entries: RepositoryEntry[];
+  summary: {
+    totalFiles: number;
+    totalFolders: number;
+  };
+  entriesTruncated: boolean;
+};
+
+export type RepositoryDetailState =
+  | { status: "ready"; data: RepositoryDetailData }
+  | { status: "unauthorized" }
+  | { status: "not-found" }
+  | { status: "unavailable" };
+
 function getApiOrigin() {
   return process.env.AERALYTH_API_ORIGIN?.trim() || "http://127.0.0.1:8080";
 }
@@ -515,6 +576,155 @@ export async function getFilesState(
   } catch {
     return { status: "unavailable" };
   }
+}
+
+export async function getRepositoriesState(): Promise<RepositoriesState> {
+  const requestHeaders = await headers();
+  const cookie = requestHeaders.get("cookie");
+
+  try {
+    return await requestApi<RepositoriesState>(
+      `${getApiOrigin()}/api/repositories`,
+      {
+        headers: getForwardedHeaders(requestHeaders, cookie),
+        cache: "no-store",
+      },
+      async (response) => {
+        if (response.status === 401) {
+          return { status: "unauthorized" };
+        }
+
+        if (!response.ok) {
+          return { status: "unavailable" };
+        }
+
+        const data = (await response.json()) as Partial<RepositoriesData>;
+        if (!isRepositoriesData(data)) {
+          return { status: "unavailable" };
+        }
+
+        return { status: "ready", data };
+      },
+    );
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
+export async function getRepositoryDetailState(
+  repositoryId: string,
+  folderId?: string,
+): Promise<RepositoryDetailState> {
+  const requestHeaders = await headers();
+  const cookie = requestHeaders.get("cookie");
+  const query = folderId ? `?${new URLSearchParams({ folder: folderId })}` : "";
+
+  try {
+    return await requestApi<RepositoryDetailState>(
+      `${getApiOrigin()}/api/repositories/${encodeURIComponent(repositoryId)}${query}`,
+      {
+        headers: getForwardedHeaders(requestHeaders, cookie),
+        cache: "no-store",
+      },
+      async (response) => {
+        if (response.status === 401) {
+          return { status: "unauthorized" };
+        }
+
+        if (response.status === 404) {
+          return { status: "not-found" };
+        }
+
+        if (!response.ok) {
+          return { status: "unavailable" };
+        }
+
+        const data = (await response.json()) as Partial<RepositoryDetailData>;
+        if (!isRepositoryDetailData(data)) {
+          return { status: "unavailable" };
+        }
+
+        return { status: "ready", data };
+      },
+    );
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
+function isRepositoriesData(
+  data: Partial<RepositoriesData>,
+): data is RepositoriesData {
+  return (
+    Array.isArray(data.repositories) &&
+    data.repositories.every(isRepositorySummary)
+  );
+}
+
+function isRepositoryDetailData(
+  data: Partial<RepositoryDetailData>,
+): data is RepositoryDetailData {
+  return (
+    isRepositorySummary(data.repository) &&
+    typeof data.currentFolderId === "string" &&
+    Array.isArray(data.breadcrumbs) &&
+    data.breadcrumbs.every(
+      (breadcrumb) =>
+        typeof breadcrumb.id === "string" &&
+        typeof breadcrumb.name === "string" &&
+        isE2eeState(breadcrumb.e2eeState),
+    ) &&
+    Array.isArray(data.entries) &&
+    data.entries.every(isRepositoryEntry) &&
+    data.summary !== undefined &&
+    typeof data.summary.totalFiles === "number" &&
+    typeof data.summary.totalFolders === "number" &&
+    typeof data.entriesTruncated === "boolean"
+  );
+}
+
+function isRepositorySummary(value: unknown): value is RepositorySummary {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const repository = value as Partial<RepositorySummary>;
+  return (
+    typeof repository.id === "string" &&
+    typeof repository.ownerUsername === "string" &&
+    typeof repository.defaultBranch === "string" &&
+    typeof repository.createdAt === "string" &&
+    typeof repository.updatedAt === "string" &&
+    repository.root !== undefined &&
+    typeof repository.root.id === "string" &&
+    typeof repository.root.name === "string" &&
+    typeof repository.root.updatedAt === "string" &&
+    isE2eeState(repository.root.e2eeState)
+  );
+}
+
+function isRepositoryEntry(value: unknown): value is RepositoryEntry {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const entry = value as Partial<RepositoryEntry>;
+  return (
+    typeof entry.id === "string" &&
+    typeof entry.name === "string" &&
+    (typeof entry.mimeType === "string" || entry.mimeType === null) &&
+    (entry.entryType === "file" || entry.entryType === "folder") &&
+    (typeof entry.parentId === "string" || entry.parentId === null) &&
+    typeof entry.sizeBytes === "number" &&
+    typeof entry.updatedAt === "string" &&
+    isE2eeState(entry.e2eeState)
+  );
+}
+
+function isE2eeState(
+  value: unknown,
+): value is "legacy" | "staged" | "encrypted" {
+  return value === "legacy" || value === "staged" || value === "encrypted";
 }
 
 function isFilesData(data: Partial<FilesData>): data is FilesData {

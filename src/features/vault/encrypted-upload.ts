@@ -28,14 +28,23 @@ export async function uploadEncryptedSelections({
   client,
   signal,
   onProgress,
+  onFileStart,
+  onFileComplete,
 }: {
   selections: EncryptedUploadSelection[];
   parentFolderId: string | null;
   csrfToken: string;
   client: VaultCryptoClient;
   signal: AbortSignal;
-  onProgress(processedBytes: number, totalBytes: number): void;
-}): Promise<void> {
+  onProgress(
+    processedBytes: number,
+    totalBytes: number,
+    fileIndex: number,
+    fileProcessedBytes: number,
+  ): void;
+  onFileStart(fileIndex: number): void;
+  onFileComplete(fileIndex: number): void;
+}): Promise<{ rootFolderId: string | null }> {
   const totalBytes = selections.reduce(
     (total, item) => total + item.file.size,
     0,
@@ -66,8 +75,10 @@ export async function uploadEncryptedSelections({
     folderIds.set(path, result.nodeId);
   }
 
-  for (const selection of selections) {
+  for (const [fileIndex, selection] of selections.entries()) {
     assertNotAborted(signal);
+    onFileStart(fileIndex);
+    let fileProcessedBytes = 0;
     const path = normalizeRelativePath(
       selection.relativePath || selection.file.name,
     );
@@ -86,10 +97,18 @@ export async function uploadEncryptedSelections({
       signal,
       onChunk: (sourceBytes) => {
         processedBytes += sourceBytes;
-        onProgress(processedBytes, totalBytes);
+        fileProcessedBytes += sourceBytes;
+        onProgress(processedBytes, totalBytes, fileIndex, fileProcessedBytes);
       },
     });
+    onFileComplete(fileIndex);
   }
+
+  const rootFolders = folders.filter((path) => !path.includes("/"));
+  return {
+    rootFolderId:
+      rootFolders.length === 1 ? (folderIds.get(rootFolders[0]) ?? null) : null,
+  };
 }
 
 export async function migrateEncryptedNode({

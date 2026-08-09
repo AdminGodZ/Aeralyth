@@ -31,6 +31,8 @@ The encrypted vault design and rollout procedure are documented in
 docker compose up -d postgres
 docker compose exec -T postgres psql -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/001_auth.sql
 docker compose exec -T postgres psql -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/002_e2ee.sql
+docker compose exec -T postgres psql -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/003_share_links.sql
+docker compose exec -T postgres psql -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/004_repositories.sql
 ```
 
 In local development, the Actix backend uses this Docker database by default

@@ -4,6 +4,7 @@ mod files;
 mod health;
 mod invitations;
 mod profile;
+mod repositories;
 mod share_links;
 mod vault;
 
@@ -74,6 +75,9 @@ pub fn configure(config: &mut web::ServiceConfig) {
                     "/share-links/access/{token}/files/{file_id}",
                     web::delete().to(share_links::remove_entry),
                 )
+                .route("/repositories", web::get().to(repositories::list))
+                .route("/repositories", web::post().to(repositories::create))
+                .route("/repositories/{id}", web::get().to(repositories::detail))
                 .route("/files", web::get().to(files::list_files))
                 .route("/files/uploads", web::post().to(files::init_upload))
                 .route(

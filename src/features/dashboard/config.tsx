@@ -2,6 +2,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   Clock,
   Folder,
+  FolderGit2,
   HardDrive,
   Settings,
   Share2,
@@ -12,6 +13,7 @@ import {
 
 export type DashboardSectionKey =
   | "files"
+  | "repositories"
   | "recent"
   | "favorites"
   | "shared"
@@ -31,7 +33,7 @@ export type DashboardSection = {
   label: string;
   href: string;
   group: "primary" | "system";
-  content: "files" | "system";
+  content: "files" | "repositories" | "system";
   icon: LucideIcon;
   title: string;
   subtitle: string;
@@ -49,6 +51,16 @@ export const dashboardSections: DashboardSection[] = [
     icon: Folder,
     title: "Files",
     subtitle: "Personal workspace",
+  },
+  {
+    key: "repositories",
+    label: "Repositories",
+    href: "/repositories",
+    group: "primary",
+    content: "repositories",
+    icon: FolderGit2,
+    title: "Repositories",
+    subtitle: "Project folders in a code-focused view",
   },
   {
     key: "recent",

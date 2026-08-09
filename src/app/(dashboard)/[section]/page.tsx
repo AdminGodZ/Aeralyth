@@ -10,6 +10,8 @@ import {
   type FileView,
   getAdminUsersState,
   getFilesState,
+  getRepositoriesState,
+  type RepositoriesState,
 } from "@/lib/api";
 
 type SectionPageProps = {
@@ -93,12 +95,21 @@ export default async function SectionPage({
         cursor?.trim() || undefined,
       )
     : Promise.resolve<FilesState>({ status: "unavailable" });
-  const [{ csrfToken, currentUser }, adminUsersState, filesState] =
-    await Promise.all([
-      dashboardSessionPromise,
-      adminUsersPromise,
-      filesPromise,
-    ]);
+  const repositoriesPromise =
+    section.key === "repositories"
+      ? getRepositoriesState()
+      : Promise.resolve<RepositoriesState>({ status: "unavailable" });
+  const [
+    { csrfToken, currentUser },
+    adminUsersState,
+    filesState,
+    repositoriesState,
+  ] = await Promise.all([
+    dashboardSessionPromise,
+    adminUsersPromise,
+    filesPromise,
+    repositoriesPromise,
+  ]);
 
   if (section.group === "system" && currentUser.role !== "admin") {
     notFound();
@@ -109,6 +120,10 @@ export default async function SectionPage({
   }
 
   if (filesState.status === "unauthorized") {
+    redirect("/login");
+  }
+
+  if (repositoriesState.status === "unauthorized") {
     redirect("/login");
   }
 
@@ -127,6 +142,7 @@ export default async function SectionPage({
       filesState={filesState}
       fileSort={fileSort}
       fileSortDirection={fileSortDirection}
+      repositoriesState={repositoriesState}
     />
   );
 }

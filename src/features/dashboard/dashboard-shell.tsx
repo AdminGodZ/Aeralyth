@@ -25,6 +25,8 @@ import { ProfileSettingsForm } from "@/features/dashboard/profile-settings-form"
 import { UploadPanel } from "@/features/dashboard/upload-panel";
 import { UserPreferenceHydrator } from "@/features/dashboard/user-preference-hydrator";
 import { UsersContent as UsersDirectory } from "@/features/dashboard/users-content";
+import { RepositoryDetail } from "@/features/repositories/repository-detail";
+import { RepositoryOverview } from "@/features/repositories/repository-overview";
 import { VaultBreadcrumbs } from "@/features/vault/vault-breadcrumbs";
 import { VaultFileList } from "@/features/vault/vault-file-list";
 import { VaultProvider } from "@/features/vault/vault-provider";
@@ -40,6 +42,8 @@ import type {
   FileSortDirection,
   FilesState,
   FolderBreadcrumb,
+  RepositoriesState,
+  RepositoryDetailState,
 } from "@/lib/api";
 
 type DashboardFrameProps = {
@@ -59,6 +63,8 @@ type DashboardPageProps = {
   filesState: FilesState;
   fileSort?: FileSort;
   fileSortDirection?: FileSortDirection;
+  repositoriesState?: RepositoriesState;
+  repositoryDetailState?: RepositoryDetailState;
 };
 
 type ReadyFilesState = Extract<FilesState, { status: "ready" }>;
@@ -113,6 +119,8 @@ export function DashboardPage({
   filesState,
   fileSort,
   fileSortDirection,
+  repositoriesState,
+  repositoryDetailState,
 }: DashboardPageProps) {
   const section =
     getDashboardSection(sectionKey) ?? getDashboardSection("files");
@@ -134,6 +142,8 @@ export function DashboardPage({
         filesState={filesState}
         fileSort={fileSort}
         fileSortDirection={fileSortDirection}
+        repositoriesState={repositoriesState}
+        repositoryDetailState={repositoryDetailState}
       />
     </>
   );
@@ -255,6 +265,8 @@ function DashboardContent({
   filesState,
   fileSort,
   fileSortDirection,
+  repositoriesState,
+  repositoryDetailState,
 }: {
   section: DashboardSection;
   currentUser: CurrentUser;
@@ -265,6 +277,8 @@ function DashboardContent({
   filesState: FilesState;
   fileSort?: FileSort;
   fileSortDirection?: FileSortDirection;
+  repositoriesState?: RepositoriesState;
+  repositoryDetailState?: RepositoryDetailState;
 }) {
   if (section.key === "settings") {
     return <SettingsContent currentUser={currentUser} csrfToken={csrfToken} />;
@@ -284,6 +298,20 @@ function DashboardContent({
 
   if (section.key === "storage") {
     return <StorageContent filesState={filesState} />;
+  }
+
+  if (section.key === "repositories") {
+    if (repositoryDetailState) {
+      return <RepositoryDetail repositoryState={repositoryDetailState} />;
+    }
+
+    return (
+      <RepositoryOverview
+        repositoriesState={repositoriesState ?? { status: "unavailable" }}
+        csrfToken={csrfToken}
+        e2eeMode={currentUser.e2eeMode}
+      />
+    );
   }
 
   return (
@@ -410,6 +438,7 @@ function FileContent({
                 e2eeMode={e2eeMode}
                 parentFolderId={currentFolderId}
                 folderZipPromptEnabled={folderZipPromptEnabled}
+                surface="files"
               />
             ) : null}
           </div>

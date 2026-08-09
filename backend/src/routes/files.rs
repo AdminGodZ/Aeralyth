@@ -8,7 +8,7 @@ use base64::{
 };
 use futures_util::{StreamExt, stream};
 use serde::{Deserialize, Serialize};
-use tokio::fs::File as AsyncFile;
+use tokio::fs::{File as AsyncFile, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::auth::{AuthUser, require_csrf, require_user};
@@ -19,6 +19,8 @@ use crate::state::AppState;
 use crate::storage::{ObjectMetadata, UploadedPart};
 
 const MAX_UPLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const UPLOAD_LENGTH_HEADER: &str = "x-aeralyth-upload-length";
+const UPLOAD_OFFSET_HEADER: &str = "x-aeralyth-upload-offset";
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 100;
 
@@ -67,6 +69,7 @@ pub(crate) struct UploadChecksumRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UploadInitResponse {
     upload_id: String,
+    root_folder_id: Option<String>,
     mode: String,
     upload_url: Option<String>,
     existing_parts: Vec<crate::storage::UploadPartPlan>,
@@ -354,9 +357,14 @@ pub async fn init_upload(
         )
     };
 
+    let mut root_folder_id = None;
     for folder_name in folder_names {
-        parent_id =
-            Some(ensure_folder(&state, &actor.owner_id, parent_id.as_deref(), folder_name).await?);
+        let folder_id =
+            ensure_folder(&state, &actor.owner_id, parent_id.as_deref(), folder_name).await?;
+        if root_folder_id.is_none() {
+            root_folder_id = Some(folder_id.clone());
+        }
+        parent_id = Some(folder_id);
     }
 
     let mime_type = body
@@ -412,6 +420,7 @@ pub async fn init_upload(
 
         return Ok(HttpResponse::Ok().json(UploadInitResponse {
             upload_id: existing.id.clone(),
+            root_folder_id,
             mode: existing.mode.clone(),
             upload_url: (existing.mode == "local")
                 .then(|| format!("/api/files/uploads/{}/content", existing.id)),
@@ -657,6 +666,7 @@ pub async fn init_upload(
 
     Ok(HttpResponse::Created().json(UploadInitResponse {
         upload_id,
+        root_folder_id,
         mode: prepared.mode.to_owned(),
         upload_url: prepared.upload_url,
         existing_parts: prepared.parts,
@@ -691,51 +701,133 @@ pub async fn upload_content(
         .await
         .map_err(error::ErrorInternalServerError)?;
     let temporary_path = object_path.with_extension(format!("part-{}", upload.id));
-    let mut file = AsyncFile::create(&temporary_path)
-        .await
-        .map_err(error::ErrorInternalServerError)?;
     let expected_bytes = u64::try_from(upload.size_bytes)
         .map_err(|_| error::ErrorInternalServerError("invalid upload size"))?;
+    let chunk_range = local_upload_chunk(&request, expected_bytes)?;
+    let (chunk_offset, chunk_bytes) = chunk_range.unwrap_or((0, expected_bytes));
+    let chunk_end = chunk_offset
+        .checked_add(chunk_bytes)
+        .ok_or_else(|| error::ErrorPayloadTooLarge("upload is too large"))?;
+
+    if chunk_end > expected_bytes {
+        return Err(error::ErrorPayloadTooLarge("upload is too large"));
+    }
+
+    if chunk_range.is_some() {
+        if let Ok(metadata) = tokio::fs::metadata(&object_path).await
+            && metadata.len() == expected_bytes
+            && chunk_end == expected_bytes
+        {
+            return Ok(HttpResponse::NoContent().finish());
+        }
+
+        let existing_bytes = match tokio::fs::metadata(&temporary_path).await {
+            Ok(metadata) => metadata.len(),
+            Err(metadata_error) if metadata_error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(metadata_error) => return Err(error::ErrorInternalServerError(metadata_error)),
+        };
+
+        if chunk_bytes > 0 && existing_bytes == chunk_end {
+            return Ok(HttpResponse::NoContent().finish());
+        }
+        if existing_bytes < chunk_offset || existing_bytes > chunk_end {
+            return Err(error::ErrorConflict("upload chunk offset does not match"));
+        }
+        if existing_bytes != chunk_offset {
+            let partial = OpenOptions::new()
+                .write(true)
+                .open(&temporary_path)
+                .await
+                .map_err(error::ErrorInternalServerError)?;
+            partial
+                .set_len(chunk_offset)
+                .await
+                .map_err(error::ErrorInternalServerError)?;
+        }
+    }
+
+    let mut file = if chunk_range.is_some() {
+        OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&temporary_path)
+            .await
+            .map_err(error::ErrorInternalServerError)?
+    } else {
+        AsyncFile::create(&temporary_path)
+            .await
+            .map_err(error::ErrorInternalServerError)?
+    };
     let mut written_bytes = 0_u64;
 
-    while let Some(chunk) = payload.next().await {
-        let chunk = match chunk {
-            Ok(chunk) => chunk,
+    while let Some(payload_chunk) = payload.next().await {
+        let payload_chunk = match payload_chunk {
+            Ok(payload_chunk) => payload_chunk,
             Err(payload_error) => {
-                drop(file);
-                let _ = tokio::fs::remove_file(&temporary_path).await;
+                rollback_local_upload_chunk(
+                    &mut file,
+                    &temporary_path,
+                    chunk_offset,
+                    chunk_range.is_some(),
+                )
+                .await;
                 return Err(error::ErrorBadRequest(payload_error));
             }
         };
         written_bytes = written_bytes
-            .checked_add(chunk.len() as u64)
+            .checked_add(payload_chunk.len() as u64)
             .ok_or_else(|| error::ErrorPayloadTooLarge("upload is too large"))?;
 
-        if written_bytes > expected_bytes || written_bytes > MAX_UPLOAD_BYTES {
-            drop(file);
-            let _ = tokio::fs::remove_file(&temporary_path).await;
+        if written_bytes > chunk_bytes || chunk_end > MAX_UPLOAD_BYTES {
+            rollback_local_upload_chunk(
+                &mut file,
+                &temporary_path,
+                chunk_offset,
+                chunk_range.is_some(),
+            )
+            .await;
             return Err(error::ErrorPayloadTooLarge("upload is too large"));
         }
 
-        if let Err(write_error) = file.write_all(&chunk).await {
-            drop(file);
-            let _ = tokio::fs::remove_file(&temporary_path).await;
+        if let Err(write_error) = file.write_all(&payload_chunk).await {
+            rollback_local_upload_chunk(
+                &mut file,
+                &temporary_path,
+                chunk_offset,
+                chunk_range.is_some(),
+            )
+            .await;
             return Err(error::ErrorInternalServerError(write_error));
         }
     }
 
     if let Err(flush_error) = file.flush().await {
-        drop(file);
-        let _ = tokio::fs::remove_file(&temporary_path).await;
+        rollback_local_upload_chunk(
+            &mut file,
+            &temporary_path,
+            chunk_offset,
+            chunk_range.is_some(),
+        )
+        .await;
         return Err(error::ErrorInternalServerError(flush_error));
+    }
+
+    if written_bytes != chunk_bytes {
+        rollback_local_upload_chunk(
+            &mut file,
+            &temporary_path,
+            chunk_offset,
+            chunk_range.is_some(),
+        )
+        .await;
+        return Err(error::ErrorBadRequest(
+            "uploaded chunk byte count does not match declaration",
+        ));
     }
     drop(file);
 
-    if written_bytes != expected_bytes {
-        let _ = tokio::fs::remove_file(&temporary_path).await;
-        return Err(error::ErrorBadRequest(
-            "uploaded byte count does not match declaration",
-        ));
+    if chunk_end < expected_bytes {
+        return Ok(HttpResponse::NoContent().finish());
     }
 
     if let Err(rename_error) = tokio::fs::rename(&temporary_path, &object_path).await {
@@ -744,6 +836,68 @@ pub async fn upload_content(
     }
 
     Ok(HttpResponse::NoContent().finish())
+}
+
+fn local_upload_chunk(request: &HttpRequest, expected_bytes: u64) -> Result<Option<(u64, u64)>> {
+    let offset = request.headers().get(UPLOAD_OFFSET_HEADER);
+    let length = request.headers().get(UPLOAD_LENGTH_HEADER);
+
+    let (Some(offset), Some(length)) = (offset, length) else {
+        if offset.is_some() || length.is_some() {
+            return Err(error::ErrorBadRequest(
+                "upload chunk headers must be provided together",
+            ));
+        }
+        return Ok(None);
+    };
+
+    let offset = offset
+        .to_str()
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| error::ErrorBadRequest("invalid upload chunk offset"))?;
+    let length = length
+        .to_str()
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .ok_or_else(|| error::ErrorBadRequest("invalid upload chunk length"))?;
+    let end = offset
+        .checked_add(length)
+        .ok_or_else(|| error::ErrorPayloadTooLarge("upload is too large"))?;
+
+    if end > expected_bytes || length > MAX_UPLOAD_BYTES {
+        return Err(error::ErrorPayloadTooLarge("upload is too large"));
+    }
+
+    if let Some(content_length) = request.headers().get(CONTENT_LENGTH) {
+        let content_length = content_length
+            .to_str()
+            .ok()
+            .and_then(|value| value.parse::<u64>().ok())
+            .ok_or_else(|| error::ErrorBadRequest("invalid content length"))?;
+        if content_length != length {
+            return Err(error::ErrorBadRequest(
+                "upload chunk length does not match content length",
+            ));
+        }
+    }
+
+    Ok(Some((offset, length)))
+}
+
+async fn rollback_local_upload_chunk(
+    file: &mut AsyncFile,
+    temporary_path: &std::path::Path,
+    chunk_offset: u64,
+    chunked: bool,
+) {
+    if chunked {
+        let _ = file.set_len(chunk_offset).await;
+        let _ = file.flush().await;
+    } else {
+        let _ = file.set_len(0).await;
+        let _ = tokio::fs::remove_file(temporary_path).await;
+    }
 }
 
 pub async fn presign_upload_content(
@@ -3043,4 +3197,49 @@ fn redirect(location: impl Into<String>) -> HttpResponse {
     HttpResponse::SeeOther()
         .insert_header((LOCATION, location.into()))
         .finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use actix_web::test::TestRequest;
+
+    use super::{UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER, local_upload_chunk};
+
+    #[test]
+    fn parses_matching_local_upload_chunk_headers() {
+        let request = TestRequest::default()
+            .insert_header((UPLOAD_OFFSET_HEADER, "8"))
+            .insert_header((UPLOAD_LENGTH_HEADER, "4"))
+            .insert_header(("content-length", "4"))
+            .to_http_request();
+
+        assert_eq!(local_upload_chunk(&request, 12).unwrap(), Some((8, 4)));
+    }
+
+    #[test]
+    fn preserves_legacy_local_uploads_without_chunk_headers() {
+        let request = TestRequest::default().to_http_request();
+
+        assert_eq!(local_upload_chunk(&request, 12).unwrap(), None);
+    }
+
+    #[test]
+    fn rejects_incomplete_or_out_of_bounds_chunk_headers() {
+        let incomplete = TestRequest::default()
+            .insert_header((UPLOAD_OFFSET_HEADER, "0"))
+            .to_http_request();
+        let out_of_bounds = TestRequest::default()
+            .insert_header((UPLOAD_OFFSET_HEADER, "8"))
+            .insert_header((UPLOAD_LENGTH_HEADER, "5"))
+            .to_http_request();
+        let mismatched_length = TestRequest::default()
+            .insert_header((UPLOAD_OFFSET_HEADER, "0"))
+            .insert_header((UPLOAD_LENGTH_HEADER, "4"))
+            .insert_header(("content-length", "3"))
+            .to_http_request();
+
+        assert!(local_upload_chunk(&incomplete, 12).is_err());
+        assert!(local_upload_chunk(&out_of_bounds, 12).is_err());
+        assert!(local_upload_chunk(&mismatched_length, 12).is_err());
+    }
 }
