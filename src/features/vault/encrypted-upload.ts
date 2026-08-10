@@ -111,6 +111,30 @@ export async function uploadEncryptedSelections({
   };
 }
 
+export async function createEncryptedFolder({
+  name,
+  parentId = null,
+  csrfToken,
+  client,
+  signal,
+}: {
+  name: string;
+  parentId?: string | null;
+  csrfToken: string;
+  client: VaultCryptoClient;
+  signal: AbortSignal;
+}): Promise<{ nodeId: string }> {
+  return uploadEncryptedEntry({
+    file: null,
+    name,
+    parentId,
+    csrfToken,
+    client,
+    signal,
+    onChunk: () => undefined,
+  });
+}
+
 export async function migrateEncryptedNode({
   node,
   csrfToken,

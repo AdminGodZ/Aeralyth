@@ -321,6 +321,7 @@ function DashboardContent({
         repositoriesState={repositoriesState ?? { status: "unavailable" }}
         csrfToken={csrfToken}
         e2eeMode={currentUser.e2eeMode}
+        ownerUsername={currentUser.username}
       />
     );
   }

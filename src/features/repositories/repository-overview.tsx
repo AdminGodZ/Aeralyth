@@ -8,6 +8,7 @@ import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { UploadPanel } from "@/features/dashboard/upload-panel";
+import { NewRepositoryDialog } from "@/features/repositories/new-repository-dialog";
 import { useResolvedVaultNames } from "@/features/repositories/use-resolved-vault-names";
 import type { RepositoriesState } from "@/lib/api";
 
@@ -15,10 +16,12 @@ export function RepositoryOverview({
   repositoriesState,
   csrfToken,
   e2eeMode,
+  ownerUsername,
 }: {
   repositoriesState: RepositoriesState;
   csrfToken: string;
   e2eeMode: "off" | "migrate" | "required";
+  ownerUsername: string;
 }) {
   const [query, setQuery] = useState("");
   const repositories = useMemo(
@@ -67,15 +70,22 @@ export function RepositoryOverview({
                 Your repositories
               </h1>
               <p className="mt-1 text-sm text-muted-foreground">
-                Import a project folder and browse it as a repository.
+                Create an empty repository or import an existing project folder.
               </p>
             </div>
-            <UploadPanel
-              csrfToken={csrfToken}
-              e2eeMode={e2eeMode}
-              folderZipPromptEnabled={false}
-              surface="repositories"
-            />
+            <div className="flex flex-wrap items-center gap-2">
+              <NewRepositoryDialog
+                ownerUsername={ownerUsername}
+                csrfToken={csrfToken}
+                e2eeMode={e2eeMode}
+              />
+              <UploadPanel
+                csrfToken={csrfToken}
+                e2eeMode={e2eeMode}
+                folderZipPromptEnabled={false}
+                surface="repositories"
+              />
+            </div>
           </div>
 
           {repositories.length > 0 ? (
@@ -143,11 +153,11 @@ export function RepositoryOverview({
                 <FolderGit2 className="size-8" aria-hidden="true" />
               </span>
               <h2 className="mt-5 font-display text-xl font-semibold">
-                Import your first repository
+                Create your first repository
               </h2>
               <p className="mt-2 max-w-lg text-sm text-muted-foreground">
-                Choose a project folder. Aeralyth preserves its structure and
-                opens it in the repository view automatically.
+                Start empty or import a project folder. Imported repositories
+                preserve their existing file structure.
               </p>
             </div>
           ) : (

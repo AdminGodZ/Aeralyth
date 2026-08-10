@@ -1012,12 +1012,13 @@ function UploadPanelView({
       ) : surface === "repositories" ? (
         <Button
           type="button"
+          variant="outline"
           disabled={isBusy}
           className="rounded-full"
           onClick={() => folderInputRef.current?.click()}
         >
           <FolderGit2 className="size-4" aria-hidden="true" />
-          Add repository
+          Import repository
         </Button>
       ) : (
         <DropdownMenu>

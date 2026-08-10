@@ -9,11 +9,19 @@ const MAX_REPOSITORY_ENTRIES: i64 = 500;
 const MAX_REPOSITORY_ARCHIVE_ENTRIES: i64 = 50_000;
 const MAX_REPOSITORY_ARCHIVE_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 const MAX_REPOSITORY_DESCRIPTION_CHARS: usize = 350;
+const MAX_REPOSITORY_NAME_CHARS: usize = 100;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreateRepositoryRequest {
     root_folder_id: String,
+    description: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct CreateEmptyRepositoryRequest {
+    name: String,
+    description: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -146,6 +154,7 @@ pub async fn create(
     if root_folder_id.is_empty() {
         return Err(error::ErrorBadRequest("root folder is required"));
     }
+    let description = normalize_description(body.description.as_deref())?;
 
     let root = state
         .db
@@ -171,13 +180,16 @@ pub async fn create(
         .db
         .query_one(
             "
-                INSERT INTO repositories (id, owner_id, root_file_id)
-                VALUES ('repo_' || replace(gen_random_uuid()::text, '-', ''), $1, $2)
+                INSERT INTO repositories (id, owner_id, root_file_id, description)
+                VALUES ('repo_' || replace(gen_random_uuid()::text, '-', ''), $1, $2, $3)
                 ON CONFLICT (owner_id, root_file_id)
-                DO UPDATE SET root_file_id = EXCLUDED.root_file_id
+                DO UPDATE SET
+                  root_file_id = EXCLUDED.root_file_id,
+                  description = COALESCE(EXCLUDED.description, repositories.description),
+                  updated_at = now()
                 RETURNING id
             ",
-            &[&owner.id, &root_folder_id],
+            &[&owner.id, &root_folder_id, &description],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -186,6 +198,113 @@ pub async fn create(
         .await?
         .ok_or_else(|| error::ErrorInternalServerError("repository could not be loaded"))?;
 
+    Ok(HttpResponse::Created().json(repository))
+}
+
+pub async fn create_empty(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    body: web::Json<CreateEmptyRepositoryRequest>,
+) -> Result<HttpResponse> {
+    let owner = require_user(&state, &request).await?;
+    require_header_csrf(&state, &request).await?;
+    if state.config.e2ee_mode.is_enabled() {
+        return Ok(HttpResponse::Conflict()
+            .body("encrypted repositories must create their root through the vault"));
+    }
+
+    let name = normalize_repository_name(&body.name)?;
+    let description = normalize_description(body.description.as_deref())?;
+    let mut client = state
+        .db
+        .get()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let transaction = client
+        .transaction()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    transaction
+        .query_one(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1 || '||' || lower($2), 0))",
+            &[&owner.id, &name],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let existing_folder = transaction
+        .query_opt(
+            "
+                SELECT id
+                FROM files
+                WHERE owner_id = $1
+                  AND entry_type = 'folder'
+                  AND state = 'active'
+                  AND parent_id IS NULL
+                  AND lower(original_name) = lower($2)
+                LIMIT 1
+            ",
+            &[&owner.id, &name],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    if existing_folder.is_some() {
+        transaction
+            .rollback()
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        return Ok(HttpResponse::Conflict()
+            .body("A top-level folder with this name already exists. Import it instead."));
+    }
+
+    let root = transaction
+        .query_one(
+            "
+                INSERT INTO files (
+                  id,
+                  owner_id,
+                  original_name,
+                  storage_name,
+                  size_bytes,
+                  entry_type,
+                  parent_id
+                )
+                VALUES (
+                  gen_random_uuid()::text,
+                  $1,
+                  $2,
+                  'folder_' || replace(gen_random_uuid()::text, '-', ''),
+                  0,
+                  'folder',
+                  NULL
+                )
+                RETURNING id
+            ",
+            &[&owner.id, &name],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let root_folder_id: String = root.get("id");
+    let repository = transaction
+        .query_one(
+            "
+                INSERT INTO repositories (id, owner_id, root_file_id, description)
+                VALUES ('repo_' || replace(gen_random_uuid()::text, '-', ''), $1, $2, $3)
+                RETURNING id
+            ",
+            &[&owner.id, &root_folder_id, &description],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let repository_id: String = repository.get("id");
+    transaction
+        .commit()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    let repository = get_repository_summary(&state, &owner, &repository_id)
+        .await?
+        .ok_or_else(|| error::ErrorInternalServerError("repository could not be loaded"))?;
     Ok(HttpResponse::Created().json(repository))
 }
 
@@ -198,13 +317,7 @@ pub async fn update(
     let owner = require_user(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let repository_id = path.into_inner();
-    let description = body.description.trim();
-    if description.chars().count() > MAX_REPOSITORY_DESCRIPTION_CHARS {
-        return Err(error::ErrorBadRequest(
-            "repository description must be 350 characters or fewer",
-        ));
-    }
-    let description = (!description.is_empty()).then(|| description.to_owned());
+    let description = normalize_description(Some(&body.description))?;
     let updated = state
         .db
         .query_opt(
@@ -559,6 +672,38 @@ fn repository_entry_from_row(row: Row) -> RepositoryEntry {
     }
 }
 
+fn normalize_repository_name(value: &str) -> Result<String> {
+    let name = value.trim();
+    if name.is_empty() {
+        return Err(error::ErrorBadRequest("repository name is required"));
+    }
+    if name.chars().count() > MAX_REPOSITORY_NAME_CHARS {
+        return Err(error::ErrorBadRequest(
+            "repository name must be 100 characters or fewer",
+        ));
+    }
+    if matches!(name, "." | "..")
+        || !name.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '-' | '_')
+        })
+    {
+        return Err(error::ErrorBadRequest(
+            "repository name may only contain letters, numbers, periods, hyphens, and underscores",
+        ));
+    }
+    Ok(name.to_owned())
+}
+
+fn normalize_description(value: Option<&str>) -> Result<Option<String>> {
+    let description = value.map(str::trim).unwrap_or_default();
+    if description.chars().count() > MAX_REPOSITORY_DESCRIPTION_CHARS {
+        return Err(error::ErrorBadRequest(
+            "repository description must be 350 characters or fewer",
+        ));
+    }
+    Ok((!description.is_empty()).then(|| description.to_owned()))
+}
+
 async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<()> {
     let csrf_token = request
         .headers()
@@ -567,4 +712,33 @@ async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<
         .ok_or_else(|| error::ErrorForbidden("csrf token required"))?;
 
     require_csrf(state, request, csrf_token).await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{normalize_description, normalize_repository_name};
+
+    #[test]
+    fn validates_and_normalizes_repository_names() {
+        assert_eq!(
+            normalize_repository_name("  aeralyth-ui_2.0  ").unwrap(),
+            "aeralyth-ui_2.0"
+        );
+
+        for invalid in ["", "   ", ".", "..", "has spaces", "owner/repo"] {
+            assert!(normalize_repository_name(invalid).is_err(), "{invalid}");
+        }
+        assert!(normalize_repository_name(&"a".repeat(101)).is_err());
+    }
+
+    #[test]
+    fn normalizes_optional_repository_descriptions() {
+        assert_eq!(normalize_description(None).unwrap(), None);
+        assert_eq!(normalize_description(Some("   ")).unwrap(), None);
+        assert_eq!(
+            normalize_description(Some("  Private source mirror  ")).unwrap(),
+            Some("Private source mirror".to_owned())
+        );
+        assert!(normalize_description(Some(&"a".repeat(351))).is_err());
+    }
 }
