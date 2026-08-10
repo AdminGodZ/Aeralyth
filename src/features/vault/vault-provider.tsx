@@ -26,6 +26,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import type { VaultManifest } from "@/features/vault/protocol";
+import { enqueueShareDirectorySync } from "@/features/vault/share-directory-sync";
 import {
   getUnlockMaterial,
   getVaultDownloadPlan,
@@ -230,6 +231,7 @@ export function VaultProvider({
         setRecoveryConfirmed(false);
         setState("unlocked");
       }
+      enqueueShareDirectorySync({ csrfToken, client });
       setPassword("");
       setPasswordConfirmation("");
       setRecoveryCodeInput("");

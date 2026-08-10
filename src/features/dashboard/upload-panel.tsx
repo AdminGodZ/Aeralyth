@@ -103,6 +103,10 @@ type UploadUrl = {
   contentLength: number;
 };
 
+type UploadPartUrl = UploadUrl & {
+  partNumber: number;
+};
+
 type UploadCompletion = {
   status:
     | "initializing"
@@ -134,6 +138,7 @@ type CreatedRepository = {
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_SELECTION_FILES = 1000;
 const MULTIPART_CONCURRENCY = 4;
+const MULTIPART_PRESIGN_BATCH_SIZE = 8;
 const LOCAL_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 const UPLOAD_RETRY_COUNT = 3;
 const UPLOAD_FINALIZATION_TIMEOUT_MS = 45_000;
@@ -483,7 +488,7 @@ function useUploadPanelController({
     let completionStarted = false;
 
     try {
-      let parts: UploadedPart[] = [];
+      const parts: UploadedPart[] = [];
 
       if (plan.mode === "multipart") {
         const partSizeBytes = plan.partSizeBytes;
@@ -500,66 +505,106 @@ function useUploadPanelController({
         const existingParts = new Map(
           plan.existingParts.map((part) => [part.partNumber, part]),
         );
-        parts = await mapWithConcurrency(
-          uploadParts,
-          MULTIPART_CONCURRENCY,
-          async (part) => {
-            const start = (part.partNumber - 1) * partSizeBytes;
-            const end = Math.min(start + partSizeBytes, selection.file.size);
-            const blob = selection.file.slice(start, end, "");
-            const progressKey = `${fileIndex}:${part.partNumber}`;
-            const checksumSha256 = await sha256Base64(blob);
-            const existingPart = existingParts.get(part.partNumber);
-
-            if (
-              existingPart?.checksumSha256 === checksumSha256 &&
-              existingPart.etag
-            ) {
-              reportProgress(progressKey, blob.size);
+        for (
+          let batchStart = 0;
+          batchStart < uploadParts.length;
+          batchStart += MULTIPART_PRESIGN_BATCH_SIZE
+        ) {
+          if (signal.aborted) {
+            throw new DOMException("Upload canceled", "AbortError");
+          }
+          const batch = uploadParts.slice(
+            batchStart,
+            batchStart + MULTIPART_PRESIGN_BATCH_SIZE,
+          );
+          const prepared = await mapWithConcurrency(
+            batch,
+            MULTIPART_CONCURRENCY,
+            async (part) => {
+              const start = (part.partNumber - 1) * partSizeBytes;
+              const end = Math.min(start + partSizeBytes, selection.file.size);
+              const blob = selection.file.slice(start, end, "");
+              const checksumSha256 = await sha256Base64(blob);
+              const existingPart = existingParts.get(part.partNumber);
+              const completed =
+                existingPart?.checksumSha256 === checksumSha256 &&
+                existingPart.etag
+                  ? {
+                      partNumber: part.partNumber,
+                      etag: existingPart.etag,
+                      checksumSha256,
+                    }
+                  : null;
+              if (completed) {
+                reportProgress(`${fileIndex}:${part.partNumber}`, blob.size);
+              }
+              return { ...part, blob, checksumSha256, completed };
+            },
+          );
+          const pending = prepared.filter((part) => !part.completed);
+          const signedParts =
+            pending.length === 0
+              ? []
+              : await requestJson<{ parts: UploadPartUrl[] }>(
+                  `/api/files/uploads/${encodeURIComponent(plan.uploadId)}/parts`,
+                  {
+                    method: "POST",
+                    headers: {
+                      "Content-Type": "application/json",
+                      ...requestAuthHeaders,
+                    },
+                    body: JSON.stringify({
+                      parts: pending.map((part) => ({
+                        partNumber: part.partNumber,
+                        checksumSha256: part.checksumSha256,
+                      })),
+                    }),
+                    signal,
+                  },
+                ).then((response) => response.parts);
+          const signedByPart = new Map(
+            signedParts.map((part) => [part.partNumber, part]),
+          );
+          if (signedByPart.size !== pending.length) {
+            throw new Error(
+              "The storage service returned an incomplete multipart batch.",
+            );
+          }
+          const uploaded = await mapWithConcurrency(
+            prepared,
+            MULTIPART_CONCURRENCY,
+            async (part): Promise<UploadedPart> => {
+              if (part.completed) return part.completed;
+              const signedPart = signedByPart.get(part.partNumber);
+              if (!signedPart || signedPart.contentLength !== part.blob.size) {
+                throw new Error(
+                  "The storage service returned an invalid signed part length.",
+                );
+              }
+              const progressKey = `${fileIndex}:${part.partNumber}`;
+              const response = await putBlobWithRetry(
+                signedPart.url,
+                part.blob,
+                { "x-amz-checksum-sha256": part.checksumSha256 },
+                signal,
+                activeUploadRequests,
+                (loaded) => reportProgress(progressKey, loaded),
+              );
+              const etag = response.getResponseHeader("ETag")?.trim();
+              if (!etag) {
+                throw new Error(
+                  "The storage service did not expose the multipart ETag header.",
+                );
+              }
               return {
                 partNumber: part.partNumber,
-                etag: existingPart.etag,
-                checksumSha256,
+                etag,
+                checksumSha256: part.checksumSha256,
               };
-            }
-
-            const signedPart = await requestJson<UploadUrl>(
-              `/api/files/uploads/${encodeURIComponent(plan.uploadId)}/parts/${part.partNumber}`,
-              {
-                method: "POST",
-                headers: {
-                  "Content-Type": "application/json",
-                  ...requestAuthHeaders,
-                },
-                body: JSON.stringify({ checksumSha256 }),
-                signal,
-              },
-            );
-
-            if (signedPart.contentLength !== blob.size) {
-              throw new Error(
-                "The storage service returned an invalid signed part length.",
-              );
-            }
-            const response = await putBlobWithRetry(
-              signedPart.url,
-              blob,
-              { "x-amz-checksum-sha256": checksumSha256 },
-              signal,
-              activeUploadRequests,
-              (loaded) => reportProgress(progressKey, loaded),
-            );
-            const etag = response.getResponseHeader("ETag")?.trim();
-
-            if (!etag) {
-              throw new Error(
-                "The storage service did not expose the multipart ETag header.",
-              );
-            }
-
-            return { partNumber: part.partNumber, etag, checksumSha256 };
-          },
-        );
+            },
+          );
+          parts.push(...uploaded);
+        }
         parts.sort((left, right) => left.partNumber - right.partNumber);
       } else {
         const checksumSha256 =

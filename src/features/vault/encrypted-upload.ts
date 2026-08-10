@@ -3,11 +3,11 @@ import {
   VAULT_CRYPTO_CHUNK_BYTES,
   VAULT_MAX_CIPHERTEXT_BYTES,
 } from "@/features/vault/protocol";
+import { enqueueShareDirectorySync } from "@/features/vault/share-directory-sync";
 import {
   abortVaultUpload,
-  getActiveShareContexts,
   getVaultContentUrl,
-  getVaultPartUrl,
+  getVaultPartUrls,
   initVaultUpload,
   publishVaultUpload,
   type VaultCompletedPart,
@@ -15,6 +15,14 @@ import {
   type VaultUploadPlan,
 } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
+
+const VAULT_PRESIGN_BATCH_SIZE = 8;
+const VAULT_UPLOAD_CONCURRENCY = 4;
+
+type PendingVaultPart = {
+  partNumber: number;
+  content: Uint8Array;
+};
 
 export type EncryptedUploadSelection = {
   file: File;
@@ -148,10 +156,6 @@ export async function migrateEncryptedNode({
   signal: AbortSignal;
   onProgress(processedBytes: number, totalBytes: number): void;
 }): Promise<void> {
-  const shareContexts = node.parentId
-    ? await getActiveShareContexts(node.parentId, signal)
-    : [];
-  await client.loadShareContexts(shareContexts);
   const started = await client.startEncryption({
     nodeId: node.nodeId,
     parentId: node.parentId,
@@ -212,13 +216,23 @@ export async function migrateEncryptedNode({
       });
     }
     const completed = await client.finalizeEncryption(started.sessionId);
-    await publishVaultUpload(
+    const published = await publishVaultUpload(
       csrfToken,
       plan.uploadId,
       parts,
       completed.record,
       signal,
     );
+    if (published.shareSyncRequired) {
+      enqueueShareDirectorySync({
+        csrfToken,
+        client,
+        job: {
+          ...published,
+          entryType: node.entryType,
+        },
+      });
+    }
     onProgress(node.plaintextBytes, node.plaintextBytes);
   } catch (error) {
     await abortVaultUpload(csrfToken, plan.uploadId).catch(() => undefined);
@@ -243,10 +257,6 @@ async function uploadEncryptedEntry({
   signal: AbortSignal;
   onChunk(bytes: number): void;
 }): Promise<{ nodeId: string }> {
-  const shareContexts = parentId
-    ? await getActiveShareContexts(parentId, signal)
-    : [];
-  await client.loadShareContexts(shareContexts);
   const started = await client.startEncryption({
     parentId,
     entryType: file ? "file" : "folder",
@@ -285,13 +295,23 @@ async function uploadEncryptedEntry({
         })
       : [];
     const completed = await client.finalizeEncryption(started.sessionId);
-    await publishVaultUpload(
+    const published = await publishVaultUpload(
       csrfToken,
       plan.uploadId,
       parts,
       completed.record,
       signal,
     );
+    if (published.shareSyncRequired) {
+      enqueueShareDirectorySync({
+        csrfToken,
+        client,
+        job: {
+          ...published,
+          entryType: file ? "file" : "folder",
+        },
+      });
+    }
     return { nodeId: completed.nodeId };
   } catch (error) {
     await abortVaultUpload(csrfToken, plan.uploadId).catch(() => undefined);
@@ -325,6 +345,7 @@ async function encryptAndUploadFile({
   }
   let pending: Uint8Array<ArrayBufferLike> = new Uint8Array();
   const completed: VaultCompletedPart[] = [];
+  const pendingParts: PendingVaultPart[] = [];
   let partNumber = 1;
 
   for (let chunkIndex = 0; chunkIndex < started.chunkCount; chunkIndex += 1) {
@@ -350,16 +371,18 @@ async function encryptAndUploadFile({
       while (pending.length >= partSize) {
         const part = pending.slice(0, partSize);
         pending = pending.slice(partSize);
-        completed.push(
-          await uploadMultipartPart(
-            csrfToken,
-            plan.uploadId,
-            partNumber,
-            part,
-            signal,
-          ),
-        );
+        pendingParts.push({ partNumber, content: part });
         partNumber += 1;
+        if (pendingParts.length === VAULT_PRESIGN_BATCH_SIZE) {
+          completed.push(
+            ...(await uploadMultipartParts(
+              csrfToken,
+              plan.uploadId,
+              pendingParts.splice(0),
+              signal,
+            )),
+          );
+        }
       }
     }
   }
@@ -370,14 +393,16 @@ async function encryptAndUploadFile({
     }
     await uploadSingle(csrfToken, plan.uploadId, pending, signal);
   } else if (pending.length > 0) {
+    pendingParts.push({ partNumber, content: pending });
+  }
+  if (pendingParts.length > 0) {
     completed.push(
-      await uploadMultipartPart(
+      ...(await uploadMultipartParts(
         csrfToken,
         plan.uploadId,
-        partNumber,
-        pending,
+        pendingParts.splice(0),
         signal,
-      ),
+      )),
     );
   }
   pending.fill(0);
@@ -414,6 +439,7 @@ async function encryptAndUploadStream({
   let plaintextPending: Uint8Array<ArrayBufferLike> = new Uint8Array();
   let encryptedPending: Uint8Array<ArrayBufferLike> = new Uint8Array();
   const completed: VaultCompletedPart[] = [];
+  const pendingParts: PendingVaultPart[] = [];
   let partNumber = 1;
   let processedBytes = 0;
 
@@ -451,16 +477,18 @@ async function encryptAndUploadStream({
         while (encryptedPending.length >= partSize) {
           const part = encryptedPending.slice(0, partSize);
           encryptedPending = encryptedPending.slice(partSize);
-          completed.push(
-            await uploadMultipartPart(
-              csrfToken,
-              plan.uploadId,
-              partNumber,
-              part,
-              signal,
-            ),
-          );
+          pendingParts.push({ partNumber, content: part });
           partNumber += 1;
+          if (pendingParts.length === VAULT_PRESIGN_BATCH_SIZE) {
+            completed.push(
+              ...(await uploadMultipartParts(
+                csrfToken,
+                plan.uploadId,
+                pendingParts.splice(0),
+                signal,
+              )),
+            );
+          }
         }
       }
     }
@@ -478,14 +506,16 @@ async function encryptAndUploadStream({
       }
       await uploadSingle(csrfToken, plan.uploadId, encryptedPending, signal);
     } else if (encryptedPending.length > 0) {
+      pendingParts.push({ partNumber, content: encryptedPending });
+    }
+    if (pendingParts.length > 0) {
       completed.push(
-        await uploadMultipartPart(
+        ...(await uploadMultipartParts(
           csrfToken,
           plan.uploadId,
-          partNumber,
-          encryptedPending,
+          pendingParts.splice(0),
           signal,
-        ),
+        )),
       );
     }
     return completed;
@@ -515,37 +545,76 @@ async function uploadSingle(
   await putEncryptedBytes(signed.url, content, checksum, signal);
 }
 
-async function uploadMultipartPart(
+async function uploadMultipartParts(
   csrfToken: string,
   uploadId: string,
-  partNumber: number,
-  content: Uint8Array,
+  pending: PendingVaultPart[],
   signal: AbortSignal,
-): Promise<VaultCompletedPart> {
-  const checksum = await sha256Base64(content);
-  const signed = await getVaultPartUrl(
-    csrfToken,
-    uploadId,
-    partNumber,
-    checksum,
-    signal,
-  );
-  if (signed.contentLength !== content.length) {
-    throw new Error("The signed multipart length is invalid.");
+): Promise<VaultCompletedPart[]> {
+  if (pending.length < 1 || pending.length > VAULT_PRESIGN_BATCH_SIZE) {
+    throw new Error("The encrypted multipart batch is invalid.");
   }
-  const response = await putEncryptedBytes(
-    signed.url,
-    content,
-    checksum,
-    signal,
-  );
-  const etag = response.headers.get("ETag")?.trim();
-  if (!etag) {
-    throw new Error(
-      "The storage service did not expose the multipart ETag header.",
+  try {
+    const prepared = await Promise.all(
+      pending.map(async (part) => ({
+        ...part,
+        checksumSha256: await sha256Base64(part.content),
+      })),
     );
+    const response = await getVaultPartUrls(
+      csrfToken,
+      uploadId,
+      prepared.map((part) => ({
+        partNumber: part.partNumber,
+        checksumSha256: part.checksumSha256,
+      })),
+      signal,
+    );
+    const signedByPart = new Map(
+      response.parts.map((part) => [part.partNumber, part]),
+    );
+    if (signedByPart.size !== prepared.length) {
+      throw new Error("The signed multipart batch is incomplete.");
+    }
+    const completed: VaultCompletedPart[] = [];
+    for (
+      let offset = 0;
+      offset < prepared.length;
+      offset += VAULT_UPLOAD_CONCURRENCY
+    ) {
+      const uploaded = await Promise.all(
+        prepared
+          .slice(offset, offset + VAULT_UPLOAD_CONCURRENCY)
+          .map(async (part) => {
+            const signed = signedByPart.get(part.partNumber);
+            if (!signed || signed.contentLength !== part.content.length) {
+              throw new Error("The signed multipart length is invalid.");
+            }
+            const upload = await putEncryptedBytes(
+              signed.url,
+              part.content,
+              part.checksumSha256,
+              signal,
+            );
+            const etag = upload.headers.get("ETag")?.trim();
+            if (!etag) {
+              throw new Error(
+                "The storage service did not expose the multipart ETag header.",
+              );
+            }
+            return {
+              partNumber: part.partNumber,
+              etag,
+              checksumSha256: part.checksumSha256,
+            };
+          }),
+      );
+      completed.push(...uploaded);
+    }
+    return completed;
+  } finally {
+    for (const part of pending) part.content.fill(0);
   }
-  return { partNumber, etag, checksumSha256: checksum };
 }
 
 async function putEncryptedBytes(

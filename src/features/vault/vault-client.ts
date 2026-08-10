@@ -1,5 +1,4 @@
 import type {
-  VaultActiveShareContext,
   VaultDownloadPlan,
   VaultUnlockMaterial,
 } from "@/features/vault/protocol";
@@ -13,6 +12,8 @@ import type {
   VaultOpenPlanResult,
   VaultRecoveryResult,
   VaultSetupResult,
+  VaultShareDirectoryInput,
+  VaultShareDirectoryResult,
   VaultShareMaterialInput,
   VaultShareMaterialResult,
   VaultShareRotationInput,
@@ -112,13 +113,6 @@ export class VaultCryptoClient {
     if (!this.closed) expectResult(await this.send({ type: "lock" }), "lock");
   }
 
-  async loadShareContexts(contexts: VaultActiveShareContext[]): Promise<void> {
-    expectResult(
-      await this.send({ type: "loadShareContexts", contexts }),
-      "loadShareContexts",
-    );
-  }
-
   async openPlan(plan: VaultDownloadPlan): Promise<VaultOpenPlanResult> {
     return expectResult(await this.send({ type: "openPlan", plan }), "openPlan")
       .result;
@@ -153,6 +147,15 @@ export class VaultCryptoClient {
     return expectResult(
       await this.send({ type: "finalizeEncryption", sessionId }),
       "finalizeEncryption",
+    ).result;
+  }
+
+  async createShareDirectory(
+    input: VaultShareDirectoryInput,
+  ): Promise<VaultShareDirectoryResult> {
+    return expectResult(
+      await this.send({ type: "createShareDirectory", input }),
+      "createShareDirectory",
     ).result;
   }
 

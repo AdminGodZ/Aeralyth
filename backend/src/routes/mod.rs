@@ -102,6 +102,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
                     web::post().to(files::presign_upload_part),
                 )
                 .route(
+                    "/files/uploads/{id}/parts",
+                    web::post().to(files::presign_upload_parts),
+                )
+                .route(
                     "/files/uploads/{id}/complete",
                     web::post().to(files::complete_upload),
                 )
@@ -142,6 +146,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
                             "/uploads/{id}/parts/{part_number}",
                             web::post().to(vault::presign_part),
                         )
+                        .route("/uploads/{id}/parts", web::post().to(vault::presign_parts))
                         .route(
                             "/uploads/{id}/publish",
                             web::post().to(vault::publish_upload),
@@ -156,6 +161,11 @@ pub fn configure(config: &mut web::ServiceConfig) {
                         .route(
                             "/nodes/{id}/share-contexts",
                             web::get().to(vault::share_contexts),
+                        )
+                        .route("/share-sync-jobs", web::get().to(vault::share_sync_jobs))
+                        .route(
+                            "/share-sync-jobs/{id}",
+                            web::post().to(vault::publish_share_directory),
                         )
                         .route("/shares", web::get().to(vault::list_shares))
                         .route("/shares", web::post().to(vault::create_share))

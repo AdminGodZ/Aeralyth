@@ -30,11 +30,6 @@ export type VaultWorkerRequest =
   | { id: number; type: "lock" }
   | {
       id: number;
-      type: "loadShareContexts";
-      contexts: VaultActiveShareContext[];
-    }
-  | {
-      id: number;
       type: "openPlan";
       plan: VaultDownloadPlan;
     }
@@ -54,6 +49,11 @@ export type VaultWorkerRequest =
       id: number;
       type: "finalizeEncryption";
       sessionId: string;
+    }
+  | {
+      id: number;
+      type: "createShareDirectory";
+      input: VaultShareDirectoryInput;
     }
   | {
       id: number;
@@ -122,6 +122,22 @@ export type VaultEncryptionComplete = {
   record: VaultNodeRecord;
 };
 
+export type VaultShareDirectoryInput = {
+  nodeId: string;
+  entryType: VaultEntryType;
+  generationNumber: number;
+  generationId: string;
+  recordVersion: number;
+  recordHash: string;
+  shareContexts: VaultActiveShareContext[];
+};
+
+export type VaultShareDirectoryResult = {
+  directoryCbor: string;
+  directorySignature: string;
+  wrappers: string[];
+};
+
 export type VaultOpenPlanResult = {
   manifest: VaultManifest;
 };
@@ -185,11 +201,11 @@ export type VaultWorkerResult =
   | { type: "unlock"; result: VaultUnlockResult }
   | { type: "recover"; result: VaultRecoveryResult }
   | { type: "lock" }
-  | { type: "loadShareContexts" }
   | { type: "openPlan"; result: VaultOpenPlanResult }
   | { type: "startEncryption"; result: VaultEncryptionStart }
   | { type: "encryptChunk"; result: VaultEncryptedChunk }
   | { type: "finalizeEncryption"; result: VaultEncryptionComplete }
+  | { type: "createShareDirectory"; result: VaultShareDirectoryResult }
   | { type: "startDecryption"; result: VaultDecryptionStart }
   | { type: "decryptChunk"; result: VaultDecryptedChunk }
   | { type: "finalizeDecryption" }

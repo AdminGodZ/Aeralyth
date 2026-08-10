@@ -6,10 +6,12 @@ import sodium from "libsodium-wrappers-sumo";
 import {
   decodeBootstrap,
   decodeManifest,
+  decodeShareDirectory,
   decodeShareEnvelope,
   decodeWrapper,
   encodeBootstrap,
   encodeManifest,
+  encodeShareDirectory,
   encodeShareEnvelope,
   encodeWrapper,
 } from "@/features/vault/cbor";
@@ -36,6 +38,7 @@ import {
   VAULT_AAD_SCHEMA_ID,
   VAULT_CRYPTO_CHUNK_BYTES,
   VAULT_FORMAT_VERSION,
+  VAULT_SHARE_DIRECTORY_VERSION,
   VAULT_SHARE_ENVELOPE_VERSION,
   VAULT_SUITE_ID,
   type VaultActiveShareContext,
@@ -46,6 +49,7 @@ import {
   type VaultPublicIdentity,
   type VaultRewrapPayload,
   type VaultSetupPayload,
+  type VaultShareDirectoryRecord,
   type VaultShareEnvelopeRecord,
   type VaultShareNodeSnapshot,
   type VaultUnlockMaterial,
@@ -65,6 +69,8 @@ import type {
   VaultOpenPlanResult,
   VaultRecoveryResult,
   VaultSetupResult,
+  VaultShareDirectoryInput,
+  VaultShareDirectoryResult,
   VaultShareMaterialInput,
   VaultShareMaterialResult,
   VaultShareRotationInput,
@@ -105,11 +111,6 @@ type EncryptionSession = {
   consumedPlaintext: number;
   leaves: Uint8Array[];
   ownerWrapper: Uint8Array;
-  shareContexts: Array<{
-    shareId: string;
-    epoch: number;
-    epochKey: CryptoKey;
-  }>;
 };
 
 type DecryptionSession = {
@@ -138,7 +139,7 @@ let identity: IdentitySecrets | null = null;
 const nodeKeys = new Map<string, CryptoKey>();
 const encryptionSessions = new Map<string, EncryptionSession>();
 const decryptionSessions = new Map<string, DecryptionSession>();
-const activeShareKeys = new Map<string, { epoch: number; key: CryptoKey }>();
+const SHARE_SIDECAR_CRYPTO_CONCURRENCY = 32;
 const hpkeSuite = new CipherSuite({
   kem: new DhkemX25519HkdfSha256(),
   kdf: new HkdfSha256(),
@@ -196,9 +197,6 @@ async function dispatch(
     case "lock":
       lockVault();
       return { result: { type: "lock" } };
-    case "loadShareContexts":
-      await loadShareContexts(request.contexts);
-      return { result: { type: "loadShareContexts" } };
     case "openPlan":
       return {
         result: { type: "openPlan", result: await openPlan(request.plan) },
@@ -226,6 +224,13 @@ async function dispatch(
         result: {
           type: "finalizeEncryption",
           result: await finalizeEncryption(request.sessionId),
+        },
+      };
+    case "createShareDirectory":
+      return {
+        result: {
+          type: "createShareDirectory",
+          result: await createShareDirectory(request.input),
         },
       };
     case "startDecryption":
@@ -692,15 +697,16 @@ function lockVault(): void {
   nodeKeys.clear();
   encryptionSessions.clear();
   decryptionSessions.clear();
-  activeShareKeys.clear();
 }
 
-async function loadShareContexts(
+async function decryptShareContexts(
   contexts: VaultActiveShareContext[],
-): Promise<void> {
+): Promise<Array<[string, { epoch: number; key: CryptoKey }]>> {
   const root = requireRootKey();
-  const loadedEntries = await Promise.all(
-    contexts.map(async (context) => {
+  const loadedEntries = await mapWithConcurrency(
+    contexts,
+    SHARE_SIDECAR_CRYPTO_CONCURRENCY,
+    async (context) => {
       if (context.epoch < 1 || !/^shr_[A-Za-z0-9_-]+$/u.test(context.shareId)) {
         throw new Error("The server returned an invalid active share context.");
       }
@@ -727,11 +733,13 @@ async function loadShareContexts(
       } finally {
         wipe(wrapperId, raw);
       }
-    }),
+    },
   );
   const loaded = new Map(loadedEntries);
-  activeShareKeys.clear();
-  for (const [shareId, value] of loaded) activeShareKeys.set(shareId, value);
+  if (loaded.size !== contexts.length) {
+    throw new Error("The active share context set contains duplicates.");
+  }
+  return Array.from(loaded);
 }
 
 async function startEncryption(
@@ -832,11 +840,6 @@ async function startEncryption(
     consumedPlaintext: 0,
     leaves: [],
     ownerWrapper,
-    shareContexts: Array.from(activeShareKeys, ([shareId, value]) => ({
-      shareId,
-      epoch: value.epoch,
-      epochKey: value.key,
-    })),
   });
   nodeKeys.set(nodeId, nodeKey);
   wipe(nodeMaterial);
@@ -955,19 +958,7 @@ async function finalizeEncryption(
       toArrayBuffer(manifestPlaintext),
     ),
   );
-  const sharedWrappers = await Promise.all(
-    session.shareContexts.map(async (context) => {
-      const metadataWrapper = createShareWrapper(session, context, 4);
-      if (session.manifest.entryType !== "file") {
-        return [await metadataWrapper];
-      }
-      return Promise.all([
-        metadataWrapper,
-        createShareWrapper(session, context, 3),
-      ]);
-    }),
-  );
-  const canonicalWrappers = [session.ownerWrapper, ...sharedWrappers.flat()];
+  const canonicalWrappers = [session.ownerWrapper];
   const decodedWrappers = canonicalWrappers.map(decodeWrapper);
   const wrapperHashes = await Promise.all(canonicalWrappers.map(sha256));
   const bootstrap: VaultBootstrapRecord = {
@@ -1015,9 +1006,106 @@ async function finalizeEncryption(
     bootstrapCbor,
     signature,
     ...session.leaves,
-    ...canonicalWrappers.slice(1),
   );
   return complete;
+}
+
+async function createShareDirectory(
+  input: VaultShareDirectoryInput,
+): Promise<VaultShareDirectoryResult> {
+  const activeIdentity = requireIdentity();
+  const nodeKey = nodeKeys.get(input.nodeId);
+  if (!nodeKey) {
+    throw vaultError(
+      "NODE_KEY_REQUIRED",
+      `Unlock the node before synchronizing its share directory:${input.nodeId}`,
+    );
+  }
+  if (
+    input.shareContexts.length < 1 ||
+    input.shareContexts.length > 4096 ||
+    !Number.isSafeInteger(input.recordVersion) ||
+    input.recordVersion < 1 ||
+    !Number.isSafeInteger(input.generationNumber) ||
+    input.generationNumber < 1
+  ) {
+    throw new Error("The share-directory request is invalid.");
+  }
+  const generationId = fromBase64Url(input.generationId);
+  const recordHash = fromBase64Url(input.recordHash);
+  if (generationId.length !== 16 || recordHash.length !== 32) {
+    throw new Error("The share-directory record binding is invalid.");
+  }
+  const contexts = await decryptShareContexts(input.shareContexts);
+  const wrappersByShare = await mapWithConcurrency(
+    contexts,
+    SHARE_SIDECAR_CRYPTO_CONCURRENCY,
+    async ([shareId, value]) => {
+      const context = { shareId, epoch: value.epoch, epochKey: value.key };
+      const metadata = createShareWrapperFromNode(
+        input.nodeId,
+        input.recordVersion,
+        input.generationNumber,
+        generationId,
+        nodeKey,
+        context,
+        4,
+      );
+      if (input.entryType === "folder") return [await metadata];
+      return Promise.all([
+        metadata,
+        createShareWrapperFromNode(
+          input.nodeId,
+          input.recordVersion,
+          input.generationNumber,
+          generationId,
+          nodeKey,
+          context,
+          3,
+        ),
+      ]);
+    },
+  );
+  const wrappers = wrappersByShare.flat();
+  const wrapperHashes = await mapWithConcurrency(
+    wrappers,
+    SHARE_SIDECAR_CRYPTO_CONCURRENCY,
+    sha256,
+  );
+  const wrapperRoot = await wrapperSetRoot(wrapperHashes);
+  const directory: VaultShareDirectoryRecord = {
+    formatVersion: VAULT_SHARE_DIRECTORY_VERSION,
+    suiteId: VAULT_SUITE_ID,
+    aadSchemaId: VAULT_AAD_SCHEMA_ID,
+    nodeId: input.nodeId,
+    recordVersion: input.recordVersion,
+    recordHash,
+    generationNumber: input.generationNumber,
+    generationId,
+    signerKeyVersion: activeIdentity.keyVersion,
+    wrapperSetRoot: wrapperRoot,
+    wrapperCount: wrappers.length,
+  };
+  const canonical = encodeShareDirectory(directory);
+  const signature = sodium.crypto_sign_detached(
+    canonical,
+    activeIdentity.ed25519PrivateKey,
+  );
+  const result = {
+    directoryCbor: toBase64Url(canonical),
+    directorySignature: toBase64Url(signature),
+    wrappers: wrappers.map(toBase64Url),
+  };
+  wipe(
+    generationId,
+    recordHash,
+    wrapperRoot,
+    canonical,
+    signature,
+    ...wrapperHashes,
+    ...wrappers,
+  );
+  return result;
 }
 
 async function openPlan(plan: VaultDownloadPlan): Promise<VaultOpenPlanResult> {
@@ -1492,22 +1580,6 @@ async function createSubtreeShareWrappers(
   return wrappersByNode.flat();
 }
 
-async function createShareWrapper(
-  session: EncryptionSession,
-  context: { shareId: string; epoch: number; epochKey: CryptoKey },
-  kind: 3 | 4,
-): Promise<Uint8Array> {
-  return createShareWrapperFromNode(
-    session.nodeId,
-    session.recordVersion,
-    session.generationNumber,
-    session.generationId,
-    session.nodeKey,
-    context,
-    kind,
-  );
-}
-
 async function createShareWrapperFromNode(
   nodeId: string,
   recordVersion: number,
@@ -1720,6 +1792,37 @@ async function openSharedKeys(
       "The share wrapper commitment is invalid.",
     );
   }
+  const directoryMaterial = share.directory;
+  const directory = directoryMaterial
+    ? decodeShareDirectory(fromBase64Url(directoryMaterial.canonicalCbor))
+    : null;
+  if (directory && directoryMaterial) {
+    const directoryCbor = fromBase64Url(directoryMaterial.canonicalCbor);
+    const directorySignature = fromBase64Url(directoryMaterial.signature);
+    if (
+      !sodium.crypto_sign_verify_detached(
+        directorySignature,
+        directoryCbor,
+        fromBase64Url(plan.signerEd25519PublicKey),
+      ) ||
+      directory.formatVersion !== VAULT_SHARE_DIRECTORY_VERSION ||
+      directory.suiteId !== VAULT_SUITE_ID ||
+      directory.aadSchemaId !== VAULT_AAD_SCHEMA_ID ||
+      directory.nodeId !== plan.nodeId ||
+      directory.recordVersion !== plan.recordVersion ||
+      directory.generationNumber !== plan.generationNumber ||
+      directory.signerKeyVersion !== plan.signerKeyVersion ||
+      directory.wrapperCount < wrapperBytes.length ||
+      directoryMaterial.wrapperProofs.length !== wrapperBytes.length ||
+      !equalBytes(directory.recordHash, fromBase64Url(plan.recordHash)) ||
+      !equalBytes(directory.generationId, fromBase64Url(plan.generationId))
+    ) {
+      throw vaultError(
+        "AUTHENTICATION_FAILED",
+        "The share-wrapper directory is invalid.",
+      );
+    }
+  }
   const seenWrapperHashes = new Set<string>();
   const receivedWrapperHashes = await Promise.all(wrapperBytes.map(sha256));
   for (let index = 0; index < receivedWrapperHashes.length; index += 1) {
@@ -1740,6 +1843,16 @@ async function openSharedKeys(
           wrapperCount: envelope.wrapperCount,
           expectedRoot: envelope.wrapperSetRoot as Uint8Array,
         }));
+    }
+    if (!committed && directory && directoryMaterial) {
+      const proof = directoryMaterial.wrapperProofs[index];
+      committed = await verifyWrapperSetProof({
+        wrapperHash: hashBytes,
+        leafIndex: proof.leafIndex,
+        proof: fromBase64Url(proof.proof),
+        wrapperCount: directory.wrapperCount,
+        expectedRoot: directory.wrapperSetRoot,
+      });
     }
     if (!committed || seenWrapperHashes.has(hash)) {
       throw vaultError(
@@ -2229,4 +2342,25 @@ function normalizeError(error: unknown): { message: string; code?: string } {
     };
   }
   return { message: "Vault operation failed." };
+}
+
+async function mapWithConcurrency<Input, Output>(
+  values: readonly Input[],
+  concurrency: number,
+  transform: (value: Input, index: number) => Promise<Output>,
+): Promise<Output[]> {
+  const results = new Array<Output>(values.length);
+  let nextIndex = 0;
+  const workers = Array.from(
+    { length: Math.min(concurrency, values.length) },
+    async () => {
+      while (nextIndex < values.length) {
+        const index = nextIndex;
+        nextIndex += 1;
+        results[index] = await transform(values[index], index);
+      }
+    },
+  );
+  await Promise.all(workers);
+  return results;
 }

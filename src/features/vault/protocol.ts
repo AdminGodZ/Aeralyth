@@ -1,5 +1,6 @@
 export const VAULT_FORMAT_VERSION = 1;
 export const VAULT_SHARE_ENVELOPE_VERSION = 2;
+export const VAULT_SHARE_DIRECTORY_VERSION = 1;
 export const VAULT_SUITE_ID = 1;
 export const VAULT_AAD_SCHEMA_ID = 1;
 export const VAULT_CRYPTO_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -98,6 +99,20 @@ export type VaultBootstrapRecord = {
   ciphertextMerkleRoot: Uint8Array;
 };
 
+export type VaultShareDirectoryRecord = {
+  formatVersion: number;
+  suiteId: number;
+  aadSchemaId: number;
+  nodeId: string;
+  recordVersion: number;
+  recordHash: Uint8Array;
+  generationNumber: number;
+  generationId: Uint8Array;
+  signerKeyVersion: number;
+  wrapperSetRoot: Uint8Array;
+  wrapperCount: number;
+};
+
 export type VaultManifest = {
   name: string;
   mimeType: string | null;
@@ -159,6 +174,14 @@ export type VaultShareDownloadMaterial = {
     leafIndex: number;
     proof: string;
   } | null>;
+  directory: {
+    canonicalCbor: string;
+    signature: string;
+    wrapperProofs: Array<{
+      leafIndex: number;
+      proof: string;
+    }>;
+  } | null;
 };
 
 export type VaultPublicIdentity = {

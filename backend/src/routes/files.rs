@@ -6,12 +6,12 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use futures_util::{StreamExt, stream};
+use futures_util::{StreamExt, future::try_join_all, stream};
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File as AsyncFile, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::auth::{AuthUser, require_csrf, require_user};
+use crate::auth::{AuthUser, require_csrf, require_principal, require_user};
 use crate::routes::share_links::{
     EditorShareGrant, editor_grant_from_header, editor_parent, validate_editor_replacement,
 };
@@ -23,6 +23,7 @@ const UPLOAD_LENGTH_HEADER: &str = "x-aeralyth-upload-length";
 const UPLOAD_OFFSET_HEADER: &str = "x-aeralyth-upload-offset";
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 100;
+const MAX_PRESIGN_PARTS: usize = 32;
 
 #[derive(Deserialize)]
 pub(crate) struct FilesQuery {
@@ -65,6 +66,18 @@ pub(crate) struct UploadChecksumRequest {
     checksum_sha256: String,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UploadPartUrlRequest {
+    part_number: i32,
+    checksum_sha256: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct UploadPartUrlsRequest {
+    parts: Vec<UploadPartUrlRequest>,
+}
+
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UploadInitResponse {
@@ -80,6 +93,19 @@ pub(crate) struct UploadInitResponse {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct UploadUrlResponse {
+    url: String,
+    content_length: u64,
+}
+
+#[derive(Serialize)]
+pub(crate) struct UploadPartUrlsResponse {
+    parts: Vec<UploadPartUrlResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct UploadPartUrlResponse {
+    part_number: i32,
     url: String,
     content_length: u64,
 }
@@ -1011,6 +1037,86 @@ pub async fn presign_upload_part(
         url,
         content_length,
     }))
+}
+
+pub async fn presign_upload_parts(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    path: web::Path<String>,
+    body: web::Json<UploadPartUrlsRequest>,
+) -> Result<HttpResponse> {
+    let actor = require_upload_actor(&state, &request, true).await?;
+    let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
+        return Ok(HttpResponse::NotFound().finish());
+    };
+    if upload.mode != "multipart" || upload.status != "pending" {
+        return Ok(HttpResponse::Conflict().finish());
+    }
+    if body.parts.is_empty() || body.parts.len() > MAX_PRESIGN_PARTS {
+        return Err(error::ErrorBadRequest(
+            "multipart presign batch must contain 1 to 32 parts",
+        ));
+    }
+
+    let size_bytes = u64::try_from(upload.size_bytes)
+        .map_err(|_| error::ErrorInternalServerError("invalid upload size"))?;
+    let part_size_bytes = upload_part_size(&upload)?;
+    let part_count = size_bytes.div_ceil(part_size_bytes);
+    let mut parts = body
+        .parts
+        .iter()
+        .map(|part| {
+            let part_number = u64::try_from(part.part_number)
+                .ok()
+                .filter(|value| *value > 0 && *value <= part_count)
+                .ok_or_else(|| error::ErrorBadRequest("invalid upload part"))?;
+            let offset = (part_number - 1)
+                .checked_mul(part_size_bytes)
+                .ok_or_else(|| error::ErrorBadRequest("invalid upload part"))?;
+            let content_length = size_bytes
+                .checked_sub(offset)
+                .map(|remaining| remaining.min(part_size_bytes))
+                .filter(|length| *length > 0)
+                .ok_or_else(|| error::ErrorBadRequest("invalid upload part"))?;
+            Ok((
+                part.part_number,
+                validate_sha256_checksum(&part.checksum_sha256)?,
+                content_length,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    parts.sort_by_key(|(part_number, _, _)| *part_number);
+    if parts.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(error::ErrorBadRequest("upload part is duplicated"));
+    }
+    let multipart_upload_id = upload
+        .multipart_upload_id
+        .as_deref()
+        .ok_or_else(|| error::ErrorInternalServerError("multipart upload id missing"))?;
+    let urls = try_join_all(parts.iter().map(|(part_number, checksum, length)| {
+        state.storage.presign_upload_part(
+            &upload.object_key,
+            multipart_upload_id,
+            *part_number,
+            checksum,
+            *length,
+        )
+    }))
+    .await
+    .map_err(error::ErrorBadGateway)?;
+    let parts = parts
+        .into_iter()
+        .zip(urls)
+        .map(
+            |((part_number, _, content_length), url)| UploadPartUrlResponse {
+                part_number,
+                url,
+                content_length,
+            },
+        )
+        .collect();
+
+    Ok(HttpResponse::Ok().json(UploadPartUrlsResponse { parts }))
 }
 
 pub async fn complete_upload(
@@ -2966,7 +3072,7 @@ async fn require_upload_actor(
         });
     }
 
-    let user = require_user(state, request).await?;
+    let user = require_principal(state, request).await?;
     if require_mutation_csrf {
         require_header_csrf(state, request).await?;
     }

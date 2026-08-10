@@ -5,16 +5,18 @@ use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
+use futures_util::future::try_join_all;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AuthUser, require_csrf, require_user};
+use crate::auth::{AuthUser, require_csrf, require_principal, require_user};
 use crate::config::E2eeMode;
 use crate::e2ee::{
     ARGON2ID_ALGORITHM, ARGON2ID_MEMORY_BYTES, ARGON2ID_OPERATIONS, ARGON2ID_OUTPUT_BYTES,
-    CRYPTO_CHUNK_BYTES, FORMAT_VERSION, MAX_CIPHERTEXT_BYTES, SHARE_ENVELOPE_VERSION,
-    UPLOAD_PART_BYTES, WrapperSetCommitment, decode_bootstrap, decode_share_envelope,
-    decode_wrapper, sha256, verify_ed25519_signature, verify_node_record, verify_share_envelope,
-    verify_wrapper_set_proof, wrapper_set_commitment,
+    CRYPTO_CHUNK_BYTES, FORMAT_VERSION, MAX_CIPHERTEXT_BYTES, SHARE_DIRECTORY_VERSION,
+    SHARE_ENVELOPE_VERSION, UPLOAD_PART_BYTES, WrapperSetCommitment, decode_bootstrap,
+    decode_share_directory, decode_share_envelope, decode_wrapper, sha256,
+    verify_ed25519_signature, verify_node_record, verify_share_envelope, verify_wrapper_set_proof,
+    wrapper_set_commitment,
 };
 use crate::state::AppState;
 use crate::storage::{ObjectMetadata, UploadedPart};
@@ -22,6 +24,7 @@ use crate::storage::{ObjectMetadata, UploadedPart};
 const MAX_IDENTITY_PRIVATE_CIPHERTEXT: usize = 8_192;
 const MAX_ACCOUNT_STATE_CIPHERTEXT: usize = 4 * 1024 * 1024;
 const MAX_MANIFEST_CIPHERTEXT: usize = 1024 * 1024;
+const MAX_PRESIGN_PARTS: usize = 32;
 const SHARED_DOWNLOAD_AUTHORIZATION_QUERY: &str = "
     WITH RECURSIVE ancestors AS (
       SELECT id, parent_id FROM files
@@ -267,6 +270,31 @@ struct UploadUrlResponse {
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
+struct PartChecksumRequest {
+    part_number: i32,
+    checksum_sha256: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct PartChecksumsRequest {
+    parts: Vec<PartChecksumRequest>,
+}
+
+#[derive(Serialize)]
+struct PartUrlsResponse {
+    parts: Vec<PartUrlResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PartUrlResponse {
+    part_number: i32,
+    url: String,
+    content_length: u64,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct CompletedUploadPartRequest {
     part_number: i32,
     etag: String,
@@ -291,6 +319,32 @@ struct PublishResponse {
     generation_id: String,
     record_version: i64,
     record_hash: String,
+    share_sync_required: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PublishShareDirectoryRequest {
+    directory_cbor: Option<String>,
+    directory_signature: Option<String>,
+    #[serde(default)]
+    wrappers: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareSyncJobResponse {
+    node_id: String,
+    entry_type: String,
+    generation_number: i64,
+    generation_id: String,
+    record_version: i64,
+    record_hash: String,
+}
+
+#[derive(Serialize)]
+struct ShareSyncJobsResponse {
+    jobs: Vec<ShareSyncJobResponse>,
 }
 
 #[derive(Deserialize)]
@@ -344,6 +398,15 @@ struct ShareDownloadMaterial {
     sender_fingerprint_sha256: String,
     recipient_key_version: i64,
     wrapper_proofs: Vec<Option<ShareWrapperProofResponse>>,
+    directory: Option<ShareDirectoryResponse>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareDirectoryResponse {
+    canonical_cbor: String,
+    signature: String,
+    wrapper_proofs: Vec<ShareWrapperProofResponse>,
 }
 
 #[derive(Serialize)]
@@ -1165,7 +1228,7 @@ pub async fn init_upload(
         .map_err(error::ErrorInternalServerError)?
     {
         let upload_id: String = row.get("id");
-        let upload = get_upload(&state, &user, &upload_id)
+        let upload = get_upload(&state, &user.id, &upload_id)
             .await?
             .ok_or_else(|| error::ErrorConflict("upload disappeared"))?;
         let existing_parts = match (
@@ -1237,7 +1300,7 @@ pub async fn init_upload(
             .commit()
             .await
             .map_err(error::ErrorInternalServerError)?;
-        let upload = get_upload(&state, &user, &existing_upload_id)
+        let upload = get_upload(&state, &user.id, &existing_upload_id)
             .await?
             .ok_or_else(|| error::ErrorConflict("upload disappeared"))?;
         let existing_parts = match (
@@ -1352,7 +1415,7 @@ pub async fn init_upload(
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let upload = get_upload(&state, &user, &upload_id)
+    let upload = get_upload(&state, &user.id, &upload_id)
         .await?
         .ok_or_else(|| error::ErrorInternalServerError("upload was not persisted"))?;
 
@@ -1366,9 +1429,9 @@ pub async fn presign_content(
     body: web::Json<ChecksumRequest>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
-    let upload = get_upload(&state, &user, &path.into_inner())
+    let upload = get_upload(&state, &user.id, &path.into_inner())
         .await?
         .ok_or_else(|| error::ErrorNotFound("upload not found"))?;
     if upload.mode != "single" || upload.status != "pending" {
@@ -1422,10 +1485,10 @@ pub async fn presign_part(
     body: web::Json<ChecksumRequest>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let (upload_id, part_number) = path.into_inner();
-    let upload = get_upload(&state, &user, &upload_id)
+    let upload = get_upload(&state, &user.id, &upload_id)
         .await?
         .ok_or_else(|| error::ErrorNotFound("upload not found"))?;
     if upload.mode != "multipart" || upload.status != "pending" {
@@ -1470,6 +1533,89 @@ pub async fn presign_part(
     }))
 }
 
+pub async fn presign_parts(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    path: web::Path<String>,
+    body: web::Json<PartChecksumsRequest>,
+) -> Result<HttpResponse> {
+    require_vault_enabled(&state)?;
+    let principal = require_principal(&state, &request).await?;
+    require_header_csrf(&state, &request).await?;
+    let upload = get_upload(&state, &principal.id, &path.into_inner())
+        .await?
+        .ok_or_else(|| error::ErrorNotFound("upload not found"))?;
+    if upload.mode != "multipart" || upload.status != "pending" {
+        return Ok(HttpResponse::Conflict().finish());
+    }
+    if body.parts.is_empty() || body.parts.len() > MAX_PRESIGN_PARTS {
+        return Err(error::ErrorBadRequest(
+            "multipart presign batch must contain 1 to 32 parts",
+        ));
+    }
+
+    let total = u64::try_from(upload.ciphertext_length)
+        .map_err(|_| error::ErrorInternalServerError("ciphertext length is invalid"))?;
+    let part_count = total.div_ceil(UPLOAD_PART_BYTES);
+    let mut parts = body
+        .parts
+        .iter()
+        .map(|part| {
+            let part_number = u64::try_from(part.part_number)
+                .ok()
+                .filter(|value| *value > 0 && *value <= part_count)
+                .ok_or_else(|| error::ErrorBadRequest("part number is invalid"))?;
+            let offset = (part_number - 1)
+                .checked_mul(UPLOAD_PART_BYTES)
+                .ok_or_else(|| error::ErrorBadRequest("part number is invalid"))?;
+            let content_length = total
+                .checked_sub(offset)
+                .map(|remaining| remaining.min(UPLOAD_PART_BYTES))
+                .filter(|length| *length > 0)
+                .ok_or_else(|| error::ErrorBadRequest("part number is invalid"))?;
+            Ok((
+                part.part_number,
+                validate_sha256_checksum(&part.checksum_sha256)?,
+                content_length,
+            ))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    parts.sort_by_key(|(part_number, _, _)| *part_number);
+    if parts.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+        return Err(error::ErrorBadRequest("upload part is duplicated"));
+    }
+    let object_key = upload
+        .object_key
+        .as_deref()
+        .ok_or_else(|| error::ErrorInternalServerError("object key is missing"))?;
+    let multipart_upload_id = upload
+        .multipart_upload_id
+        .as_deref()
+        .ok_or_else(|| error::ErrorInternalServerError("multipart upload id is missing"))?;
+    let urls = try_join_all(parts.iter().map(|(part_number, checksum, length)| {
+        state.storage.presign_upload_part(
+            object_key,
+            multipart_upload_id,
+            *part_number,
+            checksum,
+            *length,
+        )
+    }))
+    .await
+    .map_err(error::ErrorBadGateway)?;
+    let parts = parts
+        .into_iter()
+        .zip(urls)
+        .map(|((part_number, _, content_length), url)| PartUrlResponse {
+            part_number,
+            url,
+            content_length,
+        })
+        .collect();
+
+    Ok(HttpResponse::Ok().json(PartUrlsResponse { parts }))
+}
+
 pub async fn publish_upload(
     state: web::Data<AppState>,
     request: HttpRequest,
@@ -1479,7 +1625,7 @@ pub async fn publish_upload(
     require_vault_enabled(&state)?;
     let user = require_user(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
-    let upload = get_upload(&state, &user, &path.into_inner())
+    let upload = get_upload(&state, &user.id, &path.into_inner())
         .await?
         .ok_or_else(|| error::ErrorNotFound("upload not found"))?;
     if upload.status == "published" {
@@ -1530,6 +1676,7 @@ pub async fn publish_record(
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
+    lock_share_topology(&transaction, &user.id).await?;
     let file = transaction
         .query_opt(
             "
@@ -1573,7 +1720,7 @@ pub async fn publish_record(
         &decoded,
         file.get::<_, Option<String>>("parent_id").as_deref(),
     )?;
-    let committed_share_wrappers = committed_share_wrappers(
+    let (committed_share_wrappers, share_sync_required) = publication_share_wrappers(
         &transaction,
         &decoded,
         &node_id,
@@ -1583,6 +1730,15 @@ pub async fn publish_record(
     )
     .await?;
     insert_node_record(&transaction, &user.id, &decoded).await?;
+    update_share_sync_job(
+        &transaction,
+        &node_id,
+        &user.id,
+        i64::try_from(decoded.verified.bootstrap.record_version)
+            .map_err(|_| error::ErrorBadRequest("record version is invalid"))?,
+        share_sync_required,
+    )
+    .await?;
     replace_owner_wrappers(&transaction, &user.id, &decoded).await?;
     insert_share_wrappers(&transaction, &committed_share_wrappers, None).await?;
     update_node_head(&transaction, &user.id, &decoded).await?;
@@ -1604,6 +1760,7 @@ pub async fn publish_record(
         generation_id: encode_bytes(current_generation_id),
         record_version: decoded.verified.bootstrap.record_version as i64,
         record_hash: encode_bytes(decoded.verified.record_hash),
+        share_sync_required,
     }))
 }
 
@@ -1714,7 +1871,7 @@ pub async fn abort_upload(
     require_vault_enabled(&state)?;
     let user = require_user(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
-    let Some(upload) = get_upload(&state, &user, &path.into_inner()).await? else {
+    let Some(upload) = get_upload(&state, &user.id, &path.into_inner()).await? else {
         return Ok(HttpResponse::NoContent().finish());
     };
     if upload.status == "published" {
@@ -1838,6 +1995,299 @@ pub async fn share_contexts(
     Ok(HttpResponse::Ok().json(contexts))
 }
 
+pub async fn share_sync_jobs(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+) -> Result<HttpResponse> {
+    require_vault_enabled(&state)?;
+    let principal = require_principal(&state, &request).await?;
+    let rows = state
+        .db
+        .query(
+            "
+                SELECT jobs.node_id, files.entry_type,
+                       files.current_generation_number,
+                       files.current_generation_id,
+                       heads.record_version, heads.record_hash
+                FROM vault_share_sync_jobs AS jobs
+                INNER JOIN files ON files.id = jobs.node_id
+                INNER JOIN vault_node_heads AS heads
+                  ON heads.node_id = jobs.node_id
+                 AND heads.record_version = jobs.record_version
+                WHERE jobs.owner_id = $1
+                  AND files.owner_id = $1
+                  AND files.e2ee_state = 'encrypted'
+                  AND files.state = 'active'
+                ORDER BY jobs.updated_at, jobs.node_id
+                LIMIT 32
+            ",
+            &[&principal.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let jobs = rows
+        .into_iter()
+        .map(|row| ShareSyncJobResponse {
+            node_id: row.get("node_id"),
+            entry_type: row.get("entry_type"),
+            generation_number: row.get("current_generation_number"),
+            generation_id: encode_bytes(row.get::<_, Vec<u8>>("current_generation_id")),
+            record_version: row.get("record_version"),
+            record_hash: encode_bytes(row.get::<_, Vec<u8>>("record_hash")),
+        })
+        .collect();
+    Ok(HttpResponse::Ok().json(ShareSyncJobsResponse { jobs }))
+}
+
+pub async fn publish_share_directory(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    path: web::Path<String>,
+    body: web::Json<PublishShareDirectoryRequest>,
+) -> Result<HttpResponse> {
+    require_vault_enabled(&state)?;
+    let principal = require_principal(&state, &request).await?;
+    require_header_csrf(&state, &request).await?;
+    let node_id = path.into_inner();
+    validate_node_id(&node_id)?;
+    let mut client = state
+        .db
+        .get()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let transaction = client
+        .transaction()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    lock_share_topology(&transaction, &principal.id).await?;
+    let job = transaction
+        .query_opt(
+            "
+                SELECT jobs.record_version, files.entry_type,
+                       files.current_generation_number,
+                       files.current_generation_id,
+                       heads.record_hash, records.signer_key_version,
+                       identity.ed25519_public_key
+                FROM vault_share_sync_jobs AS jobs
+                INNER JOIN files ON files.id = jobs.node_id
+                INNER JOIN vault_node_heads AS heads
+                  ON heads.node_id = jobs.node_id
+                 AND heads.record_version = jobs.record_version
+                INNER JOIN vault_node_records AS records
+                  ON records.node_id = heads.node_id
+                 AND records.record_version = heads.record_version
+                INNER JOIN vault_identity_keys AS identity
+                  ON identity.user_id = records.owner_id
+                 AND identity.key_version = records.signer_key_version
+                WHERE jobs.node_id = $1 AND jobs.owner_id = $2
+                  AND files.owner_id = $2
+                FOR UPDATE OF jobs
+            ",
+            &[&node_id, &principal.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let Some(job) = job else {
+        return Ok(HttpResponse::NoContent().finish());
+    };
+    let shares = transaction
+        .query(
+            "
+                WITH RECURSIVE ancestors AS (
+                  SELECT id, parent_id FROM files
+                  WHERE id = $1 AND owner_id = $2
+                  UNION ALL
+                  SELECT parent.id, parent.parent_id
+                  FROM files AS parent
+                  INNER JOIN ancestors AS child ON child.parent_id = parent.id
+                  WHERE parent.owner_id = $2
+                )
+                SELECT shares.id, shares.active_epoch
+                FROM vault_shares AS shares
+                INNER JOIN ancestors ON ancestors.id = shares.root_node_id
+                WHERE shares.owner_id = $2 AND shares.status = 'active'
+                  AND shares.publication_fenced = FALSE
+                ORDER BY shares.id
+                FOR SHARE OF shares
+            ",
+            &[&node_id, &principal.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    if shares.is_empty() {
+        if body.directory_cbor.is_some()
+            || body.directory_signature.is_some()
+            || !body.wrappers.is_empty()
+        {
+            return Err(error::ErrorConflict(
+                "active shares changed; refresh the share directory",
+            ));
+        }
+        transaction
+            .execute(
+                "DELETE FROM vault_share_sync_jobs WHERE node_id = $1 AND owner_id = $2",
+                &[&node_id, &principal.id],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        transaction
+            .commit()
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        return Ok(HttpResponse::NoContent().finish());
+    }
+
+    let directory_cbor = decode_limited(
+        body.directory_cbor
+            .as_deref()
+            .ok_or_else(|| error::ErrorBadRequest("share directory is required"))?,
+        4_096,
+        "share directory",
+    )?;
+    let directory_signature = decode_fixed::<64>(
+        body.directory_signature
+            .as_deref()
+            .ok_or_else(|| error::ErrorBadRequest("share directory signature is required"))?,
+        "share directory signature",
+    )?;
+    let directory = decode_share_directory(&directory_cbor).map_err(error::ErrorBadRequest)?;
+    let record_version: i64 = job.get("record_version");
+    let generation_number: i64 = job.get("current_generation_number");
+    let generation_id: Vec<u8> = job.get("current_generation_id");
+    let record_hash: Vec<u8> = job.get("record_hash");
+    let signer_key_version: i64 = job.get("signer_key_version");
+    if directory.format_version != SHARE_DIRECTORY_VERSION
+        || directory.node_id != node_id
+        || i64::try_from(directory.record_version).ok() != Some(record_version)
+        || directory.record_hash.as_slice() != record_hash
+        || i64::try_from(directory.generation_number).ok() != Some(generation_number)
+        || directory.generation_id.as_slice() != generation_id
+        || i64::try_from(directory.signer_key_version).ok() != Some(signer_key_version)
+    {
+        return Err(error::ErrorConflict(
+            "share directory targets a stale node record",
+        ));
+    }
+    verify_ed25519_signature(
+        &directory_cbor,
+        &directory_signature,
+        job.get::<_, Vec<u8>>("ed25519_public_key").as_slice(),
+    )
+    .map_err(error::ErrorBadRequest)?;
+
+    let include_generation = job.get::<_, String>("entry_type") == "file";
+    let expected_count = shares
+        .len()
+        .checked_mul(if include_generation { 2 } else { 1 })
+        .ok_or_else(|| error::ErrorBadRequest("share wrapper count is invalid"))?;
+    if body.wrappers.len() != expected_count || body.wrappers.len() > 8_192 {
+        return Err(error::ErrorConflict(
+            "active shares changed; refresh the share directory",
+        ));
+    }
+    let mut expected = HashSet::with_capacity(expected_count);
+    for share in shares {
+        let share_id: String = share.get("id");
+        let epoch: i64 = share.get("active_epoch");
+        expected.insert((share_id.clone(), epoch, 4_u64, None));
+        if include_generation {
+            expected.insert((share_id, epoch, 3_u64, Some(generation_id.clone())));
+        }
+    }
+    let mut actual = HashSet::with_capacity(expected_count);
+    let mut material = Vec::with_capacity(expected_count);
+    for encoded in &body.wrappers {
+        let canonical = decode_limited(encoded, 65_536, "share wrapper")?;
+        let record = decode_wrapper(&canonical).map_err(error::ErrorBadRequest)?;
+        if !matches!(record.kind, 3 | 4)
+            || record.node_id != node_id
+            || i64::try_from(record.record_version).ok() != Some(record_version)
+        {
+            return Err(error::ErrorBadRequest(
+                "share wrapper targets another node record",
+            ));
+        }
+        let share_id = record.share_id.clone().unwrap_or_default();
+        let epoch = i64::try_from(record.epoch.unwrap_or_default())
+            .map_err(|_| error::ErrorBadRequest("share epoch is invalid"))?;
+        let wrapper_generation_id = record.generation_id.map(Vec::from);
+        if !actual.insert((share_id, epoch, record.kind, wrapper_generation_id)) {
+            return Err(error::ErrorBadRequest("share wrapper is duplicated"));
+        }
+        material.push(ShareWrapperMaterial {
+            hash: sha256(&canonical),
+            canonical,
+            record,
+        });
+    }
+    if actual != expected {
+        return Err(error::ErrorConflict(
+            "active shares changed; refresh the share directory",
+        ));
+    }
+    let hashes = material.iter().map(|value| value.hash).collect::<Vec<_>>();
+    let commitment = wrapper_set_commitment(&hashes).map_err(error::ErrorBadRequest)?;
+    if directory.wrapper_set_root != commitment.root
+        || i32::try_from(directory.wrapper_count).ok() != Some(commitment.count)
+    {
+        return Err(error::ErrorBadRequest(
+            "share directory commitment does not match its wrappers",
+        ));
+    }
+    transaction
+        .execute(
+            "
+                DELETE FROM vault_share_wrappers AS wrappers
+                USING vault_shares AS shares
+                WHERE wrappers.share_id = shares.id
+                  AND shares.owner_id = $1
+                  AND wrappers.node_id = $2
+            ",
+            &[&principal.id, &node_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    insert_share_wrappers(&transaction, &material, Some((&commitment, "directory"))).await?;
+    transaction
+        .execute(
+            "
+                INSERT INTO vault_share_wrapper_directories (
+                  node_id, record_version, owner_id, signer_key_version,
+                  canonical_cbor, signature, wrapper_set_root, wrapper_count
+                ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                ON CONFLICT (node_id, record_version) DO UPDATE SET
+                  canonical_cbor = EXCLUDED.canonical_cbor,
+                  signature = EXCLUDED.signature,
+                  wrapper_set_root = EXCLUDED.wrapper_set_root,
+                  wrapper_count = EXCLUDED.wrapper_count
+            ",
+            &[
+                &node_id,
+                &record_version,
+                &principal.id,
+                &signer_key_version,
+                &directory_cbor,
+                &directory_signature.as_slice(),
+                &commitment.root.as_slice(),
+                &commitment.count,
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    transaction
+        .execute(
+            "DELETE FROM vault_share_sync_jobs WHERE node_id = $1 AND owner_id = $2",
+            &[&node_id, &principal.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    transaction
+        .commit()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    Ok(HttpResponse::NoContent().finish())
+}
+
 pub async fn create_share(
     state: web::Data<AppState>,
     request: HttpRequest,
@@ -1891,6 +2341,7 @@ pub async fn create_share(
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
+    lock_share_topology(&transaction, &user.id).await?;
     let root = transaction
         .query_opt(
             "SELECT 1 FROM files WHERE id = $1 AND owner_id = $2 AND e2ee_state = 'encrypted' AND state = 'active' FOR UPDATE",
@@ -1960,7 +2411,12 @@ pub async fn create_share(
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    insert_share_wrappers(&transaction, &wrappers, Some(&wrapper_commitment)).await?;
+    insert_share_wrappers(
+        &transaction,
+        &wrappers,
+        Some((&wrapper_commitment, "epoch")),
+    )
+    .await?;
     insert_share_envelopes(&transaction, &envelopes).await?;
     transaction
         .execute(
@@ -2141,6 +2597,7 @@ pub async fn begin_epoch_rotation(
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
+    lock_share_topology(&transaction, &user.id).await?;
     let share = transaction
         .query_opt(
             "
@@ -2314,6 +2771,7 @@ pub async fn publish_epoch_rotation(
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
+    lock_share_topology(&transaction, &user.id).await?;
     let share = transaction
         .query_opt(
             "
@@ -2392,7 +2850,12 @@ pub async fn publish_epoch_rotation(
         previous_record_hash.as_deref(),
     )?;
     insert_owner_epoch_key(&transaction, &share_id, pending_epoch, &owner_epoch_key).await?;
-    insert_share_wrappers(&transaction, &wrappers, Some(&wrapper_commitment)).await?;
+    insert_share_wrappers(
+        &transaction,
+        &wrappers,
+        Some((&wrapper_commitment, "epoch")),
+    )
+    .await?;
     insert_share_envelopes(&transaction, &envelopes).await?;
     let cutoff_hash = share_record_hash(
         &requested_snapshot_hash,
@@ -2513,6 +2976,7 @@ pub async fn abort_epoch_rotation(
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
+    lock_share_topology(&transaction, &user.id).await?;
     let share = transaction
         .query_opt(
             "
@@ -3040,58 +3504,211 @@ async fn committed_share_wrappers(
     Ok(material)
 }
 
+async fn publication_share_wrappers(
+    transaction: &tokio_postgres::Transaction<'_>,
+    decoded: &DecodedNodeRecord,
+    node_id: &str,
+    parent_id: Option<&str>,
+    owner_id: &str,
+    include_generation: bool,
+) -> Result<(Vec<ShareWrapperMaterial>, bool)> {
+    let has_inline_share_wrappers =
+        decoded
+            .wrappers
+            .iter()
+            .try_fold(false, |found, canonical| -> Result<bool> {
+                let wrapper = decode_wrapper(canonical).map_err(error::ErrorBadRequest)?;
+                Ok(found || matches!(wrapper.kind, 3 | 4))
+            })?;
+    if has_inline_share_wrappers {
+        return Ok((
+            committed_share_wrappers(
+                transaction,
+                decoded,
+                node_id,
+                parent_id,
+                owner_id,
+                include_generation,
+            )
+            .await?,
+            false,
+        ));
+    }
+
+    let node_exists = transaction
+        .query_opt("SELECT 1 FROM files WHERE id = $1", &[&node_id])
+        .await
+        .map_err(error::ErrorInternalServerError)?
+        .is_some();
+    let anchor = if node_exists {
+        Some(node_id)
+    } else {
+        parent_id
+    };
+    let Some(anchor) = anchor else {
+        return Ok((Vec::new(), false));
+    };
+    let row = transaction
+        .query_one(
+            "
+                SELECT EXISTS (
+                  WITH RECURSIVE ancestors AS (
+                    SELECT id, parent_id FROM files
+                    WHERE id = $1 AND owner_id = $2
+                    UNION ALL
+                    SELECT parent.id, parent.parent_id
+                    FROM files AS parent
+                    INNER JOIN ancestors AS child ON child.parent_id = parent.id
+                    WHERE parent.owner_id = $2
+                  )
+                  SELECT 1
+                  FROM vault_shares AS shares
+                  INNER JOIN ancestors ON ancestors.id = shares.root_node_id
+                  WHERE shares.owner_id = $2 AND shares.status = 'active'
+                    AND shares.publication_fenced = FALSE
+                  LIMIT 1
+                ) AS required
+            ",
+            &[&anchor, &owner_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    Ok((Vec::new(), row.get("required")))
+}
+
+async fn update_share_sync_job(
+    transaction: &tokio_postgres::Transaction<'_>,
+    node_id: &str,
+    owner_id: &str,
+    record_version: i64,
+    required: bool,
+) -> Result<()> {
+    if required {
+        transaction
+            .execute(
+                "
+                    INSERT INTO vault_share_sync_jobs (
+                      node_id, owner_id, record_version
+                    ) VALUES ($1, $2, $3)
+                    ON CONFLICT (node_id) DO UPDATE SET
+                      owner_id = EXCLUDED.owner_id,
+                      record_version = EXCLUDED.record_version,
+                      attempts = 0,
+                      last_error = NULL,
+                      updated_at = now()
+                ",
+                &[&node_id, &owner_id, &record_version],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+    } else {
+        transaction
+            .execute(
+                "DELETE FROM vault_share_sync_jobs WHERE node_id = $1 AND owner_id = $2",
+                &[&node_id, &owner_id],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+    }
+    Ok(())
+}
+
 async fn insert_share_wrappers(
     transaction: &tokio_postgres::Transaction<'_>,
     wrappers: &[ShareWrapperMaterial],
-    commitment: Option<&WrapperSetCommitment>,
+    commitment: Option<(&WrapperSetCommitment, &'static str)>,
 ) -> Result<()> {
-    let proofs = commitment.map(|value| {
+    const INSERT_BATCH_SIZE: usize = 256;
+
+    let proofs = commitment.map(|(value, _)| {
         value
             .proofs
             .iter()
             .map(|proof| (proof.wrapper_hash, (proof.leaf_index, proof.proof.clone())))
             .collect::<HashMap<_, _>>()
     });
-    for wrapper in wrappers {
-        let share_id = wrapper.record.share_id.as_deref().unwrap_or_default();
-        let epoch = i64::try_from(wrapper.record.epoch.unwrap_or_default())
-            .map_err(|_| error::ErrorBadRequest("share epoch is invalid"))?;
-        let kind = if wrapper.record.kind == 3 {
-            "generation_dek"
-        } else {
-            "metadata"
-        };
-        let (leaf_index, merkle_proof) = if let Some(proofs) = proofs.as_ref() {
-            let Some((leaf_index, proof)) = proofs.get(&wrapper.hash) else {
-                return Err(error::ErrorInternalServerError(
-                    "share wrapper proof is missing",
-                ));
+    let commitment_source = commitment.map(|(_, source)| source).unwrap_or("bootstrap");
+
+    for batch in wrappers.chunks(INSERT_BATCH_SIZE) {
+        let mut wrapper_ids = Vec::with_capacity(batch.len());
+        let mut share_ids = Vec::with_capacity(batch.len());
+        let mut epochs = Vec::with_capacity(batch.len());
+        let mut node_ids = Vec::with_capacity(batch.len());
+        let mut generation_ids = Vec::with_capacity(batch.len());
+        let mut wrapper_kinds = Vec::with_capacity(batch.len());
+        let mut record_versions = Vec::with_capacity(batch.len());
+        let mut canonical_records = Vec::with_capacity(batch.len());
+        let mut wrapper_hashes = Vec::with_capacity(batch.len());
+        let mut leaf_indices = Vec::with_capacity(batch.len());
+        let mut merkle_proofs = Vec::with_capacity(batch.len());
+
+        for wrapper in batch {
+            let epoch = i64::try_from(wrapper.record.epoch.unwrap_or_default())
+                .map_err(|_| error::ErrorBadRequest("share epoch is invalid"))?;
+            let (leaf_index, merkle_proof) = if let Some(proofs) = proofs.as_ref() {
+                let Some((leaf_index, proof)) = proofs.get(&wrapper.hash) else {
+                    return Err(error::ErrorInternalServerError(
+                        "share wrapper proof is missing",
+                    ));
+                };
+                (Some(*leaf_index), Some(proof.clone()))
+            } else {
+                (None, None)
             };
-            (Some(*leaf_index), Some(proof.clone()))
-        } else {
-            (None, None)
-        };
+
+            wrapper_ids.push(wrapper.record.wrapper_id.to_vec());
+            share_ids.push(wrapper.record.share_id.clone().unwrap_or_default());
+            epochs.push(epoch);
+            node_ids.push(wrapper.record.node_id.clone());
+            generation_ids.push(wrapper.record.generation_id.map(|value| value.to_vec()));
+            wrapper_kinds.push(if wrapper.record.kind == 3 {
+                "generation_dek".to_owned()
+            } else {
+                "metadata".to_owned()
+            });
+            record_versions.push(wrapper.record.record_version as i64);
+            canonical_records.push(wrapper.canonical.clone());
+            wrapper_hashes.push(wrapper.hash.to_vec());
+            leaf_indices.push(leaf_index);
+            merkle_proofs.push(merkle_proof);
+        }
+
         transaction
             .execute(
                 "
                     INSERT INTO vault_share_wrappers (
                       wrapper_id, share_id, epoch, node_id, generation_id,
                       wrapper_kind, record_version, canonical_cbor, wrapper_hash,
+                      merkle_leaf_index, merkle_proof, commitment_source
+                    )
+                    SELECT batch.wrapper_id, batch.share_id, batch.epoch,
+                           batch.node_id, batch.generation_id, batch.wrapper_kind,
+                           batch.record_version, batch.canonical_cbor,
+                           batch.wrapper_hash, batch.merkle_leaf_index,
+                           batch.merkle_proof, $12
+                    FROM unnest(
+                      $1::bytea[], $2::text[], $3::bigint[], $4::text[],
+                      $5::bytea[], $6::text[], $7::bigint[], $8::bytea[],
+                      $9::bytea[], $10::integer[], $11::bytea[]
+                    ) AS batch(
+                      wrapper_id, share_id, epoch, node_id, generation_id,
+                      wrapper_kind, record_version, canonical_cbor, wrapper_hash,
                       merkle_leaf_index, merkle_proof
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+                    )
                 ",
                 &[
-                    &wrapper.record.wrapper_id.as_slice(),
-                    &share_id,
-                    &epoch,
-                    &wrapper.record.node_id,
-                    &wrapper.record.generation_id.map(|value| value.to_vec()),
-                    &kind,
-                    &(wrapper.record.record_version as i64),
-                    &wrapper.canonical,
-                    &wrapper.hash.as_slice(),
-                    &leaf_index,
-                    &merkle_proof,
+                    &wrapper_ids,
+                    &share_ids,
+                    &epochs,
+                    &node_ids,
+                    &generation_ids,
+                    &wrapper_kinds,
+                    &record_versions,
+                    &canonical_records,
+                    &wrapper_hashes,
+                    &leaf_indices,
+                    &merkle_proofs,
+                    &commitment_source,
                 ],
             )
             .await
@@ -3264,6 +3881,7 @@ async fn publish_record_transaction(
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
+    lock_share_topology(&transaction, &user.id).await?;
     let existing = transaction
         .query_opt(
             "
@@ -3358,7 +3976,7 @@ async fn publish_record_transaction(
     )
     .await?;
     validate_owner_wrappers(decoded, upload.parent_id.as_deref())?;
-    let committed_share_wrappers = committed_share_wrappers(
+    let (committed_share_wrappers, share_sync_required) = publication_share_wrappers(
         &transaction,
         decoded,
         &upload.node_id,
@@ -3476,6 +4094,15 @@ async fn publish_record_transaction(
     }
 
     insert_node_record(&transaction, &user.id, decoded).await?;
+    update_share_sync_job(
+        &transaction,
+        &upload.node_id,
+        &user.id,
+        i64::try_from(decoded.verified.bootstrap.record_version)
+            .map_err(|_| error::ErrorBadRequest("record version is invalid"))?,
+        share_sync_required,
+    )
+    .await?;
     replace_owner_wrappers(&transaction, &user.id, decoded).await?;
     insert_share_wrappers(&transaction, &committed_share_wrappers, None).await?;
     update_node_head(&transaction, &user.id, decoded).await?;
@@ -3522,6 +4149,7 @@ async fn publish_record_transaction(
         generation_id: encode_bytes(&upload.generation_id),
         record_version: decoded.verified.bootstrap.record_version as i64,
         record_hash: encode_bytes(decoded.verified.record_hash),
+        share_sync_required,
     })
 }
 
@@ -3828,36 +4456,50 @@ async fn reject_fenced_share_write(
     let Some(anchor) = anchor else {
         return Ok(());
     };
-    let shares = transaction
-        .query(
+    let row = transaction
+        .query_one(
             "
-                WITH RECURSIVE ancestors AS (
-                  SELECT id, parent_id FROM files
-                  WHERE id = $1 AND owner_id = $2
-                  UNION ALL
-                  SELECT parent.id, parent.parent_id
-                  FROM files AS parent
-                  INNER JOIN ancestors AS child ON child.parent_id = parent.id
-                  WHERE parent.owner_id = $2
-                )
-                SELECT shares.id, shares.status, shares.publication_fenced
-                FROM vault_shares AS shares
-                INNER JOIN ancestors ON ancestors.id = shares.root_node_id
-                WHERE shares.owner_id = $2
-                  AND shares.status IN ('active', 'rotating')
-                FOR SHARE OF shares
+                SELECT EXISTS (
+                  WITH RECURSIVE ancestors AS (
+                    SELECT id, parent_id FROM files
+                    WHERE id = $1 AND owner_id = $2
+                    UNION ALL
+                    SELECT parent.id, parent.parent_id
+                    FROM files AS parent
+                    INNER JOIN ancestors AS child ON child.parent_id = parent.id
+                    WHERE parent.owner_id = $2
+                  )
+                  SELECT 1
+                  FROM vault_shares AS shares
+                  INNER JOIN ancestors ON ancestors.id = shares.root_node_id
+                  WHERE shares.owner_id = $2
+                    AND (shares.status = 'rotating' OR shares.publication_fenced)
+                  LIMIT 1
+                ) AS blocked
             ",
             &[&anchor, &owner_id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    if shares.iter().any(|share| {
-        share.get::<_, String>("status") == "rotating" || share.get::<_, bool>("publication_fenced")
-    }) {
+    if row.get::<_, bool>("blocked") {
         return Err(error::ErrorConflict(
             "a share epoch rotation is publishing; regenerate after it completes",
         ));
     }
+    Ok(())
+}
+
+async fn lock_share_topology(
+    transaction: &tokio_postgres::Transaction<'_>,
+    owner_id: &str,
+) -> Result<()> {
+    transaction
+        .query_one(
+            "SELECT pg_advisory_xact_lock(hashtextextended($1, 11881376))",
+            &[&owner_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     Ok(())
 }
 
@@ -3871,7 +4513,12 @@ async fn current_publish_response(
         .query_opt(
             "
                 SELECT files.current_generation_number, files.current_generation_id,
-                       heads.record_version, heads.record_hash
+                       heads.record_version, heads.record_hash,
+                       EXISTS (
+                         SELECT 1 FROM vault_share_sync_jobs AS jobs
+                         WHERE jobs.node_id = files.id
+                           AND jobs.record_version = heads.record_version
+                       ) AS share_sync_required
                 FROM files
                 INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
                 WHERE files.id = $1 AND files.owner_id = $2
@@ -3889,6 +4536,7 @@ async fn current_publish_response(
         generation_id: encode_bytes(row.get::<_, Vec<u8>>("current_generation_id")),
         record_version: row.get("record_version"),
         record_hash: encode_bytes(row.get::<_, Vec<u8>>("record_hash")),
+        share_sync_required: row.get("share_sync_required"),
     }))
 }
 
@@ -3954,26 +4602,43 @@ async fn shared_download_plan(
         .await
         .map_err(error::ErrorInternalServerError)?;
     let generation_id: Vec<u8> = row.get("current_generation_id");
+    let node_record_version: i64 = row.get("record_version");
     let wrapper_rows = transaction
         .query(
             "
-                SELECT canonical_cbor, merkle_leaf_index, merkle_proof
+                SELECT canonical_cbor, merkle_leaf_index, merkle_proof,
+                       commitment_source
                 FROM (
                   SELECT DISTINCT ON (wrapper_kind)
                          wrapper_kind, canonical_cbor, record_version,
-                         merkle_leaf_index, merkle_proof
+                         merkle_leaf_index, merkle_proof, commitment_source
                   FROM vault_share_wrappers
                   WHERE share_id = $1 AND epoch = $2 AND node_id = $3
+                    AND record_version = $5
                     AND (wrapper_kind = 'metadata'
                          OR (wrapper_kind = 'generation_dek' AND generation_id = $4))
                   ORDER BY wrapper_kind, record_version DESC, wrapper_id DESC
                 ) AS current_wrappers
                 ORDER BY wrapper_kind
             ",
-            &[&share_id, &active_epoch, &node_id, &generation_id],
+            &[
+                &share_id,
+                &active_epoch,
+                &node_id,
+                &generation_id,
+                &node_record_version,
+            ],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
+    let expected_wrapper_count = if row.get::<_, String>("entry_type") == "file" {
+        2
+    } else {
+        1
+    };
+    if wrapper_rows.len() != expected_wrapper_count {
+        return Ok(HttpResponse::Conflict().body("share material is still synchronizing"));
+    }
     let envelope = transaction
         .query_one(
             "
@@ -4023,6 +4688,37 @@ async fn shared_download_plan(
             "published share envelope is inconsistent with its active epoch",
         ));
     }
+    let commitment_sources = wrapper_rows
+        .iter()
+        .map(|wrapper| wrapper.get::<_, String>("commitment_source"))
+        .collect::<HashSet<_>>();
+    if commitment_sources.len() != 1 {
+        return Err(error::ErrorInternalServerError(
+            "share wrappers use inconsistent commitments",
+        ));
+    }
+    let uses_directory = commitment_sources.contains("directory");
+    let directory_row = if uses_directory {
+        transaction
+            .query_opt(
+                "
+                    SELECT canonical_cbor, signature, wrapper_set_root,
+                           wrapper_count, signer_key_version
+                    FROM vault_share_wrapper_directories
+                    WHERE node_id = $1 AND record_version = $2
+                ",
+                &[&node_id, &node_record_version],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?
+    } else {
+        None
+    };
+    if uses_directory && directory_row.is_none() {
+        return Err(error::ErrorInternalServerError(
+            "share-wrapper directory is missing",
+        ));
+    }
     let object_key: Option<String> = row.get("object_key");
     let download_url = if let Some(object_key) = object_key.as_deref() {
         state
@@ -4040,35 +4736,104 @@ async fn shared_download_plan(
         .map(<[u8; 32]>::try_from)
         .transpose()
         .map_err(|_| error::ErrorInternalServerError("stored wrapper root is invalid"))?;
+    let directory_material = directory_row
+        .as_ref()
+        .map(|directory_row| -> Result<_> {
+            let canonical_cbor: Vec<u8> = directory_row.get("canonical_cbor");
+            let signature: Vec<u8> = directory_row.get("signature");
+            let root: Vec<u8> = directory_row.get("wrapper_set_root");
+            let root = <[u8; 32]>::try_from(root.as_slice())
+                .map_err(|_| error::ErrorInternalServerError("stored directory root is invalid"))?;
+            let count: i32 = directory_row.get("wrapper_count");
+            let signer_key_version: i64 = directory_row.get("signer_key_version");
+            let decoded =
+                decode_share_directory(&canonical_cbor).map_err(error::ErrorInternalServerError)?;
+            if decoded.node_id != node_id
+                || i64::try_from(decoded.record_version).ok() != Some(node_record_version)
+                || decoded.record_hash.as_slice() != row.get::<_, Vec<u8>>("record_hash")
+                || decoded.generation_id.as_slice() != generation_id
+                || i64::try_from(decoded.generation_number).ok()
+                    != Some(row.get("current_generation_number"))
+                || i64::try_from(decoded.signer_key_version).ok() != Some(signer_key_version)
+                || decoded.wrapper_set_root != root
+                || i32::try_from(decoded.wrapper_count).ok() != Some(count)
+            {
+                return Err(error::ErrorInternalServerError(
+                    "stored share-wrapper directory is inconsistent",
+                ));
+            }
+            verify_ed25519_signature(
+                &canonical_cbor,
+                &signature,
+                row.get::<_, Vec<u8>>("ed25519_public_key").as_slice(),
+            )
+            .map_err(error::ErrorInternalServerError)?;
+            Ok((canonical_cbor, signature, root, count))
+        })
+        .transpose()?;
     let mut wrappers = Vec::with_capacity(wrapper_rows.len());
     let mut wrapper_proofs = Vec::with_capacity(wrapper_rows.len());
+    let mut directory_proofs = Vec::with_capacity(wrapper_rows.len());
     for wrapper in wrapper_rows {
         let canonical: Vec<u8> = wrapper.get("canonical_cbor");
         let wrapper_hash = sha256(&canonical);
         wrappers.push(encode_bytes(canonical));
         let leaf_index: Option<i32> = wrapper.get("merkle_leaf_index");
         let proof: Option<Vec<u8>> = wrapper.get("merkle_proof");
-        let response_proof = match (leaf_index, proof) {
-            (Some(leaf_index), Some(proof)) if proof.len() % 32 == 0 => {
-                if epoch_protocol_version == SHARE_ENVELOPE_VERSION as i16
-                    && !verify_wrapper_set_proof(
-                        wrapper_hash,
-                        leaf_index,
-                        &proof,
-                        epoch_wrapper_count.unwrap_or_default(),
-                        epoch_root.unwrap_or_default(),
-                    )
-                {
-                    return Err(error::ErrorInternalServerError(
-                        "stored share wrapper proof does not match its epoch",
-                    ));
+        let commitment_source: String = wrapper.get("commitment_source");
+        let response_proof = match (commitment_source.as_str(), leaf_index, proof) {
+            ("bootstrap" | "epoch", None, None) => None,
+            (_, Some(leaf_index), Some(proof)) if proof.len() % 32 == 0 => {
+                match commitment_source.as_str() {
+                    "epoch" => {
+                        if epoch_protocol_version != SHARE_ENVELOPE_VERSION as i16
+                            || !verify_wrapper_set_proof(
+                                wrapper_hash,
+                                leaf_index,
+                                &proof,
+                                epoch_wrapper_count.unwrap_or_default(),
+                                epoch_root.unwrap_or_default(),
+                            )
+                        {
+                            return Err(error::ErrorInternalServerError(
+                                "stored share wrapper proof does not match its epoch",
+                            ));
+                        }
+                        Some(ShareWrapperProofResponse {
+                            leaf_index,
+                            proof: encode_bytes(proof),
+                        })
+                    }
+                    "directory" => {
+                        let Some((_, _, root, count)) = directory_material.as_ref() else {
+                            return Err(error::ErrorInternalServerError(
+                                "stored share directory proof is missing its directory",
+                            ));
+                        };
+                        if !verify_wrapper_set_proof(
+                            wrapper_hash,
+                            leaf_index,
+                            &proof,
+                            *count,
+                            *root,
+                        ) {
+                            return Err(error::ErrorInternalServerError(
+                                "stored share wrapper proof does not match its directory",
+                            ));
+                        }
+                        directory_proofs.push(ShareWrapperProofResponse {
+                            leaf_index,
+                            proof: encode_bytes(proof),
+                        });
+                        None
+                    }
+                    _ => {
+                        return Err(error::ErrorInternalServerError(
+                            "stored share wrapper commitment source is invalid",
+                        ));
+                    }
                 }
-                Some(ShareWrapperProofResponse {
-                    leaf_index,
-                    proof: encode_bytes(proof),
-                })
             }
-            (None, None) => None,
             _ => {
                 return Err(error::ErrorInternalServerError(
                     "stored share wrapper proof is invalid",
@@ -4077,6 +4842,12 @@ async fn shared_download_plan(
         };
         wrapper_proofs.push(response_proof);
     }
+    let directory =
+        directory_material.map(|(canonical_cbor, signature, _, _)| ShareDirectoryResponse {
+            canonical_cbor: encode_bytes(canonical_cbor),
+            signature: encode_bytes(signature),
+            wrapper_proofs: directory_proofs,
+        });
     let response = DownloadPlanResponse {
         node_id: node_id.to_owned(),
         entry_type: row.get("entry_type"),
@@ -4121,6 +4892,7 @@ async fn shared_download_plan(
             ),
             recipient_key_version,
             wrapper_proofs,
+            directory,
         }),
     };
 
@@ -4138,7 +4910,7 @@ async fn shared_download_plan(
 
 async fn get_upload(
     state: &AppState,
-    user: &AuthUser,
+    owner_id: &str,
     upload_id: &str,
 ) -> Result<Option<VaultUpload>> {
     let row = state
@@ -4154,7 +4926,7 @@ async fn get_upload(
                 WHERE id = $1 AND owner_id = $2
                 LIMIT 1
             ",
-            &[&upload_id, &user.id],
+            &[&upload_id, &owner_id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;

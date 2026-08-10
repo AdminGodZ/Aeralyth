@@ -332,6 +332,9 @@ ALTER TABLE vault_share_wrappers
 ALTER TABLE vault_share_wrappers
   ADD COLUMN IF NOT EXISTS merkle_proof BYTEA;
 
+ALTER TABLE vault_share_wrappers
+  ADD COLUMN IF NOT EXISTS commitment_source TEXT NOT NULL DEFAULT 'epoch';
+
 DO $$
 BEGIN
   IF NOT EXISTS (
@@ -353,8 +356,54 @@ BEGIN
   END IF;
 END $$;
 
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'vault_share_wrappers_commitment_source_check'
+      AND conrelid = 'vault_share_wrappers'::regclass
+  ) THEN
+    ALTER TABLE vault_share_wrappers
+      ADD CONSTRAINT vault_share_wrappers_commitment_source_check CHECK (
+        commitment_source IN ('bootstrap', 'epoch', 'directory')
+      );
+  END IF;
+END $$;
+
 CREATE INDEX IF NOT EXISTS vault_share_wrappers_current_idx
   ON vault_share_wrappers (share_id, epoch, node_id, wrapper_kind, record_version DESC);
+
+CREATE TABLE IF NOT EXISTS vault_share_wrapper_directories (
+  node_id TEXT NOT NULL,
+  record_version BIGINT NOT NULL CHECK (record_version > 0),
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  signer_key_version BIGINT NOT NULL CHECK (signer_key_version > 0),
+  canonical_cbor BYTEA NOT NULL CHECK (octet_length(canonical_cbor) BETWEEN 96 AND 4096),
+  signature BYTEA NOT NULL CHECK (octet_length(signature) = 64),
+  wrapper_set_root BYTEA NOT NULL CHECK (octet_length(wrapper_set_root) = 32),
+  wrapper_count INTEGER NOT NULL CHECK (wrapper_count BETWEEN 1 AND 8192),
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  PRIMARY KEY (node_id, record_version),
+  FOREIGN KEY (node_id, record_version)
+    REFERENCES vault_node_records(node_id, record_version) ON DELETE CASCADE,
+  FOREIGN KEY (owner_id, signer_key_version)
+    REFERENCES vault_identity_keys(user_id, key_version)
+);
+
+CREATE TABLE IF NOT EXISTS vault_share_sync_jobs (
+  node_id TEXT PRIMARY KEY,
+  owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  record_version BIGINT NOT NULL CHECK (record_version > 0),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  FOREIGN KEY (node_id, record_version)
+    REFERENCES vault_node_records(node_id, record_version) ON DELETE CASCADE
+);
+
+CREATE INDEX IF NOT EXISTS vault_share_sync_jobs_owner_idx
+  ON vault_share_sync_jobs (owner_id, updated_at, node_id);
 
 CREATE TABLE IF NOT EXISTS vault_revocation_cutoffs (
   share_id TEXT NOT NULL REFERENCES vault_shares(id) ON DELETE CASCADE,

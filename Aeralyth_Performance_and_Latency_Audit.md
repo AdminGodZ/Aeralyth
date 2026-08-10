@@ -114,6 +114,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-004 [P0] Node publication cost grows with every overlapping active share
 
+**Status:** Complete — implemented and verified on 2026-08-10.
+
+**Verification:** Real encrypted owner and recipient browser flows kept owner bootstraps at 207 bytes with exactly one owner wrapper both without shares and beneath an active share. The shared child was published first, then its durable background job produced a signed 134-byte directory and two proof-bearing wrappers; the recipient successfully decrypted it and the job cleared. A rollback-only `EXPLAIN (ANALYZE, BUFFERS)` probe at 0, 1, 10, 100, and 1,000 overlapping shares kept the indexed overlap check between 0.025 ms and 0.065 ms.
+
 **Confidence:** Confirmed
 
 **Evidence:** The encrypted uploader fetches active share contexts for a parent and creates share wrappers for every active context. The node bootstrap commits all wrapper IDs and hashes. Therefore ordinary file publication becomes proportional to the number of shares covering that node.
@@ -150,6 +154,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-007 [P0] Authentication and CSRF are separate database queries on nearly every mutation
 
+**Status:** Complete — implemented and verified on 2026-08-10.
+
+**Verification:** Upload control routes now use a slim request-local `SessionPrincipal`, and CSRF validation reuses that principal without querying PostgreSQL again. The `session_principal_is_loaded_once_per_request` regression test calls authentication twice on one request and proves that the loader runs exactly once.
+
 **Confidence:** Confirmed
 
 **Evidence:** `backend/src/auth.rs` loads the current user from the session, and `require_csrf` performs another session query. Multipart part-presign endpoints call both.
@@ -173,6 +181,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Compare query width, returned bytes, and p95 auth latency before and after. Part signing should not touch profile columns.
 
 ## PERF-009 [P0] Multipart presigning is one authenticated API request per part
+
+**Status:** Complete — implemented and verified on 2026-08-10.
+
+**Verification:** Legacy and encrypted upload clients presign bounded batches of eight parts, with server endpoints accepting at most 32. A live local S3-compatible multipart upload returned eight ordered 32 MiB part URLs from one authenticated request, and a duplicate-part batch was rejected with HTTP 400.
 
 **Confidence:** Confirmed
 

@@ -5,6 +5,7 @@ use sha2::{Digest, Sha256};
 
 pub const FORMAT_VERSION: u64 = 1;
 pub const SHARE_ENVELOPE_VERSION: u64 = 2;
+pub const SHARE_DIRECTORY_VERSION: u64 = 1;
 pub const SUITE_ID: u64 = 1;
 pub const AAD_SCHEMA_ID: u64 = 1;
 pub const CRYPTO_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
@@ -73,6 +74,21 @@ pub struct ShareEnvelopeRecord {
     pub aad_schema_id: u64,
     pub wrapper_hashes: Vec<[u8; 32]>,
     pub wrapper_set_root: Option<[u8; 32]>,
+    pub wrapper_count: u64,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct ShareDirectoryRecord {
+    pub format_version: u64,
+    pub suite_id: u64,
+    pub aad_schema_id: u64,
+    pub node_id: String,
+    pub record_version: u64,
+    pub record_hash: [u8; 32],
+    pub generation_number: u64,
+    pub generation_id: [u8; 16],
+    pub signer_key_version: u64,
+    pub wrapper_set_root: [u8; 32],
     pub wrapper_count: u64,
 }
 
@@ -168,6 +184,60 @@ pub fn decode_bootstrap(input: &[u8]) -> Result<BootstrapRecord, ProtocolError> 
     validate_bootstrap(&record)?;
 
     Ok(record)
+}
+
+pub fn decode_share_directory(input: &[u8]) -> Result<ShareDirectoryRecord, ProtocolError> {
+    let mut reader = CborReader::new(input);
+    reader.expect_map_len(11)?;
+    reader.expect_key(1)?;
+    let format_version = reader.read_uint()?;
+    reader.expect_key(2)?;
+    let suite_id = reader.read_uint()?;
+    reader.expect_key(3)?;
+    let aad_schema_id = reader.read_uint()?;
+    reader.expect_key(4)?;
+    let node_id = reader.read_identifier()?;
+    reader.expect_key(5)?;
+    let record_version = reader.read_uint()?;
+    reader.expect_key(6)?;
+    let record_hash = reader.read_fixed_bytes::<32>()?;
+    reader.expect_key(7)?;
+    let generation_number = reader.read_uint()?;
+    reader.expect_key(8)?;
+    let generation_id = reader.read_fixed_bytes::<16>()?;
+    reader.expect_key(9)?;
+    let signer_key_version = reader.read_uint()?;
+    reader.expect_key(10)?;
+    let wrapper_set_root = reader.read_fixed_bytes::<32>()?;
+    reader.expect_key(11)?;
+    let wrapper_count = reader.read_uint()?;
+    reader.finish()?;
+    if format_version != SHARE_DIRECTORY_VERSION
+        || suite_id != SUITE_ID
+        || aad_schema_id != AAD_SCHEMA_ID
+        || record_version == 0
+        || generation_number == 0
+        || signer_key_version == 0
+        || wrapper_count == 0
+        || wrapper_count > MAX_SHARE_WRAPPERS as u64
+    {
+        return Err(ProtocolError::new(
+            "share directory protocol fields are invalid",
+        ));
+    }
+    Ok(ShareDirectoryRecord {
+        format_version,
+        suite_id,
+        aad_schema_id,
+        node_id,
+        record_version,
+        record_hash,
+        generation_number,
+        generation_id,
+        signer_key_version,
+        wrapper_set_root,
+        wrapper_count,
+    })
 }
 
 pub fn decode_wrapper(input: &[u8]) -> Result<WrapperRecord, ProtocolError> {
@@ -963,6 +1033,21 @@ mod tests {
         assert_eq!(decoded.wrapper_count, 1);
         assert!(decoded.wrapper_hashes.is_empty());
         assert!(input.len() < 300);
+    }
+
+    #[test]
+    fn decodes_the_browser_share_directory_vector() {
+        let input = decode_hex(
+            "ab010102010301046b66696c5f7465737431323305020658200303030303030303030303030303030303030303030303030303030303030303070408500505050505050505050505050505050509060a582007070707070707070707070707070707070707070707070707070707070707070b1864",
+        );
+        let directory = decode_share_directory(&input).unwrap();
+
+        assert_eq!(directory.node_id, "fil_test123");
+        assert_eq!(directory.record_version, 2);
+        assert_eq!(directory.generation_number, 4);
+        assert_eq!(directory.wrapper_count, 100);
+        assert_eq!(directory.record_hash, [3_u8; 32]);
+        assert_eq!(directory.wrapper_set_root, [7_u8; 32]);
     }
 
     fn decode_hex(value: &str) -> Vec<u8> {

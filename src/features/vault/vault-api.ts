@@ -53,8 +53,22 @@ export type VaultUploadUrl = {
   contentLength: number;
 };
 
+export type VaultPartUploadUrl = VaultUploadUrl & {
+  partNumber: number;
+};
+
 export type VaultPublishResponse = {
   nodeId: string;
+  generationNumber: number;
+  generationId: string;
+  recordVersion: number;
+  recordHash: string;
+  shareSyncRequired: boolean;
+};
+
+export type VaultShareSyncJob = {
+  nodeId: string;
+  entryType: "file" | "folder";
   generationNumber: number;
   generationId: string;
   recordVersion: number;
@@ -203,6 +217,20 @@ export function getVaultPartUrl(
   );
 }
 
+export function getVaultPartUrls(
+  csrfToken: string,
+  uploadId: string,
+  parts: Array<{ partNumber: number; checksumSha256: string }>,
+  signal?: AbortSignal,
+): Promise<{ parts: VaultPartUploadUrl[] }> {
+  return vaultMutation(
+    `/api/vault/uploads/${encodeURIComponent(uploadId)}/parts`,
+    csrfToken,
+    { parts },
+    signal,
+  );
+}
+
 export function publishVaultUpload(
   csrfToken: string,
   uploadId: string,
@@ -214,6 +242,34 @@ export function publishVaultUpload(
     `/api/vault/uploads/${encodeURIComponent(uploadId)}/publish`,
     csrfToken,
     { parts, ...record },
+    signal,
+  );
+}
+
+export function getShareSyncJobs(
+  signal?: AbortSignal,
+): Promise<{ jobs: VaultShareSyncJob[] }> {
+  return vaultRequest("/api/vault/share-sync-jobs", { signal });
+}
+
+export async function publishShareDirectory(
+  csrfToken: string,
+  job: VaultShareSyncJob,
+  payload: {
+    directoryCbor: string;
+    directorySignature: string;
+    wrappers: string[];
+  } | null,
+  signal?: AbortSignal,
+): Promise<void> {
+  await vaultMutation(
+    `/api/vault/share-sync-jobs/${encodeURIComponent(job.nodeId)}`,
+    csrfToken,
+    payload ?? {
+      directoryCbor: null,
+      directorySignature: null,
+      wrappers: [],
+    },
     signal,
   );
 }

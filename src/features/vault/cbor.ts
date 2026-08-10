@@ -1,6 +1,7 @@
 import type {
   VaultBootstrapRecord,
   VaultManifest,
+  VaultShareDirectoryRecord,
   VaultShareEnvelopeRecord,
   VaultWrapperRecord,
 } from "@/features/vault/protocol";
@@ -50,6 +51,43 @@ export function decodeBootstrap(value: Uint8Array): VaultBootstrapRecord {
     manifestHash: fixedBytes(map, 13, 32),
     wrapperHashes: fixedBytesArray(map, 14, 32),
     ciphertextMerkleRoot: fixedBytes(map, 15, 32),
+  };
+}
+
+export function encodeShareDirectory(
+  record: VaultShareDirectoryRecord,
+): Uint8Array {
+  return encodeMap([
+    [1, record.formatVersion],
+    [2, record.suiteId],
+    [3, record.aadSchemaId],
+    [4, record.nodeId],
+    [5, record.recordVersion],
+    [6, record.recordHash],
+    [7, record.generationNumber],
+    [8, record.generationId],
+    [9, record.signerKeyVersion],
+    [10, record.wrapperSetRoot],
+    [11, record.wrapperCount],
+  ]);
+}
+
+export function decodeShareDirectory(
+  value: Uint8Array,
+): VaultShareDirectoryRecord {
+  const map = decodeExactMap(value, 11);
+  return {
+    formatVersion: requiredNumber(map, 1),
+    suiteId: requiredNumber(map, 2),
+    aadSchemaId: requiredNumber(map, 3),
+    nodeId: requiredString(map, 4),
+    recordVersion: requiredNumber(map, 5),
+    recordHash: fixedBytes(map, 6, 32),
+    generationNumber: requiredNumber(map, 7),
+    generationId: fixedBytes(map, 8, 16),
+    signerKeyVersion: requiredNumber(map, 9),
+    wrapperSetRoot: fixedBytes(map, 10, 32),
+    wrapperCount: requiredNumber(map, 11),
   };
 }
 

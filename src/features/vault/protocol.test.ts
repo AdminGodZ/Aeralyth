@@ -2,9 +2,11 @@ import { describe, expect, it } from "vitest";
 
 import {
   decodeBootstrap,
+  decodeShareDirectory,
   decodeShareEnvelope,
   decodeWrapper,
   encodeBootstrap,
+  encodeShareDirectory,
   encodeShareEnvelope,
   encodeWrapper,
 } from "@/features/vault/cbor";
@@ -21,6 +23,7 @@ import {
   toBase64Url,
   VAULT_AAD_SCHEMA_ID,
   VAULT_FORMAT_VERSION,
+  VAULT_SHARE_DIRECTORY_VERSION,
   VAULT_SHARE_ENVELOPE_VERSION,
   VAULT_SUITE_ID,
   verifyWrapperSetProof,
@@ -56,6 +59,28 @@ describe("vault protocol", () => {
   it("rejects non-minimal CBOR integers", () => {
     const malformed = Uint8Array.of(0xaf, 0x18, 0x01);
     expect(() => decodeBootstrap(malformed)).toThrow(/Non-minimal/u);
+  });
+
+  it("encodes a constant-size record-bound share-wrapper directory", () => {
+    const encoded = encodeShareDirectory({
+      formatVersion: VAULT_SHARE_DIRECTORY_VERSION,
+      suiteId: VAULT_SUITE_ID,
+      aadSchemaId: VAULT_AAD_SCHEMA_ID,
+      nodeId: "fil_test123",
+      recordVersion: 2,
+      recordHash: new Uint8Array(32).fill(3),
+      generationNumber: 4,
+      generationId: new Uint8Array(16).fill(5),
+      signerKeyVersion: 6,
+      wrapperSetRoot: new Uint8Array(32).fill(7),
+      wrapperCount: 100,
+    });
+
+    expect(Buffer.from(encoded).toString("hex")).toBe(
+      "ab010102010301046b66696c5f7465737431323305020658200303030303030303030303030303030303030303030303030303030303030303070408500505050505050505050505050505050509060a582007070707070707070707070707070707070707070707070707070707070707070b1864",
+    );
+    expect(decodeShareDirectory(encoded).wrapperCount).toBe(100);
+    expect(encoded.length).toBeLessThan(256);
   });
 
   it.each([
