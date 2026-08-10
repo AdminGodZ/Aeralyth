@@ -40,13 +40,23 @@ ALTER TABLE users
 
 DO $$
 BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'users_status_check'
+      AND conrelid = 'users'::regclass
+      AND pg_get_constraintdef(oid) NOT LIKE '%deleting%'
+  ) THEN
+    ALTER TABLE users DROP CONSTRAINT users_status_check;
+  END IF;
   IF NOT EXISTS (
     SELECT 1
     FROM pg_constraint
     WHERE conname = 'users_status_check'
+      AND conrelid = 'users'::regclass
   ) THEN
-    ALTER TABLE users
-      ADD CONSTRAINT users_status_check CHECK (status IN ('active', 'disabled'));
+    ALTER TABLE users ADD CONSTRAINT users_status_check
+      CHECK (status IN ('active', 'disabled', 'deleting'));
   END IF;
 END $$;
 
@@ -253,6 +263,44 @@ CREATE TABLE IF NOT EXISTS storage_deletion_jobs (
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
+CREATE TABLE IF NOT EXISTS user_deletion_jobs (
+  user_id TEXT PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+  phase TEXT NOT NULL DEFAULT 'file_uploads' CHECK (phase IN (
+    'file_uploads',
+    'vault_uploads',
+    'vault_object_generations',
+    'vault_migrations',
+    'vault_share_envelopes',
+    'vault_share_wrappers',
+    'vault_share_owner_keys',
+    'vault_revocation_cutoffs',
+    'vault_share_pending_revocations',
+    'vault_share_recipients',
+    'vault_share_epochs',
+    'vault_shares',
+    'file_shares',
+    'share_links',
+    'repositories',
+    'vault_node_heads',
+    'vault_node_records',
+    'vault_wrappers',
+    'files',
+    'vault_identity_trust',
+    'vault_identity_keys',
+    'user_vaults',
+    'invitations',
+    'sessions',
+    'finalize'
+  )),
+  processed_rows BIGINT NOT NULL DEFAULT 0 CHECK (processed_rows >= 0),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  locked_until TIMESTAMPTZ,
+  last_error TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
 ALTER TABLE storage_deletion_jobs
   ADD COLUMN IF NOT EXISTS multipart_upload_id TEXT;
 
@@ -339,13 +387,13 @@ DECLARE
   new_admin BIGINT := 0;
 BEGIN
   IF TG_OP <> 'INSERT' THEN
-    old_total := 1;
+    old_total := CASE WHEN OLD.status <> 'deleting' THEN 1 ELSE 0 END;
     old_active := CASE WHEN OLD.status = 'active' THEN 1 ELSE 0 END;
     old_admin := CASE WHEN OLD.status = 'active' AND OLD.role = 'admin' THEN 1 ELSE 0 END;
   END IF;
 
   IF TG_OP <> 'DELETE' THEN
-    new_total := 1;
+    new_total := CASE WHEN NEW.status <> 'deleting' THEN 1 ELSE 0 END;
     new_active := CASE WHEN NEW.status = 'active' THEN 1 ELSE 0 END;
     new_admin := CASE WHEN NEW.status = 'active' AND NEW.role = 'admin' THEN 1 ELSE 0 END;
   END IF;
@@ -608,7 +656,7 @@ ON CONFLICT (owner_id) DO UPDATE SET
   updated_at = now();
 
 UPDATE admin_directory_counters
-SET total_users = (SELECT count(*) FROM users),
+SET total_users = (SELECT count(*) FROM users WHERE status <> 'deleting'),
     active_users = (SELECT count(*) FROM users WHERE status = 'active'),
     active_admins = (
       SELECT count(*) FROM users WHERE status = 'active' AND role = 'admin'
@@ -645,6 +693,8 @@ CREATE INDEX IF NOT EXISTS file_uploads_owner_status_expiry_idx
   ON file_uploads(owner_id, status, expires_at);
 CREATE INDEX IF NOT EXISTS storage_deletion_jobs_available_idx
   ON storage_deletion_jobs(available_at, locked_until, id);
+CREATE INDEX IF NOT EXISTS user_deletion_jobs_available_idx
+  ON user_deletion_jobs(available_at, locked_until, created_at);
 CREATE INDEX IF NOT EXISTS files_active_browse_name_idx
   ON files (owner_id, parent_id, ((CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END)), lower(original_name), id)
   WHERE state = 'active';

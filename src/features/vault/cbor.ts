@@ -4,6 +4,10 @@ import type {
   VaultShareEnvelopeRecord,
   VaultWrapperRecord,
 } from "@/features/vault/protocol";
+import {
+  VAULT_FORMAT_VERSION,
+  VAULT_SHARE_ENVELOPE_VERSION,
+} from "@/features/vault/protocol";
 
 type CborScalar = number | string | Uint8Array | null;
 type CborValue = CborScalar | CborValue[] | Map<number, CborValue>;
@@ -124,7 +128,7 @@ export function decodeManifest(value: Uint8Array): VaultManifest {
 export function encodeShareEnvelope(
   record: VaultShareEnvelopeRecord,
 ): Uint8Array {
-  return encodeMap([
+  const shared: Array<[number, CborValue]> = [
     [1, record.formatVersion],
     [2, record.suiteId],
     [3, record.envelopeId],
@@ -142,18 +146,52 @@ export function encodeShareEnvelope(
     [15, record.encapsulatedKey],
     [16, record.ciphertext],
     [17, record.aadSchemaId],
-    [18, record.wrapperHashes],
+  ];
+  if (record.formatVersion === VAULT_FORMAT_VERSION) {
+    return encodeMap([...shared, [18, record.wrapperHashes]]);
+  }
+  if (
+    record.formatVersion !== VAULT_SHARE_ENVELOPE_VERSION ||
+    record.wrapperSetRoot?.length !== 32 ||
+    !Number.isSafeInteger(record.wrapperCount) ||
+    record.wrapperCount < 1 ||
+    record.wrapperCount > 8192
+  ) {
+    throw new Error("Unsupported share envelope version.");
+  }
+  return encodeMap([
+    ...shared,
+    [18, record.wrapperSetRoot],
+    [19, record.wrapperCount],
   ]);
 }
 
 export function decodeShareEnvelope(
   value: Uint8Array,
 ): VaultShareEnvelopeRecord {
-  const map = decodeExactMap(value, 18);
+  const map = decodeMap(value);
+  const formatVersion = requiredNumber(map, 1);
+  if (
+    !(
+      (formatVersion === VAULT_FORMAT_VERSION && map.size === 18) ||
+      (formatVersion === VAULT_SHARE_ENVELOPE_VERSION && map.size === 19)
+    )
+  ) {
+    throw new Error("Unsupported share envelope version.");
+  }
   const permissions = requiredNumber(map, 11);
   if (permissions !== 1) throw new Error("Unsupported share permissions.");
+  const wrapperHashes =
+    formatVersion === VAULT_FORMAT_VERSION ? fixedBytesArray(map, 18, 32) : [];
+  const wrapperCount =
+    formatVersion === VAULT_SHARE_ENVELOPE_VERSION
+      ? requiredNumber(map, 19)
+      : wrapperHashes.length;
+  if (wrapperCount < 1 || wrapperCount > 8192) {
+    throw new Error("Invalid share wrapper count.");
+  }
   return {
-    formatVersion: requiredNumber(map, 1),
+    formatVersion,
     suiteId: requiredNumber(map, 2),
     envelopeId: fixedBytes(map, 3, 16),
     shareId: requiredString(map, 4),
@@ -170,7 +208,12 @@ export function decodeShareEnvelope(
     encapsulatedKey: fixedBytes(map, 15, 32),
     ciphertext: requiredBytes(map, 16),
     aadSchemaId: requiredNumber(map, 17),
-    wrapperHashes: fixedBytesArray(map, 18, 32),
+    wrapperHashes,
+    wrapperSetRoot:
+      formatVersion === VAULT_SHARE_ENVELOPE_VERSION
+        ? fixedBytes(map, 18, 32)
+        : null,
+    wrapperCount,
   };
 }
 
@@ -307,13 +350,21 @@ function decodeExactMap(
   value: Uint8Array,
   fieldCount: number,
 ): Map<number, CborValue> {
+  const decoded = decodeMap(value);
+  if (decoded.size !== fieldCount) {
+    throw new Error("CBOR record has an invalid field count.");
+  }
+  return decoded;
+}
+
+function decodeMap(value: Uint8Array): Map<number, CborValue> {
   const reader = new Reader(value);
   const decoded = reader.value();
   reader.finish();
-  if (!(decoded instanceof Map) || decoded.size !== fieldCount) {
+  if (!(decoded instanceof Map)) {
     throw new Error("CBOR record has an invalid field count.");
   }
-  for (let key = 1; key <= fieldCount; key += 1) {
+  for (let key = 1; key <= decoded.size; key += 1) {
     if (!decoded.has(key)) {
       throw new Error("CBOR record is missing a required field.");
     }

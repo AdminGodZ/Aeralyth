@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{
@@ -11,8 +11,10 @@ use crate::auth::{AuthUser, require_csrf, require_user};
 use crate::config::E2eeMode;
 use crate::e2ee::{
     ARGON2ID_ALGORITHM, ARGON2ID_MEMORY_BYTES, ARGON2ID_OPERATIONS, ARGON2ID_OUTPUT_BYTES,
-    CRYPTO_CHUNK_BYTES, FORMAT_VERSION, MAX_CIPHERTEXT_BYTES, UPLOAD_PART_BYTES, decode_bootstrap,
+    CRYPTO_CHUNK_BYTES, FORMAT_VERSION, MAX_CIPHERTEXT_BYTES, SHARE_ENVELOPE_VERSION,
+    UPLOAD_PART_BYTES, WrapperSetCommitment, decode_bootstrap, decode_share_envelope,
     decode_wrapper, sha256, verify_ed25519_signature, verify_node_record, verify_share_envelope,
+    verify_wrapper_set_proof, wrapper_set_commitment,
 };
 use crate::state::AppState;
 use crate::storage::{ObjectMetadata, UploadedPart};
@@ -33,17 +35,25 @@ const SHARED_DOWNLOAD_AUTHORIZATION_QUERY: &str = "
     SELECT shares.id, shares.owner_id, shares.root_node_id,
            shares.active_epoch, shares.record_version,
            shares.previous_record_hash,
-           recipients.recipient_key_version
+           recipients.recipient_key_version,
+           epochs.protocol_version, epochs.wrapper_set_root, epochs.wrapper_count
     FROM vault_shares AS shares
+    INNER JOIN users AS owners
+      ON owners.id = shares.owner_id
+     AND owners.status = 'active'
     INNER JOIN ancestors ON ancestors.id = shares.root_node_id
     INNER JOIN vault_share_recipients AS recipients
       ON recipients.share_id = shares.id
      AND recipients.recipient_id = $2
      AND recipients.status = 'active'
+    INNER JOIN vault_share_epochs AS epochs
+      ON epochs.share_id = shares.id
+     AND epochs.epoch = shares.active_epoch
+     AND epochs.status = 'published'
     WHERE shares.status = 'active'
     ORDER BY shares.created_at
     LIMIT 1
-    FOR SHARE OF shares, recipients
+    FOR SHARE OF shares, recipients, epochs
 ";
 
 #[derive(Serialize)]
@@ -333,6 +343,14 @@ struct ShareDownloadMaterial {
     sender_ed25519_public_key: String,
     sender_fingerprint_sha256: String,
     recipient_key_version: i64,
+    wrapper_proofs: Vec<Option<ShareWrapperProofResponse>>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ShareWrapperProofResponse {
+    leaf_index: i32,
+    proof: String,
 }
 
 #[derive(Deserialize)]
@@ -1566,7 +1584,7 @@ pub async fn publish_record(
     .await?;
     insert_node_record(&transaction, &user.id, &decoded).await?;
     replace_owner_wrappers(&transaction, &user.id, &decoded).await?;
-    insert_share_wrappers(&transaction, &committed_share_wrappers).await?;
+    insert_share_wrappers(&transaction, &committed_share_wrappers, None).await?;
     update_node_head(&transaction, &user.id, &decoded).await?;
     transaction
         .execute(
@@ -1884,7 +1902,7 @@ pub async fn create_share(
         return Ok(HttpResponse::NotFound().body("encrypted share root not found"));
     }
     let snapshot = subtree_snapshot(&transaction, &body.root_node_id, &user.id).await?;
-    validate_share_material(
+    let wrapper_commitment = validate_share_material(
         &wrappers,
         &envelopes,
         &snapshot,
@@ -1920,8 +1938,13 @@ pub async fn create_share(
         .map_err(error::ErrorInternalServerError)?;
     transaction
         .execute(
-            "INSERT INTO vault_share_epochs (share_id, epoch, status, published_at) VALUES ($1, 1, 'published', now())",
-            &[&body.share_id],
+            "INSERT INTO vault_share_epochs (share_id, epoch, status, protocol_version, wrapper_set_root, wrapper_count, published_at) VALUES ($1, 1, 'published', $2, $3, $4, now())",
+            &[
+                &body.share_id,
+                &(SHARE_ENVELOPE_VERSION as i16),
+                &wrapper_commitment.root.as_slice(),
+                &wrapper_commitment.count,
+            ],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -1937,7 +1960,7 @@ pub async fn create_share(
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    insert_share_wrappers(&transaction, &wrappers).await?;
+    insert_share_wrappers(&transaction, &wrappers, Some(&wrapper_commitment)).await?;
     insert_share_envelopes(&transaction, &envelopes).await?;
     transaction
         .execute(
@@ -2355,7 +2378,7 @@ pub async fn publish_epoch_rotation(
         .collect::<Vec<_>>();
     let next_record_version = share.get::<_, i64>("record_version") + 1;
     let previous_record_hash: Option<Vec<u8>> = share.get("record_hash");
-    validate_rotation_material(
+    let wrapper_commitment = validate_rotation_material(
         &wrappers,
         &envelopes,
         &snapshot,
@@ -2369,7 +2392,7 @@ pub async fn publish_epoch_rotation(
         previous_record_hash.as_deref(),
     )?;
     insert_owner_epoch_key(&transaction, &share_id, pending_epoch, &owner_epoch_key).await?;
-    insert_share_wrappers(&transaction, &wrappers).await?;
+    insert_share_wrappers(&transaction, &wrappers, Some(&wrapper_commitment)).await?;
     insert_share_envelopes(&transaction, &envelopes).await?;
     let cutoff_hash = share_record_hash(
         &requested_snapshot_hash,
@@ -2387,8 +2410,14 @@ pub async fn publish_epoch_rotation(
         .map_err(error::ErrorInternalServerError)?;
     transaction
         .execute(
-            "UPDATE vault_share_epochs SET status = 'published', published_at = now() WHERE share_id = $1 AND epoch = $2 AND status = 'pending'",
-            &[&share_id, &pending_epoch],
+            "UPDATE vault_share_epochs SET status = 'published', protocol_version = $3, wrapper_set_root = $4, wrapper_count = $5, published_at = now() WHERE share_id = $1 AND epoch = $2 AND status = 'pending'",
+            &[
+                &share_id,
+                &pending_epoch,
+                &(SHARE_ENVELOPE_VERSION as i16),
+                &wrapper_commitment.root.as_slice(),
+                &wrapper_commitment.count,
+            ],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -2672,8 +2701,9 @@ fn validate_share_material(
     root_node_id: &str,
     record_version: i64,
     previous_record_hash: Option<&[u8]>,
-) -> Result<()> {
+) -> Result<WrapperSetCommitment> {
     validate_wrapper_completeness(wrappers, snapshot)?;
+    let commitment = share_wrapper_commitment(wrappers)?;
     if envelopes.len() != 1 {
         return Err(error::ErrorBadRequest(
             "each initial share requires exactly one recipient envelope",
@@ -2681,7 +2711,7 @@ fn validate_share_material(
     }
     validate_envelope(
         &envelopes[0],
-        wrappers,
+        &commitment,
         share_id,
         epoch,
         sender_id,
@@ -2691,7 +2721,8 @@ fn validate_share_material(
         root_node_id,
         record_version,
         previous_record_hash,
-    )
+    )?;
+    Ok(commitment)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2707,8 +2738,9 @@ fn validate_rotation_material(
     root_node_id: &str,
     record_version: i64,
     previous_record_hash: Option<&[u8]>,
-) -> Result<()> {
+) -> Result<WrapperSetCommitment> {
     validate_wrapper_completeness(wrappers, snapshot)?;
+    let commitment = share_wrapper_commitment(wrappers)?;
     if envelopes.len() != retained.len() {
         return Err(error::ErrorBadRequest(
             "new epoch envelopes do not cover every retained recipient",
@@ -2732,7 +2764,7 @@ fn validate_rotation_material(
     for envelope in envelopes {
         validate_envelope(
             envelope,
-            wrappers,
+            &commitment,
             share_id,
             epoch,
             sender_id,
@@ -2744,7 +2776,15 @@ fn validate_rotation_material(
             previous_record_hash,
         )?;
     }
-    Ok(())
+    Ok(commitment)
+}
+
+fn share_wrapper_commitment(wrappers: &[ShareWrapperMaterial]) -> Result<WrapperSetCommitment> {
+    let hashes = wrappers
+        .iter()
+        .map(|wrapper| wrapper.hash)
+        .collect::<Vec<_>>();
+    wrapper_set_commitment(&hashes).map_err(error::ErrorBadRequest)
 }
 
 fn validate_wrapper_completeness(
@@ -2779,7 +2819,7 @@ fn validate_wrapper_completeness(
 #[allow(clippy::too_many_arguments)]
 fn validate_envelope(
     envelope: &ShareEnvelopeMaterial,
-    wrappers: &[ShareWrapperMaterial],
+    commitment: &WrapperSetCommitment,
     share_id: &str,
     epoch: i64,
     sender_id: &str,
@@ -2791,14 +2831,11 @@ fn validate_envelope(
     previous_record_hash: Option<&[u8]>,
 ) -> Result<()> {
     let record = &envelope.record;
-    let mut committed_hashes = record.wrapper_hashes.clone();
-    let mut actual_hashes = wrappers
-        .iter()
-        .map(|wrapper| wrapper.hash)
-        .collect::<Vec<_>>();
-    committed_hashes.sort_unstable();
-    actual_hashes.sort_unstable();
-    if record.share_id != share_id
+    if record.format_version != SHARE_ENVELOPE_VERSION
+        || record.wrapper_set_root != Some(commitment.root)
+        || i32::try_from(record.wrapper_count).ok() != Some(commitment.count)
+        || !record.wrapper_hashes.is_empty()
+        || record.share_id != share_id
         || i64::try_from(record.epoch).ok() != Some(epoch)
         || record.sender_id != sender_id
         || i64::try_from(record.sender_key_version).ok() != Some(sender_key_version)
@@ -2812,7 +2849,6 @@ fn validate_envelope(
             .as_ref()
             .map(|value| value.as_slice())
             != previous_record_hash
-        || committed_hashes != actual_hashes
     {
         return Err(error::ErrorBadRequest(
             "signed share envelope does not match the share epoch",
@@ -3007,7 +3043,15 @@ async fn committed_share_wrappers(
 async fn insert_share_wrappers(
     transaction: &tokio_postgres::Transaction<'_>,
     wrappers: &[ShareWrapperMaterial],
+    commitment: Option<&WrapperSetCommitment>,
 ) -> Result<()> {
+    let proofs = commitment.map(|value| {
+        value
+            .proofs
+            .iter()
+            .map(|proof| (proof.wrapper_hash, (proof.leaf_index, proof.proof.clone())))
+            .collect::<HashMap<_, _>>()
+    });
     for wrapper in wrappers {
         let share_id = wrapper.record.share_id.as_deref().unwrap_or_default();
         let epoch = i64::try_from(wrapper.record.epoch.unwrap_or_default())
@@ -3017,13 +3061,24 @@ async fn insert_share_wrappers(
         } else {
             "metadata"
         };
+        let (leaf_index, merkle_proof) = if let Some(proofs) = proofs.as_ref() {
+            let Some((leaf_index, proof)) = proofs.get(&wrapper.hash) else {
+                return Err(error::ErrorInternalServerError(
+                    "share wrapper proof is missing",
+                ));
+            };
+            (Some(*leaf_index), Some(proof.clone()))
+        } else {
+            (None, None)
+        };
         transaction
             .execute(
                 "
                     INSERT INTO vault_share_wrappers (
                       wrapper_id, share_id, epoch, node_id, generation_id,
-                      wrapper_kind, record_version, canonical_cbor, wrapper_hash
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+                      wrapper_kind, record_version, canonical_cbor, wrapper_hash,
+                      merkle_leaf_index, merkle_proof
+                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
                 ",
                 &[
                     &wrapper.record.wrapper_id.as_slice(),
@@ -3035,6 +3090,8 @@ async fn insert_share_wrappers(
                     &(wrapper.record.record_version as i64),
                     &wrapper.canonical,
                     &wrapper.hash.as_slice(),
+                    &leaf_index,
+                    &merkle_proof,
                 ],
             )
             .await
@@ -3420,7 +3477,7 @@ async fn publish_record_transaction(
 
     insert_node_record(&transaction, &user.id, decoded).await?;
     replace_owner_wrappers(&transaction, &user.id, decoded).await?;
-    insert_share_wrappers(&transaction, &committed_share_wrappers).await?;
+    insert_share_wrappers(&transaction, &committed_share_wrappers, None).await?;
     update_node_head(&transaction, &user.id, decoded).await?;
     if upload.entry_type == "file" {
         transaction
@@ -3863,6 +3920,9 @@ async fn shared_download_plan(
     let share_record_version: i64 = share.get("record_version");
     let share_previous_record_hash: Option<Vec<u8>> = share.get("previous_record_hash");
     let recipient_key_version: i64 = share.get("recipient_key_version");
+    let epoch_protocol_version: i16 = share.get("protocol_version");
+    let epoch_wrapper_set_root: Option<Vec<u8>> = share.get("wrapper_set_root");
+    let epoch_wrapper_count: Option<i32> = share.get("wrapper_count");
     let row = transaction
         .query_one(
             "
@@ -3897,10 +3957,11 @@ async fn shared_download_plan(
     let wrapper_rows = transaction
         .query(
             "
-                SELECT canonical_cbor
+                SELECT canonical_cbor, merkle_leaf_index, merkle_proof
                 FROM (
                   SELECT DISTINCT ON (wrapper_kind)
-                         wrapper_kind, canonical_cbor, record_version
+                         wrapper_kind, canonical_cbor, record_version,
+                         merkle_leaf_index, merkle_proof
                   FROM vault_share_wrappers
                   WHERE share_id = $1 AND epoch = $2 AND node_id = $3
                     AND (wrapper_kind = 'metadata'
@@ -3941,11 +4002,22 @@ async fn shared_download_plan(
     let envelope_node_id: String = envelope.get("node_id");
     let envelope_record_version: i64 = envelope.get("record_version");
     let envelope_previous_record_hash: Option<Vec<u8>> = envelope.get("previous_record_hash");
+    let envelope_cbor: Vec<u8> = envelope.get("canonical_cbor");
+    let decoded_envelope =
+        decode_share_envelope(&envelope_cbor).map_err(error::ErrorInternalServerError)?;
     if envelope_sender_id != owner_id
         || envelope_recipient_id != user.id
         || envelope_node_id != root_node_id
         || envelope_record_version != share_record_version
         || envelope_previous_record_hash != share_previous_record_hash
+        || i16::try_from(decoded_envelope.format_version).ok() != Some(epoch_protocol_version)
+        || (epoch_protocol_version == SHARE_ENVELOPE_VERSION as i16
+            && (decoded_envelope
+                .wrapper_set_root
+                .as_ref()
+                .map(|value| value.as_slice())
+                != epoch_wrapper_set_root.as_deref()
+                || i32::try_from(decoded_envelope.wrapper_count).ok() != epoch_wrapper_count))
     {
         return Err(error::ErrorInternalServerError(
             "published share envelope is inconsistent with its active epoch",
@@ -3963,6 +4035,48 @@ async fn shared_download_plan(
     };
     let bootstrap_cbor: Vec<u8> = row.get("bootstrap_cbor");
     let bootstrap = decode_bootstrap(&bootstrap_cbor).map_err(error::ErrorInternalServerError)?;
+    let epoch_root = epoch_wrapper_set_root
+        .as_deref()
+        .map(<[u8; 32]>::try_from)
+        .transpose()
+        .map_err(|_| error::ErrorInternalServerError("stored wrapper root is invalid"))?;
+    let mut wrappers = Vec::with_capacity(wrapper_rows.len());
+    let mut wrapper_proofs = Vec::with_capacity(wrapper_rows.len());
+    for wrapper in wrapper_rows {
+        let canonical: Vec<u8> = wrapper.get("canonical_cbor");
+        let wrapper_hash = sha256(&canonical);
+        wrappers.push(encode_bytes(canonical));
+        let leaf_index: Option<i32> = wrapper.get("merkle_leaf_index");
+        let proof: Option<Vec<u8>> = wrapper.get("merkle_proof");
+        let response_proof = match (leaf_index, proof) {
+            (Some(leaf_index), Some(proof)) if proof.len() % 32 == 0 => {
+                if epoch_protocol_version == SHARE_ENVELOPE_VERSION as i16
+                    && !verify_wrapper_set_proof(
+                        wrapper_hash,
+                        leaf_index,
+                        &proof,
+                        epoch_wrapper_count.unwrap_or_default(),
+                        epoch_root.unwrap_or_default(),
+                    )
+                {
+                    return Err(error::ErrorInternalServerError(
+                        "stored share wrapper proof does not match its epoch",
+                    ));
+                }
+                Some(ShareWrapperProofResponse {
+                    leaf_index,
+                    proof: encode_bytes(proof),
+                })
+            }
+            (None, None) => None,
+            _ => {
+                return Err(error::ErrorInternalServerError(
+                    "stored share wrapper proof is invalid",
+                ));
+            }
+        };
+        wrapper_proofs.push(response_proof);
+    }
     let response = DownloadPlanResponse {
         node_id: node_id.to_owned(),
         entry_type: row.get("entry_type"),
@@ -3981,10 +4095,7 @@ async fn shared_download_plan(
         bootstrap_cbor: encode_bytes(bootstrap_cbor),
         bootstrap_signature: encode_bytes(row.get::<_, Vec<u8>>("bootstrap_signature")),
         encrypted_manifest: encode_bytes(row.get::<_, Vec<u8>>("encrypted_manifest")),
-        wrappers: wrapper_rows
-            .into_iter()
-            .map(|row| encode_bytes(row.get::<_, Vec<u8>>("canonical_cbor")))
-            .collect(),
+        wrappers,
         signer_key_version: row.get("signer_key_version"),
         signer_ed25519_public_key: encode_bytes(row.get::<_, Vec<u8>>("ed25519_public_key")),
         record_version: row.get("record_version"),
@@ -3997,7 +4108,7 @@ async fn shared_download_plan(
             recipient_id: user.id.clone(),
             record_version: share_record_version,
             previous_record_hash: share_previous_record_hash.map(encode_bytes),
-            envelope_cbor: encode_bytes(envelope.get::<_, Vec<u8>>("canonical_cbor")),
+            envelope_cbor: encode_bytes(envelope_cbor),
             envelope_signature: encode_bytes(envelope.get::<_, Vec<u8>>("signature")),
             envelope_hash: encode_bytes(envelope.get::<_, Vec<u8>>("envelope_hash")),
             sender_key_version: envelope.get("sender_key_version"),
@@ -4009,6 +4120,7 @@ async fn shared_download_plan(
                 envelope.get::<_, Vec<u8>>("fingerprint_sha256"),
             ),
             recipient_key_version,
+            wrapper_proofs,
         }),
     };
 

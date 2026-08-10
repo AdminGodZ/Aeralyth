@@ -53,6 +53,12 @@ complete memory erasure is not guaranteed.
   version, and previous record hash.
 - Sharing: authenticated HPKE using X25519, HKDF-SHA-256, and AES-256-GCM. The
   sender signs the canonical `(enc, ciphertext)` envelope and its full scope.
+  Share-envelope protocol 2 commits the epoch's wrapper set once with a
+  domain-separated Merkle root and wrapper count. Recipient envelopes contain
+  only that constant-size commitment. Downloads carry proofs for the one or two
+  wrappers they need; wrappers added by later node records remain committed by
+  the signed node bootstrap. Protocol-1 envelopes remain readable during the
+  migration but are never emitted for new shares or epoch rotations.
 
 ## Recovery and locking
 
@@ -79,6 +85,12 @@ and retained-recipient envelopes, and atomically publishes the epoch and cutoff.
 This prevents a revoked recipient from deriving future metadata or content.
 Revocation cannot erase old ciphertext, plaintext, or keys already copied by a
 recipient.
+
+The server validates the complete wrapper set and Merkle root once when an
+epoch is published, then persists each initial wrapper's leaf index and compact
+proof. Adding recipients therefore no longer duplicates the full wrapper-hash
+array in every signed HPKE envelope, and per-node download metadata grows with
+the proof depth instead of the subtree size.
 
 ## Storage and uploads
 

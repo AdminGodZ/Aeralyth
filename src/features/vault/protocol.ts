@@ -1,4 +1,5 @@
 export const VAULT_FORMAT_VERSION = 1;
+export const VAULT_SHARE_ENVELOPE_VERSION = 2;
 export const VAULT_SUITE_ID = 1;
 export const VAULT_AAD_SCHEMA_ID = 1;
 export const VAULT_CRYPTO_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -154,6 +155,10 @@ export type VaultShareDownloadMaterial = {
   senderEd25519PublicKey: string;
   senderFingerprintSha256: string;
   recipientKeyVersion: number;
+  wrapperProofs: Array<{
+    leafIndex: number;
+    proof: string;
+  } | null>;
 };
 
 export type VaultPublicIdentity = {
@@ -201,6 +206,8 @@ export type VaultShareEnvelopeRecord = {
   ciphertext: Uint8Array;
   aadSchemaId: number;
   wrapperHashes: Uint8Array[];
+  wrapperSetRoot: Uint8Array | null;
+  wrapperCount: number;
 };
 
 export type VaultShareContextMaterial = {
@@ -476,6 +483,98 @@ export async function merkleRootFromLeaves(
     level = next;
   }
   return level[0];
+}
+
+const WRAPPER_LEAF_DOMAIN = utf8("aeralyth/share-wrapper-leaf/v2");
+const WRAPPER_BRANCH_DOMAIN = utf8("aeralyth/share-wrapper-branch/v2");
+const WRAPPER_ROOT_DOMAIN = utf8("aeralyth/share-wrapper-root/v2");
+
+export async function wrapperSetRoot(
+  wrapperHashes: Uint8Array[],
+): Promise<Uint8Array> {
+  if (wrapperHashes.length === 0 || wrapperHashes.length > 8192) {
+    throw new Error("Invalid share wrapper count.");
+  }
+  const ordered = wrapperHashes
+    .map((hash) => {
+      if (hash.length !== 32) throw new Error("Invalid share wrapper hash.");
+      return Uint8Array.from(hash);
+    })
+    .sort(compareBytes);
+  for (let index = 1; index < ordered.length; index += 1) {
+    if (equalBytes(ordered[index - 1], ordered[index])) {
+      throw new Error("Duplicate share wrapper hash.");
+    }
+  }
+  let level = await Promise.all(
+    ordered.map((hash) => sha256(concatBytes(WRAPPER_LEAF_DOMAIN, hash))),
+  );
+  while (level.length > 1) {
+    const next: Uint8Array[] = [];
+    for (let index = 0; index < level.length; index += 2) {
+      const right = level[index + 1] ?? level[index];
+      next.push(
+        await sha256(concatBytes(WRAPPER_BRANCH_DOMAIN, level[index], right)),
+      );
+    }
+    level = next;
+  }
+  return sha256(
+    concatBytes(
+      WRAPPER_ROOT_DOMAIN,
+      encodeUnsigned64(wrapperHashes.length),
+      level[0],
+    ),
+  );
+}
+
+export async function verifyWrapperSetProof(input: {
+  wrapperHash: Uint8Array;
+  leafIndex: number;
+  proof: Uint8Array;
+  wrapperCount: number;
+  expectedRoot: Uint8Array;
+}): Promise<boolean> {
+  if (
+    input.wrapperHash.length !== 32 ||
+    input.expectedRoot.length !== 32 ||
+    !Number.isSafeInteger(input.leafIndex) ||
+    input.leafIndex < 0 ||
+    !Number.isSafeInteger(input.wrapperCount) ||
+    input.wrapperCount < 1 ||
+    input.wrapperCount > 8192 ||
+    input.leafIndex >= input.wrapperCount
+  ) {
+    return false;
+  }
+  const depth = Math.ceil(Math.log2(input.wrapperCount));
+  if (input.proof.length !== depth * 32) return false;
+
+  let index = input.leafIndex;
+  let node = await sha256(concatBytes(WRAPPER_LEAF_DOMAIN, input.wrapperHash));
+  for (let level = 0; level < depth; level += 1) {
+    const sibling = input.proof.subarray(level * 32, (level + 1) * 32);
+    node =
+      index % 2 === 0
+        ? await sha256(concatBytes(WRAPPER_BRANCH_DOMAIN, node, sibling))
+        : await sha256(concatBytes(WRAPPER_BRANCH_DOMAIN, sibling, node));
+    index = Math.floor(index / 2);
+  }
+  const root = await sha256(
+    concatBytes(
+      WRAPPER_ROOT_DOMAIN,
+      encodeUnsigned64(input.wrapperCount),
+      node,
+    ),
+  );
+  return equalBytes(root, input.expectedRoot);
+}
+
+function compareBytes(left: Uint8Array, right: Uint8Array): number {
+  for (let index = 0; index < Math.min(left.length, right.length); index += 1) {
+    if (left[index] !== right[index]) return left[index] - right[index];
+  }
+  return left.length - right.length;
 }
 
 export async function ciphertextLeafHash(

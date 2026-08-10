@@ -18,6 +18,35 @@ use crate::e2ee::UPLOAD_PART_BYTES;
 
 const MULTIPART_RECONCILIATION_LOCK_ID: i64 = 4_133_797_884_291_001;
 const STORAGE_OBJECT_PREFIX: &str = "users/";
+const USER_DELETION_BATCH_SIZE: i64 = 500;
+const USER_DELETION_BATCHES_PER_TICK: usize = 32;
+const USER_DELETION_PHASES: &[&str] = &[
+    "file_uploads",
+    "vault_uploads",
+    "vault_object_generations",
+    "vault_migrations",
+    "vault_share_envelopes",
+    "vault_share_wrappers",
+    "vault_share_owner_keys",
+    "vault_revocation_cutoffs",
+    "vault_share_pending_revocations",
+    "vault_share_recipients",
+    "vault_share_epochs",
+    "vault_shares",
+    "file_shares",
+    "share_links",
+    "repositories",
+    "vault_node_heads",
+    "vault_node_records",
+    "vault_wrappers",
+    "files",
+    "vault_identity_trust",
+    "vault_identity_keys",
+    "user_vaults",
+    "invitations",
+    "sessions",
+    "finalize",
+];
 
 #[derive(Clone)]
 pub enum Storage {
@@ -94,6 +123,27 @@ pub struct MultipartUploadPage {
     pub uploads: Vec<MultipartUploadSession>,
     pub next_key_marker: Option<String>,
     pub next_upload_id_marker: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MultipartIntentSource {
+    File,
+    Vault,
+}
+
+#[derive(Debug)]
+struct MultipartIntent {
+    source: MultipartIntentSource,
+    status: String,
+    upload_id: Option<String>,
+    protected_until: SystemTime,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MultipartReconciliationAction {
+    Keep,
+    Adopt(MultipartIntentSource),
+    Abort,
 }
 
 impl Storage {
@@ -652,6 +702,9 @@ pub async fn run_maintenance(db: Database, storage: Storage) {
     loop {
         maintenance_interval.tick().await;
 
+        if let Err(error) = process_user_deletion_jobs(&db).await {
+            log::error!("user deletion worker failed: {error}");
+        }
         if let Err(error) = process_deletion_jobs(&db, &storage).await {
             log::error!("storage deletion worker failed: {error}");
         }
@@ -675,6 +728,484 @@ pub async fn run_maintenance(db: Database, storage: Storage) {
                 log::error!("counter reconciliation failed: {error}");
             }
         }
+    }
+}
+
+async fn process_user_deletion_jobs(db: &Database) -> Result<(), Box<dyn StdError + Send + Sync>> {
+    for _ in 0..USER_DELETION_BATCHES_PER_TICK {
+        let claimed = db
+            .query_opt(
+                "
+                    WITH candidate AS (
+                      SELECT user_id
+                      FROM user_deletion_jobs
+                      WHERE available_at <= now()
+                        AND (locked_until IS NULL OR locked_until < now())
+                      ORDER BY created_at, user_id
+                      LIMIT 1
+                      FOR UPDATE SKIP LOCKED
+                    )
+                    UPDATE user_deletion_jobs AS jobs
+                    SET locked_until = now() + interval '2 minutes',
+                        updated_at = now()
+                    FROM candidate
+                    WHERE jobs.user_id = candidate.user_id
+                    RETURNING jobs.user_id, jobs.phase
+                ",
+                &[],
+            )
+            .await?;
+        let Some(claimed) = claimed else {
+            break;
+        };
+        let user_id: String = claimed.get("user_id");
+        let phase: String = claimed.get("phase");
+
+        if let Err(error) = process_user_deletion_batch(db, &user_id, &phase).await {
+            let error_message = error.to_string().chars().take(500).collect::<String>();
+            let attempts = db
+                .query_opt(
+                    "SELECT attempts FROM user_deletion_jobs WHERE user_id = $1",
+                    &[&user_id],
+                )
+                .await?
+                .map(|row| row.get::<_, i32>("attempts"))
+                .unwrap_or_default();
+            let delay_seconds = retry_delay_seconds(attempts);
+            db.execute(
+                "
+                    UPDATE user_deletion_jobs
+                    SET attempts = attempts + 1,
+                        available_at = now() + ($2::bigint * interval '1 second'),
+                        locked_until = NULL,
+                        last_error = $3,
+                        updated_at = now()
+                    WHERE user_id = $1
+                ",
+                &[&user_id, &delay_seconds, &error_message],
+            )
+            .await?;
+            return Err(error);
+        }
+    }
+
+    Ok(())
+}
+
+async fn process_user_deletion_batch(
+    db: &Database,
+    user_id: &str,
+    claimed_phase: &str,
+) -> Result<(), Box<dyn StdError + Send + Sync>> {
+    let mut client = db.get().await?;
+    let transaction = client.transaction().await?;
+    let Some(job) = transaction
+        .query_opt(
+            "SELECT phase FROM user_deletion_jobs WHERE user_id = $1 FOR UPDATE",
+            &[&user_id],
+        )
+        .await?
+    else {
+        transaction.commit().await?;
+        return Ok(());
+    };
+    let phase: String = job.get("phase");
+    if phase != claimed_phase {
+        transaction
+            .execute(
+                "UPDATE user_deletion_jobs SET locked_until = NULL WHERE user_id = $1",
+                &[&user_id],
+            )
+            .await?;
+        transaction.commit().await?;
+        return Ok(());
+    }
+
+    if phase == "finalize" {
+        let user = transaction
+            .query_opt(
+                "SELECT id FROM users WHERE id = $1 AND status = 'deleting' FOR UPDATE",
+                &[&user_id],
+            )
+            .await?;
+        if user.is_none() {
+            transaction
+                .execute(
+                    "DELETE FROM user_deletion_jobs WHERE user_id = $1",
+                    &[&user_id],
+                )
+                .await?;
+            transaction.commit().await?;
+            return Ok(());
+        }
+        let residual_objects: bool = transaction
+            .query_one(
+                "
+                    SELECT EXISTS (
+                      SELECT 1 FROM file_uploads WHERE owner_id = $1
+                      UNION ALL
+                      SELECT 1 FROM vault_uploads
+                      WHERE owner_id = $1 AND object_key IS NOT NULL
+                      UNION ALL
+                      SELECT 1 FROM vault_object_generations WHERE owner_id = $1
+                      UNION ALL
+                      SELECT 1 FROM vault_migrations
+                      WHERE owner_id = $1
+                        AND (legacy_object_key IS NOT NULL OR staged_object_key IS NOT NULL)
+                      UNION ALL
+                      SELECT 1 FROM files
+                      WHERE owner_id = $1 AND entry_type = 'file'
+                    ) AS residual_objects
+                ",
+                &[&user_id],
+            )
+            .await?
+            .get("residual_objects");
+        if residual_objects {
+            transaction
+                .execute(
+                    "UPDATE user_deletion_jobs SET phase = 'file_uploads', locked_until = NULL, updated_at = now() WHERE user_id = $1",
+                    &[&user_id],
+                )
+                .await?;
+        } else {
+            transaction
+                .execute(
+                    "DELETE FROM users WHERE id = $1 AND status = 'deleting'",
+                    &[&user_id],
+                )
+                .await?;
+        }
+        transaction.commit().await?;
+        return Ok(());
+    }
+
+    let affected = process_user_deletion_phase(&transaction, user_id, &phase).await?;
+    let next_phase = if affected < USER_DELETION_BATCH_SIZE as u64 {
+        next_user_deletion_phase(&phase)
+            .ok_or_else(|| std::io::Error::other(format!("unknown user deletion phase: {phase}")))?
+    } else {
+        phase.as_str()
+    };
+    let affected = i64::try_from(affected).unwrap_or(i64::MAX);
+    transaction
+        .execute(
+            "
+                UPDATE user_deletion_jobs
+                SET phase = $2,
+                    processed_rows = processed_rows + $3,
+                    attempts = 0,
+                    available_at = now(),
+                    locked_until = NULL,
+                    last_error = NULL,
+                    updated_at = now()
+                WHERE user_id = $1
+            ",
+            &[&user_id, &next_phase, &affected],
+        )
+        .await?;
+    transaction.commit().await?;
+    Ok(())
+}
+
+fn next_user_deletion_phase(current: &str) -> Option<&'static str> {
+    USER_DELETION_PHASES
+        .iter()
+        .position(|phase| *phase == current)
+        .and_then(|index| USER_DELETION_PHASES.get(index + 1))
+        .copied()
+}
+
+async fn process_user_deletion_phase(
+    transaction: &tokio_postgres::Transaction<'_>,
+    user_id: &str,
+    phase: &str,
+) -> Result<u64, tokio_postgres::Error> {
+    let batch_size = USER_DELETION_BATCH_SIZE;
+    match phase {
+        "file_uploads" => {
+            deletion_query_count(
+                transaction,
+                "
+                    WITH targets AS MATERIALIZED (
+                      SELECT id, object_key, multipart_upload_id, upload_mode,
+                             write_expires_at
+                      FROM file_uploads
+                      WHERE owner_id = $1
+                      ORDER BY id
+                      LIMIT $2
+                      FOR UPDATE SKIP LOCKED
+                    ), queued AS (
+                      INSERT INTO storage_deletion_jobs (
+                        object_key, multipart_upload_id, available_at
+                      )
+                      SELECT object_key, multipart_upload_id,
+                             CASE WHEN upload_mode = 'single'
+                               THEN GREATEST(COALESCE(write_expires_at, now()), now())
+                               ELSE now()
+                             END
+                      FROM targets
+                      ON CONFLICT (object_key) DO UPDATE SET
+                        multipart_upload_id = COALESCE(
+                          EXCLUDED.multipart_upload_id,
+                          storage_deletion_jobs.multipart_upload_id
+                        ),
+                        available_at = GREATEST(
+                          storage_deletion_jobs.available_at,
+                          EXCLUDED.available_at
+                        )
+                      RETURNING object_key
+                    ), deleted AS (
+                      DELETE FROM file_uploads AS uploads
+                      USING targets
+                      WHERE uploads.id = targets.id
+                        AND (SELECT count(*) FROM queued) >= 0
+                      RETURNING uploads.id
+                    )
+                    SELECT count(*)::bigint AS affected FROM deleted
+                ",
+                user_id,
+                batch_size,
+            )
+            .await
+        }
+        "vault_uploads" => {
+            deletion_query_count(
+                transaction,
+                "
+                    WITH targets AS MATERIALIZED (
+                      SELECT id, object_key, multipart_upload_id, upload_mode,
+                             write_expires_at
+                      FROM vault_uploads
+                      WHERE owner_id = $1
+                      ORDER BY id
+                      LIMIT $2
+                      FOR UPDATE SKIP LOCKED
+                    ), queued AS (
+                      INSERT INTO storage_deletion_jobs (
+                        object_key, multipart_upload_id, available_at
+                      )
+                      SELECT object_key, multipart_upload_id,
+                             CASE WHEN upload_mode = 'single'
+                               THEN GREATEST(COALESCE(write_expires_at, now()), now())
+                               ELSE now()
+                             END
+                      FROM targets
+                      WHERE object_key IS NOT NULL
+                      ON CONFLICT (object_key) DO UPDATE SET
+                        multipart_upload_id = COALESCE(
+                          EXCLUDED.multipart_upload_id,
+                          storage_deletion_jobs.multipart_upload_id
+                        ),
+                        available_at = GREATEST(
+                          storage_deletion_jobs.available_at,
+                          EXCLUDED.available_at
+                        )
+                      RETURNING object_key
+                    ), deleted AS (
+                      DELETE FROM vault_uploads AS uploads
+                      USING targets
+                      WHERE uploads.id = targets.id
+                        AND (SELECT count(*) FROM queued) >= 0
+                      RETURNING uploads.id
+                    )
+                    SELECT count(*)::bigint AS affected FROM deleted
+                ",
+                user_id,
+                batch_size,
+            )
+            .await
+        }
+        "vault_object_generations" => {
+            deletion_query_count(
+                transaction,
+                "
+                    WITH targets AS MATERIALIZED (
+                      SELECT node_id, generation_number, object_key
+                      FROM vault_object_generations
+                      WHERE owner_id = $1
+                      ORDER BY node_id, generation_number
+                      LIMIT $2
+                      FOR UPDATE SKIP LOCKED
+                    ), queued AS (
+                      INSERT INTO storage_deletion_jobs (object_key)
+                      SELECT object_key FROM targets
+                      ON CONFLICT (object_key) DO NOTHING
+                      RETURNING object_key
+                    ), deleted AS (
+                      DELETE FROM vault_object_generations AS generations
+                      USING targets
+                      WHERE generations.node_id = targets.node_id
+                        AND generations.generation_number = targets.generation_number
+                        AND (SELECT count(*) FROM queued) >= 0
+                      RETURNING generations.node_id
+                    )
+                    SELECT count(*)::bigint AS affected FROM deleted
+                ",
+                user_id,
+                batch_size,
+            )
+            .await
+        }
+        "vault_migrations" => {
+            deletion_query_count(
+                transaction,
+                "
+                    WITH targets AS MATERIALIZED (
+                      SELECT node_id, legacy_object_key, staged_object_key
+                      FROM vault_migrations
+                      WHERE owner_id = $1
+                      ORDER BY node_id
+                      LIMIT $2
+                      FOR UPDATE SKIP LOCKED
+                    ), object_keys AS (
+                      SELECT DISTINCT object_key
+                      FROM (
+                        SELECT legacy_object_key AS object_key FROM targets
+                        UNION ALL
+                        SELECT staged_object_key AS object_key FROM targets
+                      ) AS keys
+                      WHERE object_key IS NOT NULL
+                    ), queued AS (
+                      INSERT INTO storage_deletion_jobs (object_key)
+                      SELECT object_key FROM object_keys
+                      ON CONFLICT (object_key) DO NOTHING
+                      RETURNING object_key
+                    ), deleted AS (
+                      DELETE FROM vault_migrations AS migrations
+                      USING targets
+                      WHERE migrations.node_id = targets.node_id
+                        AND (SELECT count(*) FROM queued) >= 0
+                      RETURNING migrations.node_id
+                    )
+                    SELECT count(*)::bigint AS affected FROM deleted
+                ",
+                user_id,
+                batch_size,
+            )
+            .await
+        }
+        "files" => {
+            deletion_query_count(
+                transaction,
+                "
+                    WITH targets AS MATERIALIZED (
+                      SELECT files.id, files.entry_type,
+                             CASE WHEN position('/' IN files.storage_name) = 0
+                               THEN files.owner_id || '/' || files.storage_name
+                               ELSE files.storage_name
+                             END AS object_key
+                      FROM files
+                      WHERE files.owner_id = $1
+                        AND NOT EXISTS (
+                          SELECT 1 FROM files AS children
+                          WHERE children.parent_id = files.id
+                        )
+                      ORDER BY files.id
+                      LIMIT $2
+                      FOR UPDATE OF files SKIP LOCKED
+                    ), queued AS (
+                      INSERT INTO storage_deletion_jobs (object_key)
+                      SELECT object_key FROM targets WHERE entry_type = 'file'
+                      ON CONFLICT (object_key) DO NOTHING
+                      RETURNING object_key
+                    ), deleted AS (
+                      DELETE FROM files AS entries
+                      USING targets
+                      WHERE entries.id = targets.id
+                        AND (SELECT count(*) FROM queued) >= 0
+                      RETURNING entries.id
+                    )
+                    SELECT count(*)::bigint AS affected FROM deleted
+                ",
+                user_id,
+                batch_size,
+            )
+            .await
+        }
+        _ => {
+            let statement = user_deletion_statement(phase)
+                .unwrap_or("DELETE FROM users WHERE FALSE AND id IN (SELECT $1::text LIMIT $2)");
+            transaction
+                .execute(statement, &[&user_id, &batch_size])
+                .await
+        }
+    }
+}
+
+async fn deletion_query_count(
+    transaction: &tokio_postgres::Transaction<'_>,
+    statement: &str,
+    user_id: &str,
+    batch_size: i64,
+) -> Result<u64, tokio_postgres::Error> {
+    let row = transaction
+        .query_one(statement, &[&user_id, &batch_size])
+        .await?;
+    let affected: i64 = row.get("affected");
+    Ok(u64::try_from(affected).unwrap_or_default())
+}
+
+fn user_deletion_statement(phase: &str) -> Option<&'static str> {
+    match phase {
+        "vault_share_envelopes" => Some(
+            "DELETE FROM vault_share_envelopes WHERE ctid IN (SELECT ctid FROM vault_share_envelopes WHERE sender_id = $1 OR recipient_id = $1 ORDER BY envelope_id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        ),
+        "vault_share_wrappers" => Some(
+            "DELETE FROM vault_share_wrappers AS wrappers WHERE wrappers.ctid IN (SELECT candidate.ctid FROM vault_share_wrappers AS candidate WHERE EXISTS (SELECT 1 FROM vault_shares AS shares WHERE shares.id = candidate.share_id AND shares.owner_id = $1) OR EXISTS (SELECT 1 FROM files WHERE files.id = candidate.node_id AND files.owner_id = $1) ORDER BY candidate.wrapper_id LIMIT $2 FOR UPDATE OF candidate SKIP LOCKED)",
+        ),
+        "vault_share_owner_keys" => Some(
+            "DELETE FROM vault_share_owner_keys AS keys WHERE keys.ctid IN (SELECT candidate.ctid FROM vault_share_owner_keys AS candidate INNER JOIN vault_shares AS shares ON shares.id = candidate.share_id WHERE shares.owner_id = $1 ORDER BY candidate.share_id, candidate.epoch LIMIT $2 FOR UPDATE OF candidate SKIP LOCKED)",
+        ),
+        "vault_revocation_cutoffs" => Some(
+            "DELETE FROM vault_revocation_cutoffs AS cutoffs WHERE cutoffs.ctid IN (SELECT candidate.ctid FROM vault_revocation_cutoffs AS candidate WHERE candidate.revoked_recipient_id = $1 OR EXISTS (SELECT 1 FROM vault_shares AS shares WHERE shares.id = candidate.share_id AND shares.owner_id = $1) ORDER BY candidate.share_id, candidate.retired_epoch LIMIT $2 FOR UPDATE OF candidate SKIP LOCKED)",
+        ),
+        "vault_share_pending_revocations" => Some(
+            "DELETE FROM vault_share_pending_revocations AS revocations WHERE revocations.ctid IN (SELECT candidate.ctid FROM vault_share_pending_revocations AS candidate WHERE candidate.recipient_id = $1 OR EXISTS (SELECT 1 FROM vault_shares AS shares WHERE shares.id = candidate.share_id AND shares.owner_id = $1) ORDER BY candidate.share_id, candidate.pending_epoch LIMIT $2 FOR UPDATE OF candidate SKIP LOCKED)",
+        ),
+        "vault_share_recipients" => Some(
+            "DELETE FROM vault_share_recipients AS recipients WHERE recipients.ctid IN (SELECT candidate.ctid FROM vault_share_recipients AS candidate WHERE candidate.recipient_id = $1 OR EXISTS (SELECT 1 FROM vault_shares AS shares WHERE shares.id = candidate.share_id AND shares.owner_id = $1) ORDER BY candidate.share_id, candidate.recipient_id LIMIT $2 FOR UPDATE OF candidate SKIP LOCKED)",
+        ),
+        "vault_share_epochs" => Some(
+            "DELETE FROM vault_share_epochs AS epochs WHERE epochs.ctid IN (SELECT candidate.ctid FROM vault_share_epochs AS candidate INNER JOIN vault_shares AS shares ON shares.id = candidate.share_id WHERE shares.owner_id = $1 ORDER BY candidate.share_id, candidate.epoch LIMIT $2 FOR UPDATE OF candidate SKIP LOCKED)",
+        ),
+        "vault_shares" => Some(
+            "DELETE FROM vault_shares WHERE ctid IN (SELECT ctid FROM vault_shares WHERE owner_id = $1 ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        ),
+        "file_shares" => Some(
+            "DELETE FROM file_shares WHERE ctid IN (SELECT ctid FROM file_shares WHERE owner_id = $1 OR recipient_id = $1 ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        ),
+        "share_links" => Some(
+            "DELETE FROM share_links WHERE ctid IN (SELECT ctid FROM share_links WHERE owner_id = $1 OR recipient_id = $1 ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        ),
+        "repositories" => Some(
+            "DELETE FROM repositories WHERE ctid IN (SELECT ctid FROM repositories WHERE owner_id = $1 ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        ),
+        "vault_node_heads" => Some(
+            "DELETE FROM vault_node_heads WHERE ctid IN (SELECT ctid FROM vault_node_heads WHERE owner_id = $1 ORDER BY node_id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        ),
+        "vault_node_records" => Some(
+            "DELETE FROM vault_node_records WHERE ctid IN (SELECT ctid FROM vault_node_records WHERE owner_id = $1 ORDER BY node_id, record_version LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        ),
+        "vault_wrappers" => Some(
+            "DELETE FROM vault_wrappers WHERE ctid IN (SELECT ctid FROM vault_wrappers WHERE owner_id = $1 ORDER BY wrapper_id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        ),
+        "vault_identity_trust" => Some(
+            "DELETE FROM vault_identity_trust WHERE ctid IN (SELECT ctid FROM vault_identity_trust WHERE user_id = $1 OR peer_user_id = $1 ORDER BY user_id, peer_user_id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        ),
+        "vault_identity_keys" => Some(
+            "DELETE FROM vault_identity_keys WHERE ctid IN (SELECT ctid FROM vault_identity_keys WHERE user_id = $1 ORDER BY key_version LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        ),
+        "user_vaults" => Some(
+            "DELETE FROM user_vaults WHERE ctid IN (SELECT ctid FROM user_vaults WHERE user_id = $1 LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        ),
+        "invitations" => Some(
+            "DELETE FROM invitations WHERE ctid IN (SELECT ctid FROM invitations WHERE created_by = $1 ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        ),
+        "sessions" => Some(
+            "DELETE FROM sessions WHERE ctid IN (SELECT ctid FROM sessions WHERE user_id = $1 ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED)",
+        ),
+        _ => None,
     }
 }
 
@@ -819,67 +1350,112 @@ async fn sweep_orphaned_multipart_uploads(
         } else {
             client
                 .query(
-                    "SELECT object_key, status, multipart_upload_id FROM file_uploads WHERE object_key = ANY($1)",
+                    "
+                        SELECT 'file'::text AS source, object_key, status,
+                               multipart_upload_id,
+                               GREATEST(expires_at, COALESCE(write_expires_at, expires_at))
+                                 AS protected_until
+                        FROM file_uploads
+                        WHERE object_key = ANY($1)
+                        UNION ALL
+                        SELECT 'vault'::text AS source, object_key, status,
+                               multipart_upload_id,
+                               GREATEST(expires_at, COALESCE(write_expires_at, expires_at))
+                                 AS protected_until
+                        FROM vault_uploads
+                        WHERE object_key = ANY($1)
+                    ",
                     &[&object_keys],
                 )
                 .await?
         };
-        let intents = intent_rows
-            .into_iter()
-            .map(|row| {
-                (
-                    row.get::<_, String>("object_key"),
-                    (
-                        row.get::<_, String>("status"),
-                        row.get::<_, Option<String>>("multipart_upload_id"),
-                    ),
-                )
-            })
-            .collect::<HashMap<_, _>>();
+        let mut intents = HashMap::<String, Vec<MultipartIntent>>::new();
+        for row in intent_rows {
+            let source = match row.get::<_, String>("source").as_str() {
+                "file" => MultipartIntentSource::File,
+                "vault" => MultipartIntentSource::Vault,
+                _ => continue,
+            };
+            intents
+                .entry(row.get("object_key"))
+                .or_default()
+                .push(MultipartIntent {
+                    source,
+                    status: row.get("status"),
+                    upload_id: row.get("multipart_upload_id"),
+                    protected_until: row.get("protected_until"),
+                });
+        }
 
         for upload in page.uploads {
             if upload.initiated_epoch_seconds > cutoff {
                 continue;
             }
 
-            if let Some((status, Some(known_upload_id))) = intents.get(&upload.object_key)
-                && matches!(status.as_str(), "pending" | "completing" | "aborting")
-                && known_upload_id == &upload.upload_id
-            {
+            let action = multipart_reconciliation_action(
+                &upload.object_key,
+                &upload.upload_id,
+                intents
+                    .get(&upload.object_key)
+                    .map(Vec::as_slice)
+                    .unwrap_or_default(),
+                SystemTime::now(),
+            );
+
+            if action == MultipartReconciliationAction::Keep {
                 continue;
             }
 
-            if matches!(
-                intents.get(&upload.object_key),
-                Some((status, None)) if status == "initializing"
-            ) {
+            if let MultipartReconciliationAction::Adopt(source) = action {
+                let statement = match source {
+                    MultipartIntentSource::File => {
+                        "UPDATE file_uploads SET multipart_upload_id = $1, status = 'pending', expires_at = now() + interval '24 hours' WHERE object_key = $2 AND status = 'initializing' AND multipart_upload_id IS NULL AND expires_at > now()"
+                    }
+                    MultipartIntentSource::Vault => {
+                        "UPDATE vault_uploads SET multipart_upload_id = $1, status = 'pending', expires_at = now() + interval '24 hours' WHERE object_key = $2 AND status = 'initializing' AND multipart_upload_id IS NULL AND expires_at > now()"
+                    }
+                };
                 let adopted = client
-                    .execute(
-                        "UPDATE file_uploads SET multipart_upload_id = $1, status = 'pending', expires_at = now() + interval '24 hours' WHERE object_key = $2 AND status = 'initializing' AND multipart_upload_id IS NULL",
-                        &[&upload.upload_id, &upload.object_key],
-                    )
+                    .execute(statement, &[&upload.upload_id, &upload.object_key])
                     .await?;
 
                 if adopted == 1 {
                     log::warn!(
-                        "adopted multipart upload {} for durable intent {}",
+                        "adopted multipart upload {} for durable {:?} intent {}",
                         upload.upload_id,
+                        source,
                         upload.object_key
                     );
                     continue;
                 }
+            }
 
-                let known_after_race = client
-                    .query_opt(
-                        "SELECT 1 FROM file_uploads WHERE object_key = $1 AND multipart_upload_id = $2 AND status IN ('pending', 'completing', 'aborting') LIMIT 1",
-                        &[&upload.object_key, &upload.upload_id],
-                    )
-                    .await?
-                    .is_some();
-
-                if known_after_race {
-                    continue;
-                }
+            let protected_after_race = client
+                .query_opt(
+                    "
+                        SELECT 1
+                        FROM (
+                          SELECT object_key, multipart_upload_id, status,
+                                 GREATEST(expires_at, COALESCE(write_expires_at, expires_at))
+                                   AS protected_until
+                          FROM file_uploads
+                          UNION ALL
+                          SELECT object_key, multipart_upload_id, status,
+                                 GREATEST(expires_at, COALESCE(write_expires_at, expires_at))
+                                   AS protected_until
+                          FROM vault_uploads
+                        ) AS intents
+                        WHERE object_key = $1
+                          AND status IN ('initializing', 'pending', 'completing', 'aborting')
+                          AND (multipart_upload_id = $2 OR protected_until > now())
+                        LIMIT 1
+                    ",
+                    &[&upload.object_key, &upload.upload_id],
+                )
+                .await?
+                .is_some();
+            if protected_after_race {
+                continue;
             }
 
             storage
@@ -910,6 +1486,55 @@ async fn sweep_orphaned_multipart_uploads(
     }
 
     Ok(())
+}
+
+fn multipart_reconciliation_action(
+    object_key: &str,
+    upload_id: &str,
+    intents: &[MultipartIntent],
+    now: SystemTime,
+) -> MultipartReconciliationAction {
+    if intents.iter().any(|intent| {
+        active_multipart_status(&intent.status)
+            && intent
+                .upload_id
+                .as_deref()
+                .is_some_and(|known| known == upload_id)
+    }) {
+        return MultipartReconciliationAction::Keep;
+    }
+
+    if let Some(intent) = intents.iter().find(|intent| {
+        intent.status == "initializing"
+            && intent.upload_id.is_none()
+            && intent.protected_until > now
+            && intent_source_matches_key(intent.source, object_key)
+    }) {
+        return MultipartReconciliationAction::Adopt(intent.source);
+    }
+
+    if intents
+        .iter()
+        .any(|intent| active_multipart_status(&intent.status) && intent.protected_until > now)
+    {
+        return MultipartReconciliationAction::Keep;
+    }
+
+    MultipartReconciliationAction::Abort
+}
+
+fn active_multipart_status(status: &str) -> bool {
+    matches!(
+        status,
+        "initializing" | "pending" | "completing" | "aborting"
+    )
+}
+
+fn intent_source_matches_key(source: MultipartIntentSource, object_key: &str) -> bool {
+    match source {
+        MultipartIntentSource::File => object_key.contains("/files/"),
+        MultipartIntentSource::Vault => object_key.contains("/vault/"),
+    }
 }
 
 async fn process_deletion_jobs(
@@ -1275,7 +1900,7 @@ async fn reconcile_counters(db: &Database) -> Result<(), Box<dyn StdError + Send
     db.execute(
         "
             UPDATE admin_directory_counters
-            SET total_users = (SELECT count(*) FROM users),
+            SET total_users = (SELECT count(*) FROM users WHERE status <> 'deleting'),
                 active_users = (
                   SELECT count(*) FROM users WHERE status = 'active'
                 ),
@@ -1341,4 +1966,152 @@ fn safe_local_path(root: &Path, object_key: &str) -> Option<PathBuf> {
             .split('/')
             .fold(root.to_path_buf(), |path, segment| path.join(segment)),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn intent(
+        source: MultipartIntentSource,
+        status: &str,
+        upload_id: Option<&str>,
+        protected_until: SystemTime,
+    ) -> MultipartIntent {
+        MultipartIntent {
+            source,
+            status: status.to_owned(),
+            upload_id: upload_id.map(str::to_owned),
+            protected_until,
+        }
+    }
+
+    #[test]
+    fn keeps_an_active_vault_upload_after_the_provider_grace_window() {
+        let now = UNIX_EPOCH + Duration::from_secs(10_000);
+        let intents = [intent(
+            MultipartIntentSource::Vault,
+            "pending",
+            Some("vault-upload-id"),
+            now + Duration::from_secs(23 * 60 * 60),
+        )];
+
+        assert_eq!(
+            multipart_reconciliation_action(
+                "users/usr_test/vault/fil_test/object",
+                "vault-upload-id",
+                &intents,
+                now,
+            ),
+            MultipartReconciliationAction::Keep,
+        );
+    }
+
+    #[test]
+    fn adopts_an_initializing_upload_only_into_its_own_namespace() {
+        let now = UNIX_EPOCH + Duration::from_secs(10_000);
+        let vault_intent = intent(
+            MultipartIntentSource::Vault,
+            "initializing",
+            None,
+            now + Duration::from_secs(60),
+        );
+
+        assert_eq!(
+            multipart_reconciliation_action(
+                "users/usr_test/vault/fil_test/object",
+                "provider-id",
+                &[vault_intent],
+                now,
+            ),
+            MultipartReconciliationAction::Adopt(MultipartIntentSource::Vault),
+        );
+
+        let ambiguous_intent = intent(
+            MultipartIntentSource::Vault,
+            "initializing",
+            None,
+            now + Duration::from_secs(60),
+        );
+        assert_eq!(
+            multipart_reconciliation_action(
+                "users/usr_test/legacy-object",
+                "provider-id",
+                &[ambiguous_intent],
+                now,
+            ),
+            MultipartReconciliationAction::Keep,
+        );
+    }
+
+    #[test]
+    fn waits_for_a_live_intent_before_aborting_a_mismatched_provider_upload() {
+        let now = UNIX_EPOCH + Duration::from_secs(10_000);
+        let live = intent(
+            MultipartIntentSource::File,
+            "pending",
+            Some("different-provider-id"),
+            now + Duration::from_secs(60),
+        );
+        let expired = intent(
+            MultipartIntentSource::File,
+            "pending",
+            Some("different-provider-id"),
+            now - Duration::from_secs(1),
+        );
+
+        assert_eq!(
+            multipart_reconciliation_action(
+                "users/usr_test/files/fil_test/object",
+                "orphan-id",
+                &[live],
+                now,
+            ),
+            MultipartReconciliationAction::Keep,
+        );
+        assert_eq!(
+            multipart_reconciliation_action(
+                "users/usr_test/files/fil_test/object",
+                "orphan-id",
+                &[expired],
+                now,
+            ),
+            MultipartReconciliationAction::Abort,
+        );
+    }
+
+    #[test]
+    fn user_deletion_keeps_object_queueing_and_dependencies_before_finalization() {
+        assert_eq!(USER_DELETION_PHASES[0], "file_uploads");
+        assert_eq!(USER_DELETION_PHASES[1], "vault_uploads");
+        assert_eq!(USER_DELETION_PHASES[2], "vault_object_generations");
+        assert_eq!(USER_DELETION_PHASES[3], "vault_migrations");
+        assert!(
+            USER_DELETION_PHASES
+                .iter()
+                .position(|phase| *phase == "vault_share_wrappers")
+                < USER_DELETION_PHASES
+                    .iter()
+                    .position(|phase| *phase == "files")
+        );
+        assert_eq!(USER_DELETION_PHASES.last(), Some(&"finalize"));
+
+        for phase in USER_DELETION_PHASES {
+            if matches!(
+                *phase,
+                "file_uploads"
+                    | "vault_uploads"
+                    | "vault_object_generations"
+                    | "vault_migrations"
+                    | "files"
+                    | "finalize"
+            ) {
+                continue;
+            }
+            assert!(
+                user_deletion_statement(phase).is_some(),
+                "missing bounded deletion statement for {phase}"
+            );
+        }
+    }
 }

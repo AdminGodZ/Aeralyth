@@ -623,72 +623,37 @@ pub async fn delete_user(
     }
 
     transaction
-        .query_opt(
-            "SELECT owner_id FROM user_file_counters WHERE owner_id = $1 FOR UPDATE",
-            &[&target_user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    transaction
         .execute(
             "
-                INSERT INTO storage_deletion_jobs (
-                  object_key,
-                  multipart_upload_id,
-                  available_at
-                )
-                SELECT
-                  CASE
-                    WHEN position('/' IN files.storage_name) = 0
-                      THEN files.owner_id || '/' || files.storage_name
-                    ELSE files.storage_name
-                  END,
-                  NULL::text,
-                  CASE
-                    WHEN uploads.upload_mode = 'single'
-                      THEN GREATEST(COALESCE(uploads.write_expires_at, now()), now())
-                    ELSE now()
-                  END
-                FROM files
-                LEFT JOIN file_uploads AS uploads
-                  ON uploads.file_id = files.id
-                 AND uploads.status = 'completed'
-                WHERE files.owner_id = $1 AND files.entry_type = 'file'
-                UNION ALL
-                SELECT
-                  object_key,
-                  multipart_upload_id,
-                  CASE
-                    WHEN upload_mode = 'single'
-                      THEN GREATEST(COALESCE(write_expires_at, now()), now())
-                    ELSE now()
-                  END
-                FROM file_uploads
-                WHERE owner_id = $1
-                  AND status IN ('initializing', 'pending', 'completing', 'aborting')
-                ON CONFLICT (object_key) DO UPDATE SET
-                  multipart_upload_id = COALESCE(
-                    EXCLUDED.multipart_upload_id,
-                    storage_deletion_jobs.multipart_upload_id
-                  ),
-                  available_at = GREATEST(
-                    storage_deletion_jobs.available_at,
-                    EXCLUDED.available_at
-                  )
+                UPDATE users
+                SET status = 'deleting', updated_at = now()
+                WHERE id = $1
             ",
             &[&target_user.id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let deleted = transaction
-        .execute("DELETE FROM users WHERE id = $1", &[&target_user.id])
+    transaction
+        .execute(
+            "DELETE FROM sessions WHERE user_id = $1",
+            &[&target_user.id],
+        )
         .await
         .map_err(error::ErrorInternalServerError)?;
-
-    if deleted == 0 {
-        return Ok(redirect("/users?user=missing"));
-    }
+    transaction
+        .execute(
+            "
+                INSERT INTO user_deletion_jobs (
+                  user_id, phase, available_at, locked_until, last_error, updated_at
+                ) VALUES ($1, 'file_uploads', now(), NULL, NULL, now())
+                ON CONFLICT (user_id) DO UPDATE SET
+                  available_at = LEAST(user_deletion_jobs.available_at, now()),
+                  updated_at = now()
+            ",
+            &[&target_user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
 
     transaction
         .commit()
@@ -840,7 +805,8 @@ async fn list_users(
                   to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
                   to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_created_at
                 FROM users
-                WHERE (
+                WHERE status <> 'deleting'
+                  AND (
                   $1::text IS NULL
                   OR username ILIKE $1
                   OR COALESCE(display_name, '') ILIKE $1

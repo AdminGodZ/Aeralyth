@@ -6409,415 +6409,9 @@ B.prototype.to_Uint8Array = function() {
 }, t.add = o, t.base64_variants = m, t.compare = l, t.from_base64 = x, t.from_hex = b, t.from_string = v, t.increment = p, t.is_zero = h, t.memcmp = i, t.memzero = y, t.output_formats = T, t.pad = u, t.unpad = d, t.ready = s, t.symbols = c, t.to_base64 = E, t.to_hex = f, t.to_string = g;
 var libsodium_wrappers_default = t;
 
-// src/features/vault/cbor.ts
-function encodeBootstrap(record) {
-  return encodeMap([
-    [1, record.formatVersion],
-    [2, record.suiteId],
-    [3, record.aadSchemaId],
-    [4, record.nodeId],
-    [5, record.generationNumber],
-    [6, record.generationId],
-    [7, record.manifestIv],
-    [8, record.wrapperIds],
-    [9, record.ciphertextLength],
-    [10, record.signerKeyVersion],
-    [11, record.recordVersion],
-    [12, record.previousRecordHash],
-    [13, record.manifestHash],
-    [14, record.wrapperHashes],
-    [15, record.ciphertextMerkleRoot]
-  ]);
-}
-function decodeBootstrap(value) {
-  const map = decodeExactMap(value, 15);
-  return {
-    formatVersion: requiredNumber(map, 1),
-    suiteId: requiredNumber(map, 2),
-    aadSchemaId: requiredNumber(map, 3),
-    nodeId: requiredString(map, 4),
-    generationNumber: requiredNumber(map, 5),
-    generationId: fixedBytes(map, 6, 16),
-    manifestIv: fixedBytes(map, 7, 12),
-    wrapperIds: fixedBytesArray(map, 8, 16),
-    ciphertextLength: requiredNumber(map, 9),
-    signerKeyVersion: requiredNumber(map, 10),
-    recordVersion: requiredNumber(map, 11),
-    previousRecordHash: nullableFixedBytes(map, 12, 32),
-    manifestHash: fixedBytes(map, 13, 32),
-    wrapperHashes: fixedBytesArray(map, 14, 32),
-    ciphertextMerkleRoot: fixedBytes(map, 15, 32)
-  };
-}
-function encodeWrapper(record) {
-  return encodeMap([
-    [1, record.formatVersion],
-    [2, record.wrapperId],
-    [3, record.kind],
-    [4, record.nodeId],
-    [5, record.parentNodeId],
-    [6, record.generationId],
-    [7, record.shareId],
-    [8, record.epoch],
-    [9, record.recordVersion],
-    [10, record.ciphertext],
-    [11, record.aadSchemaId]
-  ]);
-}
-function decodeWrapper(value) {
-  const map = decodeExactMap(value, 11);
-  const kind = requiredNumber(map, 3);
-  if (kind !== 1 && kind !== 2 && kind !== 3 && kind !== 4) {
-    throw new Error("Unsupported vault wrapper kind.");
-  }
-  return {
-    formatVersion: requiredNumber(map, 1),
-    wrapperId: fixedBytes(map, 2, 16),
-    kind,
-    nodeId: requiredString(map, 4),
-    parentNodeId: nullableString(map, 5),
-    generationId: nullableFixedBytes(map, 6, 16),
-    shareId: nullableString(map, 7),
-    epoch: nullableNumber(map, 8),
-    recordVersion: requiredNumber(map, 9),
-    ciphertext: requiredBytes(map, 10),
-    aadSchemaId: requiredNumber(map, 11)
-  };
-}
-function encodeManifest(manifest) {
-  return encodeMap([
-    [1, manifest.name],
-    [2, manifest.mimeType],
-    [3, manifest.entryType === "file" ? 1 : 2],
-    [4, manifest.plaintextBytes],
-    [5, manifest.paddedBytes],
-    [6, manifest.lastModified],
-    [7, manifest.parentId],
-    [8, manifest.chunkCount],
-    [9, manifest.generationId],
-    [10, manifest.createdAt]
-  ]);
-}
-function decodeManifest(value) {
-  const map = decodeExactMap(value, 10);
-  const entryType = requiredNumber(map, 3);
-  if (entryType !== 1 && entryType !== 2) {
-    throw new Error("Invalid vault manifest entry type.");
-  }
-  return {
-    name: requiredString(map, 1),
-    mimeType: nullableString(map, 2),
-    entryType: entryType === 1 ? "file" : "folder",
-    plaintextBytes: requiredNumber(map, 4),
-    paddedBytes: requiredNumber(map, 5),
-    lastModified: requiredNumber(map, 6),
-    parentId: nullableString(map, 7),
-    chunkCount: requiredNumber(map, 8),
-    generationId: fixedBytes(map, 9, 16),
-    createdAt: requiredNumber(map, 10)
-  };
-}
-function encodeShareEnvelope(record) {
-  return encodeMap([
-    [1, record.formatVersion],
-    [2, record.suiteId],
-    [3, record.envelopeId],
-    [4, record.shareId],
-    [5, record.epoch],
-    [6, record.senderId],
-    [7, record.senderKeyVersion],
-    [8, record.recipientId],
-    [9, record.recipientKeyVersion],
-    [10, record.nodeId],
-    [11, record.permissions],
-    [12, record.generationScope],
-    [13, record.recordVersion],
-    [14, record.previousRecordHash],
-    [15, record.encapsulatedKey],
-    [16, record.ciphertext],
-    [17, record.aadSchemaId],
-    [18, record.wrapperHashes]
-  ]);
-}
-function decodeShareEnvelope(value) {
-  const map = decodeExactMap(value, 18);
-  const permissions = requiredNumber(map, 11);
-  if (permissions !== 1) throw new Error("Unsupported share permissions.");
-  return {
-    formatVersion: requiredNumber(map, 1),
-    suiteId: requiredNumber(map, 2),
-    envelopeId: fixedBytes(map, 3, 16),
-    shareId: requiredString(map, 4),
-    epoch: requiredNumber(map, 5),
-    senderId: requiredString(map, 6),
-    senderKeyVersion: requiredNumber(map, 7),
-    recipientId: requiredString(map, 8),
-    recipientKeyVersion: requiredNumber(map, 9),
-    nodeId: requiredString(map, 10),
-    permissions,
-    generationScope: nullableNumber(map, 12),
-    recordVersion: requiredNumber(map, 13),
-    previousRecordHash: nullableFixedBytes(map, 14, 32),
-    encapsulatedKey: fixedBytes(map, 15, 32),
-    ciphertext: requiredBytes(map, 16),
-    aadSchemaId: requiredNumber(map, 17),
-    wrapperHashes: fixedBytesArray(map, 18, 32)
-  };
-}
-function encodeMap(entries) {
-  const output = [];
-  writeHead(output, 5, entries.length);
-  let previous = 0;
-  for (const [key, value] of entries) {
-    if (!Number.isSafeInteger(key) || key <= previous) {
-      throw new Error("CBOR map keys must be positive and strictly ordered.");
-    }
-    writeUnsigned(output, key);
-    writeValue(output, value);
-    previous = key;
-  }
-  return Uint8Array.from(output);
-}
-var Reader = class {
-  constructor(input) {
-    this.input = input;
-  }
-  input;
-  offset = 0;
-  finish() {
-    if (this.offset !== this.input.length) {
-      throw new Error("CBOR value has trailing bytes.");
-    }
-  }
-  value() {
-    const initial = this.byte();
-    if (initial === 246) {
-      return null;
-    }
-    const major = initial >>> 5;
-    const additional = initial & 31;
-    if (major === 0) {
-      return this.length(additional);
-    }
-    if (major === 2 || major === 3) {
-      const length = this.length(additional);
-      const bytes = this.take(length);
-      return major === 2 ? bytes : new TextDecoder("utf-8", { fatal: true }).decode(bytes);
-    }
-    if (major === 4) {
-      const length = this.length(additional);
-      return Array.from({ length }, () => this.value());
-    }
-    if (major === 5) {
-      const length = this.length(additional);
-      const map = /* @__PURE__ */ new Map();
-      let previous = 0;
-      for (let index = 0; index < length; index += 1) {
-        const key = this.value();
-        if (typeof key !== "number" || key <= previous || map.has(key)) {
-          throw new Error("CBOR map keys are not canonically ordered.");
-        }
-        map.set(key, this.value());
-        previous = key;
-      }
-      return map;
-    }
-    throw new Error("Unsupported CBOR type.");
-  }
-  byte() {
-    const value = this.input[this.offset];
-    if (value === void 0) {
-      throw new Error("Unexpected end of CBOR value.");
-    }
-    this.offset += 1;
-    return value;
-  }
-  take(length) {
-    if (!Number.isSafeInteger(length) || length < 0 || this.offset + length > this.input.length) {
-      throw new Error("Invalid CBOR length.");
-    }
-    const value = this.input.slice(this.offset, this.offset + length);
-    this.offset += length;
-    return value;
-  }
-  length(additional) {
-    if (additional < 24) {
-      return additional;
-    }
-    if (additional === 24) {
-      const value = this.byte();
-      if (value < 24) throw new Error("Non-minimal CBOR integer.");
-      return value;
-    }
-    if (additional === 25) {
-      const bytes = this.take(2);
-      const value = new DataView(bytes.buffer, bytes.byteOffset, 2).getUint16(
-        0,
-        false
-      );
-      if (value <= 255) throw new Error("Non-minimal CBOR integer.");
-      return value;
-    }
-    if (additional === 26) {
-      const bytes = this.take(4);
-      const value = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(
-        0,
-        false
-      );
-      if (value <= 65535) throw new Error("Non-minimal CBOR integer.");
-      return value;
-    }
-    if (additional === 27) {
-      const bytes = this.take(8);
-      const value = new DataView(
-        bytes.buffer,
-        bytes.byteOffset,
-        8
-      ).getBigUint64(0, false);
-      if (value <= 0xffffffffn || value > BigInt(Number.MAX_SAFE_INTEGER)) {
-        throw new Error("Unsupported CBOR integer.");
-      }
-      return Number(value);
-    }
-    throw new Error("Indefinite-length CBOR is forbidden.");
-  }
-};
-function decodeExactMap(value, fieldCount) {
-  const reader = new Reader(value);
-  const decoded = reader.value();
-  reader.finish();
-  if (!(decoded instanceof Map) || decoded.size !== fieldCount) {
-    throw new Error("CBOR record has an invalid field count.");
-  }
-  for (let key = 1; key <= fieldCount; key += 1) {
-    if (!decoded.has(key)) {
-      throw new Error("CBOR record is missing a required field.");
-    }
-  }
-  return decoded;
-}
-function writeValue(output, value) {
-  if (value === null) {
-    output.push(246);
-  } else if (typeof value === "number") {
-    writeUnsigned(output, value);
-  } else if (typeof value === "string") {
-    const encoded = new TextEncoder().encode(value);
-    writeHead(output, 3, encoded.length);
-    output.push(...encoded);
-  } else if (value instanceof Uint8Array) {
-    writeHead(output, 2, value.length);
-    output.push(...value);
-  } else if (Array.isArray(value)) {
-    writeHead(output, 4, value.length);
-    for (const item of value) writeValue(output, item);
-  } else if (value instanceof Map) {
-    writeHead(output, 5, value.size);
-    let previous = 0;
-    for (const [key, item] of value) {
-      if (key <= previous) throw new Error("CBOR map keys are not ordered.");
-      writeUnsigned(output, key);
-      writeValue(output, item);
-      previous = key;
-    }
-  } else {
-    const neverValue = value;
-    throw new Error(`Unsupported CBOR value: ${String(neverValue)}`);
-  }
-}
-function writeUnsigned(output, value) {
-  if (!Number.isSafeInteger(value) || value < 0) {
-    throw new Error("CBOR only supports non-negative safe integers.");
-  }
-  writeHead(output, 0, value);
-}
-function writeHead(output, major, value) {
-  if (value < 24) {
-    output.push(major << 5 | value);
-  } else if (value <= 255) {
-    output.push(major << 5 | 24, value);
-  } else if (value <= 65535) {
-    output.push(major << 5 | 25, value >>> 8, value & 255);
-  } else if (value <= 4294967295) {
-    output.push(major << 5 | 26);
-    for (let shift = 24; shift >= 0; shift -= 8)
-      output.push(value >>> shift & 255);
-  } else {
-    output.push(major << 5 | 27);
-    let remaining = BigInt(value);
-    const bytes = new Array(8);
-    for (let index = 7; index >= 0; index -= 1) {
-      bytes[index] = Number(remaining & 0xffn);
-      remaining >>= 8n;
-    }
-    output.push(...bytes);
-  }
-}
-function field(map, key) {
-  const value = map.get(key);
-  if (value === void 0) throw new Error(`Missing CBOR field ${key}.`);
-  return value;
-}
-function requiredNumber(map, key) {
-  const value = field(map, key);
-  if (typeof value !== "number")
-    throw new Error(`CBOR field ${key} is not an integer.`);
-  return value;
-}
-function nullableNumber(map, key) {
-  const value = field(map, key);
-  if (value === null) return null;
-  if (typeof value !== "number")
-    throw new Error(`CBOR field ${key} is not an integer.`);
-  return value;
-}
-function requiredString(map, key) {
-  const value = field(map, key);
-  if (typeof value !== "string")
-    throw new Error(`CBOR field ${key} is not text.`);
-  return value;
-}
-function nullableString(map, key) {
-  const value = field(map, key);
-  if (value === null) return null;
-  if (typeof value !== "string")
-    throw new Error(`CBOR field ${key} is not text.`);
-  return value;
-}
-function requiredBytes(map, key) {
-  const value = field(map, key);
-  if (!(value instanceof Uint8Array))
-    throw new Error(`CBOR field ${key} is not bytes.`);
-  return value;
-}
-function fixedBytes(map, key, length) {
-  const value = requiredBytes(map, key);
-  if (value.length !== length)
-    throw new Error(`CBOR field ${key} has an invalid length.`);
-  return value;
-}
-function nullableFixedBytes(map, key, length) {
-  const value = field(map, key);
-  if (value === null) return null;
-  if (!(value instanceof Uint8Array) || value.length !== length) {
-    throw new Error(`CBOR field ${key} has an invalid length.`);
-  }
-  return value;
-}
-function fixedBytesArray(map, key, length) {
-  const value = field(map, key);
-  if (!Array.isArray(value))
-    throw new Error(`CBOR field ${key} is not an array.`);
-  return value.map((item) => {
-    if (!(item instanceof Uint8Array) || item.length !== length) {
-      throw new Error(`CBOR field ${key} contains an invalid byte string.`);
-    }
-    return item;
-  });
-}
-
 // src/features/vault/protocol.ts
 var VAULT_FORMAT_VERSION = 1;
+var VAULT_SHARE_ENVELOPE_VERSION = 2;
 var VAULT_SUITE_ID = 1;
 var VAULT_AAD_SCHEMA_ID = 1;
 var VAULT_CRYPTO_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -7031,6 +6625,71 @@ async function merkleRootFromLeaves(leaves) {
   }
   return level[0];
 }
+var WRAPPER_LEAF_DOMAIN = utf8("aeralyth/share-wrapper-leaf/v2");
+var WRAPPER_BRANCH_DOMAIN = utf8("aeralyth/share-wrapper-branch/v2");
+var WRAPPER_ROOT_DOMAIN = utf8("aeralyth/share-wrapper-root/v2");
+async function wrapperSetRoot(wrapperHashes) {
+  if (wrapperHashes.length === 0 || wrapperHashes.length > 8192) {
+    throw new Error("Invalid share wrapper count.");
+  }
+  const ordered = wrapperHashes.map((hash) => {
+    if (hash.length !== 32) throw new Error("Invalid share wrapper hash.");
+    return Uint8Array.from(hash);
+  }).sort(compareBytes);
+  for (let index = 1; index < ordered.length; index += 1) {
+    if (equalBytes(ordered[index - 1], ordered[index])) {
+      throw new Error("Duplicate share wrapper hash.");
+    }
+  }
+  let level = await Promise.all(
+    ordered.map((hash) => sha2564(concatBytes(WRAPPER_LEAF_DOMAIN, hash)))
+  );
+  while (level.length > 1) {
+    const next = [];
+    for (let index = 0; index < level.length; index += 2) {
+      const right = level[index + 1] ?? level[index];
+      next.push(
+        await sha2564(concatBytes(WRAPPER_BRANCH_DOMAIN, level[index], right))
+      );
+    }
+    level = next;
+  }
+  return sha2564(
+    concatBytes(
+      WRAPPER_ROOT_DOMAIN,
+      encodeUnsigned64(wrapperHashes.length),
+      level[0]
+    )
+  );
+}
+async function verifyWrapperSetProof(input) {
+  if (input.wrapperHash.length !== 32 || input.expectedRoot.length !== 32 || !Number.isSafeInteger(input.leafIndex) || input.leafIndex < 0 || !Number.isSafeInteger(input.wrapperCount) || input.wrapperCount < 1 || input.wrapperCount > 8192 || input.leafIndex >= input.wrapperCount) {
+    return false;
+  }
+  const depth = Math.ceil(Math.log2(input.wrapperCount));
+  if (input.proof.length !== depth * 32) return false;
+  let index = input.leafIndex;
+  let node = await sha2564(concatBytes(WRAPPER_LEAF_DOMAIN, input.wrapperHash));
+  for (let level = 0; level < depth; level += 1) {
+    const sibling = input.proof.subarray(level * 32, (level + 1) * 32);
+    node = index % 2 === 0 ? await sha2564(concatBytes(WRAPPER_BRANCH_DOMAIN, node, sibling)) : await sha2564(concatBytes(WRAPPER_BRANCH_DOMAIN, sibling, node));
+    index = Math.floor(index / 2);
+  }
+  const root = await sha2564(
+    concatBytes(
+      WRAPPER_ROOT_DOMAIN,
+      encodeUnsigned64(input.wrapperCount),
+      node
+    )
+  );
+  return equalBytes(root, input.expectedRoot);
+}
+function compareBytes(left, right) {
+  for (let index = 0; index < Math.min(left.length, right.length); index += 1) {
+    if (left[index] !== right[index]) return left[index] - right[index];
+  }
+  return left.length - right.length;
+}
 async function ciphertextLeafHash(chunkIndex, ciphertext) {
   const index = new Uint8Array(8);
   new DataView(index.buffer).setBigUint64(0, BigInt(chunkIndex), false);
@@ -7039,6 +6698,441 @@ async function ciphertextLeafHash(chunkIndex, ciphertext) {
 function toArrayBuffer2(value) {
   const copy = Uint8Array.from(value);
   return copy.buffer;
+}
+
+// src/features/vault/cbor.ts
+function encodeBootstrap(record) {
+  return encodeMap([
+    [1, record.formatVersion],
+    [2, record.suiteId],
+    [3, record.aadSchemaId],
+    [4, record.nodeId],
+    [5, record.generationNumber],
+    [6, record.generationId],
+    [7, record.manifestIv],
+    [8, record.wrapperIds],
+    [9, record.ciphertextLength],
+    [10, record.signerKeyVersion],
+    [11, record.recordVersion],
+    [12, record.previousRecordHash],
+    [13, record.manifestHash],
+    [14, record.wrapperHashes],
+    [15, record.ciphertextMerkleRoot]
+  ]);
+}
+function decodeBootstrap(value) {
+  const map = decodeExactMap(value, 15);
+  return {
+    formatVersion: requiredNumber(map, 1),
+    suiteId: requiredNumber(map, 2),
+    aadSchemaId: requiredNumber(map, 3),
+    nodeId: requiredString(map, 4),
+    generationNumber: requiredNumber(map, 5),
+    generationId: fixedBytes(map, 6, 16),
+    manifestIv: fixedBytes(map, 7, 12),
+    wrapperIds: fixedBytesArray(map, 8, 16),
+    ciphertextLength: requiredNumber(map, 9),
+    signerKeyVersion: requiredNumber(map, 10),
+    recordVersion: requiredNumber(map, 11),
+    previousRecordHash: nullableFixedBytes(map, 12, 32),
+    manifestHash: fixedBytes(map, 13, 32),
+    wrapperHashes: fixedBytesArray(map, 14, 32),
+    ciphertextMerkleRoot: fixedBytes(map, 15, 32)
+  };
+}
+function encodeWrapper(record) {
+  return encodeMap([
+    [1, record.formatVersion],
+    [2, record.wrapperId],
+    [3, record.kind],
+    [4, record.nodeId],
+    [5, record.parentNodeId],
+    [6, record.generationId],
+    [7, record.shareId],
+    [8, record.epoch],
+    [9, record.recordVersion],
+    [10, record.ciphertext],
+    [11, record.aadSchemaId]
+  ]);
+}
+function decodeWrapper(value) {
+  const map = decodeExactMap(value, 11);
+  const kind = requiredNumber(map, 3);
+  if (kind !== 1 && kind !== 2 && kind !== 3 && kind !== 4) {
+    throw new Error("Unsupported vault wrapper kind.");
+  }
+  return {
+    formatVersion: requiredNumber(map, 1),
+    wrapperId: fixedBytes(map, 2, 16),
+    kind,
+    nodeId: requiredString(map, 4),
+    parentNodeId: nullableString(map, 5),
+    generationId: nullableFixedBytes(map, 6, 16),
+    shareId: nullableString(map, 7),
+    epoch: nullableNumber(map, 8),
+    recordVersion: requiredNumber(map, 9),
+    ciphertext: requiredBytes(map, 10),
+    aadSchemaId: requiredNumber(map, 11)
+  };
+}
+function encodeManifest(manifest) {
+  return encodeMap([
+    [1, manifest.name],
+    [2, manifest.mimeType],
+    [3, manifest.entryType === "file" ? 1 : 2],
+    [4, manifest.plaintextBytes],
+    [5, manifest.paddedBytes],
+    [6, manifest.lastModified],
+    [7, manifest.parentId],
+    [8, manifest.chunkCount],
+    [9, manifest.generationId],
+    [10, manifest.createdAt]
+  ]);
+}
+function decodeManifest(value) {
+  const map = decodeExactMap(value, 10);
+  const entryType = requiredNumber(map, 3);
+  if (entryType !== 1 && entryType !== 2) {
+    throw new Error("Invalid vault manifest entry type.");
+  }
+  return {
+    name: requiredString(map, 1),
+    mimeType: nullableString(map, 2),
+    entryType: entryType === 1 ? "file" : "folder",
+    plaintextBytes: requiredNumber(map, 4),
+    paddedBytes: requiredNumber(map, 5),
+    lastModified: requiredNumber(map, 6),
+    parentId: nullableString(map, 7),
+    chunkCount: requiredNumber(map, 8),
+    generationId: fixedBytes(map, 9, 16),
+    createdAt: requiredNumber(map, 10)
+  };
+}
+function encodeShareEnvelope(record) {
+  const shared = [
+    [1, record.formatVersion],
+    [2, record.suiteId],
+    [3, record.envelopeId],
+    [4, record.shareId],
+    [5, record.epoch],
+    [6, record.senderId],
+    [7, record.senderKeyVersion],
+    [8, record.recipientId],
+    [9, record.recipientKeyVersion],
+    [10, record.nodeId],
+    [11, record.permissions],
+    [12, record.generationScope],
+    [13, record.recordVersion],
+    [14, record.previousRecordHash],
+    [15, record.encapsulatedKey],
+    [16, record.ciphertext],
+    [17, record.aadSchemaId]
+  ];
+  if (record.formatVersion === VAULT_FORMAT_VERSION) {
+    return encodeMap([...shared, [18, record.wrapperHashes]]);
+  }
+  if (record.formatVersion !== VAULT_SHARE_ENVELOPE_VERSION || record.wrapperSetRoot?.length !== 32 || !Number.isSafeInteger(record.wrapperCount) || record.wrapperCount < 1 || record.wrapperCount > 8192) {
+    throw new Error("Unsupported share envelope version.");
+  }
+  return encodeMap([
+    ...shared,
+    [18, record.wrapperSetRoot],
+    [19, record.wrapperCount]
+  ]);
+}
+function decodeShareEnvelope(value) {
+  const map = decodeMap(value);
+  const formatVersion = requiredNumber(map, 1);
+  if (!(formatVersion === VAULT_FORMAT_VERSION && map.size === 18 || formatVersion === VAULT_SHARE_ENVELOPE_VERSION && map.size === 19)) {
+    throw new Error("Unsupported share envelope version.");
+  }
+  const permissions = requiredNumber(map, 11);
+  if (permissions !== 1) throw new Error("Unsupported share permissions.");
+  const wrapperHashes = formatVersion === VAULT_FORMAT_VERSION ? fixedBytesArray(map, 18, 32) : [];
+  const wrapperCount = formatVersion === VAULT_SHARE_ENVELOPE_VERSION ? requiredNumber(map, 19) : wrapperHashes.length;
+  if (wrapperCount < 1 || wrapperCount > 8192) {
+    throw new Error("Invalid share wrapper count.");
+  }
+  return {
+    formatVersion,
+    suiteId: requiredNumber(map, 2),
+    envelopeId: fixedBytes(map, 3, 16),
+    shareId: requiredString(map, 4),
+    epoch: requiredNumber(map, 5),
+    senderId: requiredString(map, 6),
+    senderKeyVersion: requiredNumber(map, 7),
+    recipientId: requiredString(map, 8),
+    recipientKeyVersion: requiredNumber(map, 9),
+    nodeId: requiredString(map, 10),
+    permissions,
+    generationScope: nullableNumber(map, 12),
+    recordVersion: requiredNumber(map, 13),
+    previousRecordHash: nullableFixedBytes(map, 14, 32),
+    encapsulatedKey: fixedBytes(map, 15, 32),
+    ciphertext: requiredBytes(map, 16),
+    aadSchemaId: requiredNumber(map, 17),
+    wrapperHashes,
+    wrapperSetRoot: formatVersion === VAULT_SHARE_ENVELOPE_VERSION ? fixedBytes(map, 18, 32) : null,
+    wrapperCount
+  };
+}
+function encodeMap(entries) {
+  const output = [];
+  writeHead(output, 5, entries.length);
+  let previous = 0;
+  for (const [key, value] of entries) {
+    if (!Number.isSafeInteger(key) || key <= previous) {
+      throw new Error("CBOR map keys must be positive and strictly ordered.");
+    }
+    writeUnsigned(output, key);
+    writeValue(output, value);
+    previous = key;
+  }
+  return Uint8Array.from(output);
+}
+var Reader = class {
+  constructor(input) {
+    this.input = input;
+  }
+  input;
+  offset = 0;
+  finish() {
+    if (this.offset !== this.input.length) {
+      throw new Error("CBOR value has trailing bytes.");
+    }
+  }
+  value() {
+    const initial = this.byte();
+    if (initial === 246) {
+      return null;
+    }
+    const major = initial >>> 5;
+    const additional = initial & 31;
+    if (major === 0) {
+      return this.length(additional);
+    }
+    if (major === 2 || major === 3) {
+      const length = this.length(additional);
+      const bytes = this.take(length);
+      return major === 2 ? bytes : new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    }
+    if (major === 4) {
+      const length = this.length(additional);
+      return Array.from({ length }, () => this.value());
+    }
+    if (major === 5) {
+      const length = this.length(additional);
+      const map = /* @__PURE__ */ new Map();
+      let previous = 0;
+      for (let index = 0; index < length; index += 1) {
+        const key = this.value();
+        if (typeof key !== "number" || key <= previous || map.has(key)) {
+          throw new Error("CBOR map keys are not canonically ordered.");
+        }
+        map.set(key, this.value());
+        previous = key;
+      }
+      return map;
+    }
+    throw new Error("Unsupported CBOR type.");
+  }
+  byte() {
+    const value = this.input[this.offset];
+    if (value === void 0) {
+      throw new Error("Unexpected end of CBOR value.");
+    }
+    this.offset += 1;
+    return value;
+  }
+  take(length) {
+    if (!Number.isSafeInteger(length) || length < 0 || this.offset + length > this.input.length) {
+      throw new Error("Invalid CBOR length.");
+    }
+    const value = this.input.slice(this.offset, this.offset + length);
+    this.offset += length;
+    return value;
+  }
+  length(additional) {
+    if (additional < 24) {
+      return additional;
+    }
+    if (additional === 24) {
+      const value = this.byte();
+      if (value < 24) throw new Error("Non-minimal CBOR integer.");
+      return value;
+    }
+    if (additional === 25) {
+      const bytes = this.take(2);
+      const value = new DataView(bytes.buffer, bytes.byteOffset, 2).getUint16(
+        0,
+        false
+      );
+      if (value <= 255) throw new Error("Non-minimal CBOR integer.");
+      return value;
+    }
+    if (additional === 26) {
+      const bytes = this.take(4);
+      const value = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(
+        0,
+        false
+      );
+      if (value <= 65535) throw new Error("Non-minimal CBOR integer.");
+      return value;
+    }
+    if (additional === 27) {
+      const bytes = this.take(8);
+      const value = new DataView(
+        bytes.buffer,
+        bytes.byteOffset,
+        8
+      ).getBigUint64(0, false);
+      if (value <= 0xffffffffn || value > BigInt(Number.MAX_SAFE_INTEGER)) {
+        throw new Error("Unsupported CBOR integer.");
+      }
+      return Number(value);
+    }
+    throw new Error("Indefinite-length CBOR is forbidden.");
+  }
+};
+function decodeExactMap(value, fieldCount) {
+  const decoded = decodeMap(value);
+  if (decoded.size !== fieldCount) {
+    throw new Error("CBOR record has an invalid field count.");
+  }
+  return decoded;
+}
+function decodeMap(value) {
+  const reader = new Reader(value);
+  const decoded = reader.value();
+  reader.finish();
+  if (!(decoded instanceof Map)) {
+    throw new Error("CBOR record has an invalid field count.");
+  }
+  for (let key = 1; key <= decoded.size; key += 1) {
+    if (!decoded.has(key)) {
+      throw new Error("CBOR record is missing a required field.");
+    }
+  }
+  return decoded;
+}
+function writeValue(output, value) {
+  if (value === null) {
+    output.push(246);
+  } else if (typeof value === "number") {
+    writeUnsigned(output, value);
+  } else if (typeof value === "string") {
+    const encoded = new TextEncoder().encode(value);
+    writeHead(output, 3, encoded.length);
+    output.push(...encoded);
+  } else if (value instanceof Uint8Array) {
+    writeHead(output, 2, value.length);
+    output.push(...value);
+  } else if (Array.isArray(value)) {
+    writeHead(output, 4, value.length);
+    for (const item of value) writeValue(output, item);
+  } else if (value instanceof Map) {
+    writeHead(output, 5, value.size);
+    let previous = 0;
+    for (const [key, item] of value) {
+      if (key <= previous) throw new Error("CBOR map keys are not ordered.");
+      writeUnsigned(output, key);
+      writeValue(output, item);
+      previous = key;
+    }
+  } else {
+    const neverValue = value;
+    throw new Error(`Unsupported CBOR value: ${String(neverValue)}`);
+  }
+}
+function writeUnsigned(output, value) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error("CBOR only supports non-negative safe integers.");
+  }
+  writeHead(output, 0, value);
+}
+function writeHead(output, major, value) {
+  if (value < 24) {
+    output.push(major << 5 | value);
+  } else if (value <= 255) {
+    output.push(major << 5 | 24, value);
+  } else if (value <= 65535) {
+    output.push(major << 5 | 25, value >>> 8, value & 255);
+  } else if (value <= 4294967295) {
+    output.push(major << 5 | 26);
+    for (let shift = 24; shift >= 0; shift -= 8)
+      output.push(value >>> shift & 255);
+  } else {
+    output.push(major << 5 | 27);
+    let remaining = BigInt(value);
+    const bytes = new Array(8);
+    for (let index = 7; index >= 0; index -= 1) {
+      bytes[index] = Number(remaining & 0xffn);
+      remaining >>= 8n;
+    }
+    output.push(...bytes);
+  }
+}
+function field(map, key) {
+  const value = map.get(key);
+  if (value === void 0) throw new Error(`Missing CBOR field ${key}.`);
+  return value;
+}
+function requiredNumber(map, key) {
+  const value = field(map, key);
+  if (typeof value !== "number")
+    throw new Error(`CBOR field ${key} is not an integer.`);
+  return value;
+}
+function nullableNumber(map, key) {
+  const value = field(map, key);
+  if (value === null) return null;
+  if (typeof value !== "number")
+    throw new Error(`CBOR field ${key} is not an integer.`);
+  return value;
+}
+function requiredString(map, key) {
+  const value = field(map, key);
+  if (typeof value !== "string")
+    throw new Error(`CBOR field ${key} is not text.`);
+  return value;
+}
+function nullableString(map, key) {
+  const value = field(map, key);
+  if (value === null) return null;
+  if (typeof value !== "string")
+    throw new Error(`CBOR field ${key} is not text.`);
+  return value;
+}
+function requiredBytes(map, key) {
+  const value = field(map, key);
+  if (!(value instanceof Uint8Array))
+    throw new Error(`CBOR field ${key} is not bytes.`);
+  return value;
+}
+function fixedBytes(map, key, length) {
+  const value = requiredBytes(map, key);
+  if (value.length !== length)
+    throw new Error(`CBOR field ${key} has an invalid length.`);
+  return value;
+}
+function nullableFixedBytes(map, key, length) {
+  const value = field(map, key);
+  if (value === null) return null;
+  if (!(value instanceof Uint8Array) || value.length !== length) {
+    throw new Error(`CBOR field ${key} has an invalid length.`);
+  }
+  return value;
+}
+function fixedBytesArray(map, key, length) {
+  const value = field(map, key);
+  if (!Array.isArray(value))
+    throw new Error(`CBOR field ${key} is not an array.`);
+  return value.map((item) => {
+    if (!(item instanceof Uint8Array) || item.length !== length) {
+      throw new Error(`CBOR field ${key} contains an invalid byte string.`);
+    }
+    return item;
+  });
 }
 
 // src/features/vault/vault.worker.ts
@@ -8147,6 +8241,7 @@ async function buildShareMaterial(input) {
       epochKey
     );
     const wrapperHashes = await Promise.all(wrappers.map(sha2564));
+    const wrapperRoot = await wrapperSetRoot(wrapperHashes);
     const envelopes = await Promise.all(
       input.recipients.map(
         (recipient) => createHpkeEnvelope({
@@ -8157,7 +8252,8 @@ async function buildShareMaterial(input) {
           recordVersion: input.recordVersion,
           previousRecordHash: input.previousRecordHash,
           recipient,
-          wrapperHashes,
+          wrapperSetRoot: wrapperRoot,
+          wrapperCount: wrapperHashes.length,
           epochMaterial
         })
       )
@@ -8317,7 +8413,7 @@ async function createHpkeEnvelope(input) {
     throw new Error("The HPKE suite returned invalid envelope material.");
   }
   const envelope = {
-    formatVersion: VAULT_FORMAT_VERSION,
+    formatVersion: VAULT_SHARE_ENVELOPE_VERSION,
     suiteId: VAULT_SUITE_ID,
     envelopeId,
     shareId: input.shareId,
@@ -8334,7 +8430,9 @@ async function createHpkeEnvelope(input) {
     encapsulatedKey,
     ciphertext,
     aadSchemaId: VAULT_AAD_SCHEMA_ID,
-    wrapperHashes: input.wrapperHashes
+    wrapperHashes: [],
+    wrapperSetRoot: input.wrapperSetRoot,
+    wrapperCount: input.wrapperCount
   };
   const canonical = encodeShareEnvelope(envelope);
   const signature = libsodium_wrappers_default.crypto_sign_detached(
@@ -8371,7 +8469,7 @@ async function openSharedKeys(plan, wrappers, wrapperBytes) {
     sha2564(concatBytes(senderX25519, senderEd25519))
   ]);
   const expectedPreviousRecordHash = share.previousRecordHash ? fromBase64Url(share.previousRecordHash) : null;
-  if (!equalBytes(envelopeHash, fromBase64Url(share.envelopeHash)) || envelope.formatVersion !== VAULT_FORMAT_VERSION || envelope.shareId !== share.shareId || envelope.epoch !== share.epoch || envelope.senderId !== share.senderId || envelope.recipientId !== share.recipientId || envelope.nodeId !== share.rootNodeId || envelope.senderKeyVersion !== share.senderKeyVersion || envelope.recipientKeyVersion !== activeIdentity.keyVersion || envelope.recipientKeyVersion !== share.recipientKeyVersion || envelope.recordVersion !== share.recordVersion || envelope.generationScope !== null || !nullableEqualBytes(
+  if (!equalBytes(envelopeHash, fromBase64Url(share.envelopeHash)) || envelope.formatVersion !== VAULT_FORMAT_VERSION && envelope.formatVersion !== VAULT_SHARE_ENVELOPE_VERSION || envelope.shareId !== share.shareId || envelope.epoch !== share.epoch || envelope.senderId !== share.senderId || envelope.recipientId !== share.recipientId || envelope.nodeId !== share.rootNodeId || envelope.senderKeyVersion !== share.senderKeyVersion || envelope.recipientKeyVersion !== activeIdentity.keyVersion || envelope.recipientKeyVersion !== share.recipientKeyVersion || envelope.recordVersion !== share.recordVersion || envelope.generationScope !== null || !nullableEqualBytes(
     envelope.previousRecordHash,
     expectedPreviousRecordHash
   ) || !equalBytes(
@@ -8384,16 +8482,37 @@ async function openSharedKeys(plan, wrappers, wrapperBytes) {
     );
   }
   const bootstrap = decodeBootstrap(fromBase64Url(plan.bootstrapCbor));
-  const committed = /* @__PURE__ */ new Set([
-    ...envelope.wrapperHashes.map(toBase64Url),
-    ...bootstrap.wrapperHashes.map(toBase64Url)
-  ]);
-  const seenWrapperHashes = /* @__PURE__ */ new Set();
-  const receivedWrapperHashes = await Promise.all(
-    wrapperBytes.map(async (canonical) => toBase64Url(await sha2564(canonical)))
+  const bootstrapCommitments = new Set(
+    bootstrap.wrapperHashes.map(toBase64Url)
   );
-  for (const hash of receivedWrapperHashes) {
-    if (!committed.has(hash) || seenWrapperHashes.has(hash)) {
+  const legacyCommitments = new Set(envelope.wrapperHashes.map(toBase64Url));
+  const wrapperProofs = share.wrapperProofs ?? [];
+  if (envelope.formatVersion === VAULT_SHARE_ENVELOPE_VERSION && (envelope.wrapperSetRoot === null || envelope.wrapperCount < 1 || wrapperProofs.length !== wrapperBytes.length)) {
+    throw vaultError(
+      "AUTHENTICATION_FAILED",
+      "The share wrapper commitment is invalid."
+    );
+  }
+  const seenWrapperHashes = /* @__PURE__ */ new Set();
+  const receivedWrapperHashes = await Promise.all(wrapperBytes.map(sha2564));
+  for (let index = 0; index < receivedWrapperHashes.length; index += 1) {
+    const hashBytes = receivedWrapperHashes[index];
+    const hash = toBase64Url(hashBytes);
+    let committed = bootstrapCommitments.has(hash);
+    if (!committed && envelope.formatVersion === VAULT_FORMAT_VERSION) {
+      committed = legacyCommitments.has(hash);
+    }
+    if (!committed && envelope.formatVersion === VAULT_SHARE_ENVELOPE_VERSION) {
+      const proof = wrapperProofs[index];
+      committed = proof !== null && await verifyWrapperSetProof({
+        wrapperHash: hashBytes,
+        leafIndex: proof.leafIndex,
+        proof: fromBase64Url(proof.proof),
+        wrapperCount: envelope.wrapperCount,
+        expectedRoot: envelope.wrapperSetRoot
+      });
+    }
+    if (!committed || seenWrapperHashes.has(hash)) {
       throw vaultError(
         "AUTHENTICATION_FAILED",
         "A share wrapper is not committed."

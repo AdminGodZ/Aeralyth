@@ -229,6 +229,36 @@ CREATE TABLE IF NOT EXISTS vault_share_epochs (
   PRIMARY KEY (share_id, epoch)
 );
 
+ALTER TABLE vault_share_epochs
+  ADD COLUMN IF NOT EXISTS protocol_version SMALLINT NOT NULL DEFAULT 1;
+
+ALTER TABLE vault_share_epochs
+  ADD COLUMN IF NOT EXISTS wrapper_set_root BYTEA;
+
+ALTER TABLE vault_share_epochs
+  ADD COLUMN IF NOT EXISTS wrapper_count INTEGER;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'vault_share_epochs_wrapper_commitment_check'
+      AND conrelid = 'vault_share_epochs'::regclass
+  ) THEN
+    ALTER TABLE vault_share_epochs
+      ADD CONSTRAINT vault_share_epochs_wrapper_commitment_check CHECK (
+        (protocol_version = 1 AND wrapper_set_root IS NULL AND wrapper_count IS NULL)
+        OR (
+          protocol_version = 2
+          AND wrapper_set_root IS NOT NULL
+          AND octet_length(wrapper_set_root) = 32
+          AND wrapper_count IS NOT NULL
+          AND wrapper_count BETWEEN 1 AND 8192
+        )
+      );
+  END IF;
+END $$;
+
 CREATE TABLE IF NOT EXISTS vault_share_owner_keys (
   share_id TEXT NOT NULL,
   epoch BIGINT NOT NULL,
@@ -295,6 +325,33 @@ CREATE TABLE IF NOT EXISTS vault_share_wrappers (
 
 ALTER TABLE vault_share_wrappers
   ADD COLUMN IF NOT EXISTS record_version BIGINT NOT NULL DEFAULT 1;
+
+ALTER TABLE vault_share_wrappers
+  ADD COLUMN IF NOT EXISTS merkle_leaf_index INTEGER;
+
+ALTER TABLE vault_share_wrappers
+  ADD COLUMN IF NOT EXISTS merkle_proof BYTEA;
+
+DO $$
+BEGIN
+  IF NOT EXISTS (
+    SELECT 1 FROM pg_constraint
+    WHERE conname = 'vault_share_wrappers_merkle_proof_check'
+      AND conrelid = 'vault_share_wrappers'::regclass
+  ) THEN
+    ALTER TABLE vault_share_wrappers
+      ADD CONSTRAINT vault_share_wrappers_merkle_proof_check CHECK (
+        (merkle_leaf_index IS NULL AND merkle_proof IS NULL)
+        OR (
+          merkle_leaf_index IS NOT NULL
+          AND merkle_proof IS NOT NULL
+          AND merkle_leaf_index >= 0
+          AND octet_length(merkle_proof) % 32 = 0
+          AND octet_length(merkle_proof) <= 448
+        )
+      );
+  END IF;
+END $$;
 
 CREATE INDEX IF NOT EXISTS vault_share_wrappers_current_idx
   ON vault_share_wrappers (share_id, epoch, node_id, wrapper_kind, record_version DESC);

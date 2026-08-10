@@ -4,6 +4,7 @@ use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 pub const FORMAT_VERSION: u64 = 1;
+pub const SHARE_ENVELOPE_VERSION: u64 = 2;
 pub const SUITE_ID: u64 = 1;
 pub const AAD_SCHEMA_ID: u64 = 1;
 pub const CRYPTO_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
@@ -15,6 +16,7 @@ pub const ARGON2ID_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 pub const ARGON2ID_OUTPUT_BYTES: u64 = 32;
 
 const MAX_WRAPPERS_PER_RECORD: usize = 4_096;
+const MAX_SHARE_WRAPPERS: usize = 8_192;
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct BootstrapRecord {
@@ -70,6 +72,22 @@ pub struct ShareEnvelopeRecord {
     pub ciphertext: Vec<u8>,
     pub aad_schema_id: u64,
     pub wrapper_hashes: Vec<[u8; 32]>,
+    pub wrapper_set_root: Option<[u8; 32]>,
+    pub wrapper_count: u64,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct WrapperSetProof {
+    pub wrapper_hash: [u8; 32],
+    pub leaf_index: i32,
+    pub proof: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct WrapperSetCommitment {
+    pub root: [u8; 32],
+    pub count: i32,
+    pub proofs: Vec<WrapperSetProof>,
 }
 
 #[derive(Debug, Clone)]
@@ -236,7 +254,7 @@ pub fn decode_wrapper(input: &[u8]) -> Result<WrapperRecord, ProtocolError> {
 
 pub fn decode_share_envelope(input: &[u8]) -> Result<ShareEnvelopeRecord, ProtocolError> {
     let mut reader = CborReader::new(input);
-    reader.expect_map_len(18)?;
+    let field_count = reader.read_map_len()?;
     reader.expect_key(1)?;
     let format_version = reader.read_uint()?;
     reader.expect_key(2)?;
@@ -272,11 +290,23 @@ pub fn decode_share_envelope(input: &[u8]) -> Result<ShareEnvelopeRecord, Protoc
     reader.expect_key(17)?;
     let aad_schema_id = reader.read_uint()?;
     reader.expect_key(18)?;
-    let wrapper_hashes = reader.read_fixed_bytes_array::<32>(MAX_WRAPPERS_PER_RECORD)?;
+    let (wrapper_hashes, wrapper_set_root, wrapper_count) = match (format_version, field_count) {
+        (FORMAT_VERSION, 18) => {
+            let hashes = reader.read_fixed_bytes_array::<32>(MAX_WRAPPERS_PER_RECORD)?;
+            let count = hashes.len() as u64;
+            (hashes, None, count)
+        }
+        (SHARE_ENVELOPE_VERSION, 19) => {
+            let root = reader.read_fixed_bytes::<32>()?;
+            reader.expect_key(19)?;
+            let count = reader.read_uint()?;
+            (Vec::new(), Some(root), count)
+        }
+        _ => return Err(ProtocolError::new("share envelope version is unsupported")),
+    };
     reader.finish()?;
 
-    if format_version != FORMAT_VERSION
-        || suite_id != SUITE_ID
+    if suite_id != SUITE_ID
         || aad_schema_id != AAD_SCHEMA_ID
         || epoch == 0
         || sender_key_version == 0
@@ -284,8 +314,12 @@ pub fn decode_share_envelope(input: &[u8]) -> Result<ShareEnvelopeRecord, Protoc
         || permissions != 1
         || record_version == 0
         || !(48..=65_536).contains(&ciphertext.len())
-        || wrapper_hashes.is_empty()
         || (record_version == 1) != previous_record_hash.is_none()
+        || (format_version == FORMAT_VERSION && wrapper_hashes.is_empty())
+        || (format_version == SHARE_ENVELOPE_VERSION
+            && (wrapper_set_root.is_none()
+                || wrapper_count == 0
+                || wrapper_count > MAX_SHARE_WRAPPERS as u64))
     {
         return Err(ProtocolError::new("share envelope fields are invalid"));
     }
@@ -309,6 +343,8 @@ pub fn decode_share_envelope(input: &[u8]) -> Result<ShareEnvelopeRecord, Protoc
         ciphertext,
         aad_schema_id,
         wrapper_hashes,
+        wrapper_set_root,
+        wrapper_count,
     })
 }
 
@@ -390,6 +426,141 @@ pub fn verify_node_record(
 
 pub fn sha256(input: &[u8]) -> [u8; 32] {
     Sha256::digest(input).into()
+}
+
+const WRAPPER_LEAF_DOMAIN: &[u8] = b"aeralyth/share-wrapper-leaf/v2";
+const WRAPPER_BRANCH_DOMAIN: &[u8] = b"aeralyth/share-wrapper-branch/v2";
+const WRAPPER_ROOT_DOMAIN: &[u8] = b"aeralyth/share-wrapper-root/v2";
+
+pub fn wrapper_set_commitment(
+    wrapper_hashes: &[[u8; 32]],
+) -> Result<WrapperSetCommitment, ProtocolError> {
+    if wrapper_hashes.is_empty() || wrapper_hashes.len() > MAX_SHARE_WRAPPERS {
+        return Err(ProtocolError::new("share wrapper count is invalid"));
+    }
+    let mut ordered = wrapper_hashes.to_vec();
+    ordered.sort_unstable();
+    if ordered.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(ProtocolError::new("share wrapper hash is duplicated"));
+    }
+
+    #[derive(Clone)]
+    struct Node {
+        hash: [u8; 32],
+        start: usize,
+        end: usize,
+    }
+
+    let mut proofs = vec![Vec::new(); ordered.len()];
+    let mut level = ordered
+        .iter()
+        .enumerate()
+        .map(|(index, hash)| {
+            let mut input = Vec::with_capacity(WRAPPER_LEAF_DOMAIN.len() + hash.len());
+            input.extend_from_slice(WRAPPER_LEAF_DOMAIN);
+            input.extend_from_slice(hash);
+            Node {
+                hash: sha256(&input),
+                start: index,
+                end: index + 1,
+            }
+        })
+        .collect::<Vec<_>>();
+
+    while level.len() > 1 {
+        let mut next = Vec::with_capacity(level.len().div_ceil(2));
+        for pair in level.chunks(2) {
+            let left = &pair[0];
+            let right = pair.get(1).unwrap_or(left);
+            for proof in &mut proofs[left.start..left.end] {
+                proof.extend_from_slice(&right.hash);
+            }
+            if pair.len() == 2 {
+                for proof in &mut proofs[right.start..right.end] {
+                    proof.extend_from_slice(&left.hash);
+                }
+            }
+            let mut input = Vec::with_capacity(WRAPPER_BRANCH_DOMAIN.len() + 64);
+            input.extend_from_slice(WRAPPER_BRANCH_DOMAIN);
+            input.extend_from_slice(&left.hash);
+            input.extend_from_slice(&right.hash);
+            next.push(Node {
+                hash: sha256(&input),
+                start: left.start,
+                end: right.end,
+            });
+        }
+        level = next;
+    }
+
+    let count = i32::try_from(ordered.len())
+        .map_err(|_| ProtocolError::new("share wrapper count is invalid"))?;
+    let mut root_input = Vec::with_capacity(WRAPPER_ROOT_DOMAIN.len() + 8 + 32);
+    root_input.extend_from_slice(WRAPPER_ROOT_DOMAIN);
+    root_input.extend_from_slice(&(ordered.len() as u64).to_be_bytes());
+    root_input.extend_from_slice(&level[0].hash);
+    let root = sha256(&root_input);
+    let proofs = ordered
+        .into_iter()
+        .zip(proofs)
+        .enumerate()
+        .map(|(leaf_index, (wrapper_hash, proof))| WrapperSetProof {
+            wrapper_hash,
+            leaf_index: i32::try_from(leaf_index).unwrap_or(i32::MAX),
+            proof,
+        })
+        .collect();
+
+    Ok(WrapperSetCommitment {
+        root,
+        count,
+        proofs,
+    })
+}
+
+pub fn verify_wrapper_set_proof(
+    wrapper_hash: [u8; 32],
+    leaf_index: i32,
+    proof: &[u8],
+    wrapper_count: i32,
+    expected_root: [u8; 32],
+) -> bool {
+    let Ok(mut index) = usize::try_from(leaf_index) else {
+        return false;
+    };
+    let Ok(count) = usize::try_from(wrapper_count) else {
+        return false;
+    };
+    if count == 0 || count > MAX_SHARE_WRAPPERS || index >= count {
+        return false;
+    }
+    let depth = usize::BITS as usize - (count - 1).leading_zeros() as usize;
+    if proof.len() != depth * 32 {
+        return false;
+    }
+
+    let mut leaf_input = Vec::with_capacity(WRAPPER_LEAF_DOMAIN.len() + 32);
+    leaf_input.extend_from_slice(WRAPPER_LEAF_DOMAIN);
+    leaf_input.extend_from_slice(&wrapper_hash);
+    let mut node = sha256(&leaf_input);
+    for sibling in proof.chunks_exact(32) {
+        let mut input = Vec::with_capacity(WRAPPER_BRANCH_DOMAIN.len() + 64);
+        input.extend_from_slice(WRAPPER_BRANCH_DOMAIN);
+        if index % 2 == 0 {
+            input.extend_from_slice(&node);
+            input.extend_from_slice(sibling);
+        } else {
+            input.extend_from_slice(sibling);
+            input.extend_from_slice(&node);
+        }
+        node = sha256(&input);
+        index /= 2;
+    }
+    let mut root_input = Vec::with_capacity(WRAPPER_ROOT_DOMAIN.len() + 8 + 32);
+    root_input.extend_from_slice(WRAPPER_ROOT_DOMAIN);
+    root_input.extend_from_slice(&(count as u64).to_be_bytes());
+    root_input.extend_from_slice(&node);
+    sha256(&root_input) == expected_root
 }
 
 pub fn verify_ed25519_signature(
@@ -487,12 +658,16 @@ impl<'a> CborReader<'a> {
     }
 
     fn expect_map_len(&mut self, expected: usize) -> Result<(), ProtocolError> {
-        let actual = self.read_len(5)?;
+        let actual = self.read_map_len()?;
         if actual == expected as u64 {
             Ok(())
         } else {
             Err(ProtocolError::new("CBOR map has an invalid field count"))
         }
+    }
+
+    fn read_map_len(&mut self) -> Result<u64, ProtocolError> {
+        self.read_len(5)
     }
 
     fn expect_key(&mut self, expected: u64) -> Result<(), ProtocolError> {
@@ -739,6 +914,57 @@ mod tests {
         assert!(error.to_string().contains("signature"));
     }
 
+    #[test]
+    fn wrapper_set_commitment_proofs_cover_every_sorted_leaf() {
+        let hashes = [[3_u8; 32], [1_u8; 32], [2_u8; 32]];
+        let commitment = wrapper_set_commitment(&hashes).unwrap();
+
+        assert_eq!(commitment.count, 3);
+        assert_eq!(
+            commitment.root.as_slice(),
+            decode_hex("e3204f260c1b5a7ac452b00bf91a562062bdbff758ed8e6386e732f63bee709b")
+        );
+        assert_eq!(commitment.proofs.len(), 3);
+        assert_eq!(
+            commitment.proofs[0].proof,
+            decode_hex(
+                "c635a2f3548516774fe0d5d4e652f36ab67baebf95b29110032e50d0276293368adc76e8e70bb7eb0278ae2f5dab61b0509ae2fa5f62b179b117381304185af3"
+            )
+        );
+        for proof in &commitment.proofs {
+            assert!(verify_wrapper_set_proof(
+                proof.wrapper_hash,
+                proof.leaf_index,
+                &proof.proof,
+                commitment.count,
+                commitment.root,
+            ));
+        }
+
+        let mut tampered = commitment.proofs[0].proof.clone();
+        tampered[0] ^= 1;
+        assert!(!verify_wrapper_set_proof(
+            commitment.proofs[0].wrapper_hash,
+            commitment.proofs[0].leaf_index,
+            &tampered,
+            commitment.count,
+            commitment.root,
+        ));
+    }
+
+    #[test]
+    fn decodes_a_constant_size_protocol_v2_share_envelope() {
+        let commitment = wrapper_set_commitment(&[[7_u8; 32]]).unwrap();
+        let input = encode_share_envelope_v2_for_test(commitment.root, commitment.count as u8);
+        let decoded = decode_share_envelope(&input).unwrap();
+
+        assert_eq!(decoded.format_version, SHARE_ENVELOPE_VERSION);
+        assert_eq!(decoded.wrapper_set_root, Some(commitment.root));
+        assert_eq!(decoded.wrapper_count, 1);
+        assert!(decoded.wrapper_hashes.is_empty());
+        assert!(input.len() < 300);
+    }
+
     fn decode_hex(value: &str) -> Vec<u8> {
         value
             .as_bytes()
@@ -796,6 +1022,40 @@ mod tests {
         push_key(&mut output, 10);
         push_bytes(&mut output, &[9_u8; 48]);
         push_uint_pair(&mut output, 11, 1);
+        output
+    }
+
+    fn encode_share_envelope_v2_for_test(root: [u8; 32], wrapper_count: u8) -> Vec<u8> {
+        let mut output = vec![0xb3];
+        push_uint_pair(&mut output, 1, SHARE_ENVELOPE_VERSION as u8);
+        push_uint_pair(&mut output, 2, SUITE_ID as u8);
+        push_key(&mut output, 3);
+        push_bytes(&mut output, &[10_u8; 16]);
+        push_key(&mut output, 4);
+        push_text(&mut output, b"shr_test");
+        push_uint_pair(&mut output, 5, 1);
+        push_key(&mut output, 6);
+        push_text(&mut output, b"usr_sender");
+        push_uint_pair(&mut output, 7, 1);
+        push_key(&mut output, 8);
+        push_text(&mut output, b"usr_recipient");
+        push_uint_pair(&mut output, 9, 1);
+        push_key(&mut output, 10);
+        push_text(&mut output, b"fil_test");
+        push_uint_pair(&mut output, 11, 1);
+        push_key(&mut output, 12);
+        output.push(0xf6);
+        push_uint_pair(&mut output, 13, 1);
+        push_key(&mut output, 14);
+        output.push(0xf6);
+        push_key(&mut output, 15);
+        push_bytes(&mut output, &[12_u8; 32]);
+        push_key(&mut output, 16);
+        push_bytes(&mut output, &[13_u8; 48]);
+        push_uint_pair(&mut output, 17, AAD_SCHEMA_ID as u8);
+        push_key(&mut output, 18);
+        push_bytes(&mut output, &root);
+        push_uint_pair(&mut output, 19, wrapper_count);
         output
     }
 

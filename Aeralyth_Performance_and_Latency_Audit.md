@@ -72,6 +72,8 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-001 [Critical] Multipart orphan reconciliation can abort active encrypted vault uploads
 
+**Status:** Complete — implemented and verified on 2026-08-10.
+
 **Confidence:** Confirmed
 
 **Evidence:** `backend/src/storage.rs`, in the multipart reconciliation path, matches live S3 multipart uploads against `file_uploads`. Encrypted uploads are tracked in `vault_uploads` and use the same general user/object namespace. The default orphan grace is one hour while vault upload intents can remain valid for 24 hours.
@@ -84,6 +86,8 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-002 [Critical] Share envelopes duplicate the complete wrapper-hash set for every recipient
 
+**Status:** Complete — implemented and verified on 2026-08-10.
+
 **Confidence:** Confirmed
 
 **Evidence:** `src/features/vault/vault.worker.ts` builds all subtree wrappers, hashes every wrapper, and places the complete `wrapperHashes` array in each HPKE envelope. `backend/src/e2ee.rs` decodes that array, while vault routes validate and store each recipient envelope.
@@ -95,6 +99,8 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Benchmark 1, 10, 100, 1,000, and 4,096 wrappers with 1, 10, and 100 recipients. Request size and recipient-envelope size should become effectively constant, and per-node download metadata should grow only logarithmically.
 
 ## PERF-003 [Critical] User deletion is synchronous, unbounded, and omits active vault-upload cleanup
+
+**Status:** Complete — implemented and verified on 2026-08-10.
 
 **Confidence:** Confirmed
 

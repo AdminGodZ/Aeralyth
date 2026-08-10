@@ -36,6 +36,7 @@ import {
   VAULT_AAD_SCHEMA_ID,
   VAULT_CRYPTO_CHUNK_BYTES,
   VAULT_FORMAT_VERSION,
+  VAULT_SHARE_ENVELOPE_VERSION,
   VAULT_SUITE_ID,
   type VaultActiveShareContext,
   type VaultBootstrapRecord,
@@ -49,7 +50,9 @@ import {
   type VaultShareNodeSnapshot,
   type VaultUnlockMaterial,
   type VaultWrapperRecord,
+  verifyWrapperSetProof,
   wipe,
+  wrapperSetRoot,
   zeroNonce,
 } from "@/features/vault/protocol";
 import type {
@@ -1397,6 +1400,7 @@ async function buildShareMaterial(input: {
       epochKey,
     );
     const wrapperHashes = await Promise.all(wrappers.map(sha256));
+    const wrapperRoot = await wrapperSetRoot(wrapperHashes);
     const envelopes = await Promise.all(
       input.recipients.map((recipient) =>
         createHpkeEnvelope({
@@ -1407,7 +1411,8 @@ async function buildShareMaterial(input: {
           recordVersion: input.recordVersion,
           previousRecordHash: input.previousRecordHash,
           recipient,
-          wrapperHashes,
+          wrapperSetRoot: wrapperRoot,
+          wrapperCount: wrapperHashes.length,
           epochMaterial,
         }),
       ),
@@ -1561,7 +1566,8 @@ async function createHpkeEnvelope(input: {
   recordVersion: number;
   previousRecordHash: Uint8Array | null;
   recipient: { userId: string; keyVersion: number; x25519PublicKey: string };
-  wrapperHashes: Uint8Array[];
+  wrapperSetRoot: Uint8Array;
+  wrapperCount: number;
   epochMaterial: Uint8Array;
 }): Promise<{ canonicalCbor: string; signature: string }> {
   const activeIdentity = requireIdentity();
@@ -1602,7 +1608,7 @@ async function createHpkeEnvelope(input: {
     throw new Error("The HPKE suite returned invalid envelope material.");
   }
   const envelope: VaultShareEnvelopeRecord = {
-    formatVersion: VAULT_FORMAT_VERSION,
+    formatVersion: VAULT_SHARE_ENVELOPE_VERSION,
     suiteId: VAULT_SUITE_ID,
     envelopeId,
     shareId: input.shareId,
@@ -1619,7 +1625,9 @@ async function createHpkeEnvelope(input: {
     encapsulatedKey,
     ciphertext,
     aadSchemaId: VAULT_AAD_SCHEMA_ID,
-    wrapperHashes: input.wrapperHashes,
+    wrapperHashes: [],
+    wrapperSetRoot: input.wrapperSetRoot,
+    wrapperCount: input.wrapperCount,
   };
   const canonical = encodeShareEnvelope(envelope);
   const signature = sodium.crypto_sign_detached(
@@ -1667,7 +1675,8 @@ async function openSharedKeys(
     : null;
   if (
     !equalBytes(envelopeHash, fromBase64Url(share.envelopeHash)) ||
-    envelope.formatVersion !== VAULT_FORMAT_VERSION ||
+    (envelope.formatVersion !== VAULT_FORMAT_VERSION &&
+      envelope.formatVersion !== VAULT_SHARE_ENVELOPE_VERSION) ||
     envelope.shareId !== share.shareId ||
     envelope.epoch !== share.epoch ||
     envelope.senderId !== share.senderId ||
@@ -1695,16 +1704,44 @@ async function openSharedKeys(
     );
   }
   const bootstrap = decodeBootstrap(fromBase64Url(plan.bootstrapCbor));
-  const committed = new Set([
-    ...envelope.wrapperHashes.map(toBase64Url),
-    ...bootstrap.wrapperHashes.map(toBase64Url),
-  ]);
-  const seenWrapperHashes = new Set<string>();
-  const receivedWrapperHashes = await Promise.all(
-    wrapperBytes.map(async (canonical) => toBase64Url(await sha256(canonical))),
+  const bootstrapCommitments = new Set(
+    bootstrap.wrapperHashes.map(toBase64Url),
   );
-  for (const hash of receivedWrapperHashes) {
-    if (!committed.has(hash) || seenWrapperHashes.has(hash)) {
+  const legacyCommitments = new Set(envelope.wrapperHashes.map(toBase64Url));
+  const wrapperProofs = share.wrapperProofs ?? [];
+  if (
+    envelope.formatVersion === VAULT_SHARE_ENVELOPE_VERSION &&
+    (envelope.wrapperSetRoot === null ||
+      envelope.wrapperCount < 1 ||
+      wrapperProofs.length !== wrapperBytes.length)
+  ) {
+    throw vaultError(
+      "AUTHENTICATION_FAILED",
+      "The share wrapper commitment is invalid.",
+    );
+  }
+  const seenWrapperHashes = new Set<string>();
+  const receivedWrapperHashes = await Promise.all(wrapperBytes.map(sha256));
+  for (let index = 0; index < receivedWrapperHashes.length; index += 1) {
+    const hashBytes = receivedWrapperHashes[index];
+    const hash = toBase64Url(hashBytes);
+    let committed = bootstrapCommitments.has(hash);
+    if (!committed && envelope.formatVersion === VAULT_FORMAT_VERSION) {
+      committed = legacyCommitments.has(hash);
+    }
+    if (!committed && envelope.formatVersion === VAULT_SHARE_ENVELOPE_VERSION) {
+      const proof = wrapperProofs[index];
+      committed =
+        proof !== null &&
+        (await verifyWrapperSetProof({
+          wrapperHash: hashBytes,
+          leafIndex: proof.leafIndex,
+          proof: fromBase64Url(proof.proof),
+          wrapperCount: envelope.wrapperCount,
+          expectedRoot: envelope.wrapperSetRoot as Uint8Array,
+        }));
+    }
+    if (!committed || seenWrapperHashes.has(hash)) {
       throw vaultError(
         "AUTHENTICATION_FAILED",
         "A share wrapper is not committed.",

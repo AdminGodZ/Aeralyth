@@ -21,7 +21,10 @@ import {
   toBase64Url,
   VAULT_AAD_SCHEMA_ID,
   VAULT_FORMAT_VERSION,
+  VAULT_SHARE_ENVELOPE_VERSION,
   VAULT_SUITE_ID,
+  verifyWrapperSetProof,
+  wrapperSetRoot,
 } from "@/features/vault/protocol";
 
 describe("vault protocol", () => {
@@ -108,6 +111,8 @@ describe("vault protocol", () => {
       ciphertext: new Uint8Array(48).fill(13),
       aadSchemaId: VAULT_AAD_SCHEMA_ID,
       wrapperHashes: [new Uint8Array(32).fill(14)],
+      wrapperSetRoot: null,
+      wrapperCount: 1,
     };
     const decodedEnvelope = decodeShareEnvelope(encodeShareEnvelope(envelope));
     expect(decodedEnvelope.senderId).toBe("usr_sender");
@@ -115,6 +120,71 @@ describe("vault protocol", () => {
     expect(decodedEnvelope.previousRecordHash).toEqual(
       envelope.previousRecordHash,
     );
+  });
+
+  it("keeps protocol-v2 recipient envelopes constant-sized", async () => {
+    const root = await wrapperSetRoot([new Uint8Array(32).fill(14)]);
+    const baseEnvelope = {
+      formatVersion: VAULT_SHARE_ENVELOPE_VERSION,
+      suiteId: VAULT_SUITE_ID,
+      envelopeId: new Uint8Array(16).fill(10),
+      shareId: "shr_test123",
+      epoch: 2,
+      senderId: "usr_sender",
+      senderKeyVersion: 3,
+      recipientId: "usr_recipient",
+      recipientKeyVersion: 4,
+      nodeId: "fil_test123",
+      permissions: 1 as const,
+      generationScope: null,
+      recordVersion: 5,
+      previousRecordHash: new Uint8Array(32).fill(11),
+      encapsulatedKey: new Uint8Array(32).fill(12),
+      ciphertext: new Uint8Array(48).fill(13),
+      aadSchemaId: VAULT_AAD_SCHEMA_ID,
+      wrapperHashes: [],
+      wrapperSetRoot: root,
+      wrapperCount: 1,
+    };
+    const oneWrapper = encodeShareEnvelope(baseEnvelope);
+    const thousands = encodeShareEnvelope({
+      ...baseEnvelope,
+      wrapperCount: 4096,
+    });
+    const decoded = decodeShareEnvelope(oneWrapper);
+
+    expect(decoded.wrapperSetRoot).toEqual(root);
+    expect(decoded.wrapperCount).toBe(1);
+    expect(oneWrapper.length).toBeLessThan(300);
+    expect(Math.abs(thousands.length - oneWrapper.length)).toBeLessThanOrEqual(
+      2,
+    );
+  });
+
+  it("matches the cross-runtime wrapper-set commitment vector", async () => {
+    const root = await wrapperSetRoot([
+      new Uint8Array(32).fill(3),
+      new Uint8Array(32).fill(1),
+      new Uint8Array(32).fill(2),
+    ]);
+
+    expect(Buffer.from(root).toString("hex")).toBe(
+      "e3204f260c1b5a7ac452b00bf91a562062bdbff758ed8e6386e732f63bee709b",
+    );
+    expect(
+      await verifyWrapperSetProof({
+        wrapperHash: new Uint8Array(32).fill(1),
+        leafIndex: 0,
+        proof: Uint8Array.from(
+          Buffer.from(
+            "c635a2f3548516774fe0d5d4e652f36ab67baebf95b29110032e50d0276293368adc76e8e70bb7eb0278ae2f5dab61b0509ae2fa5f62b179b117381304185af3",
+            "hex",
+          ),
+        ),
+        wrapperCount: 3,
+        expectedRoot: root,
+      }),
+    ).toBe(true);
   });
 
   it("uses a deterministic 96-bit big-endian chunk counter", () => {

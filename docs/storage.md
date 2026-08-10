@@ -55,9 +55,26 @@ Railway Storage Buckets do not currently expose lifecycle configuration for
 aborting incomplete multipart uploads. Aeralyth therefore writes a durable
 `initializing` intent before calling S3 and runs an hourly `ListMultipartUploads`
 reconciliation under a PostgreSQL advisory lock. Unknown `users/` uploads older
-than `AERALYTH_MULTIPART_ORPHAN_GRACE_SECONDS` are aborted. Known cancellations
+than `AERALYTH_MULTIPART_ORPHAN_GRACE_SECONDS` are aborted only after the
+reconciler has checked both `file_uploads` and `vault_uploads` by object key and
+provider upload ID. A live intent protects a mismatched provider entry until its
+write/intent TTL has elapsed, and an initializing intent can adopt its provider
+ID only inside its existing `users/<id>/files/` or `users/<id>/vault/`
+namespace. The worker rechecks both intent tables immediately before an abort so
+a concurrent initializer or replica cannot lose the race. Known cancellations
 and expirations remain in the database-backed deletion queue until both the
 multipart abort and object deletion succeed.
+
+Administrative user deletion is asynchronous. The request transaction changes
+the account to `deleting`, revokes its sessions, and creates one durable
+`user_deletion_jobs` checkpoint. The maintenance worker then queues legacy,
+active upload, encrypted generation, and migration object keys before removing
+metadata in 500-row, retryable phases. It deletes file trees leaf-first and
+removes the user row only after a final user-row lock proves that no in-flight
+request introduced another object. The final lock either restarts the sweep or
+fences new foreign-key inserts until deletion commits. This keeps the API
+response and every worker transaction bounded while preserving every object in
+the durable storage-deletion queue.
 
 Legacy development objects remain readable during migration from
 `AERALYTH_STORAGE_PATH/<owner>/<storage-name>` on the original host. Before an
