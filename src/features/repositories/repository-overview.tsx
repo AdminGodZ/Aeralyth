@@ -125,7 +125,8 @@ export function RepositoryOverview({
                           </Badge>
                         </div>
                         <p className="mt-2 text-sm text-muted-foreground">
-                          Project folder stored in Aeralyth
+                          {repository.description ||
+                            "Project folder stored in Aeralyth"}
                         </p>
                         <p className="mt-3 text-xs text-muted-foreground">
                           Updated {formatRepositoryDate(repository.updatedAt)}

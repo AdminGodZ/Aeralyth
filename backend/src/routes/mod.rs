@@ -77,6 +77,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
                 )
                 .route("/repositories", web::get().to(repositories::list))
                 .route("/repositories", web::post().to(repositories::create))
+                .route("/repositories/{id}", web::patch().to(repositories::update))
                 .route(
                     "/repositories/{id}/archive-manifest",
                     web::get().to(repositories::archive_manifest),

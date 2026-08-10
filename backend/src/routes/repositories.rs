@@ -8,11 +8,17 @@ use crate::state::AppState;
 const MAX_REPOSITORY_ENTRIES: i64 = 500;
 const MAX_REPOSITORY_ARCHIVE_ENTRIES: i64 = 50_000;
 const MAX_REPOSITORY_ARCHIVE_BYTES: i64 = 2 * 1024 * 1024 * 1024;
+const MAX_REPOSITORY_DESCRIPTION_CHARS: usize = 350;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreateRepositoryRequest {
     root_folder_id: String,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct UpdateRepositoryRequest {
+    description: String,
 }
 
 #[derive(Deserialize)]
@@ -51,6 +57,7 @@ struct RepositorySummary {
     id: String,
     owner_username: String,
     default_branch: &'static str,
+    description: Option<String>,
     root: RepositoryRoot,
     created_at: String,
     updated_at: String,
@@ -101,6 +108,7 @@ pub async fn list(state: web::Data<AppState>, request: HttpRequest) -> Result<Ht
             "
                 SELECT
                   repositories.id,
+                  repositories.description,
                   owners.username AS owner_username,
                   roots.id AS root_id,
                   roots.original_name AS root_name,
@@ -179,6 +187,45 @@ pub async fn create(
         .ok_or_else(|| error::ErrorInternalServerError("repository could not be loaded"))?;
 
     Ok(HttpResponse::Created().json(repository))
+}
+
+pub async fn update(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    path: web::Path<String>,
+    body: web::Json<UpdateRepositoryRequest>,
+) -> Result<HttpResponse> {
+    let owner = require_user(&state, &request).await?;
+    require_header_csrf(&state, &request).await?;
+    let repository_id = path.into_inner();
+    let description = body.description.trim();
+    if description.chars().count() > MAX_REPOSITORY_DESCRIPTION_CHARS {
+        return Err(error::ErrorBadRequest(
+            "repository description must be 350 characters or fewer",
+        ));
+    }
+    let description = (!description.is_empty()).then(|| description.to_owned());
+    let updated = state
+        .db
+        .query_opt(
+            "
+                UPDATE repositories
+                SET description = $1,
+                    updated_at = now()
+                WHERE id = $2 AND owner_id = $3
+                RETURNING id
+            ",
+            &[&description, &repository_id, &owner.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    if updated.is_none() {
+        return Ok(HttpResponse::NotFound().finish());
+    }
+    let repository = get_repository_summary(&state, &owner, &repository_id)
+        .await?
+        .ok_or_else(|| error::ErrorInternalServerError("repository could not be loaded"))?;
+    Ok(HttpResponse::Ok().json(repository))
 }
 
 pub async fn detail(
@@ -421,6 +468,7 @@ async fn get_repository_summary(
             "
                 SELECT
                   repositories.id,
+                  repositories.description,
                   owners.username AS owner_username,
                   roots.id AS root_id,
                   roots.original_name AS root_name,
@@ -486,6 +534,7 @@ fn repository_summary_from_row(row: Row) -> RepositorySummary {
         id: row.get("id"),
         owner_username: row.get("owner_username"),
         default_branch: "main",
+        description: row.get("description"),
         root: RepositoryRoot {
             id: row.get("root_id"),
             name: row.get("root_name"),

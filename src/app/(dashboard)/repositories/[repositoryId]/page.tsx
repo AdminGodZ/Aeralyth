@@ -7,7 +7,7 @@ import { getRepositoryDetailState } from "@/lib/api";
 
 type RepositoryPageProps = {
   params: Promise<{ repositoryId: string }>;
-  searchParams: Promise<{ folder?: string }>;
+  searchParams: Promise<{ file?: string; folder?: string }>;
 };
 
 export const dynamic = "force-dynamic";
@@ -21,7 +21,7 @@ export default async function RepositoryPage({
   params,
   searchParams,
 }: RepositoryPageProps) {
-  const [{ repositoryId }, { folder }] = await Promise.all([
+  const [{ repositoryId }, { file, folder }] = await Promise.all([
     params,
     searchParams,
   ]);
@@ -47,6 +47,7 @@ export default async function RepositoryPage({
       csrfToken={csrfToken}
       filesState={{ status: "unavailable" }}
       repositoryDetailState={repositoryDetailState}
+      repositoryFileId={file?.trim() || undefined}
     />
   );
 }

@@ -65,6 +65,7 @@ type DashboardPageProps = {
   fileSortDirection?: FileSortDirection;
   repositoriesState?: RepositoriesState;
   repositoryDetailState?: RepositoryDetailState;
+  repositoryFileId?: string;
 };
 
 type ReadyFilesState = Extract<FilesState, { status: "ready" }>;
@@ -121,6 +122,7 @@ export function DashboardPage({
   fileSortDirection,
   repositoriesState,
   repositoryDetailState,
+  repositoryFileId,
 }: DashboardPageProps) {
   const section =
     getDashboardSection(sectionKey) ?? getDashboardSection("files");
@@ -144,6 +146,7 @@ export function DashboardPage({
         fileSortDirection={fileSortDirection}
         repositoriesState={repositoriesState}
         repositoryDetailState={repositoryDetailState}
+        repositoryFileId={repositoryFileId}
       />
     </>
   );
@@ -267,6 +270,7 @@ function DashboardContent({
   fileSortDirection,
   repositoriesState,
   repositoryDetailState,
+  repositoryFileId,
 }: {
   section: DashboardSection;
   currentUser: CurrentUser;
@@ -279,6 +283,7 @@ function DashboardContent({
   fileSortDirection?: FileSortDirection;
   repositoriesState?: RepositoriesState;
   repositoryDetailState?: RepositoryDetailState;
+  repositoryFileId?: string;
 }) {
   if (section.key === "settings") {
     return <SettingsContent currentUser={currentUser} csrfToken={csrfToken} />;
@@ -302,7 +307,13 @@ function DashboardContent({
 
   if (section.key === "repositories") {
     if (repositoryDetailState) {
-      return <RepositoryDetail repositoryState={repositoryDetailState} />;
+      return (
+        <RepositoryDetail
+          csrfToken={csrfToken}
+          repositoryState={repositoryDetailState}
+          selectedFileId={repositoryFileId}
+        />
+      );
     }
 
     return (

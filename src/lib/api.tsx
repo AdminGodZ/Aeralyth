@@ -234,6 +234,7 @@ export type RepositorySummary = {
   id: string;
   ownerUsername: string;
   defaultBranch: string;
+  description: string | null;
   root: RepositoryRoot;
   createdAt: string;
   updatedAt: string;
@@ -699,6 +700,8 @@ function isRepositorySummary(value: unknown): value is RepositorySummary {
     typeof repository.id === "string" &&
     typeof repository.ownerUsername === "string" &&
     typeof repository.defaultBranch === "string" &&
+    (typeof repository.description === "string" ||
+      repository.description === null) &&
     typeof repository.createdAt === "string" &&
     typeof repository.updatedAt === "string" &&
     repository.root !== undefined &&

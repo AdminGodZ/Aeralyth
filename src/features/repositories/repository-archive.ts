@@ -38,7 +38,10 @@ export async function downloadRepositoryArchive({
   onProgress?(progress: RepositoryArchiveProgress): void;
 }): Promise<void> {
   onProgress?.({ label: "Reading repository tree…", percentage: null });
-  const manifest = await requestArchiveManifest(repository.id, signal);
+  const manifest = await requestRepositoryArchiveManifest(
+    repository.id,
+    signal,
+  );
   const entriesById = new Map(
     manifest.entries.map((entry) => [entry.id, entry]),
   );
@@ -157,7 +160,7 @@ export async function downloadRepositoryArchive({
   onProgress?.({ label: "ZIP download ready", percentage: 100 });
 }
 
-async function requestArchiveManifest(
+export async function requestRepositoryArchiveManifest(
   repositoryId: string,
   signal?: AbortSignal,
 ): Promise<RepositoryArchiveManifest> {

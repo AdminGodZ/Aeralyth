@@ -3,7 +3,6 @@
 import { formatDistanceToNow } from "date-fns";
 import {
   BookMarked,
-  BookOpen,
   ChevronRight,
   Code2,
   FileCode2,
@@ -18,6 +17,10 @@ import { useMemo } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { RepositoryCodeMenu } from "@/features/repositories/repository-code-menu";
+import { RepositoryDescription } from "@/features/repositories/repository-description";
+import { getRepositoryFilePresentation } from "@/features/repositories/repository-file-types";
+import { RepositoryFileViewer } from "@/features/repositories/repository-file-viewer";
+import { RepositoryLanguageStats } from "@/features/repositories/repository-language-stats";
 import { useResolvedVaultNames } from "@/features/repositories/use-resolved-vault-names";
 import type {
   RepositoryDetailData,
@@ -26,9 +29,13 @@ import type {
 } from "@/lib/api";
 
 export function RepositoryDetail({
+  csrfToken,
   repositoryState,
+  selectedFileId,
 }: {
+  csrfToken: string;
   repositoryState: RepositoryDetailState;
+  selectedFileId?: string;
 }) {
   if (repositoryState.status !== "ready") {
     return (
@@ -43,10 +50,24 @@ export function RepositoryDetail({
     );
   }
 
-  return <ReadyRepositoryDetail data={repositoryState.data} />;
+  return (
+    <ReadyRepositoryDetail
+      csrfToken={csrfToken}
+      data={repositoryState.data}
+      selectedFileId={selectedFileId}
+    />
+  );
 }
 
-function ReadyRepositoryDetail({ data }: { data: RepositoryDetailData }) {
+function ReadyRepositoryDetail({
+  csrfToken,
+  data,
+  selectedFileId,
+}: {
+  csrfToken: string;
+  data: RepositoryDetailData;
+  selectedFileId?: string;
+}) {
   const nodes = useMemo(
     () => [
       data.repository.root,
@@ -64,10 +85,8 @@ function ReadyRepositoryDetail({ data }: { data: RepositoryDetailData }) {
     ...entry,
     resolvedName: names.nameFor(entry),
   }));
-  const readme = resolvedEntries.find(
-    (entry) =>
-      entry.entryType === "file" &&
-      /^readme(?:\.|$)/iu.test(entry.resolvedName),
+  const selectedFile = resolvedEntries.find(
+    (entry) => entry.entryType === "file" && entry.id === selectedFileId,
   );
 
   return (
@@ -135,87 +154,101 @@ function ReadyRepositoryDetail({ data }: { data: RepositoryDetailData }) {
             </div>
           </div>
 
-          <section className="overflow-hidden rounded-md border">
-            <RepositoryPath
-              data={data}
-              repositoryName={repositoryName}
-              nameFor={names.nameFor}
-            />
+          {selectedFile ? (
+            <>
+              <div className="mb-3 overflow-hidden rounded-md border">
+                <RepositoryPath
+                  data={data}
+                  repositoryName={repositoryName}
+                  nameFor={names.nameFor}
+                  selectedFileName={selectedFile.resolvedName}
+                />
+              </div>
+              <RepositoryFileViewer
+                key={selectedFile.id}
+                entry={selectedFile}
+              />
+            </>
+          ) : (
+            <section className="overflow-hidden rounded-md border">
+              <RepositoryPath
+                data={data}
+                repositoryName={repositoryName}
+                nameFor={names.nameFor}
+              />
 
-            <div className="flex items-center justify-between gap-4 border-b bg-muted/25 px-4 py-3 text-sm">
-              <div className="flex min-w-0 items-center gap-2">
-                <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/12 text-xs font-semibold text-primary">
-                  {data.repository.ownerUsername.slice(0, 1).toUpperCase()}
-                </span>
-                <span className="truncate font-medium">
-                  {data.repository.ownerUsername}
-                </span>
-                <span className="hidden truncate text-muted-foreground sm:inline">
-                  imported this project folder
+              <div className="flex items-center justify-between gap-4 border-b bg-muted/25 px-4 py-3 text-sm">
+                <div className="flex min-w-0 items-center gap-2">
+                  <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-primary/12 text-xs font-semibold text-primary">
+                    {data.repository.ownerUsername.slice(0, 1).toUpperCase()}
+                  </span>
+                  <span className="truncate font-medium">
+                    {data.repository.ownerUsername}
+                  </span>
+                  <span className="hidden truncate text-muted-foreground sm:inline">
+                    imported this project folder
+                  </span>
+                </div>
+                <span className="shrink-0 text-xs text-muted-foreground">
+                  {formatRepositoryDate(data.repository.updatedAt)}
                 </span>
               </div>
-              <span className="shrink-0 text-xs text-muted-foreground">
-                {formatRepositoryDate(data.repository.updatedAt)}
-              </span>
-            </div>
 
-            <table
-              className="w-full table-fixed"
-              aria-label="Folders and files"
-            >
-              <thead>
-                <tr className="border-b text-left text-xs font-medium text-muted-foreground">
-                  <th scope="col" className="px-4 py-2 font-medium">
-                    Name
-                  </th>
-                  <th
-                    scope="col"
-                    className="hidden w-32 px-4 py-2 text-right font-medium sm:table-cell"
-                  >
-                    Last change
-                  </th>
-                </tr>
-              </thead>
-              <tbody className="divide-y">
-                {resolvedEntries.length > 0 ? (
-                  resolvedEntries.map((entry) => (
-                    <RepositoryEntryRow
-                      key={entry.id}
-                      entry={entry}
-                      repositoryId={data.repository.id}
-                    />
-                  ))
-                ) : (
-                  <tr>
-                    <td colSpan={2} className="px-4 py-10 text-center">
-                      <p className="font-medium">This folder is empty</p>
-                      <p className="mt-1 text-sm text-muted-foreground">
-                        No files or folders are stored here.
-                      </p>
-                    </td>
+              <table
+                className="w-full table-fixed"
+                aria-label="Folders and files"
+              >
+                <thead>
+                  <tr className="border-b text-left text-xs font-medium text-muted-foreground">
+                    <th scope="col" className="px-4 py-2 font-medium">
+                      Name
+                    </th>
+                    <th
+                      scope="col"
+                      className="hidden w-32 px-4 py-2 text-right font-medium sm:table-cell"
+                    >
+                      Last change
+                    </th>
                   </tr>
-                )}
-              </tbody>
-            </table>
+                </thead>
+                <tbody className="divide-y">
+                  {resolvedEntries.length > 0 ? (
+                    resolvedEntries.map((entry) => (
+                      <RepositoryEntryRow
+                        key={entry.id}
+                        entry={entry}
+                        repositoryId={data.repository.id}
+                        currentFolderId={data.currentFolderId}
+                      />
+                    ))
+                  ) : (
+                    <tr>
+                      <td colSpan={2} className="px-4 py-10 text-center">
+                        <p className="font-medium">This folder is empty</p>
+                        <p className="mt-1 text-sm text-muted-foreground">
+                          No files or folders are stored here.
+                        </p>
+                      </td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
 
-            {data.entriesTruncated ? (
-              <p className="border-t px-4 py-3 text-xs text-muted-foreground">
-                Showing the first 500 entries in this folder.
-              </p>
-            ) : null}
-          </section>
-
-          {readme ? <ReadmePanel readmeName={readme.resolvedName} /> : null}
+              {data.entriesTruncated ? (
+                <p className="border-t px-4 py-3 text-xs text-muted-foreground">
+                  Showing the first 500 entries in this folder.
+                </p>
+              ) : null}
+            </section>
+          )}
         </main>
 
         <aside className="space-y-5 lg:border-l lg:pl-6">
-          <section>
-            <h2 className="font-display text-base font-semibold">About</h2>
-            <p className="mt-3 text-sm leading-6 text-muted-foreground">
-              Repository view for a project folder stored in Aeralyth. Git
-              history and hosting actions are intentionally not enabled yet.
-            </p>
-          </section>
+          <RepositoryDescription
+            repositoryId={data.repository.id}
+            initialDescription={data.repository.description}
+            csrfToken={csrfToken}
+          />
           <section className="border-t pt-4">
             <dl className="space-y-3 text-sm">
               <div className="flex items-center justify-between gap-4">
@@ -236,6 +269,10 @@ function ReadyRepositoryDetail({ data }: { data: RepositoryDetailData }) {
               </div>
             </dl>
           </section>
+          <RepositoryLanguageStats
+            key={data.repository.id}
+            repository={data.repository}
+          />
         </aside>
       </div>
     </div>
@@ -246,6 +283,7 @@ function RepositoryPath({
   data,
   repositoryName,
   nameFor,
+  selectedFileName,
 }: {
   data: RepositoryDetailData;
   repositoryName: string;
@@ -255,8 +293,9 @@ function RepositoryPath({
     e2eeState: "legacy" | "staged" | "encrypted";
     entryType?: "file" | "folder";
   }): string;
+  selectedFileName?: string;
 }) {
-  if (data.breadcrumbs.length === 0) {
+  if (data.breadcrumbs.length === 0 && !selectedFileName) {
     return null;
   }
 
@@ -272,7 +311,8 @@ function RepositoryPath({
         {repositoryName}
       </Link>
       {data.breadcrumbs.map((breadcrumb, index) => {
-        const current = index === data.breadcrumbs.length - 1;
+        const current =
+          index === data.breadcrumbs.length - 1 && !selectedFileName;
         const name = nameFor({ ...breadcrumb, entryType: "folder" });
         return (
           <span key={breadcrumb.id} className="flex min-w-0 items-center gap-1">
@@ -296,6 +336,17 @@ function RepositoryPath({
           </span>
         );
       })}
+      {selectedFileName ? (
+        <span className="flex min-w-0 items-center gap-1" aria-current="page">
+          <ChevronRight
+            className="size-4 shrink-0 text-muted-foreground"
+            aria-hidden="true"
+          />
+          <span className="max-w-80 truncate font-semibold">
+            {selectedFileName}
+          </span>
+        </span>
+      ) : null}
     </nav>
   );
 }
@@ -303,14 +354,20 @@ function RepositoryPath({
 function RepositoryEntryRow({
   entry,
   repositoryId,
+  currentFolderId,
 }: {
   entry: RepositoryEntry & { resolvedName: string };
   repositoryId: string;
+  currentFolderId: string;
 }) {
+  const presentation = getRepositoryFilePresentation(
+    entry.resolvedName,
+    entry.mimeType,
+  );
   const icon =
     entry.entryType === "folder" ? (
       <Folder className="size-4 fill-current" aria-hidden="true" />
-    ) : isCodeFile(entry.resolvedName) ? (
+    ) : presentation.kind === "text" || presentation.kind === "markdown" ? (
       <FileCode2 className="size-4" aria-hidden="true" />
     ) : (
       <FileText className="size-4" aria-hidden="true" />
@@ -336,34 +393,21 @@ function RepositoryEntryRow({
             {content}
           </Link>
         ) : (
-          content
+          <Link
+            href={{
+              pathname: `/repositories/${repositoryId}`,
+              query: { file: entry.id, folder: currentFolderId },
+            }}
+            className="font-medium text-primary hover:underline"
+          >
+            {content}
+          </Link>
         )}
       </td>
       <td className="hidden w-32 px-4 py-2 text-right text-xs text-muted-foreground sm:table-cell">
         {formatRepositoryDate(entry.updatedAt)}
       </td>
     </tr>
-  );
-}
-
-function ReadmePanel({ readmeName }: { readmeName: string }) {
-  return (
-    <section className="mt-4 overflow-hidden rounded-md border">
-      <header className="flex min-h-12 items-center gap-2 border-b px-4">
-        <BookOpen className="size-4" aria-hidden="true" />
-        <h2 className="font-display text-sm font-semibold">{readmeName}</h2>
-      </header>
-      <div className="px-5 py-8">
-        <h3 className="font-display text-xl font-semibold">
-          README preview is coming next
-        </h3>
-        <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">
-          Aeralyth detected the README file. Rendering repository file contents
-          belongs to the next logic phase, so this view does not fabricate its
-          contents.
-        </p>
-      </div>
-    </section>
   );
 }
 
@@ -380,10 +424,4 @@ function formatRepositoryDate(value: string) {
   }
 
   return formatDistanceToNow(date, { addSuffix: true });
-}
-
-function isCodeFile(name: string) {
-  return /\.(?:c|cc|cpp|css|go|html|java|js|jsx|json|kt|md|mjs|py|rb|rs|swift|toml|ts|tsx|vue|yaml|yml)$/iu.test(
-    name,
-  );
 }
