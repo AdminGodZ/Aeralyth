@@ -402,6 +402,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-026 [P0] Vault wrappers and envelopes are inserted one row per awaited SQL call
 
+**Status:** Complete — implemented and verified on 2026-08-12.
+
+**Verification:** Wrapper and envelope helpers now materialize typed PostgreSQL arrays and issue exactly one `INSERT ... SELECT FROM unnest(...)` statement for each non-empty collection, with a zero-statement fast path for empty input. A real encrypted-share publication returned HTTP 201 in 16.860 ms with one request database-pool checkout and persisted two wrappers plus one envelope under the same transaction. PostgreSQL reported protocol v2, a two-wrapper commitment, a 32-byte root, and one active recipient. The independent per-row epoch-guard cost remains tracked by PERF-025.
+
 **Confidence:** Confirmed
 
 **Evidence:** Vault route helpers loop over wrappers and envelopes and await an insert for each row.
@@ -618,6 +622,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-044 [P0] Share material generation launches unbounded browser crypto work
 
+**Status:** Complete — implemented and verified on 2026-08-12.
+
+**Verification:** Subtree wrapper derivation, wrapper hashing, Merkle hashing, wrapper verification, and recipient-envelope HPKE now run through one order-preserving bounded queue. Wrapper/hash work is capped at 16 logical lanes, while HPKE is capped at eight and scales to half the detected hardware concurrency; unknown devices fall back to four. Regression tests process 40 tasks while proving a peak of exactly four in flight, stable result ordering, hardware caps, and fail-stop scheduling. The production worker bundle and a real browser share-to-recipient decrypt flow both passed without console warnings or errors.
+
 **Confidence:** Confirmed
 
 **Evidence:** `createSubtreeShareWrappers` uses `Promise.all` across every node, and envelope creation uses `Promise.all` across every recipient.
@@ -629,6 +637,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Measure worker peak heap and completion time across low-end and high-end devices. Peak memory should be bounded independently of subtree size.
 
 ## PERF-045 [P0] Envelope validation repeatedly sorts and clones the same wrapper-hash set
+
+**Status:** Complete — implemented and verified on 2026-08-12.
+
+**Verification:** Protocol v2 envelopes carry one wrapper root and count, and server publication computes one `WrapperSetCommitment` for the request before validating every envelope against it. A 128-envelope regression test proves reuse of that single commitment and rejects the legacy per-envelope hash-array representation. Share-record hashing now consumes the commitment's already canonical proof order instead of cloning and sorting wrapper hashes again; a compatibility test proves the resulting record hash is unchanged. The live browser publication persisted protocol v2 with a 32-byte root and the expected wrapper count, and the recipient successfully decrypted the shared metadata.
 
 **Confidence:** Confirmed
 

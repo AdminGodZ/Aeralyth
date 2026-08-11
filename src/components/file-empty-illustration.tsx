@@ -9,76 +9,87 @@ export function FileEmptyIllustration({ className }: { className?: string }) {
       className={cn("size-full", className)}
     >
       <ellipse
-        cx="78"
+        cx="79"
         cy="116"
-        rx="54"
-        ry="7"
+        rx="53"
+        ry="6"
         fill="var(--foreground)"
-        opacity="0.06"
+        opacity="0.055"
       />
 
       <path
-        d="M18 39c0-7.18 5.82-13 13-13h28.3c4.01 0 7.8 1.85 10.26 5.02l7.88 10.14A13 13 0 0 0 87.7 46H124c7.18 0 13 5.82 13 13v38c0 7.18-5.82 13-13 13H31c-7.18 0-13-5.82-13-13V39Z"
+        d="M18.5 59V38c0-8.28 6.72-15 15-15h27.84c5.04 0 9.78 2.39 12.78 6.44l7.8 10.53a16 16 0 0 0 12.86 6.48h32.72c7.73 0 14 6.27 14 14V94.5c0 8.28-6.72 15-15 15h-93c-8.28 0-15-6.72-15-15V59Z"
         fill="var(--muted)"
-        stroke="var(--muted-foreground)"
-        strokeWidth="2.5"
-        opacity="0.82"
-      />
-      <path
-        d="M20 62h115v35c0 6.08-4.92 11-11 11H31c-6.08 0-11-4.92-11-11V62Z"
-        fill="var(--background)"
         opacity="0.72"
       />
       <path
-        d="M20 62h115"
-        stroke="var(--muted-foreground)"
-        strokeWidth="2"
-        opacity="0.28"
+        d="M18.5 59h123v35.5c0 8.28-6.72 15-15 15h-93c-8.28 0-15-6.72-15-15V59Z"
+        fill="var(--card)"
+      />
+      <path
+        d="M18.5 59V38c0-8.28 6.72-15 15-15h27.84c5.04 0 9.78 2.39 12.78 6.44l7.8 10.53a16 16 0 0 0 12.86 6.48h32.72c7.73 0 14 6.27 14 14V94.5c0 8.28-6.72 15-15 15h-93c-8.28 0-15-6.72-15-15V59Z"
+        stroke="color-mix(in srgb, var(--muted-foreground) 54%, transparent)"
+        strokeWidth="2.5"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M19.88 59h120.24"
+        stroke="color-mix(in srgb, var(--muted-foreground) 20%, transparent)"
+        strokeWidth="1.75"
       />
 
       <rect
-        x="42"
-        y="70"
-        width="54"
-        height="27"
-        rx="6"
+        x="37"
+        y="68"
+        width="53"
+        height="29"
+        rx="7"
         fill="var(--primary)"
-        opacity="0.08"
+        opacity="0.065"
       />
       <path
-        d="M51 79h29M51 87h20"
-        stroke="var(--primary)"
-        strokeWidth="2.5"
+        d="M47 78h30M47 87h20"
+        stroke="color-mix(in srgb, var(--primary) 72%, transparent)"
+        strokeWidth="2.75"
         strokeLinecap="round"
-        opacity="0.62"
       />
 
       <circle
-        cx="112"
-        cy="88"
-        r="31"
-        fill="var(--background)"
-        stroke="var(--border)"
-        strokeWidth="2.5"
-        className="drop-shadow-[0_14px_24px_rgb(0_0_0/0.18)]"
+        cx="111"
+        cy="88.5"
+        r="32.5"
+        fill="var(--foreground)"
+        opacity="0.035"
       />
-      <circle cx="107" cy="83" r="12" fill="var(--primary)" opacity="0.12" />
-      <circle cx="107" cy="83" r="11" stroke="var(--primary)" strokeWidth="4" />
-      <path
-        d="m115.5 91.5 11 11"
-        stroke="var(--primary)"
-        strokeWidth="4"
-        strokeLinecap="round"
+      <circle
+        cx="111"
+        cy="86"
+        r="31.5"
+        fill="var(--card)"
+        stroke="color-mix(in srgb, var(--muted-foreground) 26%, transparent)"
+        strokeWidth="2.25"
+        className="drop-shadow-[0_14px_24px_rgb(0_0_0/0.14)]"
+      />
+      <circle
+        cx="111"
+        cy="86"
+        r="27.5"
+        stroke="color-mix(in srgb, var(--primary) 8%, transparent)"
       />
 
-      <circle cx="137" cy="48" r="2.5" fill="var(--primary)" opacity="0.8" />
-      <circle cx="28" cy="21" r="2" fill="var(--primary)" opacity="0.45" />
-      <path
-        d="M145 69h7M148.5 65.5v7"
+      <circle
+        cx="105.5"
+        cy="80.5"
+        r="11.75"
+        fill="color-mix(in srgb, var(--primary) 9%, transparent)"
         stroke="var(--primary)"
-        strokeWidth="2"
+        strokeWidth="4.5"
+      />
+      <path
+        d="m114.25 89.25 13 13"
+        stroke="var(--primary)"
+        strokeWidth="4.75"
         strokeLinecap="round"
-        opacity="0.55"
       />
     </svg>
   );

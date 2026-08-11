@@ -4,6 +4,10 @@ import bs58check from "bs58check";
 import sodium from "libsodium-wrappers-sumo";
 
 import {
+  detectedCryptoConcurrency,
+  mapWithConcurrency,
+} from "@/features/vault/bounded-async";
+import {
   decodeBootstrap,
   decodeManifest,
   decodeShareDirectory,
@@ -139,7 +143,10 @@ let identity: IdentitySecrets | null = null;
 const nodeKeys = new Map<string, CryptoKey>();
 const encryptionSessions = new Map<string, EncryptionSession>();
 const decryptionSessions = new Map<string, DecryptionSession>();
-const SHARE_SIDECAR_CRYPTO_CONCURRENCY = 32;
+const SHARE_WRAPPER_CRYPTO_CONCURRENCY = detectedCryptoConcurrency(16);
+const SHARE_HASH_CRYPTO_CONCURRENCY = detectedCryptoConcurrency(16);
+const SHARE_ENVELOPE_CRYPTO_CONCURRENCY = detectedCryptoConcurrency(8, 2);
+const SHARE_SIDECAR_CRYPTO_CONCURRENCY = SHARE_WRAPPER_CRYPTO_CONCURRENCY;
 const hpkeSuite = new CipherSuite({
   kem: new DhkemX25519HkdfSha256(),
   kdf: new HkdfSha256(),
@@ -1301,7 +1308,11 @@ async function openAndVerifyPlan(plan: VaultDownloadPlan): Promise<OpenedPlan> {
         "The wrapper commitment count is invalid.",
       );
     }
-    const computedWrapperHashes = await Promise.all(wrapperBytes.map(sha256));
+    const computedWrapperHashes = await mapWithConcurrency(
+      wrapperBytes,
+      SHARE_HASH_CRYPTO_CONCURRENCY,
+      sha256,
+    );
     for (let index = 0; index < wrappers.length; index += 1) {
       const wrapper = wrappers[index];
       if (
@@ -1487,10 +1498,16 @@ async function buildShareMaterial(input: {
       input.epoch,
       epochKey,
     );
-    const wrapperHashes = await Promise.all(wrappers.map(sha256));
+    const wrapperHashes = await mapWithConcurrency(
+      wrappers,
+      SHARE_HASH_CRYPTO_CONCURRENCY,
+      sha256,
+    );
     const wrapperRoot = await wrapperSetRoot(wrapperHashes);
-    const envelopes = await Promise.all(
-      input.recipients.map((recipient) =>
+    const envelopes = await mapWithConcurrency(
+      input.recipients,
+      SHARE_ENVELOPE_CRYPTO_CONCURRENCY,
+      (recipient) =>
         createHpkeEnvelope({
           shareId: input.shareId,
           rootNodeId: input.rootNodeId,
@@ -1503,7 +1520,6 @@ async function buildShareMaterial(input: {
           wrapperCount: wrapperHashes.length,
           epochMaterial,
         }),
-      ),
     );
     const ownerCiphertext = await encryptDerivedRecord(
       root,
@@ -1535,49 +1551,46 @@ async function createSubtreeShareWrappers(
   const ordered = [...nodes].sort((left, right) =>
     left.nodeId.localeCompare(right.nodeId),
   );
-  const wrappersByNode = await Promise.all(
-    ordered.map(async (node) => {
-      const nodeKey = nodeKeys.get(node.nodeId);
-      if (!nodeKey) {
-        throw vaultError(
-          "NODE_KEY_REQUIRED",
-          `Unlock every node in the shared subtree first:${node.nodeId}`,
-        );
-      }
-      const generationId = node.generationId
-        ? fromBase64Url(node.generationId)
-        : new Uint8Array(16);
-      if (generationId.length !== 16) {
-        throw new Error("A share generation ID is invalid.");
-      }
-      const context = { shareId, epoch, epochKey };
-      const metadataWrapper = createShareWrapperFromNode(
+  const tasks: Array<{
+    node: VaultShareNodeSnapshot;
+    nodeKey: CryptoKey;
+    generationId: Uint8Array;
+    kind: 3 | 4;
+  }> = [];
+  for (const node of ordered) {
+    const nodeKey = nodeKeys.get(node.nodeId);
+    if (!nodeKey) {
+      throw vaultError(
+        "NODE_KEY_REQUIRED",
+        `Unlock every node in the shared subtree first:${node.nodeId}`,
+      );
+    }
+    const generationId = node.generationId
+      ? fromBase64Url(node.generationId)
+      : new Uint8Array(16);
+    if (generationId.length !== 16) {
+      throw new Error("A share generation ID is invalid.");
+    }
+    tasks.push({ node, nodeKey, generationId, kind: 4 });
+    if (node.entryType === "file") {
+      tasks.push({ node, nodeKey, generationId, kind: 3 });
+    }
+  }
+  const context = { shareId, epoch, epochKey };
+  return mapWithConcurrency(
+    tasks,
+    SHARE_WRAPPER_CRYPTO_CONCURRENCY,
+    ({ node, nodeKey, generationId, kind }) =>
+      createShareWrapperFromNode(
         node.nodeId,
         node.recordVersion,
         node.generationNumber,
         generationId,
         nodeKey,
         context,
-        4,
-      );
-      if (node.entryType !== "file") {
-        return [await metadataWrapper];
-      }
-      return Promise.all([
-        metadataWrapper,
-        createShareWrapperFromNode(
-          node.nodeId,
-          node.recordVersion,
-          node.generationNumber,
-          generationId,
-          nodeKey,
-          context,
-          3,
-        ),
-      ]);
-    }),
+        kind,
+      ),
   );
-  return wrappersByNode.flat();
 }
 
 async function createShareWrapperFromNode(
@@ -1824,7 +1837,11 @@ async function openSharedKeys(
     }
   }
   const seenWrapperHashes = new Set<string>();
-  const receivedWrapperHashes = await Promise.all(wrapperBytes.map(sha256));
+  const receivedWrapperHashes = await mapWithConcurrency(
+    wrapperBytes,
+    SHARE_HASH_CRYPTO_CONCURRENCY,
+    sha256,
+  );
   for (let index = 0; index < receivedWrapperHashes.length; index += 1) {
     const hashBytes = receivedWrapperHashes[index];
     const hash = toBase64Url(hashBytes);
@@ -2342,25 +2359,4 @@ function normalizeError(error: unknown): { message: string; code?: string } {
     };
   }
   return { message: "Vault operation failed." };
-}
-
-async function mapWithConcurrency<Input, Output>(
-  values: readonly Input[],
-  concurrency: number,
-  transform: (value: Input, index: number) => Promise<Output>,
-): Promise<Output[]> {
-  const results = new Array<Output>(values.length);
-  let nextIndex = 0;
-  const workers = Array.from(
-    { length: Math.min(concurrency, values.length) },
-    async () => {
-      while (nextIndex < values.length) {
-        const index = nextIndex;
-        nextIndex += 1;
-        results[index] = await transform(values[index], index);
-      }
-    },
-  );
-  await Promise.all(workers);
-  return results;
 }

@@ -2403,7 +2403,7 @@ pub async fn create_share(
         None,
     )?;
     let snapshot_hash = snapshot_hash(&snapshot);
-    let share_hash = share_record_hash(&snapshot_hash, &wrappers, &envelopes, 1);
+    let share_hash = share_record_hash(&snapshot_hash, &wrapper_commitment, &envelopes, 1);
     transaction
         .execute(
             "
@@ -2894,7 +2894,7 @@ pub async fn publish_epoch_rotation(
     insert_share_envelopes(&transaction, &envelopes).await?;
     let cutoff_hash = share_record_hash(
         &requested_snapshot_hash,
-        &wrappers,
+        &wrapper_commitment,
         &envelopes,
         pending_epoch,
     );
@@ -3423,17 +3423,17 @@ fn snapshot_hash(snapshot: &[SnapshotNode]) -> [u8; 32] {
 
 fn share_record_hash(
     snapshot_hash: &[u8; 32],
-    wrappers: &[ShareWrapperMaterial],
+    wrapper_commitment: &WrapperSetCommitment,
     envelopes: &[ShareEnvelopeMaterial],
     epoch: i64,
 ) -> [u8; 32] {
     let mut input = b"aeralyth/share-record/v1".to_vec();
     input.extend_from_slice(&epoch.to_be_bytes());
     input.extend_from_slice(snapshot_hash);
-    let mut wrapper_hashes = wrappers.iter().map(|value| value.hash).collect::<Vec<_>>();
-    wrapper_hashes.sort_unstable();
-    for hash in wrapper_hashes {
-        input.extend_from_slice(&hash);
+    // Commitment proofs are emitted in canonical wrapper-hash order. Reuse that order instead
+    // of cloning and sorting the same set again for the share-record commitment.
+    for proof in &wrapper_commitment.proofs {
+        input.extend_from_slice(&proof.wrapper_hash);
     }
     let mut envelope_hashes = envelopes.iter().map(|value| value.hash).collect::<Vec<_>>();
     envelope_hashes.sort_unstable();
@@ -3653,7 +3653,9 @@ async fn insert_share_wrappers(
     wrappers: &[ShareWrapperMaterial],
     commitment: Option<(&WrapperSetCommitment, &'static str)>,
 ) -> Result<()> {
-    const INSERT_BATCH_SIZE: usize = 256;
+    if wrappers.is_empty() {
+        return Ok(());
+    }
 
     let proofs = commitment.map(|(value, _)| {
         value
@@ -3664,91 +3666,89 @@ async fn insert_share_wrappers(
     });
     let commitment_source = commitment.map(|(_, source)| source).unwrap_or("bootstrap");
 
-    for batch in wrappers.chunks(INSERT_BATCH_SIZE) {
-        let mut wrapper_ids = Vec::with_capacity(batch.len());
-        let mut share_ids = Vec::with_capacity(batch.len());
-        let mut epochs = Vec::with_capacity(batch.len());
-        let mut node_ids = Vec::with_capacity(batch.len());
-        let mut generation_ids = Vec::with_capacity(batch.len());
-        let mut wrapper_kinds = Vec::with_capacity(batch.len());
-        let mut record_versions = Vec::with_capacity(batch.len());
-        let mut canonical_records = Vec::with_capacity(batch.len());
-        let mut wrapper_hashes = Vec::with_capacity(batch.len());
-        let mut leaf_indices = Vec::with_capacity(batch.len());
-        let mut merkle_proofs = Vec::with_capacity(batch.len());
+    let mut wrapper_ids = Vec::with_capacity(wrappers.len());
+    let mut share_ids = Vec::with_capacity(wrappers.len());
+    let mut epochs = Vec::with_capacity(wrappers.len());
+    let mut node_ids = Vec::with_capacity(wrappers.len());
+    let mut generation_ids = Vec::with_capacity(wrappers.len());
+    let mut wrapper_kinds = Vec::with_capacity(wrappers.len());
+    let mut record_versions = Vec::with_capacity(wrappers.len());
+    let mut canonical_records = Vec::with_capacity(wrappers.len());
+    let mut wrapper_hashes = Vec::with_capacity(wrappers.len());
+    let mut leaf_indices = Vec::with_capacity(wrappers.len());
+    let mut merkle_proofs = Vec::with_capacity(wrappers.len());
 
-        for wrapper in batch {
-            let epoch = i64::try_from(wrapper.record.epoch.unwrap_or_default())
-                .map_err(|_| error::ErrorBadRequest("share epoch is invalid"))?;
-            let (leaf_index, merkle_proof) = if let Some(proofs) = proofs.as_ref() {
-                let Some((leaf_index, proof)) = proofs.get(&wrapper.hash) else {
-                    return Err(error::ErrorInternalServerError(
-                        "share wrapper proof is missing",
-                    ));
-                };
-                (Some(*leaf_index), Some(proof.clone()))
-            } else {
-                (None, None)
+    for wrapper in wrappers {
+        let epoch = i64::try_from(wrapper.record.epoch.unwrap_or_default())
+            .map_err(|_| error::ErrorBadRequest("share epoch is invalid"))?;
+        let (leaf_index, merkle_proof) = if let Some(proofs) = proofs.as_ref() {
+            let Some((leaf_index, proof)) = proofs.get(&wrapper.hash) else {
+                return Err(error::ErrorInternalServerError(
+                    "share wrapper proof is missing",
+                ));
             };
+            (Some(*leaf_index), Some(proof.clone()))
+        } else {
+            (None, None)
+        };
 
-            wrapper_ids.push(wrapper.record.wrapper_id.to_vec());
-            share_ids.push(wrapper.record.share_id.clone().unwrap_or_default());
-            epochs.push(epoch);
-            node_ids.push(wrapper.record.node_id.clone());
-            generation_ids.push(wrapper.record.generation_id.map(|value| value.to_vec()));
-            wrapper_kinds.push(if wrapper.record.kind == 3 {
-                "generation_dek".to_owned()
-            } else {
-                "metadata".to_owned()
-            });
-            record_versions.push(wrapper.record.record_version as i64);
-            canonical_records.push(wrapper.canonical.clone());
-            wrapper_hashes.push(wrapper.hash.to_vec());
-            leaf_indices.push(leaf_index);
-            merkle_proofs.push(merkle_proof);
-        }
-
-        transaction
-            .execute(
-                "
-                    INSERT INTO vault_share_wrappers (
-                      wrapper_id, share_id, epoch, node_id, generation_id,
-                      wrapper_kind, record_version, canonical_cbor, wrapper_hash,
-                      merkle_leaf_index, merkle_proof, commitment_source
-                    )
-                    SELECT batch.wrapper_id, batch.share_id, batch.epoch,
-                           batch.node_id, batch.generation_id, batch.wrapper_kind,
-                           batch.record_version, batch.canonical_cbor,
-                           batch.wrapper_hash, batch.merkle_leaf_index,
-                           batch.merkle_proof, $12
-                    FROM unnest(
-                      $1::bytea[], $2::text[], $3::bigint[], $4::text[],
-                      $5::bytea[], $6::text[], $7::bigint[], $8::bytea[],
-                      $9::bytea[], $10::integer[], $11::bytea[]
-                    ) AS batch(
-                      wrapper_id, share_id, epoch, node_id, generation_id,
-                      wrapper_kind, record_version, canonical_cbor, wrapper_hash,
-                      merkle_leaf_index, merkle_proof
-                    )
-                ",
-                &[
-                    &wrapper_ids,
-                    &share_ids,
-                    &epochs,
-                    &node_ids,
-                    &generation_ids,
-                    &wrapper_kinds,
-                    &record_versions,
-                    &canonical_records,
-                    &wrapper_hashes,
-                    &leaf_indices,
-                    &merkle_proofs,
-                    &commitment_source,
-                ],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+        wrapper_ids.push(wrapper.record.wrapper_id.to_vec());
+        share_ids.push(wrapper.record.share_id.clone().unwrap_or_default());
+        epochs.push(epoch);
+        node_ids.push(wrapper.record.node_id.clone());
+        generation_ids.push(wrapper.record.generation_id.map(|value| value.to_vec()));
+        wrapper_kinds.push(if wrapper.record.kind == 3 {
+            "generation_dek".to_owned()
+        } else {
+            "metadata".to_owned()
+        });
+        record_versions.push(wrapper.record.record_version as i64);
+        canonical_records.push(wrapper.canonical.clone());
+        wrapper_hashes.push(wrapper.hash.to_vec());
+        leaf_indices.push(leaf_index);
+        merkle_proofs.push(merkle_proof);
     }
+
+    transaction
+        .execute(
+            "
+            INSERT INTO vault_share_wrappers (
+              wrapper_id, share_id, epoch, node_id, generation_id,
+              wrapper_kind, record_version, canonical_cbor, wrapper_hash,
+              merkle_leaf_index, merkle_proof, commitment_source
+            )
+            SELECT batch.wrapper_id, batch.share_id, batch.epoch,
+                   batch.node_id, batch.generation_id, batch.wrapper_kind,
+                   batch.record_version, batch.canonical_cbor,
+                   batch.wrapper_hash, batch.merkle_leaf_index,
+                   batch.merkle_proof, $12
+            FROM unnest(
+              $1::bytea[], $2::text[], $3::bigint[], $4::text[],
+              $5::bytea[], $6::text[], $7::bigint[], $8::bytea[],
+              $9::bytea[], $10::integer[], $11::bytea[]
+            ) AS batch(
+              wrapper_id, share_id, epoch, node_id, generation_id,
+              wrapper_kind, record_version, canonical_cbor, wrapper_hash,
+              merkle_leaf_index, merkle_proof
+            )
+            ",
+            &[
+                &wrapper_ids,
+                &share_ids,
+                &epochs,
+                &node_ids,
+                &generation_ids,
+                &wrapper_kinds,
+                &record_versions,
+                &canonical_records,
+                &wrapper_hashes,
+                &leaf_indices,
+                &merkle_proofs,
+                &commitment_source,
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     Ok(())
 }
 
@@ -3756,41 +3756,98 @@ async fn insert_share_envelopes(
     transaction: &tokio_postgres::Transaction<'_>,
     envelopes: &[ShareEnvelopeMaterial],
 ) -> Result<()> {
+    if envelopes.is_empty() {
+        return Ok(());
+    }
+
+    let mut envelope_ids = Vec::with_capacity(envelopes.len());
+    let mut share_ids = Vec::with_capacity(envelopes.len());
+    let mut epochs = Vec::with_capacity(envelopes.len());
+    let mut sender_ids = Vec::with_capacity(envelopes.len());
+    let mut sender_key_versions = Vec::with_capacity(envelopes.len());
+    let mut recipient_ids = Vec::with_capacity(envelopes.len());
+    let mut recipient_key_versions = Vec::with_capacity(envelopes.len());
+    let mut node_ids = Vec::with_capacity(envelopes.len());
+    let mut generation_scopes = Vec::with_capacity(envelopes.len());
+    let mut record_versions = Vec::with_capacity(envelopes.len());
+    let mut previous_record_hashes = Vec::with_capacity(envelopes.len());
+    let mut encapsulated_keys = Vec::with_capacity(envelopes.len());
+    let mut ciphertexts = Vec::with_capacity(envelopes.len());
+    let mut canonical_records = Vec::with_capacity(envelopes.len());
+    let mut signatures = Vec::with_capacity(envelopes.len());
+    let mut envelope_hashes = Vec::with_capacity(envelopes.len());
+
     for envelope in envelopes {
         let record = &envelope.record;
-        transaction
-            .execute(
-                "
-                    INSERT INTO vault_share_envelopes (
-                      envelope_id, share_id, epoch, sender_id,
-                      sender_key_version, recipient_id, recipient_key_version,
-                      node_id, permissions, generation_scope, record_version,
-                      previous_record_hash, encapsulated_key, ciphertext,
-                      canonical_cbor, signature, envelope_hash
-                    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'read', $9, $10, $11, $12, $13, $14, $15, $16)
-                ",
-                &[
-                    &record.envelope_id.as_slice(),
-                    &record.share_id,
-                    &(record.epoch as i64),
-                    &record.sender_id,
-                    &(record.sender_key_version as i64),
-                    &record.recipient_id,
-                    &(record.recipient_key_version as i64),
-                    &record.node_id,
-                    &record.generation_scope.map(|value| value as i64),
-                    &(record.record_version as i64),
-                    &record.previous_record_hash.map(|value| value.to_vec()),
-                    &record.encapsulated_key.as_slice(),
-                    &record.ciphertext,
-                    &envelope.canonical,
-                    &envelope.signature,
-                    &envelope.hash.as_slice(),
-                ],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+        envelope_ids.push(record.envelope_id.to_vec());
+        share_ids.push(record.share_id.clone());
+        epochs.push(record.epoch as i64);
+        sender_ids.push(record.sender_id.clone());
+        sender_key_versions.push(record.sender_key_version as i64);
+        recipient_ids.push(record.recipient_id.clone());
+        recipient_key_versions.push(record.recipient_key_version as i64);
+        node_ids.push(record.node_id.clone());
+        generation_scopes.push(record.generation_scope.map(|value| value as i64));
+        record_versions.push(record.record_version as i64);
+        previous_record_hashes.push(record.previous_record_hash.map(|value| value.to_vec()));
+        encapsulated_keys.push(record.encapsulated_key.to_vec());
+        ciphertexts.push(record.ciphertext.clone());
+        canonical_records.push(envelope.canonical.clone());
+        signatures.push(envelope.signature.clone());
+        envelope_hashes.push(envelope.hash.to_vec());
     }
+
+    transaction
+        .execute(
+            "
+            INSERT INTO vault_share_envelopes (
+              envelope_id, share_id, epoch, sender_id,
+              sender_key_version, recipient_id, recipient_key_version,
+              node_id, permissions, generation_scope, record_version,
+              previous_record_hash, encapsulated_key, ciphertext,
+              canonical_cbor, signature, envelope_hash
+            )
+            SELECT batch.envelope_id, batch.share_id, batch.epoch,
+                   batch.sender_id, batch.sender_key_version,
+                   batch.recipient_id, batch.recipient_key_version,
+                   batch.node_id, 'read', batch.generation_scope,
+                   batch.record_version, batch.previous_record_hash,
+                   batch.encapsulated_key, batch.ciphertext,
+                   batch.canonical_cbor, batch.signature, batch.envelope_hash
+            FROM unnest(
+              $1::bytea[], $2::text[], $3::bigint[], $4::text[],
+              $5::bigint[], $6::text[], $7::bigint[], $8::text[],
+              $9::bigint[], $10::bigint[], $11::bytea[], $12::bytea[],
+              $13::bytea[], $14::bytea[], $15::bytea[], $16::bytea[]
+            ) AS batch(
+              envelope_id, share_id, epoch, sender_id,
+              sender_key_version, recipient_id, recipient_key_version,
+              node_id, generation_scope, record_version,
+              previous_record_hash, encapsulated_key, ciphertext,
+              canonical_cbor, signature, envelope_hash
+            )
+            ",
+            &[
+                &envelope_ids,
+                &share_ids,
+                &epochs,
+                &sender_ids,
+                &sender_key_versions,
+                &recipient_ids,
+                &recipient_key_versions,
+                &node_ids,
+                &generation_scopes,
+                &record_versions,
+                &previous_record_hashes,
+                &encapsulated_keys,
+                &ciphertexts,
+                &canonical_records,
+                &signatures,
+                &envelope_hashes,
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     Ok(())
 }
 
@@ -5453,6 +5510,77 @@ mod tests {
         assert!(SHARED_DOWNLOAD_AUTHORIZATION_QUERY.contains("shares.status = 'active'"));
     }
 
+    #[test]
+    fn share_record_hash_reuses_the_commitments_canonical_wrapper_order() {
+        let wrapper_hashes = [[3_u8; 32], [1_u8; 32], [2_u8; 32]];
+        let commitment = wrapper_set_commitment(&wrapper_hashes).unwrap();
+        let snapshot = [9_u8; 32];
+        let actual = share_record_hash(&snapshot, &commitment, &[], 7);
+
+        let mut expected_input = b"aeralyth/share-record/v1".to_vec();
+        expected_input.extend_from_slice(&7_i64.to_be_bytes());
+        expected_input.extend_from_slice(&snapshot);
+        let mut ordered = wrapper_hashes;
+        ordered.sort_unstable();
+        for hash in ordered {
+            expected_input.extend_from_slice(&hash);
+        }
+
+        assert_eq!(actual, sha256(&expected_input));
+        assert!(
+            commitment
+                .proofs
+                .windows(2)
+                .all(|pair| pair[0].wrapper_hash < pair[1].wrapper_hash)
+        );
+    }
+
+    #[test]
+    fn protocol_v2_envelopes_reuse_one_precomputed_wrapper_commitment() {
+        let commitment = wrapper_set_commitment(&[[4_u8; 32], [5_u8; 32]]).unwrap();
+        for index in 0..128 {
+            let recipient = format!("usr_recipient_{index}");
+            let envelope = envelope_for_test(&recipient, &commitment);
+            assert!(
+                validate_envelope(
+                    &envelope,
+                    &commitment,
+                    "shr_test",
+                    2,
+                    "usr_sender",
+                    3,
+                    &recipient,
+                    4,
+                    "fil_root",
+                    1,
+                    None,
+                )
+                .is_ok()
+            );
+        }
+
+        let mut legacy = envelope_for_test("usr_legacy", &commitment);
+        legacy.record.format_version = FORMAT_VERSION;
+        legacy.record.wrapper_hashes = vec![[4_u8; 32], [5_u8; 32]];
+        legacy.record.wrapper_set_root = None;
+        assert!(
+            validate_envelope(
+                &legacy,
+                &commitment,
+                "shr_test",
+                2,
+                "usr_sender",
+                3,
+                "usr_legacy",
+                4,
+                "fil_root",
+                1,
+                None,
+            )
+            .is_err()
+        );
+    }
+
     fn bootstrap_for_cas(
         record_version: u64,
         previous_record_hash: Option<[u8; 32]>,
@@ -5484,6 +5612,39 @@ mod tests {
             generation_id: node.generation_id.clone(),
             record_version: node.record_version,
             record_hash: node.record_hash.clone(),
+        }
+    }
+
+    fn envelope_for_test(
+        recipient_id: &str,
+        commitment: &WrapperSetCommitment,
+    ) -> ShareEnvelopeMaterial {
+        ShareEnvelopeMaterial {
+            canonical: Vec::new(),
+            signature: Vec::new(),
+            record: crate::e2ee::ShareEnvelopeRecord {
+                format_version: SHARE_ENVELOPE_VERSION,
+                suite_id: 1,
+                envelope_id: [1_u8; 16],
+                share_id: "shr_test".to_owned(),
+                epoch: 2,
+                sender_id: "usr_sender".to_owned(),
+                sender_key_version: 3,
+                recipient_id: recipient_id.to_owned(),
+                recipient_key_version: 4,
+                node_id: "fil_root".to_owned(),
+                permissions: 1,
+                generation_scope: None,
+                record_version: 1,
+                previous_record_hash: None,
+                encapsulated_key: [2_u8; 32],
+                ciphertext: vec![3_u8; 48],
+                aad_schema_id: 1,
+                wrapper_hashes: Vec::new(),
+                wrapper_set_root: Some(commitment.root),
+                wrapper_count: commitment.count as u64,
+            },
+            hash: [6_u8; 32],
         }
     }
 }

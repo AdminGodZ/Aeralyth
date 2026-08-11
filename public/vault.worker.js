@@ -6409,6 +6409,49 @@ B.prototype.to_Uint8Array = function() {
 }, t.add = o, t.base64_variants = m, t.compare = l, t.from_base64 = x, t.from_hex = b, t.from_string = v, t.increment = p, t.is_zero = h, t.memcmp = i, t.memzero = y, t.output_formats = T, t.pad = u, t.unpad = d, t.ready = s, t.symbols = c, t.to_base64 = E, t.to_hex = f, t.to_string = g;
 var libsodium_wrappers_default = t;
 
+// src/features/vault/bounded-async.ts
+var NO_FAILURE = /* @__PURE__ */ Symbol("no failure");
+function concurrencyForHardware(hardwareConcurrency, maximum, divisor = 1, fallback = 4) {
+  if (!Number.isSafeInteger(maximum) || maximum < 1 || !Number.isSafeInteger(divisor) || divisor < 1 || !Number.isSafeInteger(fallback) || fallback < 1) {
+    throw new Error("Invalid bounded-concurrency configuration.");
+  }
+  const available = typeof hardwareConcurrency === "number" && Number.isFinite(hardwareConcurrency) && hardwareConcurrency >= 1 ? Math.floor(hardwareConcurrency) : fallback;
+  return Math.max(1, Math.min(maximum, Math.ceil(available / divisor)));
+}
+function detectedCryptoConcurrency(maximum, divisor = 1) {
+  const hardwareConcurrency = typeof navigator === "undefined" ? void 0 : navigator.hardwareConcurrency;
+  return concurrencyForHardware(hardwareConcurrency, maximum, divisor);
+}
+async function mapWithConcurrency(values, concurrency, transform) {
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1) {
+    throw new Error("Concurrency must be a positive integer.");
+  }
+  if (values.length === 0) return [];
+  const results = new Array(values.length);
+  let nextIndex = 0;
+  let stopped = false;
+  let failure = NO_FAILURE;
+  const workers = Array.from(
+    { length: Math.min(concurrency, values.length) },
+    async () => {
+      while (!stopped) {
+        const index = nextIndex;
+        if (index >= values.length) return;
+        nextIndex += 1;
+        try {
+          results[index] = await transform(values[index], index);
+        } catch (error) {
+          if (failure === NO_FAILURE) failure = error;
+          stopped = true;
+        }
+      }
+    }
+  );
+  await Promise.all(workers);
+  if (failure !== NO_FAILURE) throw failure;
+  return results;
+}
+
 // src/features/vault/protocol.ts
 var VAULT_FORMAT_VERSION = 1;
 var VAULT_SHARE_ENVELOPE_VERSION = 2;
@@ -6416,6 +6459,7 @@ var VAULT_SHARE_DIRECTORY_VERSION = 1;
 var VAULT_SUITE_ID = 1;
 var VAULT_AAD_SCHEMA_ID = 1;
 var VAULT_CRYPTO_CHUNK_BYTES = 4 * 1024 * 1024;
+var PROTOCOL_HASH_CONCURRENCY = detectedCryptoConcurrency(16);
 var ARGON2ID_PROFILE = Object.freeze({
   algorithm: "argon2id13",
   operations: 3,
@@ -6611,8 +6655,10 @@ async function merkleRootFromLeaves(leaves) {
   }
   let level = leaves.map((leaf) => Uint8Array.from(leaf));
   while (level.length > 1) {
-    const next = await Promise.all(
-      Array.from({ length: Math.ceil(level.length / 2) }, (_2, pairIndex) => {
+    const next = await mapWithConcurrency(
+      Array.from({ length: Math.ceil(level.length / 2) }, (_2, index) => index),
+      PROTOCOL_HASH_CONCURRENCY,
+      async (pairIndex) => {
         const index = pairIndex * 2;
         if (index + 1 === level.length) {
           return level[index];
@@ -6620,7 +6666,7 @@ async function merkleRootFromLeaves(leaves) {
         return sha2564(
           concatBytes(Uint8Array.of(1), level[index], level[index + 1])
         );
-      })
+      }
     );
     level = next;
   }
@@ -6642,18 +6688,21 @@ async function wrapperSetRoot(wrapperHashes) {
       throw new Error("Duplicate share wrapper hash.");
     }
   }
-  let level = await Promise.all(
-    ordered.map((hash) => sha2564(concatBytes(WRAPPER_LEAF_DOMAIN, hash)))
+  let level = await mapWithConcurrency(
+    ordered,
+    PROTOCOL_HASH_CONCURRENCY,
+    (hash) => sha2564(concatBytes(WRAPPER_LEAF_DOMAIN, hash))
   );
   while (level.length > 1) {
-    const next = [];
-    for (let index = 0; index < level.length; index += 2) {
-      const right = level[index + 1] ?? level[index];
-      next.push(
-        await sha2564(concatBytes(WRAPPER_BRANCH_DOMAIN, level[index], right))
-      );
-    }
-    level = next;
+    level = await mapWithConcurrency(
+      Array.from({ length: Math.ceil(level.length / 2) }, (_2, index) => index),
+      PROTOCOL_HASH_CONCURRENCY,
+      (pairIndex) => {
+        const index = pairIndex * 2;
+        const right = level[index + 1] ?? level[index];
+        return sha2564(concatBytes(WRAPPER_BRANCH_DOMAIN, level[index], right));
+      }
+    );
   }
   return sha2564(
     concatBytes(
@@ -7174,7 +7223,10 @@ var identity = null;
 var nodeKeys = /* @__PURE__ */ new Map();
 var encryptionSessions = /* @__PURE__ */ new Map();
 var decryptionSessions = /* @__PURE__ */ new Map();
-var SHARE_SIDECAR_CRYPTO_CONCURRENCY = 32;
+var SHARE_WRAPPER_CRYPTO_CONCURRENCY = detectedCryptoConcurrency(16);
+var SHARE_HASH_CRYPTO_CONCURRENCY = detectedCryptoConcurrency(16);
+var SHARE_ENVELOPE_CRYPTO_CONCURRENCY = detectedCryptoConcurrency(8, 2);
+var SHARE_SIDECAR_CRYPTO_CONCURRENCY = SHARE_WRAPPER_CRYPTO_CONCURRENCY;
 var hpkeSuite = new CipherSuite({
   kem: new DhkemX25519HkdfSha2562(),
   kdf: new HkdfSha256(),
@@ -8204,7 +8256,11 @@ async function openAndVerifyPlan(plan) {
         "The wrapper commitment count is invalid."
       );
     }
-    const computedWrapperHashes = await Promise.all(wrapperBytes.map(sha2564));
+    const computedWrapperHashes = await mapWithConcurrency(
+      wrapperBytes,
+      SHARE_HASH_CRYPTO_CONCURRENCY,
+      sha2564
+    );
     for (let index = 0; index < wrappers.length; index += 1) {
       const wrapper = wrappers[index];
       if (wrapper.nodeId !== plan.nodeId || wrapper.recordVersion !== plan.recordVersion || !equalBytes(wrapper.wrapperId, bootstrap.wrapperIds[index]) || !equalBytes(
@@ -8349,23 +8405,27 @@ async function buildShareMaterial(input) {
       input.epoch,
       epochKey
     );
-    const wrapperHashes = await Promise.all(wrappers.map(sha2564));
+    const wrapperHashes = await mapWithConcurrency(
+      wrappers,
+      SHARE_HASH_CRYPTO_CONCURRENCY,
+      sha2564
+    );
     const wrapperRoot = await wrapperSetRoot(wrapperHashes);
-    const envelopes = await Promise.all(
-      input.recipients.map(
-        (recipient) => createHpkeEnvelope({
-          shareId: input.shareId,
-          rootNodeId: input.rootNodeId,
-          senderId: input.senderId,
-          epoch: input.epoch,
-          recordVersion: input.recordVersion,
-          previousRecordHash: input.previousRecordHash,
-          recipient,
-          wrapperSetRoot: wrapperRoot,
-          wrapperCount: wrapperHashes.length,
-          epochMaterial
-        })
-      )
+    const envelopes = await mapWithConcurrency(
+      input.recipients,
+      SHARE_ENVELOPE_CRYPTO_CONCURRENCY,
+      (recipient) => createHpkeEnvelope({
+        shareId: input.shareId,
+        rootNodeId: input.rootNodeId,
+        senderId: input.senderId,
+        epoch: input.epoch,
+        recordVersion: input.recordVersion,
+        previousRecordHash: input.previousRecordHash,
+        recipient,
+        wrapperSetRoot: wrapperRoot,
+        wrapperCount: wrapperHashes.length,
+        epochMaterial
+      })
     );
     const ownerCiphertext = await encryptDerivedRecord(
       root,
@@ -8391,47 +8451,38 @@ async function createSubtreeShareWrappers(nodes, shareId, epoch, epochKey) {
   const ordered = [...nodes].sort(
     (left, right) => left.nodeId.localeCompare(right.nodeId)
   );
-  const wrappersByNode = await Promise.all(
-    ordered.map(async (node) => {
-      const nodeKey = nodeKeys.get(node.nodeId);
-      if (!nodeKey) {
-        throw vaultError(
-          "NODE_KEY_REQUIRED",
-          `Unlock every node in the shared subtree first:${node.nodeId}`
-        );
-      }
-      const generationId = node.generationId ? fromBase64Url(node.generationId) : new Uint8Array(16);
-      if (generationId.length !== 16) {
-        throw new Error("A share generation ID is invalid.");
-      }
-      const context = { shareId, epoch, epochKey };
-      const metadataWrapper = createShareWrapperFromNode(
-        node.nodeId,
-        node.recordVersion,
-        node.generationNumber,
-        generationId,
-        nodeKey,
-        context,
-        4
+  const tasks = [];
+  for (const node of ordered) {
+    const nodeKey = nodeKeys.get(node.nodeId);
+    if (!nodeKey) {
+      throw vaultError(
+        "NODE_KEY_REQUIRED",
+        `Unlock every node in the shared subtree first:${node.nodeId}`
       );
-      if (node.entryType !== "file") {
-        return [await metadataWrapper];
-      }
-      return Promise.all([
-        metadataWrapper,
-        createShareWrapperFromNode(
-          node.nodeId,
-          node.recordVersion,
-          node.generationNumber,
-          generationId,
-          nodeKey,
-          context,
-          3
-        )
-      ]);
-    })
+    }
+    const generationId = node.generationId ? fromBase64Url(node.generationId) : new Uint8Array(16);
+    if (generationId.length !== 16) {
+      throw new Error("A share generation ID is invalid.");
+    }
+    tasks.push({ node, nodeKey, generationId, kind: 4 });
+    if (node.entryType === "file") {
+      tasks.push({ node, nodeKey, generationId, kind: 3 });
+    }
+  }
+  const context = { shareId, epoch, epochKey };
+  return mapWithConcurrency(
+    tasks,
+    SHARE_WRAPPER_CRYPTO_CONCURRENCY,
+    ({ node, nodeKey, generationId, kind }) => createShareWrapperFromNode(
+      node.nodeId,
+      node.recordVersion,
+      node.generationNumber,
+      generationId,
+      nodeKey,
+      context,
+      kind
+    )
   );
-  return wrappersByNode.flat();
 }
 async function createShareWrapperFromNode(nodeId, recordVersion, generationNumber, generationId, nodeKey, context, kind) {
   const keyMaterial = await deriveKeyMaterial(
@@ -8608,7 +8659,11 @@ async function openSharedKeys(plan, wrappers, wrapperBytes) {
     }
   }
   const seenWrapperHashes = /* @__PURE__ */ new Set();
-  const receivedWrapperHashes = await Promise.all(wrapperBytes.map(sha2564));
+  const receivedWrapperHashes = await mapWithConcurrency(
+    wrapperBytes,
+    SHARE_HASH_CRYPTO_CONCURRENCY,
+    sha2564
+  );
   for (let index = 0; index < receivedWrapperHashes.length; index += 1) {
     const hashBytes = receivedWrapperHashes[index];
     const hash = toBase64Url(hashBytes);
@@ -8982,22 +9037,6 @@ function normalizeError(error) {
     };
   }
   return { message: "Vault operation failed." };
-}
-async function mapWithConcurrency(values, concurrency, transform) {
-  const results = new Array(values.length);
-  let nextIndex = 0;
-  const workers = Array.from(
-    { length: Math.min(concurrency, values.length) },
-    async () => {
-      while (nextIndex < values.length) {
-        const index = nextIndex;
-        nextIndex += 1;
-        results[index] = await transform(values[index], index);
-      }
-    }
-  );
-  await Promise.all(workers);
-  return results;
 }
 /*! Bundled license information:
 
