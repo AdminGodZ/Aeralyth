@@ -6,6 +6,7 @@ mod invitations;
 mod profile;
 mod repositories;
 mod share_links;
+mod upload_reservations;
 mod vault;
 
 use actix_web::web;

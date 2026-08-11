@@ -12,9 +12,11 @@ use tokio::fs::{File as AsyncFile, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::auth::{AuthUser, require_csrf, require_principal, require_user};
+use crate::db::query_opt_cached;
 use crate::routes::share_links::{
     EditorShareGrant, editor_grant_from_header, editor_parent, validate_editor_replacement,
 };
+use crate::routes::upload_reservations::{reservation_amount, reserve_upload_capacity};
 use crate::state::AppState;
 use crate::storage::{ObjectMetadata, UploadedPart};
 
@@ -427,6 +429,7 @@ pub async fn init_upload(
             );
         }
 
+        state.db.release_request_connection().await;
         let existing_parts =
             if let Some(multipart_upload_id) = existing.multipart_upload_id.as_deref() {
                 state
@@ -456,15 +459,6 @@ pub async fn init_upload(
         }));
     }
 
-    let reserved_bytes = current_reserved_bytes(&state, &actor.owner_id).await?;
-    let requested_total = reserved_bytes
-        .checked_add(body.size_bytes)
-        .ok_or_else(|| error::ErrorPayloadTooLarge("storage quota exceeded"))?;
-
-    if requested_total > state.config.storage_quota_bytes {
-        return Err(error::ErrorPayloadTooLarge("storage quota exceeded"));
-    }
-
     let upload_id = format!("upl_{}", create_storage_name()?);
     let file_id = format!("fil_{}", create_storage_name()?);
     let object_key = format!(
@@ -490,52 +484,50 @@ pub async fn init_upload(
         Ok(transaction) => transaction,
         Err(database_error) => return Err(error::ErrorInternalServerError(database_error)),
     };
-    let counter = match transaction
-        .query_one(
-            "SELECT used_bytes FROM user_file_counters WHERE owner_id = $1 FOR UPDATE",
-            &[&actor.owner_id],
-        )
-        .await
-    {
-        Ok(counter) => counter,
-        Err(database_error) => return Err(error::ErrorInternalServerError(database_error)),
-    };
-    let pending = match transaction
-        .query_one(
+    let replacement_credit = if let Some(replacement_file_id) = replacement_file_id.as_deref() {
+        let replacement = query_opt_cached(
+            &transaction,
             "
-                SELECT
-                  COALESCE(sum(size_bytes), 0)::bigint AS pending_bytes,
-                  count(*)::bigint AS pending_uploads
-                FROM file_uploads
-                WHERE owner_id = $1
-                  AND (
-                    (status IN ('initializing', 'pending', 'completing') AND expires_at > now())
-                    OR status = 'aborting'
-                  )
+                SELECT size_bytes
+                FROM files
+                WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
+                  AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
+                FOR UPDATE
             ",
-            &[&actor.owner_id],
+            &[&replacement_file_id, &actor.owner_id],
         )
         .await
-    {
-        Ok(pending) => pending,
-        Err(database_error) => return Err(error::ErrorInternalServerError(database_error)),
+        .map_err(error::ErrorInternalServerError)?
+        .ok_or_else(|| error::ErrorNotFound("the file selected for replacement is unavailable"))?;
+        let competing = query_opt_cached(
+            &transaction,
+            "
+                SELECT id
+                FROM file_uploads
+                WHERE owner_id = $1 AND replacement_file_id = $2
+                  AND status IN ('initializing', 'pending', 'completing', 'aborting')
+                LIMIT 1
+            ",
+            &[&actor.owner_id, &replacement_file_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+        if competing.is_some() {
+            return Ok(HttpResponse::Conflict()
+                .body("the selected file already has a replacement in progress"));
+        }
+        replacement.get::<_, i64>("size_bytes")
+    } else {
+        0
     };
-    let used_bytes: i64 = counter.get("used_bytes");
-    let pending_bytes: i64 = pending.get("pending_bytes");
-    let reserved_bytes = used_bytes.saturating_add(pending_bytes);
-    let pending_uploads: i64 = pending.get("pending_uploads");
-    let quota_exceeded = u64::try_from(reserved_bytes)
-        .ok()
-        .and_then(|reserved| reserved.checked_add(body.size_bytes))
-        .is_none_or(|reserved| reserved > state.config.storage_quota_bytes);
-
-    if quota_exceeded || pending_uploads >= 20 {
-        return if quota_exceeded {
-            Err(error::ErrorPayloadTooLarge("storage quota exceeded"))
-        } else {
-            Err(error::ErrorTooManyRequests("too many uploads are pending"))
-        };
-    }
+    let reservation = reservation_amount(size_bytes, replacement_credit)?;
+    reserve_upload_capacity(
+        &transaction,
+        &actor.owner_id,
+        reservation,
+        state.config.storage_quota_bytes,
+    )
+    .await?;
 
     let insert_result = transaction
         .execute(
@@ -554,10 +546,11 @@ pub async fn init_upload(
                   multipart_upload_id,
                   share_link_id,
                   replacement_file_id,
+                  reservation_bytes,
                   status,
                   expires_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, 'initializing', now() + interval '24 hours')
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, $13, 'initializing', now() + interval '24 hours')
             ",
             &[
                 &upload_id,
@@ -572,6 +565,7 @@ pub async fn init_upload(
                 &part_size_bytes,
                 &actor.share_link_id,
                 &replacement_file_id,
+                &reservation.ledger_bytes,
             ],
         )
         .await;
@@ -579,31 +573,39 @@ pub async fn init_upload(
     if let Err(database_error) = insert_result {
         return Err(error::ErrorInternalServerError(database_error));
     }
-    if let Err(commit_error) = transaction.commit().await {
-        match state
-            .db
-            .query_opt(
-                "SELECT id FROM file_uploads WHERE id = $1 AND owner_id = $2 LIMIT 1",
-                &[&upload_id, &actor.owner_id],
-            )
-            .await
-        {
-            Ok(Some(_)) => {
-                log::warn!(
-                    "upload reservation commit returned an error but the row is durable: {commit_error}"
-                );
-            }
-            Ok(None) => {
-                return Err(error::ErrorInternalServerError(commit_error));
-            }
-            Err(reconciliation_error) => {
-                log::error!(
-                    "could not reconcile ambiguous upload reservation {upload_id}: {reconciliation_error}"
-                );
-                return Err(error::ErrorInternalServerError(commit_error));
+    match transaction.commit().await {
+        Ok(()) => drop(client),
+        Err(commit_error) => {
+            // A failed COMMIT can leave the transaction connection unusable. Reconcile on a
+            // fresh checkout so an acknowledged commit is never mistaken for a rollback.
+            drop(client);
+            state.db.release_request_connection().await;
+            match state
+                .db
+                .query_opt(
+                    "SELECT id FROM file_uploads WHERE id = $1 AND owner_id = $2 LIMIT 1",
+                    &[&upload_id, &actor.owner_id],
+                )
+                .await
+            {
+                Ok(Some(_)) => {
+                    log::warn!(
+                        "upload reservation commit returned an error but the row is durable: {commit_error}"
+                    );
+                }
+                Ok(None) => {
+                    return Err(error::ErrorInternalServerError(commit_error));
+                }
+                Err(reconciliation_error) => {
+                    log::error!(
+                        "could not reconcile ambiguous upload reservation {upload_id}: {reconciliation_error}"
+                    );
+                    return Err(error::ErrorInternalServerError(commit_error));
+                }
             }
         }
     }
+    state.db.release_request_connection().await;
 
     let prepared = match state
         .storage
@@ -715,6 +717,7 @@ pub async fn upload_content(
     if upload.mode != "local" || upload.status != "pending" {
         return Ok(HttpResponse::Conflict().finish());
     }
+    state.db.release_request_connection().await;
 
     let object_path = state
         .storage
@@ -1202,6 +1205,7 @@ pub async fn complete_upload(
             Ok(HttpResponse::Conflict().json(upload_complete_response(&current, &current.status)))
         };
     }
+    state.db.release_request_connection().await;
 
     let mut metadata = None;
 
@@ -1318,6 +1322,7 @@ async fn reconcile_completing_upload_response(
     state: &AppState,
     upload: &UploadRecord,
 ) -> Result<HttpResponse> {
+    state.db.release_request_connection().await;
     let metadata = match state.storage.object_metadata(&upload.object_key).await {
         Ok(metadata) => metadata,
         Err(metadata_error) => {
@@ -1564,6 +1569,7 @@ pub async fn download(
     let Some(file) = get_download_file(&state, &user, &path.into_inner()).await? else {
         return Ok(HttpResponse::NotFound().finish());
     };
+    state.db.release_request_connection().await;
 
     if let Some(download_url) = state
         .storage
@@ -3015,38 +3021,6 @@ async fn find_resumable_upload(
         checksum_sha256: row.get("checksum_sha256"),
         replacement_file_id: row.get("replacement_file_id"),
     }))
-}
-
-async fn current_reserved_bytes(state: &AppState, owner_id: &str) -> Result<u64> {
-    let row = state
-        .db
-        .query_one(
-            "
-                SELECT
-                  COALESCE((
-                    SELECT used_bytes
-                    FROM user_file_counters
-                    WHERE owner_id = $1
-                  ), 0)::bigint
-                  +
-                  COALESCE((
-                    SELECT sum(size_bytes)
-                    FROM file_uploads
-                    WHERE owner_id = $1
-                      AND (
-                        (status IN ('initializing', 'pending', 'completing') AND expires_at > now())
-                        OR status = 'aborting'
-                      )
-                  ), 0)::bigint AS reserved_bytes
-            ",
-            &[&owner_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let reserved_bytes: i64 = row.get("reserved_bytes");
-
-    u64::try_from(reserved_bytes)
-        .map_err(|_| error::ErrorInternalServerError("invalid reserved byte count"))
 }
 
 async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<()> {

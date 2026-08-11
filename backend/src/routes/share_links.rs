@@ -429,6 +429,7 @@ pub async fn download(
         storage_name: file.get("storage_name"),
         mime_type: file.get("mime_type"),
     };
+    state.db.release_request_connection().await;
 
     if let Some(download_url) = state
         .storage

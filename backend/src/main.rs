@@ -6,7 +6,7 @@ mod routes;
 mod state;
 mod storage;
 
-use actix_web::{App, HttpServer, middleware::Logger, web};
+use actix_web::{App, HttpServer, dev::Service, middleware::Logger, web};
 use std::io;
 use std::time::Duration;
 
@@ -71,6 +71,7 @@ async fn main() -> std::io::Result<()> {
             .app_data(state.clone())
             .app_data(web::JsonConfig::default().limit(8 * 1024 * 1024))
             .wrap(Logger::default().exclude_regex(r"^/api/share-links/access/"))
+            .wrap_fn(|request, service| db::scope_request(service.call(request)))
             .configure(routes::configure)
     })
     .bind(&bind_addr)?

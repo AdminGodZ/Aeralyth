@@ -542,9 +542,27 @@ END;
 $$;
 
 DROP TRIGGER IF EXISTS files_counter_change ON files;
-CREATE TRIGGER files_counter_change
-AFTER INSERT OR UPDATE OR DELETE ON files
-FOR EACH ROW EXECUTE FUNCTION update_file_counters();
+DO $$
+BEGIN
+  -- A replay of the base migration must not re-enable per-row accounting after
+  -- migration 006 has installed the complete statement-level trigger set.
+  IF (
+    SELECT count(*)
+    FROM pg_trigger
+    WHERE tgrelid = 'files'::regclass
+      AND NOT tgisinternal
+      AND tgname IN (
+        'files_counter_insert_statement',
+        'files_counter_update_statement',
+        'files_counter_delete_statement'
+      )
+  ) <> 3 THEN
+    CREATE TRIGGER files_counter_change
+    AFTER INSERT OR UPDATE OR DELETE ON files
+    FOR EACH ROW EXECUTE FUNCTION update_file_counters();
+  END IF;
+END
+$$;
 
 CREATE OR REPLACE FUNCTION update_share_counters()
 RETURNS TRIGGER

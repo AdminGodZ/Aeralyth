@@ -10,6 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{AuthUser, require_csrf, require_principal, require_user};
 use crate::config::E2eeMode;
+use crate::db::{query_one_cached, query_opt_cached};
 use crate::e2ee::{
     ARGON2ID_ALGORITHM, ARGON2ID_MEMORY_BYTES, ARGON2ID_OPERATIONS, ARGON2ID_OUTPUT_BYTES,
     CRYPTO_CHUNK_BYTES, FORMAT_VERSION, MAX_CIPHERTEXT_BYTES, SHARE_DIRECTORY_VERSION,
@@ -18,6 +19,7 @@ use crate::e2ee::{
     verify_ed25519_signature, verify_node_record, verify_share_envelope, verify_wrapper_set_proof,
     wrapper_set_commitment,
 };
+use crate::routes::upload_reservations::{reservation_amount, reserve_upload_capacity};
 use crate::state::AppState;
 use crate::storage::{ObjectMetadata, UploadedPart};
 
@@ -1172,7 +1174,7 @@ pub async fn init_upload(
         u64::from(body.chunk_count),
     )?;
     let parent_id = validate_encrypted_parent(&state, &user, body.parent_id.as_deref()).await?;
-    let migration_credit = if body.migration {
+    let migration_expected_size = if body.migration {
         if state.config.e2ee_mode != E2eeMode::Migrate || generation_number != 1 {
             return Err(error::ErrorBadRequest(
                 "encrypted migration request is invalid",
@@ -1203,12 +1205,12 @@ pub async fn init_upload(
             return Err(error::ErrorConflict("legacy node changed during migration"));
         }
         if body.entry_type == "file" {
-            row.get::<_, i64>("size_bytes")
+            Some(row.get::<_, i64>("size_bytes"))
         } else {
-            0
+            Some(0)
         }
     } else {
-        0
+        None
     };
 
     if let Some(row) = state
@@ -1231,6 +1233,7 @@ pub async fn init_upload(
         let upload = get_upload(&state, &user.id, &upload_id)
             .await?
             .ok_or_else(|| error::ErrorConflict("upload disappeared"))?;
+        state.db.release_request_connection().await;
         let existing_parts = match (
             upload.object_key.as_deref(),
             upload.multipart_upload_id.as_deref(),
@@ -1273,36 +1276,64 @@ pub async fn init_upload(
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let counter = transaction
-        .query_one(
-            "SELECT used_bytes FROM user_file_counters WHERE owner_id = $1 FOR UPDATE",
-            &[&user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let concurrent_upload = transaction
-        .query_opt(
-            "
-                SELECT id FROM vault_uploads
-                WHERE owner_id = $1 AND node_id = $2
-                  AND generation_number = $3 AND generation_id = $4
-                  AND status IN ('initializing', 'pending', 'completing')
-                  AND expires_at > now()
-                LIMIT 1
-            ",
-            &[&user.id, &body.node_id, &generation_number, &generation_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let upload_lock_key = format!("vault-upload:{}:{}", user.id, body.node_id);
+    query_one_cached(
+        &transaction,
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
+        &[&upload_lock_key],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    let existing_node = query_opt_cached(
+        &transaction,
+        "
+            SELECT entry_type, size_bytes, e2ee_state
+            FROM files
+            WHERE id = $1 AND owner_id = $2 AND state = 'active'
+            FOR UPDATE
+        ",
+        &[&body.node_id, &user.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    if let Some(existing_node) = existing_node.as_ref()
+        && existing_node.get::<_, String>("entry_type") != body.entry_type
+    {
+        return Err(error::ErrorConflict("encrypted node type changed"));
+    }
+    if let Some(expected_size) = migration_expected_size
+        && existing_node.as_ref().is_none_or(|node| {
+            node.get::<_, String>("e2ee_state") != "staged"
+                || node.get::<_, i64>("size_bytes") != expected_size
+        })
+    {
+        return Err(error::ErrorConflict("legacy node changed during migration"));
+    }
+    let concurrent_upload = query_opt_cached(
+        &transaction,
+        "
+            SELECT id FROM vault_uploads
+            WHERE owner_id = $1 AND node_id = $2
+              AND generation_number = $3 AND generation_id = $4
+              AND status IN ('initializing', 'pending', 'completing')
+            LIMIT 1
+        ",
+        &[&user.id, &body.node_id, &generation_number, &generation_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     if let Some(row) = concurrent_upload {
         let existing_upload_id: String = row.get("id");
         transaction
             .commit()
             .await
             .map_err(error::ErrorInternalServerError)?;
+        drop(client);
+        state.db.release_request_connection().await;
         let upload = get_upload(&state, &user.id, &existing_upload_id)
             .await?
             .ok_or_else(|| error::ErrorConflict("upload disappeared"))?;
+        state.db.release_request_connection().await;
         let existing_parts = match (
             upload.object_key.as_deref(),
             upload.multipart_upload_id.as_deref(),
@@ -1316,34 +1347,35 @@ pub async fn init_upload(
         };
         return Ok(HttpResponse::Ok().json(upload_plan(&upload, existing_parts)));
     }
-    let reservations = transaction
-        .query_one(
-            "
-                SELECT
-                  COALESCE((SELECT sum(size_bytes) FROM file_uploads
-                            WHERE owner_id = $1 AND status IN ('initializing', 'pending', 'completing')), 0)::bigint
-                    AS legacy_reserved_bytes,
-                  COALESCE((SELECT sum(ciphertext_length) FROM vault_uploads
-                            WHERE owner_id = $1 AND status IN ('initializing', 'pending', 'completing')), 0)::bigint
-                    AS vault_reserved_bytes
-            ",
-            &[&user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let used_bytes: i64 = counter.get("used_bytes");
-    let legacy_reserved_bytes: i64 = reservations.get("legacy_reserved_bytes");
-    let vault_reserved_bytes: i64 = reservations.get("vault_reserved_bytes");
-    let reserved_bytes = used_bytes
-        .checked_sub(migration_credit)
-        .and_then(|value| value.checked_add(legacy_reserved_bytes))
-        .and_then(|value| value.checked_add(vault_reserved_bytes))
-        .and_then(|value| value.checked_add(ciphertext_length))
-        .and_then(|value| u64::try_from(value).ok())
-        .ok_or_else(|| error::ErrorPayloadTooLarge("storage quota exceeded"))?;
-    if reserved_bytes > state.config.storage_quota_bytes {
-        return Err(error::ErrorPayloadTooLarge("storage quota exceeded"));
+    let competing_upload = query_opt_cached(
+        &transaction,
+        "
+            SELECT id FROM vault_uploads
+            WHERE owner_id = $1 AND node_id = $2
+              AND status IN ('initializing', 'pending', 'completing', 'aborting')
+            LIMIT 1
+        ",
+        &[&user.id, &body.node_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    if competing_upload.is_some() {
+        return Err(error::ErrorConflict(
+            "another encrypted generation is already uploading",
+        ));
     }
+    let replacement_credit = existing_node
+        .as_ref()
+        .filter(|node| node.get::<_, String>("entry_type") == "file")
+        .map_or(0, |node| node.get::<_, i64>("size_bytes"));
+    let reservation = reservation_amount(ciphertext_length, replacement_credit)?;
+    reserve_upload_capacity(
+        &transaction,
+        &user.id,
+        reservation,
+        state.config.storage_quota_bytes,
+    )
+    .await?;
     transaction
         .execute(
             "
@@ -1351,9 +1383,9 @@ pub async fn init_upload(
                   id, node_id, owner_id, parent_id, entry_type,
                   generation_number, generation_id, object_key,
                   ciphertext_length, chunk_count, upload_mode,
-                  part_size_bytes, status, expires_at
+                  part_size_bytes, reservation_bytes, status, expires_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'initializing', now() + interval '24 hours')
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, 'initializing', now() + interval '24 hours')
             ",
             &[
                 &upload_id,
@@ -1368,6 +1400,7 @@ pub async fn init_upload(
                 &chunk_count,
                 &mode,
                 &part_size_bytes,
+                &reservation.ledger_bytes,
             ],
         )
         .await
@@ -1376,6 +1409,8 @@ pub async fn init_upload(
         .commit()
         .await
         .map_err(error::ErrorInternalServerError)?;
+    drop(client);
+    state.db.release_request_connection().await;
 
     let prepared = if let Some(object_key) = object_key.as_deref() {
         match state
@@ -3801,6 +3836,7 @@ async fn finalize_ciphertext_object(
             return Err(error::ErrorConflict("upload state changed; retry"));
         }
     }
+    state.db.release_request_connection().await;
     if upload.mode == "multipart" {
         let multipart_id = upload
             .multipart_upload_id
@@ -4193,6 +4229,7 @@ async fn decode_and_verify_node_record(
         return Err(error::ErrorForbidden("signing identity is not active"));
     };
     let public_key: Vec<u8> = identity.get("ed25519_public_key");
+    state.db.release_request_connection().await;
     let verified = verify_node_record(
         &bootstrap_cbor,
         &signature,

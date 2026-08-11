@@ -1,0 +1,29 @@
+WITH reserved AS (
+  UPDATE user_storage_usage
+  SET reserved_bytes = reserved_bytes + 10,
+      pending_uploads = pending_uploads + 1,
+      updated_at = now()
+  WHERE owner_id = 'usr_perf_reservation_concurrency'
+    AND pending_uploads < 20
+    AND used_bytes + reserved_bytes <= 100 - 10
+  RETURNING owner_id
+), inserted AS (
+  INSERT INTO file_uploads (
+    id, file_id, owner_id, original_name, object_key,
+    size_bytes, upload_mode, reservation_bytes, status, expires_at
+  )
+  SELECT
+    'upl_perf_concurrent_' || :client_id::text,
+    'fil_perf_concurrent_' || :client_id::text,
+    owner_id,
+    'concurrent-' || :client_id::text,
+    'perf-ledger/concurrent/' || :client_id::text,
+    10,
+    'local',
+    10,
+    'initializing',
+    now() + interval '1 hour'
+  FROM reserved
+  RETURNING id
+)
+SELECT count(*) FROM inserted;

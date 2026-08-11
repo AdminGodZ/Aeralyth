@@ -210,6 +210,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-011 [P0] Database helpers acquire a new pooled connection for every query
 
+**Status:** Complete — implemented and verified on 2026-08-12.
+
+**Verification:** All request-side database helpers now share one lazily checked-out, prepared-statement-caching connection per Actix request, and an explicit transaction can take ownership of that same connection. Slow storage, request-body, download, and cryptographic phases explicitly release the request connection. Live login, `/api/auth/me`, and multi-query file-list requests each logged exactly one pool checkout; upload initialization deliberately used a second checkout only after releasing the reservation phase before provider preparation. A regression test proves one initialization and safe transaction handoff.
+
 **Confidence:** Confirmed
 
 **Evidence:** `backend/src/db.rs` calls `pool.get()` inside every `query`, `query_one`, `query_opt`, and `execute`. Multi-step handlers therefore check out and release different connections repeatedly unless they manually open a transaction.
@@ -221,6 +225,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Record pool checkouts per request. Multi-step read handlers should normally perform one checkout.
 
 ## PERF-012 [P0] Upload initialization scans reservations redundantly
+
+**Status:** Complete — implemented and verified on 2026-08-12.
+
+**Verification:** Legacy and encrypted initialization now reserve against a dedicated `user_storage_usage` ledger with one conditional primary-key update in the same transaction as intent insertion; no upload-table `SUM` remains on either initialization path. Signed net-growth credits are locked for replacements/migrations, the pending limit covers both upload types, and statement-level terminal/delete triggers release bytes and intent counts exactly once. Forty simultaneous PostgreSQL clients competing for ten quota slots admitted exactly ten, left `100` reserved bytes and `10` intents, and released both to zero on one terminal transition. The real API lifecycle moved `0/0/0` to `0/1024/1` on init and `1024/0/0` on publish (`used/reserved/pending`); a final live init/abort check independently returned the ledger to `0/0/0`.
 
 **Confidence:** Confirmed
 
@@ -353,6 +361,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Compare database CPU per authenticated request and index size after conversion.
 
 ## PERF-023 [P0] The `files` counter trigger rewrites a hot counter row for every update, even when contributions do not change
+
+**Status:** Complete — implemented and verified on 2026-08-12.
+
+**Verification:** The row-level trigger was replaced by INSERT/UPDATE/DELETE statement triggers using transition tables and per-owner aggregate deltas. A rollback-only 10,000-file regression test proved one counter write for the bulk insert, trash, restore/resize, and delete statements; an `updated_at`-only update produced zero counter or storage-ledger writes, and trash changed the UI counter without touching the separated storage ledger. A disposable-database test replays the complete migration chain, asserts that the legacy row trigger is absent and exactly three statement triggers remain, then reruns the accounting regression. These checks are committed under `database/tests/` and exposed through package scripts.
 
 **Confidence:** Confirmed
 
