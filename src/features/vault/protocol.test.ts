@@ -11,6 +11,7 @@ import {
   encodeWrapper,
 } from "@/features/vault/cbor";
 import {
+  asBufferSource,
   chunkNonce,
   ciphertextLeafHash,
   encodeChunkAad,
@@ -31,6 +32,22 @@ import {
 } from "@/features/vault/protocol";
 
 describe("vault protocol", () => {
+  it("reuses owned ArrayBuffers and only copies partial ranges", () => {
+    const whole = Uint8Array.from([1, 2, 3, 4]);
+    const parent = Uint8Array.from([9, 8, 7, 6]);
+    const partial = parent.subarray(1, 3);
+
+    expect(toArrayBuffer(whole)).toBe(whole.buffer);
+    const partialBuffer = toArrayBuffer(partial);
+    expect(partialBuffer).not.toBe(parent.buffer);
+    expect(new Uint8Array(partialBuffer)).toEqual(Uint8Array.from([8, 7]));
+
+    const source = asBufferSource(partial);
+    expect(source.buffer).toBe(parent.buffer);
+    expect(source.byteOffset).toBe(partial.byteOffset);
+    expect(source.byteLength).toBe(partial.byteLength);
+  });
+
   it("encodes the canonical bootstrap vector accepted by the Rust decoder", () => {
     const encoded = encodeBootstrap({
       formatVersion: VAULT_FORMAT_VERSION,

@@ -487,7 +487,7 @@ export function ciphertextChunkLength(
 
 export async function sha256(value: Uint8Array): Promise<Uint8Array> {
   return new Uint8Array(
-    await crypto.subtle.digest("SHA-256", toArrayBuffer(value)),
+    await crypto.subtle.digest("SHA-256", asBufferSource(value)),
   );
 }
 
@@ -621,7 +621,23 @@ export async function ciphertextLeafHash(
   return sha256(concatBytes(Uint8Array.of(0), index, ciphertext));
 }
 
+export function asBufferSource(value: Uint8Array): Uint8Array<ArrayBuffer> {
+  if (value.buffer instanceof ArrayBuffer) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  return Uint8Array.from(value);
+}
+
 export function toArrayBuffer(value: Uint8Array): ArrayBuffer {
-  const copy = Uint8Array.from(value);
-  return copy.buffer;
+  const source = asBufferSource(value);
+  if (
+    source.byteOffset === 0 &&
+    source.byteLength === source.buffer.byteLength
+  ) {
+    return source.buffer;
+  }
+  return source.buffer.slice(
+    source.byteOffset,
+    source.byteOffset + source.byteLength,
+  );
 }

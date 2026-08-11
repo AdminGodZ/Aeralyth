@@ -21,6 +21,7 @@ import {
 } from "@/features/vault/cbor";
 import {
   ARGON2ID_PROFILE,
+  asBufferSource,
   assertArgon2idProfile,
   chunkNonce,
   ciphertextLeafHash,
@@ -910,12 +911,12 @@ async function encryptChunk(
       await crypto.subtle.encrypt(
         {
           name: "AES-GCM",
-          iv: toArrayBuffer(chunkNonce(chunkIndex)),
-          additionalData: toArrayBuffer(aad),
+          iv: asBufferSource(chunkNonce(chunkIndex)),
+          additionalData: asBufferSource(aad),
           tagLength: 128,
         },
         session.contentKey,
-        toArrayBuffer(padded),
+        asBufferSource(padded),
       ),
     );
     session.leaves.push(await ciphertextLeafHash(chunkIndex, ciphertext));
@@ -957,12 +958,12 @@ async function finalizeEncryption(
     await crypto.subtle.encrypt(
       {
         name: "AES-GCM",
-        iv: toArrayBuffer(zeroNonce()),
-        additionalData: toArrayBuffer(manifestAad),
+        iv: asBufferSource(zeroNonce()),
+        additionalData: asBufferSource(manifestAad),
         tagLength: 128,
       },
       manifestKey,
-      toArrayBuffer(manifestPlaintext),
+      asBufferSource(manifestPlaintext),
     ),
   );
   const canonicalWrappers = [session.ownerWrapper];
@@ -1191,12 +1192,12 @@ async function decryptChunk(
       await crypto.subtle.decrypt(
         {
           name: "AES-GCM",
-          iv: toArrayBuffer(chunkNonce(chunkIndex)),
-          additionalData: toArrayBuffer(aad),
+          iv: asBufferSource(chunkNonce(chunkIndex)),
+          additionalData: asBufferSource(aad),
           tagLength: 128,
         },
         session.contentKey,
-        toArrayBuffer(ciphertext),
+        asBufferSource(ciphertext),
       ),
     );
     const offset = chunkIndex * VAULT_CRYPTO_CHUNK_BYTES;
@@ -1392,12 +1393,12 @@ async function openAndVerifyPlan(plan: VaultDownloadPlan): Promise<OpenedPlan> {
       await crypto.subtle.decrypt(
         {
           name: "AES-GCM",
-          iv: toArrayBuffer(zeroNonce()),
-          additionalData: toArrayBuffer(manifestAad),
+          iv: asBufferSource(zeroNonce()),
+          additionalData: asBufferSource(manifestAad),
           tagLength: 128,
         },
         manifestKey,
-        toArrayBuffer(encryptedManifest),
+        asBufferSource(encryptedManifest),
       ),
     );
   } catch (error) {
@@ -1683,10 +1684,10 @@ async function createHpkeEnvelope(input: {
   const sender = await hpkeSuite.createSenderContext({
     recipientPublicKey: recipientPublic,
     senderKey: senderPrivate,
-    info: toArrayBuffer(info),
+    info: asBufferSource(info),
   });
   const ciphertext = new Uint8Array(
-    await sender.seal(toArrayBuffer(input.epochMaterial), toArrayBuffer(aad)),
+    await sender.seal(asBufferSource(input.epochMaterial), asBufferSource(aad)),
   );
   const encapsulatedKey = new Uint8Array(sender.enc);
   if (encapsulatedKey.length !== 32 || ciphertext.length !== 48) {
@@ -1923,13 +1924,13 @@ async function openSharedKeys(
   const recipient = await hpkeSuite.createRecipientContext({
     recipientKey: recipientPrivate,
     senderPublicKey: senderPublic,
-    enc: toArrayBuffer(envelope.encapsulatedKey),
-    info: toArrayBuffer(info),
+    enc: asBufferSource(envelope.encapsulatedKey),
+    info: asBufferSource(info),
   });
   const epochMaterial = new Uint8Array(
     await recipient.open(
-      toArrayBuffer(envelope.ciphertext),
-      toArrayBuffer(aad),
+      asBufferSource(envelope.ciphertext),
+      asBufferSource(aad),
     ),
   );
   if (epochMaterial.length !== 32)
@@ -2091,7 +2092,7 @@ function derivePasswordMaterial(
 async function importHkdf(material: Uint8Array): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     "raw",
-    toArrayBuffer(material),
+    asBufferSource(material),
     "HKDF",
     false,
     ["deriveBits"],
@@ -2121,8 +2122,8 @@ async function deriveKeyMaterial(
       {
         name: "HKDF",
         hash: "SHA-256",
-        salt: toArrayBuffer(salt),
-        info: toArrayBuffer(utf8(info)),
+        salt: asBufferSource(salt),
+        info: asBufferSource(utf8(info)),
       },
       base,
       256,
@@ -2133,7 +2134,7 @@ async function deriveKeyMaterial(
 async function importAesKey(material: Uint8Array): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     "raw",
-    toArrayBuffer(material),
+    asBufferSource(material),
     { name: "AES-GCM", length: 256 },
     false,
     ["encrypt", "decrypt"],
@@ -2229,12 +2230,12 @@ async function encryptDerivedRecord(
       await crypto.subtle.encrypt(
         {
           name: "AES-GCM",
-          iv: toArrayBuffer(zeroNonce()),
-          additionalData: toArrayBuffer(aad),
+          iv: asBufferSource(zeroNonce()),
+          additionalData: asBufferSource(aad),
           tagLength: 128,
         },
         key,
-        toArrayBuffer(plaintext),
+        asBufferSource(plaintext),
       ),
     );
   } finally {
@@ -2261,12 +2262,12 @@ async function decryptDerivedRecord(
       await crypto.subtle.decrypt(
         {
           name: "AES-GCM",
-          iv: toArrayBuffer(zeroNonce()),
-          additionalData: toArrayBuffer(aad),
+          iv: asBufferSource(zeroNonce()),
+          additionalData: asBufferSource(aad),
           tagLength: 128,
         },
         key,
-        toArrayBuffer(ciphertext),
+        asBufferSource(ciphertext),
       ),
     );
   } finally {

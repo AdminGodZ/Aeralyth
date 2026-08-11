@@ -774,6 +774,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-056 [P0] All maintenance work is serialized in one loop
 
+**Status:** Complete — implemented and verified on 2026-08-12.
+
+**Verification:** Maintenance now runs as seven independently scheduled and supervised workers with staggered start times, per-worker restart isolation, skipped missed ticks, and one shared graceful-shutdown signal. A regression test permanently stalls one periodic operation while a sibling still completes three runs inside 250 ms, then proves both stop promptly on shutdown. In the live S3-backed verification, the user-deletion worker advanced a disposable account through every phase while the separate storage-deletion worker removed its published encrypted object; the user, job, queued object cleanup, and MinIO object were all gone on the next observed maintenance cycle.
+
 **Confidence:** Confirmed
 
 **Evidence:** `backend/src/storage.rs::run_maintenance` executes deletion jobs, legacy expiry, vault expiry, invitation expiry, orphan reconciliation, and counter reconciliation in sequence.
@@ -906,6 +910,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-067 [P0] Encrypted multipart construction repeatedly reallocates and copies the growing part
 
+**Status:** Complete — implemented and verified on 2026-08-12.
+
+**Verification:** Encrypted upload and migration paths now fill a preallocated fixed-size part buffer with a cursor, wipe each consumed source chunk, hand off completed buffers, and expose the final short range as a view without concatenating or slicing it into another allocation. Regression tests prove eight appended chunks complete one part with exactly one allocation, boundary-spanning input is copied once, final-range ownership is preserved, and fragmented migration streams produce exact transferable buffers. A real browser encrypted a 34 MiB file into nine crypto chunks and uploaded one 32 MiB part plus one final part through one batched presign request; MinIO persisted the exact 35,651,728-byte ciphertext with a two-part ETag.
+
 **Confidence:** Confirmed
 
 **Evidence:** `src/features/vault/encrypted-upload.ts::appendBytes` allocates a new array for every encrypted chunk, copies the previous accumulator and new chunk, then zeroes the old accumulator. Full parts are sliced again.
@@ -917,6 +925,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Browser profiling should show no accumulator reallocations and peak transfer memory close to the configured number of part buffers.
 
 ## PERF-068 [P0] `toArrayBuffer` clones full typed arrays across hot crypto/network paths
+
+**Status:** Complete — implemented and verified on 2026-08-12.
+
+**Verification:** WebCrypto digest/encrypt/decrypt, HKDF/AES imports, HPKE inputs, upload checksums, and `fetch` bodies now receive exact `Uint8Array<ArrayBuffer>` views directly. `toArrayBuffer` returns an owned whole buffer by identity and copies only a partial range for APIs that truly require an exact `ArrayBuffer`; regression tests prove both cases and prove direct views retain their original offset and length. The rebuilt worker completed the real two-part encrypted browser upload through API publication and storage persistence with no browser console warnings or errors.
 
 **Confidence:** Confirmed
 

@@ -1,4 +1,9 @@
 import {
+  ExactStreamReader,
+  FixedSizeBufferAssembler,
+} from "@/features/vault/buffered-bytes";
+import {
+  asBufferSource,
   toArrayBuffer,
   VAULT_CRYPTO_CHUNK_BYTES,
   VAULT_MAX_CIPHERTEXT_BYTES,
@@ -22,6 +27,12 @@ const VAULT_UPLOAD_CONCURRENCY = 4;
 type PendingVaultPart = {
   partNumber: number;
   content: Uint8Array;
+};
+
+type MultipartBufferState = {
+  nextPartNumber: number;
+  pending: PendingVaultPart[];
+  completed: VaultCompletedPart[];
 };
 
 export type EncryptedUploadSelection = {
@@ -343,70 +354,81 @@ async function encryptAndUploadFile({
       "An encrypted upload cannot resume after its browser key was discarded.",
     );
   }
-  let pending: Uint8Array<ArrayBufferLike> = new Uint8Array();
-  const completed: VaultCompletedPart[] = [];
-  const pendingParts: PendingVaultPart[] = [];
-  let partNumber = 1;
+  const assembler = new FixedSizeBufferAssembler(
+    encryptedUploadBufferSize(plan, started.ciphertextLength),
+  );
+  const multipart: MultipartBufferState = {
+    nextPartNumber: 1,
+    pending: [],
+    completed: [],
+  };
+  let singleContent: Uint8Array | null = null;
+  let ciphertextBytes = 0;
 
-  for (let chunkIndex = 0; chunkIndex < started.chunkCount; chunkIndex += 1) {
-    assertNotAborted(signal);
-    const sourceStart = chunkIndex * VAULT_CRYPTO_CHUNK_BYTES;
-    const sourceEnd = Math.min(
-      file.size,
-      sourceStart + VAULT_CRYPTO_CHUNK_BYTES,
-    );
-    const plaintext = await file.slice(sourceStart, sourceEnd).arrayBuffer();
-    const sourceBytes = plaintext.byteLength;
-    const encrypted = await client.encryptChunk(
-      started.sessionId,
-      chunkIndex,
-      plaintext,
-    );
-    pending = appendBytes(pending, new Uint8Array(encrypted.ciphertext));
-    onChunk(sourceBytes);
+  try {
+    for (let chunkIndex = 0; chunkIndex < started.chunkCount; chunkIndex += 1) {
+      assertNotAborted(signal);
+      const sourceStart = chunkIndex * VAULT_CRYPTO_CHUNK_BYTES;
+      const sourceEnd = Math.min(
+        file.size,
+        sourceStart + VAULT_CRYPTO_CHUNK_BYTES,
+      );
+      const plaintext = await file.slice(sourceStart, sourceEnd).arrayBuffer();
+      const sourceBytes = plaintext.byteLength;
+      const encrypted = await client.encryptChunk(
+        started.sessionId,
+        chunkIndex,
+        plaintext,
+      );
+      const ciphertext = new Uint8Array(encrypted.ciphertext);
+      ciphertextBytes += ciphertext.byteLength;
+      const ready = assembler.append(ciphertext);
+      onChunk(sourceBytes);
 
-    if (plan.mode === "multipart") {
-      const partSize = plan.partSizeBytes;
-      if (!partSize) throw new Error("The multipart upload plan is invalid.");
-      while (pending.length >= partSize) {
-        const part = pending.slice(0, partSize);
-        pending = pending.slice(partSize);
-        pendingParts.push({ partNumber, content: part });
-        partNumber += 1;
-        if (pendingParts.length === VAULT_PRESIGN_BATCH_SIZE) {
-          completed.push(
-            ...(await uploadMultipartParts(
-              csrfToken,
-              plan.uploadId,
-              pendingParts.splice(0),
-              signal,
-            )),
-          );
+      if (plan.mode === "multipart") {
+        queueMultipartBuffers(multipart, ready);
+        await uploadReadyMultipartParts(
+          multipart,
+          csrfToken,
+          plan.uploadId,
+          signal,
+          false,
+        );
+      } else if (ready.length > 0) {
+        if (ready.length !== 1 || singleContent) {
+          throw new Error("The encrypted upload length is inconsistent.");
         }
+        [singleContent] = ready;
       }
     }
-  }
 
-  if (plan.mode === "single") {
-    if (pending.length !== started.ciphertextLength) {
+    if (ciphertextBytes !== started.ciphertextLength) {
       throw new Error("The encrypted upload length is inconsistent.");
     }
-    await uploadSingle(csrfToken, plan.uploadId, pending, signal);
-  } else if (pending.length > 0) {
-    pendingParts.push({ partNumber, content: pending });
-  }
-  if (pendingParts.length > 0) {
-    completed.push(
-      ...(await uploadMultipartParts(
+    if (plan.mode === "single") {
+      const trailing = assembler.finish();
+      trailing?.fill(0);
+      if (trailing || singleContent?.length !== started.ciphertextLength) {
+        throw new Error("The encrypted upload length is inconsistent.");
+      }
+      await uploadSingle(csrfToken, plan.uploadId, singleContent, signal);
+    } else {
+      const trailing = assembler.finish();
+      if (trailing) queueMultipartBuffers(multipart, [trailing]);
+      await uploadReadyMultipartParts(
+        multipart,
         csrfToken,
         plan.uploadId,
-        pendingParts.splice(0),
         signal,
-      )),
-    );
+        true,
+      );
+    }
+    return multipart.completed;
+  } finally {
+    assembler.clear();
+    singleContent?.fill(0);
+    for (const part of multipart.pending) part.content.fill(0);
   }
-  pending.fill(0);
-  return completed;
 }
 
 async function encryptAndUploadStream({
@@ -435,13 +457,18 @@ async function encryptAndUploadStream({
       "An encrypted migration cannot resume with discarded browser keys.",
     );
   }
-  const reader = stream.getReader();
-  let plaintextPending: Uint8Array<ArrayBufferLike> = new Uint8Array();
-  let encryptedPending: Uint8Array<ArrayBufferLike> = new Uint8Array();
-  const completed: VaultCompletedPart[] = [];
-  const pendingParts: PendingVaultPart[] = [];
-  let partNumber = 1;
+  const reader = new ExactStreamReader(stream.getReader());
+  const assembler = new FixedSizeBufferAssembler(
+    encryptedUploadBufferSize(plan, started.ciphertextLength),
+  );
+  const multipart: MultipartBufferState = {
+    nextPartNumber: 1,
+    pending: [],
+    completed: [],
+  };
+  let singleContent: Uint8Array | null = null;
   let processedBytes = 0;
+  let ciphertextBytes = 0;
 
   try {
     for (let chunkIndex = 0; chunkIndex < started.chunkCount; chunkIndex += 1) {
@@ -450,79 +477,113 @@ async function encryptAndUploadStream({
         VAULT_CRYPTO_CHUNK_BYTES,
         plaintextBytes - processedBytes,
       );
-      while (plaintextPending.length < expected) {
-        const next = await reader.read();
-        if (next.done) {
-          throw new Error("The legacy object ended before its recorded size.");
-        }
-        plaintextPending = appendBytes(plaintextPending, next.value);
+      const plaintext = await reader.readExactly(expected);
+      if (!plaintext) {
+        throw new Error("The legacy object ended before its recorded size.");
       }
-      const plaintext = plaintextPending.slice(0, expected);
-      plaintextPending = plaintextPending.slice(expected);
-      const encrypted = await client.encryptChunk(
-        started.sessionId,
-        chunkIndex,
-        toArrayBuffer(plaintext),
-      );
-      encryptedPending = appendBytes(
-        encryptedPending,
-        new Uint8Array(encrypted.ciphertext),
-      );
+      let encrypted: Awaited<ReturnType<VaultCryptoClient["encryptChunk"]>>;
+      try {
+        encrypted = await client.encryptChunk(
+          started.sessionId,
+          chunkIndex,
+          toArrayBuffer(plaintext),
+        );
+      } finally {
+        if (plaintext.byteLength > 0) plaintext.fill(0);
+      }
+      const ciphertext = new Uint8Array(encrypted.ciphertext);
+      ciphertextBytes += ciphertext.byteLength;
+      const ready = assembler.append(ciphertext);
       processedBytes += expected;
       onChunk(processedBytes);
 
       if (plan.mode === "multipart") {
-        const partSize = plan.partSizeBytes;
-        if (!partSize) throw new Error("The multipart upload plan is invalid.");
-        while (encryptedPending.length >= partSize) {
-          const part = encryptedPending.slice(0, partSize);
-          encryptedPending = encryptedPending.slice(partSize);
-          pendingParts.push({ partNumber, content: part });
-          partNumber += 1;
-          if (pendingParts.length === VAULT_PRESIGN_BATCH_SIZE) {
-            completed.push(
-              ...(await uploadMultipartParts(
-                csrfToken,
-                plan.uploadId,
-                pendingParts.splice(0),
-                signal,
-              )),
-            );
-          }
+        queueMultipartBuffers(multipart, ready);
+        await uploadReadyMultipartParts(
+          multipart,
+          csrfToken,
+          plan.uploadId,
+          signal,
+          false,
+        );
+      } else if (ready.length > 0) {
+        if (ready.length !== 1 || singleContent) {
+          throw new Error("The encrypted migration length is inconsistent.");
         }
+        [singleContent] = ready;
       }
     }
-    const trailing = await reader.read();
     if (
-      !trailing.done ||
-      plaintextPending.length !== 0 ||
+      !(await reader.isAtEnd()) ||
+      ciphertextBytes !== started.ciphertextLength ||
       processedBytes !== plaintextBytes
     ) {
       throw new Error("The legacy object size changed during migration.");
     }
     if (plan.mode === "single") {
-      if (encryptedPending.length !== started.ciphertextLength) {
+      const trailing = assembler.finish();
+      trailing?.fill(0);
+      if (trailing || singleContent?.length !== started.ciphertextLength) {
         throw new Error("The encrypted migration length is inconsistent.");
       }
-      await uploadSingle(csrfToken, plan.uploadId, encryptedPending, signal);
-    } else if (encryptedPending.length > 0) {
-      pendingParts.push({ partNumber, content: encryptedPending });
-    }
-    if (pendingParts.length > 0) {
-      completed.push(
-        ...(await uploadMultipartParts(
-          csrfToken,
-          plan.uploadId,
-          pendingParts.splice(0),
-          signal,
-        )),
+      await uploadSingle(csrfToken, plan.uploadId, singleContent, signal);
+    } else {
+      const trailing = assembler.finish();
+      if (trailing) queueMultipartBuffers(multipart, [trailing]);
+      await uploadReadyMultipartParts(
+        multipart,
+        csrfToken,
+        plan.uploadId,
+        signal,
+        true,
       );
     }
-    return completed;
+    return multipart.completed;
   } finally {
-    plaintextPending.fill(0);
-    encryptedPending.fill(0);
-    await reader.cancel().catch(() => undefined);
+    assembler.clear();
+    singleContent?.fill(0);
+    for (const part of multipart.pending) part.content.fill(0);
+    await reader.cancel();
+  }
+}
+
+function encryptedUploadBufferSize(
+  plan: VaultUploadPlan,
+  ciphertextLength: number,
+): number {
+  const size =
+    plan.mode === "multipart" ? plan.partSizeBytes : ciphertextLength;
+  if (!Number.isSafeInteger(size) || !size || size < 1) {
+    throw new Error("The encrypted upload plan is invalid.");
+  }
+  return size;
+}
+
+function queueMultipartBuffers(
+  state: MultipartBufferState,
+  buffers: Uint8Array[],
+): void {
+  for (const content of buffers) {
+    state.pending.push({ partNumber: state.nextPartNumber, content });
+    state.nextPartNumber += 1;
+  }
+}
+
+async function uploadReadyMultipartParts(
+  state: MultipartBufferState,
+  csrfToken: string,
+  uploadId: string,
+  signal: AbortSignal,
+  flushAll: boolean,
+): Promise<void> {
+  while (
+    state.pending.length >= VAULT_PRESIGN_BATCH_SIZE ||
+    (flushAll && state.pending.length > 0)
+  ) {
+    const batch = state.pending.splice(0, VAULT_PRESIGN_BATCH_SIZE);
+    state.completed.push(
+      ...(await uploadMultipartParts(csrfToken, uploadId, batch, signal)),
+    );
   }
 }
 
@@ -532,17 +593,21 @@ async function uploadSingle(
   content: Uint8Array,
   signal: AbortSignal,
 ): Promise<void> {
-  const checksum = await sha256Base64(content);
-  const signed = await getVaultContentUrl(
-    csrfToken,
-    uploadId,
-    checksum,
-    signal,
-  );
-  if (signed.contentLength !== content.length) {
-    throw new Error("The signed upload length is invalid.");
+  try {
+    const checksum = await sha256Base64(content);
+    const signed = await getVaultContentUrl(
+      csrfToken,
+      uploadId,
+      checksum,
+      signal,
+    );
+    if (signed.contentLength !== content.length) {
+      throw new Error("The signed upload length is invalid.");
+    }
+    await putEncryptedBytes(signed.url, content, checksum, signal);
+  } finally {
+    content.fill(0);
   }
-  await putEncryptedBytes(signed.url, content, checksum, signal);
 }
 
 async function uploadMultipartParts(
@@ -633,7 +698,7 @@ async function putEncryptedBytes(
           "Content-Type": "application/octet-stream",
           "x-amz-checksum-sha256": checksum,
         },
-        body: toArrayBuffer(content),
+        body: asBufferSource(content),
         signal,
       });
       if (!response.ok) {
@@ -698,18 +763,9 @@ function pathDepth(path: string): number {
   return path.split("/").length;
 }
 
-function appendBytes(left: Uint8Array, right: Uint8Array): Uint8Array {
-  const output = new Uint8Array(left.length + right.length);
-  output.set(left);
-  output.set(right, left.length);
-  left.fill(0);
-  right.fill(0);
-  return output;
-}
-
 async function sha256Base64(content: Uint8Array): Promise<string> {
   const digest = new Uint8Array(
-    await crypto.subtle.digest("SHA-256", toArrayBuffer(content)),
+    await crypto.subtle.digest("SHA-256", asBufferSource(content)),
   );
   let binary = "";
   for (const byte of digest) binary += String.fromCharCode(byte);

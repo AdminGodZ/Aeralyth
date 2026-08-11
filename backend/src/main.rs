@@ -9,6 +9,7 @@ mod storage;
 use actix_web::{App, HttpServer, dev::Service, middleware::Logger, web};
 use std::io;
 use std::time::Duration;
+use tokio::sync::watch;
 
 use config::E2eeMode;
 use state::AppState;
@@ -57,7 +58,8 @@ async fn main() -> std::io::Result<()> {
     let storage = storage::Storage::create(&config)
         .await
         .map_err(|error| io::Error::other(format!("failed to initialize storage: {error}")))?;
-    tokio::spawn(storage::run_maintenance(db.clone(), storage.clone()));
+    let maintenance_db = db.clone();
+    let maintenance_storage = storage.clone();
     let state = web::Data::new(AppState {
         config: config.clone(),
         db,
@@ -66,7 +68,7 @@ async fn main() -> std::io::Result<()> {
 
     log::info!("starting Aeralyth API on {bind_addr}");
 
-    HttpServer::new(move || {
+    let server = HttpServer::new(move || {
         App::new()
             .app_data(state.clone())
             .app_data(web::JsonConfig::default().limit(8 * 1024 * 1024))
@@ -75,6 +77,17 @@ async fn main() -> std::io::Result<()> {
             .configure(routes::configure)
     })
     .bind(&bind_addr)?
-    .run()
-    .await
+    .run();
+    let (maintenance_shutdown, maintenance_shutdown_receiver) = watch::channel(false);
+    let maintenance = tokio::spawn(storage::run_maintenance(
+        maintenance_db,
+        maintenance_storage,
+        maintenance_shutdown_receiver,
+    ));
+    let result = server.await;
+    let _ = maintenance_shutdown.send(true);
+    if let Err(error) = maintenance.await {
+        log::error!("maintenance runtime stopped unexpectedly: {error}");
+    }
+    result
 }

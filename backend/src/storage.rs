@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt;
+use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -9,8 +10,11 @@ use aws_credential_types::Credentials;
 use aws_sdk_s3::presigning::PresigningConfig;
 use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode, CompletedMultipartUpload, CompletedPart};
 use aws_types::region::Region;
+use futures_util::future::{Either, select};
 use serde::Serialize;
-use tokio::time::{MissedTickBehavior, interval};
+use tokio::sync::watch;
+use tokio::task::JoinSet;
+use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep};
 
 use crate::config::Config;
 use crate::db::Database;
@@ -20,6 +24,7 @@ const MULTIPART_RECONCILIATION_LOCK_ID: i64 = 4_133_797_884_291_001;
 const STORAGE_OBJECT_PREFIX: &str = "users/";
 const USER_DELETION_BATCH_SIZE: i64 = 500;
 const USER_DELETION_BATCHES_PER_TICK: usize = 32;
+const MAINTENANCE_RESTART_DELAY: Duration = Duration::from_secs(1);
 const USER_DELETION_PHASES: &[&str] = &[
     "file_uploads",
     "vault_uploads",
@@ -46,6 +51,62 @@ const USER_DELETION_PHASES: &[&str] = &[
     "invitations",
     "sessions",
     "finalize",
+];
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+enum MaintenanceWorker {
+    UserDeletion,
+    StorageDeletion,
+    LegacyUploadExpiry,
+    VaultUploadExpiry,
+    InvitationExpiry,
+    MultipartReconciliation,
+    CounterReconciliation,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct MaintenanceSchedule {
+    worker: MaintenanceWorker,
+    initial_delay: Duration,
+    interval: Duration,
+}
+
+const MAINTENANCE_SCHEDULES: &[MaintenanceSchedule] = &[
+    MaintenanceSchedule {
+        worker: MaintenanceWorker::UserDeletion,
+        initial_delay: Duration::from_secs(0),
+        interval: Duration::from_secs(10),
+    },
+    MaintenanceSchedule {
+        worker: MaintenanceWorker::StorageDeletion,
+        initial_delay: Duration::from_secs(1),
+        interval: Duration::from_secs(10),
+    },
+    MaintenanceSchedule {
+        worker: MaintenanceWorker::LegacyUploadExpiry,
+        initial_delay: Duration::from_secs(2),
+        interval: Duration::from_secs(10),
+    },
+    MaintenanceSchedule {
+        worker: MaintenanceWorker::VaultUploadExpiry,
+        initial_delay: Duration::from_secs(3),
+        interval: Duration::from_secs(10),
+    },
+    MaintenanceSchedule {
+        worker: MaintenanceWorker::InvitationExpiry,
+        initial_delay: Duration::from_secs(4),
+        interval: Duration::from_secs(10),
+    },
+    MaintenanceSchedule {
+        worker: MaintenanceWorker::MultipartReconciliation,
+        initial_delay: Duration::from_secs(0),
+        interval: Duration::from_secs(60 * 60),
+    },
+    MaintenanceSchedule {
+        worker: MaintenanceWorker::CounterReconciliation,
+        initial_delay: Duration::from_secs(5),
+        interval: Duration::from_secs(60 * 60),
+    },
 ];
 
 #[derive(Clone)]
@@ -694,39 +755,172 @@ impl Storage {
     }
 }
 
-pub async fn run_maintenance(db: Database, storage: Storage) {
-    let mut maintenance_interval = interval(Duration::from_secs(10));
-    maintenance_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
-    let mut reconciliation_ticks = 359_u16;
+pub async fn run_maintenance(db: Database, storage: Storage, shutdown: watch::Receiver<bool>) {
+    let mut supervisors = JoinSet::new();
+    for schedule in MAINTENANCE_SCHEDULES.iter().copied() {
+        supervisors.spawn(supervise_maintenance_worker(
+            schedule,
+            db.clone(),
+            storage.clone(),
+            shutdown.clone(),
+        ));
+    }
+
+    while let Some(result) = supervisors.join_next().await {
+        if let Err(error) = result {
+            log::error!("maintenance supervisor stopped unexpectedly: {error}");
+        }
+    }
+}
+
+async fn supervise_maintenance_worker(
+    schedule: MaintenanceSchedule,
+    db: Database,
+    storage: Storage,
+    shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+
+        let worker = tokio::spawn(run_maintenance_worker(
+            schedule,
+            db.clone(),
+            storage.clone(),
+            shutdown.clone(),
+        ));
+        let outcome = worker.await;
+        if *shutdown.borrow() {
+            return;
+        }
+
+        match outcome {
+            Ok(()) => log::error!(
+                "{} maintenance worker exited unexpectedly; restarting",
+                schedule.worker.label()
+            ),
+            Err(error) => log::error!(
+                "{} maintenance worker panicked or was cancelled: {error}; restarting",
+                schedule.worker.label()
+            ),
+        }
+
+        if matches!(
+            select(
+                Box::pin(wait_for_shutdown(shutdown.clone())),
+                Box::pin(sleep(MAINTENANCE_RESTART_DELAY)),
+            )
+            .await,
+            Either::Left(_)
+        ) {
+            return;
+        }
+    }
+}
+
+async fn run_maintenance_worker(
+    schedule: MaintenanceSchedule,
+    db: Database,
+    storage: Storage,
+    shutdown: watch::Receiver<bool>,
+) {
+    run_periodic_task(
+        schedule.initial_delay,
+        schedule.interval,
+        shutdown,
+        move || {
+            let db = db.clone();
+            let storage = storage.clone();
+            async move {
+                if let Err(error) = schedule.worker.run(&db, &storage).await {
+                    log::error!(
+                        "{} maintenance worker failed: {error}",
+                        schedule.worker.label()
+                    );
+                }
+            }
+        },
+    )
+    .await;
+}
+
+async fn run_periodic_task<Operation, OperationFuture>(
+    initial_delay: Duration,
+    period: Duration,
+    shutdown: watch::Receiver<bool>,
+    mut operation: Operation,
+) where
+    Operation: FnMut() -> OperationFuture,
+    OperationFuture: Future<Output = ()>,
+{
+    if *shutdown.borrow() {
+        return;
+    }
+
+    let mut task_interval = interval_at(Instant::now() + initial_delay, period);
+    task_interval.set_missed_tick_behavior(MissedTickBehavior::Skip);
 
     loop {
-        maintenance_interval.tick().await;
+        if matches!(
+            select(
+                Box::pin(wait_for_shutdown(shutdown.clone())),
+                Box::pin(task_interval.tick()),
+            )
+            .await,
+            Either::Left(_)
+        ) {
+            break;
+        }
+        if matches!(
+            select(
+                Box::pin(wait_for_shutdown(shutdown.clone())),
+                Box::pin(operation()),
+            )
+            .await,
+            Either::Left(_)
+        ) {
+            break;
+        }
+    }
+}
 
-        if let Err(error) = process_user_deletion_jobs(&db).await {
-            log::error!("user deletion worker failed: {error}");
+async fn wait_for_shutdown(mut shutdown: watch::Receiver<bool>) {
+    while !*shutdown.borrow() {
+        if shutdown.changed().await.is_err() {
+            return;
         }
-        if let Err(error) = process_deletion_jobs(&db, &storage).await {
-            log::error!("storage deletion worker failed: {error}");
-        }
-        if let Err(error) = expire_abandoned_uploads(&db, &storage).await {
-            log::error!("abandoned upload cleanup failed: {error}");
-        }
-        if let Err(error) = expire_abandoned_vault_uploads(&db, &storage).await {
-            log::error!("abandoned encrypted upload cleanup failed: {error}");
-        }
-        if let Err(error) = expire_invitations_batch(&db).await {
-            log::error!("invitation expiry worker failed: {error}");
-        }
+    }
+}
 
-        reconciliation_ticks = reconciliation_ticks.saturating_add(1);
-        if reconciliation_ticks >= 360 {
-            reconciliation_ticks = 0;
-            if let Err(error) = reconcile_orphaned_multipart_uploads(&db, &storage).await {
-                log::error!("multipart upload reconciliation failed: {error}");
+impl MaintenanceWorker {
+    const fn label(self) -> &'static str {
+        match self {
+            Self::UserDeletion => "user deletion",
+            Self::StorageDeletion => "storage deletion",
+            Self::LegacyUploadExpiry => "legacy upload expiry",
+            Self::VaultUploadExpiry => "encrypted upload expiry",
+            Self::InvitationExpiry => "invitation expiry",
+            Self::MultipartReconciliation => "multipart reconciliation",
+            Self::CounterReconciliation => "counter reconciliation",
+        }
+    }
+
+    async fn run(
+        self,
+        db: &Database,
+        storage: &Storage,
+    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        match self {
+            Self::UserDeletion => process_user_deletion_jobs(db).await,
+            Self::StorageDeletion => process_deletion_jobs(db, storage).await,
+            Self::LegacyUploadExpiry => expire_abandoned_uploads(db, storage).await,
+            Self::VaultUploadExpiry => expire_abandoned_vault_uploads(db, storage).await,
+            Self::InvitationExpiry => expire_invitations_batch(db).await,
+            Self::MultipartReconciliation => {
+                reconcile_orphaned_multipart_uploads(db, storage).await
             }
-            if let Err(error) = reconcile_counters(&db).await {
-                log::error!("counter reconciliation failed: {error}");
-            }
+            Self::CounterReconciliation => reconcile_counters(db).await,
         }
     }
 }
@@ -1970,7 +2164,63 @@ fn safe_local_path(root: &Path, object_key: &str) -> Option<PathBuf> {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+    use std::sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    };
+
     use super::*;
+
+    #[actix_web::test]
+    async fn maintenance_bulkheads_keep_running_when_one_task_stalls() {
+        let workers = MAINTENANCE_SCHEDULES
+            .iter()
+            .map(|schedule| schedule.worker)
+            .collect::<HashSet<_>>();
+        assert_eq!(workers.len(), MAINTENANCE_SCHEDULES.len());
+
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let stalled = tokio::spawn(run_periodic_task(
+            Duration::from_secs(0),
+            Duration::from_secs(60),
+            shutdown_rx.clone(),
+            || async { std::future::pending::<()>().await },
+        ));
+        let completed_runs = Arc::new(AtomicUsize::new(0));
+        let completed_runs_for_task = Arc::clone(&completed_runs);
+        let active = tokio::spawn(run_periodic_task(
+            Duration::from_secs(0),
+            Duration::from_millis(2),
+            shutdown_rx,
+            move || {
+                let completed_runs = Arc::clone(&completed_runs_for_task);
+                async move {
+                    completed_runs.fetch_add(1, Ordering::SeqCst);
+                }
+            },
+        ));
+
+        tokio::time::timeout(Duration::from_millis(250), async {
+            while completed_runs.load(Ordering::SeqCst) < 3 {
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("the independent maintenance task should keep meeting its interval");
+
+        shutdown_tx
+            .send(true)
+            .expect("maintenance shutdown receiver should remain active");
+        tokio::time::timeout(Duration::from_millis(250), stalled)
+            .await
+            .expect("the stalled task should stop on shutdown")
+            .expect("the stalled task should not panic");
+        tokio::time::timeout(Duration::from_millis(250), active)
+            .await
+            .expect("the active task should stop on shutdown")
+            .expect("the active task should not panic");
+    }
 
     fn intent(
         source: MultipartIntentSource,

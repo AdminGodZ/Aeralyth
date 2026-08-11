@@ -6646,7 +6646,7 @@ function encryptedLength(paddedBytes) {
 }
 async function sha2564(value) {
   return new Uint8Array(
-    await crypto.subtle.digest("SHA-256", toArrayBuffer2(value))
+    await crypto.subtle.digest("SHA-256", asBufferSource(value))
   );
 }
 async function merkleRootFromLeaves(leaves) {
@@ -6745,9 +6745,21 @@ async function ciphertextLeafHash(chunkIndex, ciphertext) {
   new DataView(index.buffer).setBigUint64(0, BigInt(chunkIndex), false);
   return sha2564(concatBytes(Uint8Array.of(0), index, ciphertext));
 }
+function asBufferSource(value) {
+  if (value.buffer instanceof ArrayBuffer) {
+    return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
+  }
+  return Uint8Array.from(value);
+}
 function toArrayBuffer2(value) {
-  const copy = Uint8Array.from(value);
-  return copy.buffer;
+  const source = asBufferSource(value);
+  if (source.byteOffset === 0 && source.byteLength === source.buffer.byteLength) {
+    return source.buffer;
+  }
+  return source.buffer.slice(
+    source.byteOffset,
+    source.byteOffset + source.byteLength
+  );
 }
 
 // src/features/vault/cbor.ts
@@ -7916,12 +7928,12 @@ async function encryptChunk(sessionId, chunkIndex, plaintext) {
       await crypto.subtle.encrypt(
         {
           name: "AES-GCM",
-          iv: toArrayBuffer2(chunkNonce(chunkIndex)),
-          additionalData: toArrayBuffer2(aad),
+          iv: asBufferSource(chunkNonce(chunkIndex)),
+          additionalData: asBufferSource(aad),
           tagLength: 128
         },
         session.contentKey,
-        toArrayBuffer2(padded)
+        asBufferSource(padded)
       )
     );
     session.leaves.push(await ciphertextLeafHash(chunkIndex, ciphertext));
@@ -7956,12 +7968,12 @@ async function finalizeEncryption(sessionId) {
     await crypto.subtle.encrypt(
       {
         name: "AES-GCM",
-        iv: toArrayBuffer2(zeroNonce()),
-        additionalData: toArrayBuffer2(manifestAad),
+        iv: asBufferSource(zeroNonce()),
+        additionalData: asBufferSource(manifestAad),
         tagLength: 128
       },
       manifestKey,
-      toArrayBuffer2(manifestPlaintext)
+      asBufferSource(manifestPlaintext)
     )
   );
   const canonicalWrappers = [session.ownerWrapper];
@@ -8163,12 +8175,12 @@ async function decryptChunk(sessionId, chunkIndex, ciphertext) {
       await crypto.subtle.decrypt(
         {
           name: "AES-GCM",
-          iv: toArrayBuffer2(chunkNonce(chunkIndex)),
-          additionalData: toArrayBuffer2(aad),
+          iv: asBufferSource(chunkNonce(chunkIndex)),
+          additionalData: asBufferSource(aad),
           tagLength: 128
         },
         session.contentKey,
-        toArrayBuffer2(ciphertext)
+        asBufferSource(ciphertext)
       )
     );
     const offset = chunkIndex * VAULT_CRYPTO_CHUNK_BYTES;
@@ -8330,12 +8342,12 @@ async function openAndVerifyPlan(plan) {
       await crypto.subtle.decrypt(
         {
           name: "AES-GCM",
-          iv: toArrayBuffer2(zeroNonce()),
-          additionalData: toArrayBuffer2(manifestAad),
+          iv: asBufferSource(zeroNonce()),
+          additionalData: asBufferSource(manifestAad),
           tagLength: 128
         },
         manifestKey,
-        toArrayBuffer2(encryptedManifest)
+        asBufferSource(encryptedManifest)
       )
     );
   } catch (error) {
@@ -8552,10 +8564,10 @@ async function createHpkeEnvelope(input) {
   const sender = await hpkeSuite.createSenderContext({
     recipientPublicKey: recipientPublic,
     senderKey: senderPrivate,
-    info: toArrayBuffer2(info)
+    info: asBufferSource(info)
   });
   const ciphertext = new Uint8Array(
-    await sender.seal(toArrayBuffer2(input.epochMaterial), toArrayBuffer2(aad))
+    await sender.seal(asBufferSource(input.epochMaterial), asBufferSource(aad))
   );
   const encapsulatedKey = new Uint8Array(sender.enc);
   if (encapsulatedKey.length !== 32 || ciphertext.length !== 48) {
@@ -8735,13 +8747,13 @@ async function openSharedKeys(plan, wrappers, wrapperBytes) {
   const recipient = await hpkeSuite.createRecipientContext({
     recipientKey: recipientPrivate,
     senderPublicKey: senderPublic,
-    enc: toArrayBuffer2(envelope.encapsulatedKey),
-    info: toArrayBuffer2(info)
+    enc: asBufferSource(envelope.encapsulatedKey),
+    info: asBufferSource(info)
   });
   const epochMaterial = new Uint8Array(
     await recipient.open(
-      toArrayBuffer2(envelope.ciphertext),
-      toArrayBuffer2(aad)
+      asBufferSource(envelope.ciphertext),
+      asBufferSource(aad)
     )
   );
   if (epochMaterial.length !== 32)
@@ -8852,7 +8864,7 @@ function derivePasswordMaterial(password, salt) {
 async function importHkdf(material) {
   return crypto.subtle.importKey(
     "raw",
-    toArrayBuffer2(material),
+    asBufferSource(material),
     "HKDF",
     false,
     ["deriveBits"]
@@ -8872,8 +8884,8 @@ async function deriveKeyMaterial(base2, salt, info) {
       {
         name: "HKDF",
         hash: "SHA-256",
-        salt: toArrayBuffer2(salt),
-        info: toArrayBuffer2(utf8(info))
+        salt: asBufferSource(salt),
+        info: asBufferSource(utf8(info))
       },
       base2,
       256
@@ -8883,7 +8895,7 @@ async function deriveKeyMaterial(base2, salt, info) {
 async function importAesKey(material) {
   return crypto.subtle.importKey(
     "raw",
-    toArrayBuffer2(material),
+    asBufferSource(material),
     { name: "AES-GCM", length: 256 },
     false,
     ["encrypt", "decrypt"]
@@ -8941,12 +8953,12 @@ async function encryptDerivedRecord(base2, salt, purpose, recordId, version, pla
       await crypto.subtle.encrypt(
         {
           name: "AES-GCM",
-          iv: toArrayBuffer2(zeroNonce()),
-          additionalData: toArrayBuffer2(aad),
+          iv: asBufferSource(zeroNonce()),
+          additionalData: asBufferSource(aad),
           tagLength: 128
         },
         key,
-        toArrayBuffer2(plaintext)
+        asBufferSource(plaintext)
       )
     );
   } finally {
@@ -8965,12 +8977,12 @@ async function decryptDerivedRecord(base2, salt, purpose, recordId, version, cip
       await crypto.subtle.decrypt(
         {
           name: "AES-GCM",
-          iv: toArrayBuffer2(zeroNonce()),
-          additionalData: toArrayBuffer2(aad),
+          iv: asBufferSource(zeroNonce()),
+          additionalData: asBufferSource(aad),
           tagLength: 128
         },
         key,
-        toArrayBuffer2(ciphertext)
+        asBufferSource(ciphertext)
       )
     );
   } finally {
