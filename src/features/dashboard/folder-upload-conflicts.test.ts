@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   folderUploadCreatesRepository,
   resolveFolderUploadConflicts,
+  UPLOAD_PATH_LOOKUP_CONCURRENCY,
   type UploadTreeEntry,
 } from "@/features/dashboard/folder-upload-conflicts";
 
@@ -104,6 +105,40 @@ describe("resolveFolderUploadConflicts", () => {
         ],
       }),
     ).rejects.toThrow("More than one existing item matches");
+  });
+
+  it("bounds lookups for large existing folder trees", async () => {
+    const projectCount = UPLOAD_PATH_LOOKUP_CONCURRENCY * 3;
+    const projects = Array.from({ length: projectCount }, (_, index) =>
+      entry(`project-${String(index)}`, `project-${String(index)}`, "folder"),
+    );
+    let activeLoads = 0;
+    let maximumActiveLoads = 0;
+
+    const resolution = await resolveFolderUploadConflicts({
+      relativePaths: projects.map(
+        (_, index) => `project-${String(index)}/src/main.ts`,
+      ),
+      parentFolderId: null,
+      loadChildren: async (parentId) => {
+        activeLoads += 1;
+        maximumActiveLoads = Math.max(maximumActiveLoads, activeLoads);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        activeLoads -= 1;
+
+        if (parentId === null) return projects;
+        if (parentId.startsWith("project-")) {
+          return [entry(`src-for-${parentId}`, "src", "folder")];
+        }
+        return [];
+      },
+    });
+
+    expect(resolution.existingFolders.size).toBe(projectCount * 2);
+    expect(maximumActiveLoads).toBeGreaterThan(1);
+    expect(maximumActiveLoads).toBeLessThanOrEqual(
+      UPLOAD_PATH_LOOKUP_CONCURRENCY,
+    );
   });
 });
 

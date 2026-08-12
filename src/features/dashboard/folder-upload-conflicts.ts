@@ -1,3 +1,7 @@
+import { mapWithConcurrency } from "@/features/vault/bounded-async";
+
+export const UPLOAD_PATH_LOOKUP_CONCURRENCY = 4;
+
 export type UploadTreeEntry = {
   id: string;
   name: string;
@@ -72,8 +76,10 @@ export async function resolveFolderUploadConflicts({
   async function resolveFolderDepth(depthIndex: number): Promise<void> {
     const sameDepth = foldersByDepth[depthIndex];
     if (!sameDepth) return;
-    await Promise.all(
-      sameDepth.map(async (folderPath) => {
+    await mapWithConcurrency(
+      sameDepth,
+      UPLOAD_PATH_LOOKUP_CONCURRENCY,
+      async (folderPath) => {
         const parentPath = parentDirectory(folderPath);
         const parentId = parentPath
           ? existingFolders.get(parentPath)?.id
@@ -87,14 +93,16 @@ export async function resolveFolderUploadConflicts({
           throw new UploadPathConflictError(folderPath, "type");
         }
         existingFolders.set(folderPath, match);
-      }),
+      },
     );
     await resolveFolderDepth(depthIndex + 1);
   }
   await resolveFolderDepth(0);
 
-  await Promise.all(
-    filePaths.map(async (filePath) => {
+  await mapWithConcurrency(
+    filePaths,
+    UPLOAD_PATH_LOOKUP_CONCURRENCY,
+    async (filePath) => {
       const parentPath = parentDirectory(filePath);
       const parentId = parentPath
         ? existingFolders.get(parentPath)?.id
@@ -108,7 +116,7 @@ export async function resolveFolderUploadConflicts({
         throw new UploadPathConflictError(filePath, "type");
       }
       replacementFiles.set(filePath, match);
-    }),
+    },
   );
 
   return {

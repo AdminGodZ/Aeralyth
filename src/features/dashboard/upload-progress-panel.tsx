@@ -2,7 +2,6 @@
 
 import {
   Check,
-  ChevronDown,
   CircleAlert,
   Clock3,
   File,
@@ -10,7 +9,7 @@ import {
   ShieldCheck,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -50,8 +49,8 @@ export function UploadProgressPanel({
   onCancel: () => void;
   onDismiss: () => void;
 }) {
-  const [open, setOpen] = useState(false);
   const failed = session.status === "failed";
+  const [open, setOpen] = useState(failed);
   const activeItem =
     session.activeFileIndex === null
       ? null
@@ -59,24 +58,18 @@ export function UploadProgressPanel({
   const percentage = getUploadPercentage(session);
   const activeFilePercentage = getActiveFilePercentage(session, activeItem);
 
-  useEffect(() => {
-    if (failed) {
-      setOpen(true);
-    }
-  }, [failed]);
-
   return (
     <Popover open={open} onOpenChange={setOpen}>
       <div
         className={cn(
-          "flex w-[22rem] max-w-[calc(100vw-2rem)] items-center overflow-hidden rounded-xl border bg-card shadow-sm transition-colors sm:w-[26rem]",
+          "flex w-[22rem] max-w-[calc(100vw-2rem)] items-center overflow-hidden rounded-xl border bg-background/95 shadow-lg shadow-black/10 backdrop-blur-sm transition-colors sm:w-[26rem]",
           failed ? "border-destructive/40" : "border-border/80",
         )}
       >
         <PopoverTrigger asChild>
           <button
             type="button"
-            className="group min-w-0 flex-1 px-3 py-2.5 text-left outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
+            className="group min-w-0 flex-1 px-3 py-2.5 text-left outline-none transition-colors hover:bg-muted/10 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset"
             aria-label={
               failed ? "Show upload failure details" : "Show upload details"
             }
@@ -101,43 +94,34 @@ export function UploadProgressPanel({
               </span>
 
               <span className="min-w-0 flex-1">
-                <span className="flex items-center justify-between gap-3">
-                  <span className="truncate text-sm font-medium">
-                    {getHeadline(session, activeItem)}
-                  </span>
+                <span className="block truncate text-sm font-medium">
+                  {getHeadline(session, activeItem)}
+                </span>
+                <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                  {formatCompletedFiles(session)} ·{" "}
+                  {formatBytes(session.uploadedBytes)} of{" "}
+                  {formatBytes(session.totalBytes)}
+                </span>
+                <span className="mt-2 flex items-center gap-2.5">
+                  <Progress
+                    value={percentage}
+                    className={cn(
+                      "h-1 flex-1",
+                      failed
+                        ? "bg-destructive/15 [&_[data-slot=progress-indicator]]:bg-destructive"
+                        : undefined,
+                    )}
+                    aria-label={`Upload ${Math.round(percentage)}% complete`}
+                  />
                   <span
                     className={cn(
-                      "shrink-0 text-xs font-medium tabular-nums",
+                      "min-w-8 shrink-0 text-right text-xs font-medium tabular-nums",
                       failed ? "text-destructive" : "text-muted-foreground",
                     )}
                   >
                     {failed ? "Failed" : `${Math.round(percentage)}%`}
                   </span>
                 </span>
-                <span className="mt-0.5 flex items-center justify-between gap-3 text-[11px] text-muted-foreground">
-                  <span className="truncate">
-                    {formatCompletedFiles(session)} ·{" "}
-                    {formatBytes(session.uploadedBytes)} of{" "}
-                    {formatBytes(session.totalBytes)}
-                  </span>
-                  <ChevronDown
-                    className={cn(
-                      "size-3.5 shrink-0 transition-transform",
-                      open ? "rotate-180" : "rotate-0",
-                    )}
-                    aria-hidden="true"
-                  />
-                </span>
-                <Progress
-                  value={percentage}
-                  className={cn(
-                    "mt-2 h-1",
-                    failed
-                      ? "bg-destructive/15 [&_[data-slot=progress-indicator]]:bg-destructive"
-                      : undefined,
-                  )}
-                  aria-label={`Upload ${Math.round(percentage)}% complete`}
-                />
               </span>
             </div>
           </button>

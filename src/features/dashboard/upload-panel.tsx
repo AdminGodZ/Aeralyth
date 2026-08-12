@@ -39,11 +39,15 @@ import {
   type UploadTreeEntry,
 } from "@/features/dashboard/folder-upload-conflicts";
 import type { FolderZipWorkerResponse } from "@/features/dashboard/folder-zip-messages";
-import { filterGitIgnoredSelections } from "@/features/dashboard/gitignore-filter";
 import {
   UploadProgressPanel,
   type UploadProgressSession,
 } from "@/features/dashboard/upload-progress-panel";
+import {
+  getUploadSelectionError,
+  MAX_UPLOAD_BYTES,
+  prepareFolderUploadSelection,
+} from "@/features/dashboard/upload-selection-policy";
 import { uploadEncryptedSelections } from "@/features/vault/encrypted-upload";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import { useVault } from "@/features/vault/vault-provider";
@@ -156,8 +160,6 @@ type UploadChildrenPage = {
   hasMore: boolean;
 };
 
-const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
-const MAX_SELECTION_FILES = 1000;
 const MULTIPART_CONCURRENCY = 4;
 const MULTIPART_PRESIGN_BATCH_SIZE = 8;
 const LOCAL_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
@@ -276,15 +278,12 @@ function useUploadPanelController({
       return;
     }
 
-    if (files.length > MAX_SELECTION_FILES) {
-      setUploadError(
-        `Choose no more than ${MAX_SELECTION_FILES.toLocaleString()} files at once.`,
-      );
-      return;
-    }
-
-    if (replacementFileId && files.length !== 1) {
-      setUploadError("Choose exactly one file to replace the shared file.");
+    const selectionError = getUploadSelectionError(
+      files,
+      Boolean(replacementFileId),
+    );
+    if (selectionError) {
+      setUploadError(selectionError);
       return;
     }
 
@@ -785,11 +784,18 @@ function useUploadPanelController({
     let uploadFiles = files;
     let ignoredFiles = 0;
     const createRepository = folderUploadCreatesRepository(surface);
-    if (folderSelection && createRepository) {
+    if (folderSelection) {
       setPreparingMessage("Applying .gitignore");
       setIsPreparingSelection(true);
       try {
-        uploadFiles = await filterGitIgnoredSelections(files);
+        const prepared = await prepareFolderUploadSelection(files);
+        uploadFiles = prepared.files;
+        ignoredFiles = prepared.ignoredFiles;
+        if (prepared.error) {
+          setIsPreparingSelection(false);
+          setUploadError(prepared.error);
+          return;
+        }
       } catch (error) {
         setIsPreparingSelection(false);
         setUploadError(
@@ -800,7 +806,6 @@ function useUploadPanelController({
         return;
       }
       setIsPreparingSelection(false);
-      ignoredFiles = files.length - uploadFiles.length;
 
       if (uploadFiles.length === 0) {
         setUploadError(
@@ -1230,12 +1235,6 @@ function UploadPanelView({
           />
           <span role="status">{preparingMessage}</span>
         </div>
-      ) : uploadSession ? (
-        <UploadProgressPanel
-          session={uploadSession}
-          onCancel={cancelUpload}
-          onDismiss={dismissUploadSession}
-        />
       ) : replacementFileId ? (
         <Button
           type="button"
@@ -1316,6 +1315,19 @@ function UploadPanelView({
         />
       )}
 
+      {uploadSession ? (
+        <div className="pointer-events-none fixed inset-x-4 bottom-4 z-40 flex justify-end sm:right-6 sm:left-auto sm:bottom-6">
+          <div className="pointer-events-auto">
+            <UploadProgressPanel
+              key={uploadSession.status}
+              session={uploadSession}
+              onCancel={cancelUpload}
+              onDismiss={dismissUploadSession}
+            />
+          </div>
+        </div>
+      ) : null}
+
       {pendingReplacementUpload ? (
         <FolderReplacementDialog
           pendingUpload={pendingReplacementUpload}
@@ -1350,9 +1362,6 @@ function FolderReplacementDialog({
   onReplace: () => void;
 }) {
   const conflictCount = pendingUpload.resolution.conflictPaths.length;
-  const conflictLabel = `${conflictCount.toLocaleString()} ${
-    conflictCount === 1 ? "file has" : "files have"
-  } the same path`;
 
   return (
     <Dialog
@@ -1365,33 +1374,15 @@ function FolderReplacementDialog({
     >
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>Replace existing files?</DialogTitle>
+          <DialogTitle>
+            Replace {conflictCount.toLocaleString()} existing{" "}
+            {conflictCount === 1 ? "file" : "files"}?
+          </DialogTitle>
           <DialogDescription>
-            “{pendingUpload.folderName}” already exists and {conflictLabel}.
-            Replace those files with the selected versions?
+            In “{pendingUpload.folderName}”, matching files will be replaced and
+            new files will be added. Everything else will stay unchanged.
           </DialogDescription>
         </DialogHeader>
-
-        <div className="flex items-start gap-3 rounded-md border bg-muted/25 p-3">
-          <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <FolderUp className="size-5" aria-hidden="true" />
-          </span>
-          <div className="min-w-0">
-            <p className="truncate text-sm font-semibold">
-              {pendingUpload.folderName}
-            </p>
-            <p className="mt-1 text-xs text-muted-foreground">
-              New files will be added. Existing files that are not in this
-              upload will stay unchanged.
-            </p>
-            {pendingUpload.ignoredFiles > 0 ? (
-              <p className="mt-1 text-xs text-muted-foreground">
-                {formatIgnoredFiles(pendingUpload.ignoredFiles)} will stay on
-                this device
-              </p>
-            ) : null}
-          </div>
-        </div>
 
         <DialogFooter>
           <Button
