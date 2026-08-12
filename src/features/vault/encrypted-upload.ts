@@ -1,3 +1,7 @@
+import type {
+  ExistingUploadNode,
+  FolderUploadResolution,
+} from "@/features/dashboard/folder-upload-conflicts";
 import {
   ExactStreamReader,
   FixedSizeBufferAssembler,
@@ -43,6 +47,7 @@ export type EncryptedUploadSelection = {
 export async function uploadEncryptedSelections({
   selections,
   parentFolderId,
+  resolution,
   csrfToken,
   client,
   signal,
@@ -52,6 +57,7 @@ export async function uploadEncryptedSelections({
 }: {
   selections: EncryptedUploadSelection[];
   parentFolderId: string | null;
+  resolution?: FolderUploadResolution;
   csrfToken: string;
   client: VaultCryptoClient;
   signal: AbortSignal;
@@ -75,6 +81,11 @@ export async function uploadEncryptedSelections({
 
   for (const path of folders) {
     assertNotAborted(signal);
+    const existing = resolution?.existingFolders.get(path);
+    if (existing) {
+      folderIds.set(path, existing.id);
+      continue;
+    }
     const parentPath = parentDirectory(path);
     const parentId = folderIds.get(parentPath);
     if (parentId === undefined) {
@@ -114,6 +125,7 @@ export async function uploadEncryptedSelections({
       csrfToken,
       client,
       signal,
+      replacement: resolution?.replacementFiles.get(path),
       onChunk: (sourceBytes) => {
         processedBytes += sourceBytes;
         fileProcessedBytes += sourceBytes;
@@ -180,22 +192,33 @@ export async function migrateEncryptedNode({
     previousRecordHash: null,
   });
   if (started.ciphertextLength > VAULT_MAX_CIPHERTEXT_BYTES) {
+    await client
+      .abortEncryption(started.sessionId, started.nodeId)
+      .catch(() => undefined);
     throw new Error(`${node.name} exceeds the encrypted upload limit.`);
   }
-  const plan = await initVaultUpload(
-    csrfToken,
-    {
-      nodeId: node.nodeId,
-      parentId: node.parentId,
-      entryType: node.entryType,
-      generationNumber: started.generationNumber,
-      generationId: started.generationId,
-      ciphertextLength: started.ciphertextLength,
-      chunkCount: started.chunkCount,
-      migration: true,
-    },
-    signal,
-  );
+  let plan: VaultUploadPlan;
+  try {
+    plan = await initVaultUpload(
+      csrfToken,
+      {
+        nodeId: node.nodeId,
+        parentId: node.parentId,
+        entryType: node.entryType,
+        generationNumber: started.generationNumber,
+        generationId: started.generationId,
+        ciphertextLength: started.ciphertextLength,
+        chunkCount: started.chunkCount,
+        migration: true,
+      },
+      signal,
+    );
+  } catch (error) {
+    await client
+      .abortEncryption(started.sessionId, started.nodeId)
+      .catch(() => undefined);
+    throw error;
+  }
 
   try {
     let parts: VaultCompletedPart[] = [];
@@ -246,6 +269,9 @@ export async function migrateEncryptedNode({
     }
     onProgress(node.plaintextBytes, node.plaintextBytes);
   } catch (error) {
+    await client
+      .abortEncryption(started.sessionId, started.nodeId)
+      .catch(() => undefined);
     await abortVaultUpload(csrfToken, plan.uploadId).catch(() => undefined);
     throw error;
   }
@@ -258,6 +284,7 @@ async function uploadEncryptedEntry({
   csrfToken,
   client,
   signal,
+  replacement,
   onChunk,
 }: {
   file: File | null;
@@ -266,9 +293,19 @@ async function uploadEncryptedEntry({
   csrfToken: string;
   client: VaultCryptoClient;
   signal: AbortSignal;
+  replacement?: ExistingUploadNode;
   onChunk(bytes: number): void;
 }): Promise<{ nodeId: string }> {
+  const replacementVersion = getEncryptedReplacementVersion(replacement);
   const started = await client.startEncryption({
+    ...(replacementVersion
+      ? {
+          nodeId: replacementVersion.nodeId,
+          generationNumber: replacementVersion.generationNumber + 1,
+          recordVersion: replacementVersion.recordVersion + 1,
+          previousRecordHash: replacementVersion.recordHash,
+        }
+      : {}),
     parentId,
     entryType: file ? "file" : "folder",
     name,
@@ -277,21 +314,32 @@ async function uploadEncryptedEntry({
     lastModified: file?.lastModified ?? Date.now(),
   });
   if (started.ciphertextLength > VAULT_MAX_CIPHERTEXT_BYTES) {
+    await client
+      .abortEncryption(started.sessionId, started.nodeId)
+      .catch(() => undefined);
     throw new Error(`${name} exceeds the encrypted upload limit.`);
   }
-  const plan = await initVaultUpload(
-    csrfToken,
-    {
-      nodeId: started.nodeId,
-      parentId,
-      entryType: file ? "file" : "folder",
-      generationNumber: started.generationNumber,
-      generationId: started.generationId,
-      ciphertextLength: started.ciphertextLength,
-      chunkCount: started.chunkCount,
-    },
-    signal,
-  );
+  let plan: VaultUploadPlan;
+  try {
+    plan = await initVaultUpload(
+      csrfToken,
+      {
+        nodeId: started.nodeId,
+        parentId,
+        entryType: file ? "file" : "folder",
+        generationNumber: started.generationNumber,
+        generationId: started.generationId,
+        ciphertextLength: started.ciphertextLength,
+        chunkCount: started.chunkCount,
+      },
+      signal,
+    );
+  } catch (error) {
+    await client
+      .abortEncryption(started.sessionId, started.nodeId)
+      .catch(() => undefined);
+    throw error;
+  }
 
   try {
     const parts = file
@@ -325,9 +373,36 @@ async function uploadEncryptedEntry({
     }
     return { nodeId: completed.nodeId };
   } catch (error) {
+    await client
+      .abortEncryption(started.sessionId, started.nodeId)
+      .catch(() => undefined);
     await abortVaultUpload(csrfToken, plan.uploadId).catch(() => undefined);
     throw error;
   }
+}
+
+export function getEncryptedReplacementVersion(
+  replacement?: ExistingUploadNode,
+) {
+  if (!replacement) return null;
+  if (
+    replacement.e2eeState !== "encrypted" ||
+    !Number.isSafeInteger(replacement.generationNumber) ||
+    !Number.isSafeInteger(replacement.recordVersion) ||
+    (replacement.generationNumber ?? 0) < 1 ||
+    (replacement.recordVersion ?? 0) < 1 ||
+    !replacement.recordHash
+  ) {
+    throw new Error(
+      `“${replacement.name}” cannot be replaced until its encrypted record is ready.`,
+    );
+  }
+  return {
+    nodeId: replacement.id,
+    generationNumber: replacement.generationNumber as number,
+    recordVersion: replacement.recordVersion as number,
+    recordHash: replacement.recordHash,
+  };
 }
 
 async function encryptAndUploadFile({

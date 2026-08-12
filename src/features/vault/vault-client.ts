@@ -150,6 +150,13 @@ export class VaultCryptoClient {
     ).result;
   }
 
+  async abortEncryption(sessionId: string, nodeId: string): Promise<void> {
+    expectResult(
+      await this.send({ type: "abortEncryption", sessionId, nodeId }),
+      "abortEncryption",
+    );
+  }
+
   async createShareDirectory(
     input: VaultShareDirectoryInput,
   ): Promise<VaultShareDirectoryResult> {

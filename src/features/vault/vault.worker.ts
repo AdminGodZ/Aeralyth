@@ -234,6 +234,9 @@ async function dispatch(
           result: await finalizeEncryption(request.sessionId),
         },
       };
+    case "abortEncryption":
+      abortEncryption(request.sessionId, request.nodeId);
+      return { result: { type: "abortEncryption" } };
     case "createShareDirectory":
       return {
         result: {
@@ -849,7 +852,6 @@ async function startEncryption(
     leaves: [],
     ownerWrapper,
   });
-  nodeKeys.set(nodeId, nodeKey);
   wipe(nodeMaterial);
 
   return {
@@ -1005,6 +1007,7 @@ async function finalizeEncryption(
       wrappers: canonicalWrappers.map(toBase64Url),
     },
   };
+  nodeKeys.set(session.nodeId, session.nodeKey);
   encryptionSessions.delete(sessionId);
   wipe(
     manifestPlaintext,
@@ -1016,6 +1019,26 @@ async function finalizeEncryption(
     ...session.leaves,
   );
   return complete;
+}
+
+function abortEncryption(sessionId: string, nodeId: string): void {
+  validateNodeId(nodeId);
+  const session = encryptionSessions.get(sessionId);
+  if (session && session.nodeId !== nodeId) {
+    throw new Error("The encryption session does not match the node.");
+  }
+  encryptionSessions.delete(sessionId);
+  if (!session || nodeKeys.get(nodeId) === session.nodeKey) {
+    nodeKeys.delete(nodeId);
+  }
+  if (session) {
+    wipe(
+      session.generationId,
+      session.previousRecordHash,
+      session.ownerWrapper,
+      ...session.leaves,
+    );
+  }
 }
 
 async function createShareDirectory(

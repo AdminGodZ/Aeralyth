@@ -31,18 +31,21 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Progress } from "@/components/ui/progress";
+import {
+  type FolderUploadResolution,
+  folderUploadCreatesRepository,
+  normalizeUploadPath,
+  resolveFolderUploadConflicts,
+  type UploadTreeEntry,
+} from "@/features/dashboard/folder-upload-conflicts";
 import type { FolderZipWorkerResponse } from "@/features/dashboard/folder-zip-messages";
 import { filterGitIgnoredSelections } from "@/features/dashboard/gitignore-filter";
 import {
   UploadProgressPanel,
   type UploadProgressSession,
 } from "@/features/dashboard/upload-progress-panel";
-import {
-  detectProjectFolder,
-  getSelectionRootName,
-  type ProjectDetection,
-} from "@/features/repositories/project-detection";
 import { uploadEncryptedSelections } from "@/features/vault/encrypted-upload";
+import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import { useVault } from "@/features/vault/vault-provider";
 
 type UploadSelection = {
@@ -57,18 +60,25 @@ type PendingFolderUpload = {
   ignoredFiles: number;
 };
 
-type PendingProjectUpload = {
+type PendingReplacementUpload = {
   files: UploadSelection[];
   folderName: string;
-  detection: ProjectDetection;
+  createRepository: boolean;
   ignoredFiles: number;
+  resolution: FolderUploadResolution;
 };
 
 type QueuedUpload = {
   files: UploadSelection[];
   createRepository: boolean;
   ignoredFiles: number;
+  resolution?: FolderUploadResolution;
+  replacementConfirmed: boolean;
 };
+
+type QueuedVaultAction =
+  | { kind: "upload"; upload: QueuedUpload }
+  | { kind: "prepare-folder"; upload: QueuedUpload };
 
 type CompressionProgress = {
   processedBytes: number;
@@ -135,6 +145,17 @@ type CreatedRepository = {
   id: string;
 };
 
+type UploadChildrenPage = {
+  entries: Array<{
+    id: string;
+    name: string;
+    entryType: "file" | "folder";
+    e2eeState: "legacy" | "staged" | "encrypted";
+  }>;
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
 const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
 const MAX_SELECTION_FILES = 1000;
 const MULTIPART_CONCURRENCY = 4;
@@ -142,6 +163,8 @@ const MULTIPART_PRESIGN_BATCH_SIZE = 8;
 const LOCAL_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 const UPLOAD_RETRY_COUNT = 3;
 const UPLOAD_FINALIZATION_TIMEOUT_MS = 45_000;
+const UPLOAD_TREE_PAGE_SIZE = 100;
+const UPLOAD_TREE_DECRYPT_CONCURRENCY = 8;
 
 export function UploadPanel(props: UploadPanelProps) {
   const controller = useUploadPanelController(props);
@@ -163,17 +186,21 @@ function useUploadPanelController({
   const folderInputRef = useRef<HTMLInputElement>(null);
   const zipWorkerRef = useRef<Worker | null>(null);
   const uploadAbortRef = useRef<AbortController | null>(null);
+  const preparationAbortRef = useRef<AbortController | null>(null);
   const activeUploadRequests = useStableSet<XMLHttpRequest>();
-  const queuedVaultSelectionRef = useRef<QueuedUpload | null>(null);
+  const queuedVaultActionRef = useRef<QueuedVaultAction | null>(null);
   const [isPreparingSelection, setIsPreparingSelection] = useState(false);
+  const [preparingMessage, setPreparingMessage] = useState(
+    "Preparing selected files",
+  );
   const [isUploading, setIsUploading] = useState(false);
   const [uploadSession, setUploadSession] =
     useState<UploadProgressSession | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [pendingFolderUpload, setPendingFolderUpload] =
     useState<PendingFolderUpload | null>(null);
-  const [pendingProjectUpload, setPendingProjectUpload] =
-    useState<PendingProjectUpload | null>(null);
+  const [pendingReplacementUpload, setPendingReplacementUpload] =
+    useState<PendingReplacementUpload | null>(null);
   const [isCompressing, setIsCompressing] = useState(false);
   const [compressionError, setCompressionError] = useState<string | null>(null);
   const [compressionProgress, setCompressionProgress] =
@@ -200,6 +227,7 @@ function useUploadPanelController({
     return () => {
       zipWorkerRef.current?.terminate();
       uploadAbortRef.current?.abort();
+      preparationAbortRef.current?.abort();
       for (const request of activeUploadRequests) {
         request.abort();
       }
@@ -207,23 +235,42 @@ function useUploadPanelController({
     };
   }, [activeUploadRequests]);
 
-  const submitQueuedFiles = useEffectEvent((queued: QueuedUpload) => {
-    submitFiles(queued.files, queued.createRepository, queued.ignoredFiles);
-  });
+  const resumeQueuedVaultAction = useEffectEvent(
+    (queued: QueuedVaultAction) => {
+      if (queued.kind === "prepare-folder") {
+        void prepareFolderUpload(
+          queued.upload.files,
+          queued.upload.createRepository,
+          queued.upload.ignoredFiles,
+          queued.upload.replacementConfirmed,
+        );
+        return;
+      }
+      submitFiles(
+        queued.upload.files,
+        queued.upload.createRepository,
+        queued.upload.ignoredFiles,
+        queued.upload.resolution,
+        queued.upload.replacementConfirmed,
+      );
+    },
+  );
 
   useEffect(() => {
-    const queued = queuedVaultSelectionRef.current;
+    const queued = queuedVaultActionRef.current;
     if (e2eeMode === "off" || vault.state !== "unlocked" || !queued) {
       return;
     }
-    queuedVaultSelectionRef.current = null;
-    submitQueuedFiles(queued);
+    queuedVaultActionRef.current = null;
+    resumeQueuedVaultAction(queued);
   }, [e2eeMode, vault.state]);
 
   function submitFiles(
     files: UploadSelection[],
     createRepository = false,
     ignoredFiles = 0,
+    resolution?: FolderUploadResolution,
+    replacementConfirmed = false,
   ) {
     if (files.length === 0 || isUploading) {
       return;
@@ -242,10 +289,15 @@ function useUploadPanelController({
     }
 
     if (e2eeMode !== "off" && vault.state !== "unlocked") {
-      queuedVaultSelectionRef.current = {
-        files,
-        createRepository,
-        ignoredFiles,
+      queuedVaultActionRef.current = {
+        kind: resolution ? "prepare-folder" : "upload",
+        upload: {
+          files,
+          createRepository,
+          ignoredFiles,
+          resolution,
+          replacementConfirmed,
+        },
       };
       vault.requestUnlock();
       return;
@@ -254,12 +306,13 @@ function useUploadPanelController({
     setUploadError(null);
     setIsUploading(true);
     setUploadSession(createUploadProgressSession(files, ignoredFiles));
-    void uploadSelections(files, createRepository);
+    void uploadSelections(files, createRepository, resolution);
   }
 
   async function uploadSelections(
     files: UploadSelection[],
     createRepository: boolean,
+    resolution?: FolderUploadResolution,
   ) {
     const controller = new AbortController();
     uploadAbortRef.current = controller;
@@ -337,6 +390,7 @@ function useUploadPanelController({
         const encryptedUpload = await uploadEncryptedSelections({
           selections: files,
           parentFolderId: parentFolderId ?? null,
+          resolution,
           csrfToken,
           client: vault.client,
           signal: controller.signal,
@@ -389,6 +443,7 @@ function useUploadPanelController({
         const uploadedRootFolderId = await uploadSelection(
           selection,
           fileIndex,
+          resolution,
           controller.signal,
           (key, loaded) => reportProgress(fileIndex, key, loaded),
         );
@@ -462,6 +517,7 @@ function useUploadPanelController({
   async function uploadSelection(
     selection: UploadSelection,
     fileIndex: number,
+    resolution: FolderUploadResolution | undefined,
     signal: AbortSignal,
     reportProgress: (key: string, loaded: number) => void,
   ) {
@@ -481,7 +537,12 @@ function useUploadPanelController({
         sizeBytes: selection.file.size,
         mimeType: selection.file.type || null,
         parentId: parentFolderId ?? null,
-        replacementFileId: replacementFileId ?? null,
+        replacementFileId:
+          replacementFileId ??
+          resolution?.replacementFiles.get(
+            normalizeUploadPath(selection.relativePath),
+          )?.id ??
+          null,
       }),
       signal,
     });
@@ -723,7 +784,9 @@ function useUploadPanelController({
 
     let uploadFiles = files;
     let ignoredFiles = 0;
-    if (folderSelection) {
+    const createRepository = folderUploadCreatesRepository(surface);
+    if (folderSelection && createRepository) {
+      setPreparingMessage("Applying .gitignore");
       setIsPreparingSelection(true);
       try {
         uploadFiles = await filterGitIgnoredSelections(files);
@@ -747,33 +810,23 @@ function useUploadPanelController({
       }
     }
 
-    if (surface === "repositories") {
+    if (createRepository) {
       if (!folderSelection) {
         setUploadError("Choose a project folder to create a repository.");
         return;
       }
-      submitFiles(uploadFiles, true, ignoredFiles);
+      queueFolderOrUpload(uploadFiles, ignoredFiles, createRepository);
       return;
-    }
-
-    if (surface === "files" && !shareToken && folderSelection) {
-      const relativePaths = uploadFiles.map(({ relativePath }) => relativePath);
-      const detection = detectProjectFolder(relativePaths);
-      if (detection.detected) {
-        setPendingProjectUpload({
-          files: uploadFiles,
-          folderName: getSelectionRootName(relativePaths),
-          detection,
-          ignoredFiles,
-        });
-        return;
-      }
     }
 
     queueFolderOrUpload(uploadFiles, ignoredFiles);
   }
 
-  function queueFolderOrUpload(files: UploadSelection[], ignoredFiles = 0) {
+  function queueFolderOrUpload(
+    files: UploadSelection[],
+    ignoredFiles = 0,
+    createRepository = false,
+  ) {
     if (folderZipPromptEnabled && isFolderSelection(files)) {
       setCompressionError(null);
       setPendingFolderUpload({
@@ -788,29 +841,168 @@ function useUploadPanelController({
       return;
     }
 
-    submitFiles(files, false, ignoredFiles);
-  }
-
-  function createDetectedRepository() {
-    if (!pendingProjectUpload) {
+    if (isFolderSelection(files) && !shareToken) {
+      void prepareFolderUpload(files, createRepository, ignoredFiles);
       return;
     }
 
-    const files = pendingProjectUpload.files;
-    const ignoredFiles = pendingProjectUpload.ignoredFiles;
-    setPendingProjectUpload(null);
-    submitFiles(files, true, ignoredFiles);
+    submitFiles(files, createRepository, ignoredFiles);
   }
 
-  function keepDetectedProjectInFiles() {
-    if (!pendingProjectUpload) {
+  async function prepareFolderUpload(
+    files: UploadSelection[],
+    createRepository: boolean,
+    ignoredFiles: number,
+    replacementConfirmed = false,
+  ) {
+    if (e2eeMode !== "off" && vault.state !== "unlocked") {
+      queuedVaultActionRef.current = {
+        kind: "prepare-folder",
+        upload: {
+          files,
+          createRepository,
+          ignoredFiles,
+          replacementConfirmed,
+        },
+      };
+      vault.requestUnlock();
       return;
     }
 
-    const files = pendingProjectUpload.files;
-    const ignoredFiles = pendingProjectUpload.ignoredFiles;
-    setPendingProjectUpload(null);
-    queueFolderOrUpload(files, ignoredFiles);
+    preparationAbortRef.current?.abort();
+    const controller = new AbortController();
+    preparationAbortRef.current = controller;
+    setPreparingMessage("Checking existing files");
+    setIsPreparingSelection(true);
+    setUploadError(null);
+
+    try {
+      if (e2eeMode !== "off" && parentFolderId) {
+        await vault.openNode(parentFolderId);
+      }
+      const resolution = await resolveFolderUploadConflicts({
+        relativePaths: files.map(({ relativePath }) => relativePath),
+        parentFolderId: parentFolderId ?? null,
+        loadChildren: (folderId) =>
+          loadUploadTreeChildren(folderId, controller.signal),
+      });
+      assertEncryptedResolutionReady(resolution);
+
+      if (resolution.conflictPaths.length > 0 && !replacementConfirmed) {
+        setPendingReplacementUpload({
+          files,
+          folderName: getFolderSelectionName(files),
+          createRepository,
+          ignoredFiles,
+          resolution,
+        });
+        return;
+      }
+
+      submitFiles(
+        files,
+        createRepository,
+        ignoredFiles,
+        resolution,
+        replacementConfirmed,
+      );
+    } catch (error) {
+      if (!isAbortError(error)) {
+        setUploadError(
+          error instanceof Error && error.message
+            ? error.message
+            : "Existing files could not be checked. Try the upload again.",
+        );
+      }
+    } finally {
+      if (preparationAbortRef.current === controller) {
+        preparationAbortRef.current = null;
+      }
+      setIsPreparingSelection(false);
+    }
+  }
+
+  async function loadUploadTreeChildren(
+    folderId: string | null,
+    signal: AbortSignal,
+  ): Promise<UploadTreeEntry[]> {
+    const listed: UploadChildrenPage["entries"] = [];
+    let cursor: string | null = null;
+
+    do {
+      const search = new URLSearchParams({
+        view: "files",
+        sort: "name",
+        direction: "asc",
+        limit: String(UPLOAD_TREE_PAGE_SIZE),
+        ...(folderId ? { folder: folderId } : {}),
+        ...(cursor ? { cursor } : {}),
+      });
+      // Pagination is sequential because each cursor is issued by the previous page.
+      // react-doctor-disable-next-line react-doctor/async-await-in-loop
+      const page = await requestJson<UploadChildrenPage>(
+        `/api/files?${search}`,
+        {
+          signal,
+        },
+      );
+      listed.push(...page.entries);
+      cursor = page.hasMore ? page.nextCursor : null;
+      if (page.hasMore && !cursor) {
+        throw new Error("The existing folder listing could not be continued.");
+      }
+    } while (cursor);
+
+    return mapWithConcurrency(
+      listed,
+      UPLOAD_TREE_DECRYPT_CONCURRENCY,
+      async (entry): Promise<UploadTreeEntry> => {
+        if (entry.e2eeState !== "encrypted") {
+          return entry;
+        }
+        if (!vault.client) {
+          throw new Error("Unlock the vault before checking existing files.");
+        }
+        const plan = await getVaultDownloadPlan(entry.id, signal);
+        const opened = await vault.client.openPlan(plan);
+        if (opened.manifest.entryType !== entry.entryType) {
+          throw new Error("An encrypted file record has an invalid type.");
+        }
+        return {
+          ...entry,
+          name: opened.manifest.name,
+          generationNumber: plan.generationNumber,
+          recordVersion: plan.recordVersion,
+          recordHash: plan.recordHash,
+        };
+      },
+    );
+  }
+
+  function assertEncryptedResolutionReady(resolution: FolderUploadResolution) {
+    if (e2eeMode === "off") return;
+    const matched = [
+      ...resolution.existingFolders.values(),
+      ...resolution.replacementFiles.values(),
+    ];
+    if (matched.some(({ e2eeState }) => e2eeState !== "encrypted")) {
+      throw new Error(
+        "This existing folder is still being encrypted. Wait for vault migration to finish, then upload it again.",
+      );
+    }
+  }
+
+  function confirmReplacementUpload() {
+    if (!pendingReplacementUpload) return;
+    const pending = pendingReplacementUpload;
+    setPendingReplacementUpload(null);
+    submitFiles(
+      pending.files,
+      pending.createRepository,
+      pending.ignoredFiles,
+      pending.resolution,
+      true,
+    );
   }
 
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
@@ -945,7 +1137,7 @@ function useUploadPanelController({
     const files = pendingFolderUpload.files;
     const ignoredFiles = pendingFolderUpload.ignoredFiles;
     setPendingFolderUpload(null);
-    submitFiles(files, false, ignoredFiles);
+    void prepareFolderUpload(files, false, ignoredFiles);
   }
 
   function cancelCompression() {
@@ -967,18 +1159,18 @@ function useUploadPanelController({
   return {
     uploadError,
     activity,
+    preparingMessage,
     uploadSession,
     fileInputRef,
     folderInputRef,
     handleFileChange,
     pendingFolderUpload,
-    pendingProjectUpload,
+    pendingReplacementUpload,
     compressionError,
     compressionProgress,
     closePendingFolderUpload: () => setPendingFolderUpload(null),
-    closePendingProjectUpload: () => setPendingProjectUpload(null),
-    createDetectedRepository,
-    keepDetectedProjectInFiles,
+    closePendingReplacementUpload: () => setPendingReplacementUpload(null),
+    confirmReplacementUpload,
     uploadPendingFolder,
     startFolderCompression,
     cancelCompression,
@@ -992,18 +1184,18 @@ function useUploadPanelController({
 function UploadPanelView({
   uploadError,
   activity,
+  preparingMessage,
   uploadSession,
   fileInputRef,
   folderInputRef,
   handleFileChange,
   pendingFolderUpload,
-  pendingProjectUpload,
+  pendingReplacementUpload,
   compressionError,
   compressionProgress,
   closePendingFolderUpload,
-  closePendingProjectUpload,
-  createDetectedRepository,
-  keepDetectedProjectInFiles,
+  closePendingReplacementUpload,
+  confirmReplacementUpload,
   uploadPendingFolder,
   startFolderCompression,
   cancelCompression,
@@ -1036,7 +1228,7 @@ function UploadPanelView({
             className="size-4 animate-spin text-primary"
             aria-hidden="true"
           />
-          <span role="status">Applying .gitignore</span>
+          <span role="status">{preparingMessage}</span>
         </div>
       ) : uploadSession ? (
         <UploadProgressPanel
@@ -1124,12 +1316,11 @@ function UploadPanelView({
         />
       )}
 
-      {pendingProjectUpload ? (
-        <ProjectFolderDecisionDialog
-          pendingUpload={pendingProjectUpload}
-          onClose={closePendingProjectUpload}
-          onCreateRepository={createDetectedRepository}
-          onKeepInFiles={keepDetectedProjectInFiles}
+      {pendingReplacementUpload ? (
+        <FolderReplacementDialog
+          pendingUpload={pendingReplacementUpload}
+          onClose={closePendingReplacementUpload}
+          onReplace={confirmReplacementUpload}
         />
       ) : null}
 
@@ -1149,20 +1340,19 @@ function UploadPanelView({
   );
 }
 
-function ProjectFolderDecisionDialog({
+function FolderReplacementDialog({
   pendingUpload,
   onClose,
-  onCreateRepository,
-  onKeepInFiles,
+  onReplace,
 }: {
-  pendingUpload: PendingProjectUpload;
+  pendingUpload: PendingReplacementUpload;
   onClose: () => void;
-  onCreateRepository: () => void;
-  onKeepInFiles: () => void;
+  onReplace: () => void;
 }) {
-  const projectLabel = pendingUpload.detection.projectType
-    ? `${pendingUpload.detection.projectType} project`
-    : "software project";
+  const conflictCount = pendingUpload.resolution.conflictPaths.length;
+  const conflictLabel = `${conflictCount.toLocaleString()} ${
+    conflictCount === 1 ? "file has" : "files have"
+  } the same path`;
 
   return (
     <Dialog
@@ -1175,23 +1365,24 @@ function ProjectFolderDecisionDialog({
     >
       <DialogContent className="sm:max-w-lg">
         <DialogHeader>
-          <DialogTitle>This folder looks like a project</DialogTitle>
+          <DialogTitle>Replace existing files?</DialogTitle>
           <DialogDescription>
-            Aeralyth detected a {projectLabel}. Choose whether to add it as a
-            repository or keep it in regular file storage.
+            “{pendingUpload.folderName}” already exists and {conflictLabel}.
+            Replace those files with the selected versions?
           </DialogDescription>
         </DialogHeader>
 
         <div className="flex items-start gap-3 rounded-md border bg-muted/25 p-3">
           <span className="flex size-10 shrink-0 items-center justify-center rounded-md bg-primary/10 text-primary">
-            <FolderGit2 className="size-5" aria-hidden="true" />
+            <FolderUp className="size-5" aria-hidden="true" />
           </span>
           <div className="min-w-0">
             <p className="truncate text-sm font-semibold">
               {pendingUpload.folderName}
             </p>
             <p className="mt-1 text-xs text-muted-foreground">
-              Detected from {formatDetectionSignals(pendingUpload.detection)}
+              New files will be added. Existing files that are not in this
+              upload will stay unchanged.
             </p>
             {pendingUpload.ignoredFiles > 0 ? (
               <p className="mt-1 text-xs text-muted-foreground">
@@ -1202,45 +1393,6 @@ function ProjectFolderDecisionDialog({
           </div>
         </div>
 
-        <div className="grid gap-3 sm:grid-cols-2">
-          <Button
-            type="button"
-            variant="secondary"
-            size="lg"
-            className="h-auto min-h-20 justify-start gap-3 rounded-md border border-primary/70 px-4 py-3 text-left whitespace-normal hover:border-primary"
-            onClick={onCreateRepository}
-          >
-            <FolderGit2
-              className="size-5 shrink-0 text-primary"
-              aria-hidden="true"
-            />
-            <span className="min-w-0">
-              <span className="block font-semibold">Create repository</span>
-              <span className="mt-0.5 block text-xs font-normal leading-4 text-muted-foreground">
-                Upload the folder and open its repository view
-              </span>
-            </span>
-          </Button>
-          <Button
-            type="button"
-            variant="secondary"
-            size="lg"
-            className="h-auto min-h-20 justify-start gap-3 rounded-md border border-transparent px-4 py-3 text-left whitespace-normal"
-            onClick={onKeepInFiles}
-          >
-            <FolderUp
-              className="size-5 shrink-0 text-primary"
-              aria-hidden="true"
-            />
-            <span className="min-w-0">
-              <span className="block font-semibold">Keep in Files</span>
-              <span className="mt-0.5 block text-xs font-normal leading-4 text-muted-foreground">
-                Continue with the normal folder upload choices
-              </span>
-            </span>
-          </Button>
-        </div>
-
         <DialogFooter>
           <Button
             type="button"
@@ -1249,6 +1401,9 @@ function ProjectFolderDecisionDialog({
             onClick={onClose}
           >
             Cancel
+          </Button>
+          <Button type="button" className="rounded-md" onClick={onReplace}>
+            Replace and upload
           </Button>
         </DialogFooter>
       </DialogContent>
@@ -1852,12 +2007,15 @@ function createUploadProgressSession(
   };
 }
 
-function formatDetectionSignals(detection: ProjectDetection) {
-  if (detection.signals.length === 0) {
-    return "its folder structure";
+function getFolderSelectionName(files: UploadSelection[]) {
+  const roots = new Set<string>();
+  for (const { relativePath } of files) {
+    const root = normalizeUploadPath(relativePath).split("/", 1)[0];
+    if (root) roots.add(root);
   }
-
-  return detection.signals.join(", ");
+  return roots.size === 1
+    ? (roots.values().next().value ?? "Selected folder")
+    : "Selected folder";
 }
 
 function formatFolderSelectionSummary(pendingUpload: PendingFolderUpload) {

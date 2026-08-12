@@ -244,6 +244,7 @@ struct UploadRecord {
     multipart_upload_id: Option<String>,
     status: String,
     checksum_sha256: Option<String>,
+    share_link_id: Option<String>,
     replacement_file_id: Option<String>,
 }
 
@@ -374,14 +375,9 @@ pub async fn init_upload(
         };
         (parent_id, replacement_file_id)
     } else {
-        if body.replacement_file_id.is_some() {
-            return Err(error::ErrorBadRequest(
-                "file replacement requires an editor share link",
-            ));
-        }
         (
             validate_folder(&state, &actor.owner_id, body.parent_id.as_deref()).await?,
-            None,
+            body.replacement_file_id.clone(),
         )
     };
 
@@ -485,20 +481,45 @@ pub async fn init_upload(
         Err(database_error) => return Err(error::ErrorInternalServerError(database_error)),
     };
     let replacement_credit = if let Some(replacement_file_id) = replacement_file_id.as_deref() {
-        let replacement = query_opt_cached(
-            &transaction,
-            "
-                SELECT size_bytes
-                FROM files
-                WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
-                  AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
-                FOR UPDATE
-            ",
-            &[&replacement_file_id, &actor.owner_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?
-        .ok_or_else(|| error::ErrorNotFound("the file selected for replacement is unavailable"))?;
+        let replacement = if actor.editor_grant.is_some() {
+            query_opt_cached(
+                &transaction,
+                "
+                    SELECT size_bytes
+                    FROM files
+                    WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
+                      AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
+                    FOR UPDATE
+                ",
+                &[&replacement_file_id, &actor.owner_id],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?
+        } else {
+            query_opt_cached(
+                &transaction,
+                "
+                    SELECT size_bytes
+                    FROM files
+                    WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
+                      AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
+                      AND parent_id IS NOT DISTINCT FROM $3
+                      AND lower(original_name) = lower($4)
+                    FOR UPDATE
+                ",
+                &[
+                    &replacement_file_id,
+                    &actor.owner_id,
+                    &parent_id,
+                    &display_name,
+                ],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?
+        }
+        .ok_or_else(|| {
+            error::ErrorConflict("the replacement file no longer matches the upload path")
+        })?;
         let competing = query_opt_cached(
             &transaction,
             "
@@ -1402,22 +1423,45 @@ async fn finalize_upload_record(
     }
 
     if let Some(replacement_file_id) = upload.replacement_file_id.as_deref() {
-        let target = transaction
-            .query_opt(
-                "
-                    SELECT storage_name
-                    FROM files
-                    WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
-                      AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
-                    FOR UPDATE
-                ",
-                &[&replacement_file_id, &upload.owner_id],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+        let target = if upload.share_link_id.is_some() {
+            transaction
+                .query_opt(
+                    "
+                        SELECT storage_name
+                        FROM files
+                        WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
+                          AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
+                        FOR UPDATE
+                    ",
+                    &[&replacement_file_id, &upload.owner_id],
+                )
+                .await
+                .map_err(error::ErrorInternalServerError)?
+        } else {
+            transaction
+                .query_opt(
+                    "
+                        SELECT storage_name
+                        FROM files
+                        WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
+                          AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
+                          AND parent_id IS NOT DISTINCT FROM $3
+                          AND lower(original_name) = lower($4)
+                        FOR UPDATE
+                    ",
+                    &[
+                        &replacement_file_id,
+                        &upload.owner_id,
+                        &upload.parent_id,
+                        &upload.original_name,
+                    ],
+                )
+                .await
+                .map_err(error::ErrorInternalServerError)?
+        };
         let Some(target) = target else {
-            return Err(error::ErrorNotFound(
-                "the file selected for replacement is unavailable",
+            return Err(error::ErrorConflict(
+                "the replacement file no longer matches the upload path",
             ));
         };
         let previous_storage_name: String = target.get("storage_name");
@@ -2944,6 +2988,7 @@ async fn get_upload(
         multipart_upload_id: row.get("multipart_upload_id"),
         status: row.get("status"),
         checksum_sha256: row.get("checksum_sha256"),
+        share_link_id: row.get("share_link_id"),
         replacement_file_id: row.get("replacement_file_id"),
     }))
 }
@@ -3019,6 +3064,7 @@ async fn find_resumable_upload(
         multipart_upload_id: row.get("multipart_upload_id"),
         status: row.get("status"),
         checksum_sha256: row.get("checksum_sha256"),
+        share_link_id: row.get("share_link_id"),
         replacement_file_id: row.get("replacement_file_id"),
     }))
 }

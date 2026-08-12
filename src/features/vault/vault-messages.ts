@@ -52,6 +52,12 @@ export type VaultWorkerRequest =
     }
   | {
       id: number;
+      type: "abortEncryption";
+      sessionId: string;
+      nodeId: string;
+    }
+  | {
+      id: number;
       type: "createShareDirectory";
       input: VaultShareDirectoryInput;
     }
@@ -205,6 +211,7 @@ export type VaultWorkerResult =
   | { type: "startEncryption"; result: VaultEncryptionStart }
   | { type: "encryptChunk"; result: VaultEncryptedChunk }
   | { type: "finalizeEncryption"; result: VaultEncryptionComplete }
+  | { type: "abortEncryption" }
   | { type: "createShareDirectory"; result: VaultShareDirectoryResult }
   | { type: "startDecryption"; result: VaultDecryptionStart }
   | { type: "decryptChunk"; result: VaultDecryptedChunk }
