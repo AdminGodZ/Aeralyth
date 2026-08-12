@@ -8,87 +8,45 @@ export function FileEmptyIllustration({ className }: { className?: string }) {
       aria-hidden="true"
       className={cn("size-full", className)}
     >
-      <ellipse
-        cx="79"
-        cy="116"
-        rx="53"
-        ry="6"
-        fill="var(--foreground)"
-        opacity="0.055"
+      <path
+        d="M27 48V25.5C27 19.15 32.15 14 38.5 14h70c6.9 0 12.5 5.6 12.5 12.5V50H27v-2Z"
+        fill="var(--muted)"
+        opacity="0.62"
+      />
+      <path
+        d="M27 33V25.5C27 19.15 32.15 14 38.5 14h70c6.9 0 12.5 5.6 12.5 12.5V47"
+        stroke="color-mix(in srgb, var(--foreground) 72%, transparent)"
+        strokeWidth="3.5"
+        strokeLinecap="round"
+        strokeLinejoin="round"
       />
 
       <path
-        d="M18.5 59V38c0-8.28 6.72-15 15-15h27.84c5.04 0 9.78 2.39 12.78 6.44l7.8 10.53a16 16 0 0 0 12.86 6.48h32.72c7.73 0 14 6.27 14 14V94.5c0 8.28-6.72 15-15 15h-93c-8.28 0-15-6.72-15-15V59Z"
-        fill="var(--muted)"
-        opacity="0.72"
-      />
-      <path
-        d="M18.5 59h123v35.5c0 8.28-6.72 15-15 15h-93c-8.28 0-15-6.72-15-15V59Z"
+        d="M25.9 31h44.6c4.9 0 9.6 2.1 12.9 5.7l6.7 7.25a13 13 0 0 0 9.55 4.15h27.9c7.7 0 13.67 6.75 12.74 14.4l-5.25 43.2c-.78 6.44-6.25 11.3-12.74 11.3H31.5c-6.8 0-12.4-5.2-13-12L13.1 45c-.7-7.6 5.2-14 12.8-14Z"
         fill="var(--card)"
+        stroke="color-mix(in srgb, var(--foreground) 72%, transparent)"
+        strokeWidth="3.5"
+        strokeLinejoin="round"
       />
+
       <path
-        d="M18.5 59V38c0-8.28 6.72-15 15-15h27.84c5.04 0 9.78 2.39 12.78 6.44l7.8 10.53a16 16 0 0 0 12.86 6.48h32.72c7.73 0 14 6.27 14 14V94.5c0 8.28-6.72 15-15 15h-93c-8.28 0-15-6.72-15-15V59Z"
-        stroke="color-mix(in srgb, var(--muted-foreground) 54%, transparent)"
-        strokeWidth="2.5"
+        d="M41.5 58.5 54.5 71.5M54.5 58.5l-13 13M94.5 56l13 13M107.5 56l-13 13"
+        stroke="color-mix(in srgb, var(--foreground) 72%, transparent)"
+        strokeWidth="3.25"
+        strokeLinecap="round"
         strokeLinejoin="round"
       />
       <path
-        d="M19.88 59h120.24"
-        stroke="color-mix(in srgb, var(--muted-foreground) 20%, transparent)"
-        strokeWidth="1.75"
-      />
-
-      <rect
-        x="37"
-        y="68"
-        width="53"
-        height="29"
-        rx="7"
-        fill="var(--primary)"
-        opacity="0.065"
-      />
-      <path
-        d="M47 78h30M47 87h20"
-        stroke="color-mix(in srgb, var(--primary) 72%, transparent)"
-        strokeWidth="2.75"
+        d="M56.5 93.5c11-11.3 29-11.3 40 0"
+        stroke="color-mix(in srgb, var(--foreground) 72%, transparent)"
+        strokeWidth="3.25"
         strokeLinecap="round"
       />
 
-      <circle
-        cx="111"
-        cy="88.5"
-        r="32.5"
-        fill="var(--foreground)"
-        opacity="0.035"
-      />
-      <circle
-        cx="111"
-        cy="86"
-        r="31.5"
-        fill="var(--card)"
-        stroke="color-mix(in srgb, var(--muted-foreground) 26%, transparent)"
-        strokeWidth="2.25"
-        className="drop-shadow-[0_14px_24px_rgb(0_0_0/0.14)]"
-      />
-      <circle
-        cx="111"
-        cy="86"
-        r="27.5"
-        stroke="color-mix(in srgb, var(--primary) 8%, transparent)"
-      />
-
-      <circle
-        cx="105.5"
-        cy="80.5"
-        r="11.75"
-        fill="color-mix(in srgb, var(--primary) 9%, transparent)"
-        stroke="var(--primary)"
-        strokeWidth="4.5"
-      />
       <path
-        d="m114.25 89.25 13 13"
-        stroke="var(--primary)"
-        strokeWidth="4.75"
+        d="m123 13.5 5-8.5M128 20l9-7M130 27l11-1"
+        stroke="color-mix(in srgb, var(--foreground) 72%, transparent)"
+        strokeWidth="3.25"
         strokeLinecap="round"
       />
     </svg>
