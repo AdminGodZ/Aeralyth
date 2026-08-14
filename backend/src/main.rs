@@ -3,6 +3,7 @@ mod config;
 mod db;
 mod e2ee;
 mod observability;
+mod passwords;
 mod routes;
 mod state;
 mod storage;
@@ -28,14 +29,18 @@ async fn main() -> std::io::Result<()> {
         .map_err(|error| io::Error::other(format!("failed to initialize logging: {error}")))?;
     let metrics = observability::Metrics::new(&config);
     let bind_addr = config.bind_addr();
-    let db = db::Database::create(
-        &config.database_url,
-        config.database_pool_max,
-        Duration::from_millis(config.database_pool_wait_ms),
-        metrics.clone(),
-    )
-    .await
-    .map_err(|error| io::Error::other(format!("failed to connect to postgres: {error}")))?;
+    let request_pool_settings = db::DatabasePoolSettings {
+        role: db::PoolRole::Request,
+        max_size: config.database_pool_max,
+        min_size: config.database_pool_min,
+        checkout_queue_capacity: config.database_pool_queue_capacity,
+        wait_timeout: Duration::from_millis(config.database_pool_wait_ms),
+        max_lifetime: Duration::from_secs(config.database_connection_max_lifetime_seconds),
+        lifetime_jitter: Duration::from_secs(config.database_connection_lifetime_jitter_seconds),
+    };
+    let db = db::Database::create(&config.database_url, request_pool_settings, metrics.clone())
+        .await
+        .map_err(|error| io::Error::other(format!("failed to connect to postgres: {error}")))?;
     if config.e2ee_mode == E2eeMode::Required {
         let row = db
             .query_one(
@@ -65,12 +70,42 @@ async fn main() -> std::io::Result<()> {
     let storage = storage::Storage::create(&config)
         .await
         .map_err(|error| io::Error::other(format!("failed to initialize storage: {error}")))?;
-    let maintenance_db = db.clone();
+    let maintenance_db = db::Database::create(
+        &config.database_url,
+        db::DatabasePoolSettings {
+            role: db::PoolRole::Maintenance,
+            max_size: config.database_maintenance_pool_max,
+            min_size: config.database_maintenance_pool_min,
+            checkout_queue_capacity: config.database_maintenance_pool_queue_capacity,
+            ..request_pool_settings
+        },
+        metrics.clone(),
+    )
+    .await
+    .map_err(|error| {
+        io::Error::other(format!(
+            "failed to connect maintenance pool to postgres: {error}"
+        ))
+    })?;
+    let database_pools = db::DatabasePoolMonitor::new(&db, &maintenance_db);
+    let passwords =
+        passwords::PasswordService::new(config.password_workers, config.password_queue_capacity)
+            .map_err(|error| {
+                io::Error::other(format!("failed to initialize password workers: {error}"))
+            })?;
+    let login_rate_limiter = passwords::LoginRateLimiter::new(
+        Duration::from_secs(60),
+        config.login_attempts_per_address_minute,
+        config.login_attempts_per_account_minute,
+    );
     let maintenance_storage = storage.clone();
     let state = web::Data::new(AppState {
         config: config.clone(),
         db,
+        database_pools,
         metrics: metrics.clone(),
+        passwords,
+        login_rate_limiter,
         storage,
         vault_mutation_limiter: MutationLimiter::new(8, 3),
     });
@@ -184,4 +219,18 @@ async fn main() -> std::io::Result<()> {
         tracing::error!(%error, "maintenance runtime stopped unexpectedly");
     }
     result
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn maintenance_uses_an_independent_database_pool() {
+        let source = include_str!("main.rs");
+        let forbidden_clone = ["maintenance_db = ", "db.clone()"].concat();
+
+        assert!(source.contains("role: db::PoolRole::Request"));
+        assert!(source.contains("role: db::PoolRole::Maintenance"));
+        assert!(source.matches("db::Database::create(").count() >= 2);
+        assert!(!source.contains(&forbidden_clone));
+    }
 }

@@ -3,6 +3,7 @@ use actix_web::http::header::LOCATION;
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
+use std::net::{IpAddr, Ipv4Addr};
 
 use crate::auth::{SESSION_COOKIE, authenticate_password, current_user, require_csrf};
 use crate::state::AppState;
@@ -35,10 +36,22 @@ struct CsrfResponse {
     csrf_token: String,
 }
 
-pub async fn login(state: web::Data<AppState>, form: web::Form<LoginForm>) -> Result<HttpResponse> {
+pub async fn login(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    form: web::Form<LoginForm>,
+) -> Result<HttpResponse> {
     let username = form.username.trim();
 
     if username.is_empty() || form.password.is_empty() {
+        return Ok(redirect(login_error_location(form.next.as_deref())));
+    }
+
+    let address = request
+        .peer_addr()
+        .map(|address| address.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    if !state.login_rate_limiter.allow(address, username) {
         return Ok(redirect(login_error_location(form.next.as_deref())));
     }
 

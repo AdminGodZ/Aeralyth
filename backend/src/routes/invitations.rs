@@ -81,6 +81,36 @@ pub async fn accept(
         return Ok(redirect(format!("/invite/{token}?error=weak-password")));
     }
 
+    let invitation_available = state
+        .db
+        .query_opt(
+            "
+                SELECT 1
+                FROM invitations AS target
+                WHERE target.token_hash = encode(digest($1::text, 'sha256'), 'hex')
+                  AND target.status = 'pending'
+                  AND target.expires_at > now()
+                  AND NOT EXISTS (
+                    SELECT 1
+                    FROM users
+                    WHERE lower(username) = lower(target.invited_username)
+                  )
+                LIMIT 1
+            ",
+            &[&token],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    if invitation_available.is_none() {
+        return Ok(redirect(format!("/invite/{token}?error=unavailable")));
+    }
+
+    state.db.release_request_connection().await;
+    let password_hash =
+        state.passwords.hash(password).await.map_err(|_| {
+            error::ErrorServiceUnavailable("password service temporarily unavailable")
+        })?;
+
     let accepted_user = state
         .db
         .query_opt(
@@ -103,13 +133,13 @@ pub async fn accept(
                 SELECT
                   gen_random_uuid()::text,
                   invited_username,
-                  crypt($2, gen_salt('bf')),
+                  $2,
                   role,
                   'active'
                 FROM accepted_invitation
                 RETURNING username
             ",
-            &[&token, &password],
+            &[&token, &password_hash],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;

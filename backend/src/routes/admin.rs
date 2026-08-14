@@ -324,6 +324,12 @@ pub async fn create_user(
         return Ok(redirect("/users?user=user-exists"));
     }
 
+    state.db.release_request_connection().await;
+    let password_hash =
+        state.passwords.hash(password).await.map_err(|_| {
+            error::ErrorServiceUnavailable("password service temporarily unavailable")
+        })?;
+
     state
         .db
         .execute(
@@ -332,12 +338,12 @@ pub async fn create_user(
                 VALUES (
                   gen_random_uuid()::text,
                   $1,
-                  crypt($2, gen_salt('bf')),
+                  $2,
                   $3,
                   'active'
                 )
             ",
-            &[&username, &password, &role],
+            &[&username, &password_hash, &role],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;

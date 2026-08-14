@@ -36,6 +36,7 @@ jobs:
       AERALYTH_COOKIE_SECURE: "false"
       AERALYTH_E2EE_MODE: "off"
       AERALYTH_METRICS_TOKEN: ci-only-performance-token-000000000
+      AERALYTH_DATABASE_INTEGRATION_TESTS: "1"
       AERALYTH_PERF_URL: http://127.0.0.1:18080/health
       AERALYTH_PERF_MAX_P95_MS: "500"
       DATABASE_URL: postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth
@@ -73,6 +74,7 @@ jobs:
           exit 1
       - run: npm run perf:http
       - run: npm run perf:auth-before-body
+      - run: npm run perf:auth-database-isolation
       - name: Show API log on failure
         if: failure()
         run: cat backend-performance.log

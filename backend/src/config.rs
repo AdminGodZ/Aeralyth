@@ -31,7 +31,18 @@ pub struct Config {
     pub database_url: String,
     pub database_url_configured: bool,
     pub database_pool_max: usize,
+    pub database_pool_min: usize,
+    pub database_pool_queue_capacity: usize,
+    pub database_maintenance_pool_max: usize,
+    pub database_maintenance_pool_min: usize,
+    pub database_maintenance_pool_queue_capacity: usize,
     pub database_pool_wait_ms: u64,
+    pub database_connection_max_lifetime_seconds: u64,
+    pub database_connection_lifetime_jitter_seconds: u64,
+    pub password_workers: usize,
+    pub password_queue_capacity: usize,
+    pub login_attempts_per_address_minute: u32,
+    pub login_attempts_per_account_minute: u32,
     pub metrics_token: Option<String>,
     pub request_slow_ms: u64,
     pub request_success_sample_rate: usize,
@@ -68,7 +79,34 @@ impl Config {
         let database_url = configured_database_url
             .unwrap_or_else(|| "postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth".to_owned());
         let database_pool_max = env_usize("AERALYTH_DB_POOL_MAX", 8, 1, 32);
+        let database_pool_min = env_usize("AERALYTH_DB_POOL_MIN", 2, 0, database_pool_max);
+        let database_pool_queue_capacity = env_usize(
+            "AERALYTH_DB_POOL_QUEUE_CAPACITY",
+            database_pool_max.saturating_mul(8),
+            database_pool_max,
+            1_024,
+        );
+        let database_maintenance_pool_max = env_usize("AERALYTH_DB_MAINTENANCE_POOL_MAX", 2, 1, 8);
+        let database_maintenance_pool_min = env_usize(
+            "AERALYTH_DB_MAINTENANCE_POOL_MIN",
+            1,
+            0,
+            database_maintenance_pool_max,
+        );
+        let database_maintenance_pool_queue_capacity = env_usize(
+            "AERALYTH_DB_MAINTENANCE_POOL_QUEUE_CAPACITY",
+            database_maintenance_pool_max.saturating_mul(8),
+            database_maintenance_pool_max,
+            128,
+        );
         let database_pool_wait_ms = env_u64("AERALYTH_DB_POOL_WAIT_MS", 1_000, 100, 30_000);
+        let password_workers = env_usize("AERALYTH_PASSWORD_WORKERS", 2, 1, 8);
+        let password_queue_capacity = env_usize(
+            "AERALYTH_PASSWORD_QUEUE_CAPACITY",
+            16,
+            password_workers,
+            256,
+        );
         let cookie_secure = env::var("AERALYTH_COOKIE_SECURE")
             .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
             .unwrap_or_else(|_| !cfg!(debug_assertions));
@@ -159,7 +197,38 @@ impl Config {
             database_url,
             database_url_configured,
             database_pool_max,
+            database_pool_min,
+            database_pool_queue_capacity,
+            database_maintenance_pool_max,
+            database_maintenance_pool_min,
+            database_maintenance_pool_queue_capacity,
             database_pool_wait_ms,
+            database_connection_max_lifetime_seconds: env_u64(
+                "AERALYTH_DB_CONNECTION_MAX_LIFETIME_SECONDS",
+                30 * 60,
+                10 * 60,
+                24 * 60 * 60,
+            ),
+            database_connection_lifetime_jitter_seconds: env_u64(
+                "AERALYTH_DB_CONNECTION_LIFETIME_JITTER_SECONDS",
+                10 * 60,
+                0,
+                60 * 60,
+            ),
+            password_workers,
+            password_queue_capacity,
+            login_attempts_per_address_minute: env_u32(
+                "AERALYTH_LOGIN_ATTEMPTS_PER_ADDRESS_MINUTE",
+                60,
+                1,
+                10_000,
+            ),
+            login_attempts_per_account_minute: env_u32(
+                "AERALYTH_LOGIN_ATTEMPTS_PER_ACCOUNT_MINUTE",
+                10,
+                1,
+                1_000,
+            ),
             metrics_token,
             request_slow_ms: env_u64("AERALYTH_REQUEST_SLOW_MS", 500, 1, 60_000),
             request_success_sample_rate: env_usize(
@@ -236,6 +305,14 @@ fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
     env::var(name)
         .ok()
         .and_then(|value| value.parse::<u64>().ok())
+        .map(|value| value.clamp(min, max))
+        .unwrap_or(default)
+}
+
+fn env_u32(name: &str, default: u32, min: u32, max: u32) -> u32 {
+    env::var(name)
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
         .map(|value| value.clamp(min, max))
         .unwrap_or(default)
 }

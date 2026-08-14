@@ -85,11 +85,31 @@ The backend reads these optional environment variables:
 AERALYTH_API_HOST=0.0.0.0
 AERALYTH_API_PORT=8080
 DATABASE_URL=postgres://aeralyth:aeralyth@localhost:5432/aeralyth
+AERALYTH_DB_POOL_MAX=8
+AERALYTH_DB_POOL_MIN=2
+AERALYTH_DB_POOL_QUEUE_CAPACITY=64
+AERALYTH_DB_MAINTENANCE_POOL_MAX=2
+AERALYTH_DB_MAINTENANCE_POOL_MIN=1
+AERALYTH_DB_MAINTENANCE_POOL_QUEUE_CAPACITY=16
+AERALYTH_DB_POOL_WAIT_MS=1000
+AERALYTH_DB_CONNECTION_MAX_LIFETIME_SECONDS=1800
+AERALYTH_DB_CONNECTION_LIFETIME_JITTER_SECONDS=600
+AERALYTH_PASSWORD_WORKERS=2
+AERALYTH_PASSWORD_QUEUE_CAPACITY=16
+AERALYTH_LOGIN_ATTEMPTS_PER_ADDRESS_MINUTE=60
+AERALYTH_LOGIN_ATTEMPTS_PER_ACCOUNT_MINUTE=10
 AERALYTH_COOKIE_SECURE=false
 AERALYTH_STORAGE_BACKEND=s3
 AERALYTH_E2EE_MODE=migrate
 AERALYTH_SHARE_LINK_SECRET=<at-least-32-random-bytes>
 ```
+
+Request and maintenance database pools are deliberately separate. Treat their
+maximum sizes as one per-instance PostgreSQL connection budget when tuning a
+deployment. The small prewarmed minimums avoid cold reconnects; healthy idle
+connections stay pooled, while maximum-lifetime recycling is staggered by the
+configured jitter. Password hashing and verification run in the bounded Rust
+worker queue instead of consuming PostgreSQL connections.
 
 `AERALYTH_COOKIE_SECURE` defaults to `false` for debug builds and `true` for
 release builds.

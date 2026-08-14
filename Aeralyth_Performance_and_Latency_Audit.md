@@ -338,6 +338,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-018 [P1] Pool defaults and workload mixing magnify burst latency
 
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** Request traffic and all eight maintenance workers now use independently created, independently sized PostgreSQL pools with bounded checkout queues; maintenance can no longer borrow a request connection through request-local caching. Both pools expose labeled size, available, waiting, checkout-latency, checkout-failure, connection-creation, and lifetime-recycle metrics. A real-PostgreSQL regression test held the only maintenance connection until that pool timed out while the one-connection request pool still completed its ping inside 250 ms. The warmed 20-login contention check measured authenticated file-control p95 at 8.45 ms, request checkout p99 within the 5 ms bucket, and zero request-pool checkout failures. The bulkhead test and contention check now run in performance CI.
+
 **Confidence:** Confirmed
 
 **Evidence:** The pool defaults to 8 connections, is capped at 32, and has a one-second wait timeout. Request traffic, health checks, and maintenance all use the same pool.
@@ -350,6 +354,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-019 [P2] Idle-connection recycling creates avoidable cold-request connection churn
 
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** Healthy connections are no longer rejected based on idle time. `RecyclingMethod::Verified` remains enabled, TCP keepalive is configured, the request and maintenance pools prewarm small configurable minimums, and the 30-minute maximum lifetime is staggered by up to ten minutes per connection instead of recycling a cohort together. Creation and lifetime-recycle counters make reconnect behavior directly observable. Regression tests simulate a connection idle for ten minutes, fail if an idle-age check returns, and verify each connection receives a stable bounded lifetime jitter. Live metrics confirmed both pools prewarmed without checkout failures.
+
 **Confidence:** Confirmed
 
 **Evidence:** `backend/src/db.rs` rejects pooled connections older than 30 minutes or unused for more than five minutes. Low-traffic periods can therefore leave the next request creating a new PostgreSQL connection.
@@ -361,6 +369,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** After ten idle minutes, the first request should not need to establish every pool connection.
 
 ## PERF-020 [P1] Password verification and hashing run inside PostgreSQL
+
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** Login now fetches the stored bcrypt hash, maps the user, explicitly releases the request-scoped PostgreSQL connection, and only then verifies in a bounded Rust `spawn_blocking` worker queue. Missing users perform the same dummy-hash work to avoid a fast username oracle. Admin creation and invitation acceptance hash before their short insert statements, and invalid invitations are rejected before consuming a password worker. Per-address and per-account login limits are independent of the worker bound, while an exhausted worker queue returns `429` rather than growing without limit. PostgreSQL-compatible `$2a$` verification, queue bounds, rate limits, and a source guard forbidding runtime `crypt`/`gen_salt` SQL are covered by tests. In the live 20-login burst, authenticated file-control p95 was 8.45 ms, request checkout p99 stayed in the 5 ms bucket, and database checkout failures stayed at zero.
 
 **Confidence:** Confirmed
 

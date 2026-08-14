@@ -36,6 +36,7 @@
     "test:performance": "vitest run --config vitest.performance.config.mts",
     "perf:http": "node performance/http-load.mjs",
     "perf:auth-before-body": "node performance/auth-before-body.mjs",
+    "perf:auth-database-isolation": "node performance/auth-database-isolation.mjs",
     "format": "biome format --write"
   },
   "dependencies": {

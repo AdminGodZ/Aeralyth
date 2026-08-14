@@ -4,14 +4,18 @@ use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::config::Config;
-use crate::db::Database;
+use crate::db::{Database, DatabasePoolMonitor};
 use crate::observability::Metrics;
+use crate::passwords::{LoginRateLimiter, PasswordService};
 use crate::storage::Storage;
 
 pub struct AppState {
     pub config: Config,
     pub db: Database,
+    pub database_pools: DatabasePoolMonitor,
     pub metrics: Metrics,
+    pub passwords: PasswordService,
+    pub login_rate_limiter: LoginRateLimiter,
     pub storage: Storage,
     pub vault_mutation_limiter: MutationLimiter,
 }

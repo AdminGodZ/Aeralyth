@@ -19,7 +19,7 @@ pub async fn metrics(state: web::Data<AppState>, request: HttpRequest) -> HttpRe
     HttpResponse::Ok()
         .insert_header((CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8"))
         .insert_header((CACHE_CONTROL, "no-store"))
-        .body(state.metrics.render(state.db.status()))
+        .body(state.metrics.render(&state.database_pools.statuses()))
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {

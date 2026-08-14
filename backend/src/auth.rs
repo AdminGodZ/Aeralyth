@@ -93,6 +93,7 @@ pub async fn authenticate_password(
                 SELECT
                   id,
                   username,
+                  password_hash,
                   role,
                   status,
                   display_name,
@@ -109,15 +110,38 @@ pub async fn authenticate_password(
                 FROM users
                 WHERE username = $1
                   AND status = 'active'
-                  AND password_hash = crypt($2, password_hash)
                 LIMIT 1
             ",
-            &[&username, &password],
+            &[&username],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
+    let candidate = user.map(|row| {
+        let password_hash: String = row.get("password_hash");
+        let user = auth_user_from_row(row, state.config.e2ee_mode.as_str());
+        (user, password_hash)
+    });
 
-    Ok(user.map(|row| auth_user_from_row(row, state.config.e2ee_mode.as_str())))
+    // Bcrypt is CPU-bound. Return the scarce PostgreSQL connection before
+    // waiting for the bounded blocking worker, including for invalid users.
+    state.db.release_request_connection().await;
+    let verified = state
+        .passwords
+        .verify_candidate(
+            password,
+            candidate
+                .as_ref()
+                .map(|(_, password_hash)| password_hash.as_str()),
+        )
+        .await
+        .map_err(|password_error| match password_error {
+            crate::passwords::PasswordError::Busy => {
+                error::ErrorTooManyRequests("too many authentication requests")
+            }
+            _ => error::ErrorServiceUnavailable("authentication temporarily unavailable"),
+        })?;
+
+    Ok(candidate.and_then(|(user, _)| verified.then_some(user)))
 }
 
 pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Option<AuthUser>> {
@@ -455,6 +479,29 @@ mod tests {
                 source.matches("parse_json_body::<").count(),
                 expected_payloads,
                 "{name} JSON route coverage changed; authenticate before parsing any new body"
+            );
+        }
+    }
+
+    #[test]
+    fn application_password_paths_never_run_bcrypt_in_postgres() {
+        for (name, source) in [
+            ("authentication", include_str!("auth.rs")),
+            ("admin user creation", include_str!("routes/admin.rs")),
+            (
+                "invitation acceptance",
+                include_str!("routes/invitations.rs"),
+            ),
+        ] {
+            let crypt_call = ["cr", "ypt("].concat();
+            let salt_call = ["gen_", "salt("].concat();
+            assert!(
+                !source.contains(&crypt_call),
+                "{name} moved bcrypt back into PostgreSQL"
+            );
+            assert!(
+                !source.contains(&salt_call),
+                "{name} moved hashing back into PostgreSQL"
             );
         }
     }

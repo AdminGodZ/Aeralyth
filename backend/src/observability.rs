@@ -26,7 +26,9 @@ struct MetricsInner {
     success_sample_rate: u64,
     slow_request: Duration,
     http: Mutex<BTreeMap<HttpKey, HttpStats>>,
-    pool_checkout: Mutex<DurationStats>,
+    pool_checkout: Mutex<BTreeMap<String, DurationStats>>,
+    pool_connections_created: Mutex<BTreeMap<String, u64>>,
+    pool_lifetime_recycles: Mutex<BTreeMap<String, u64>>,
     maintenance: Mutex<BTreeMap<String, DurationStats>>,
     maintenance_restarts: Mutex<BTreeMap<String, u64>>,
 }
@@ -74,7 +76,9 @@ impl Metrics {
                 success_sample_rate: config.request_success_sample_rate as u64,
                 slow_request: Duration::from_millis(config.request_slow_ms),
                 http: Mutex::new(BTreeMap::new()),
-                pool_checkout: Mutex::new(DurationStats::default()),
+                pool_checkout: Mutex::new(BTreeMap::new()),
+                pool_connections_created: Mutex::new(BTreeMap::new()),
+                pool_lifetime_recycles: Mutex::new(BTreeMap::new()),
                 maintenance: Mutex::new(BTreeMap::new()),
                 maintenance_restarts: Mutex::new(BTreeMap::new()),
             }),
@@ -152,8 +156,19 @@ impl Metrics {
         }
     }
 
-    pub fn record_pool_checkout(&self, duration: Duration, succeeded: bool) {
-        lock_unpoisoned(&self.inner.pool_checkout).record(duration, !succeeded);
+    pub fn record_pool_checkout(&self, pool: &str, duration: Duration, succeeded: bool) {
+        lock_unpoisoned(&self.inner.pool_checkout)
+            .entry(pool.to_owned())
+            .or_default()
+            .record(duration, !succeeded);
+    }
+
+    pub fn record_pool_connection_created(&self, pool: &str) {
+        increment_labeled_counter(&self.inner.pool_connections_created, pool);
+    }
+
+    pub fn record_pool_lifetime_recycle(&self, pool: &str) {
+        increment_labeled_counter(&self.inner.pool_lifetime_recycles, pool);
     }
 
     pub fn record_maintenance(&self, worker: &str, duration: Duration, succeeded: bool) {
@@ -169,7 +184,7 @@ impl Metrics {
         *count = count.saturating_add(1);
     }
 
-    pub fn render(&self, pool: PoolStatus) -> String {
+    pub fn render(&self, pools: &[(&str, PoolStatus)]) -> String {
         let mut output = String::with_capacity(16 * 1024);
         writeln!(
             output,
@@ -195,8 +210,13 @@ impl Metrics {
             self.inner.started_at.elapsed().as_secs_f64(),
         )
         .ok();
-        render_pool_metrics(&mut output, pool);
-        render_pool_checkout_metrics(&mut output, &lock_unpoisoned(&self.inner.pool_checkout));
+        render_pool_metrics(&mut output, pools);
+        render_pool_checkout_metrics(
+            &mut output,
+            &lock_unpoisoned(&self.inner.pool_checkout),
+            &lock_unpoisoned(&self.inner.pool_connections_created),
+            &lock_unpoisoned(&self.inner.pool_lifetime_recycles),
+        );
         render_http_metrics(&mut output, &lock_unpoisoned(&self.inner.http));
         render_maintenance_metrics(
             &mut output,
@@ -241,40 +261,36 @@ pub fn init_logging(config: &Config) -> Result<(), Box<dyn StdError + Send + Syn
     Ok(())
 }
 
-fn render_pool_metrics(output: &mut String, pool: PoolStatus) {
+fn render_pool_metrics(output: &mut String, pools: &[(&str, PoolStatus)]) {
     writeln!(
         output,
         "# HELP aeralyth_db_pool_connections Database pool connections by state."
     )
     .ok();
     writeln!(output, "# TYPE aeralyth_db_pool_connections gauge").ok();
-    writeln!(
-        output,
-        "aeralyth_db_pool_connections{{state=\"max\"}} {}",
-        pool.max_size
-    )
-    .ok();
-    writeln!(
-        output,
-        "aeralyth_db_pool_connections{{state=\"size\"}} {}",
-        pool.size
-    )
-    .ok();
-    writeln!(
-        output,
-        "aeralyth_db_pool_connections{{state=\"available\"}} {}",
-        pool.available,
-    )
-    .ok();
-    writeln!(
-        output,
-        "aeralyth_db_pool_connections{{state=\"waiting\"}} {}",
-        pool.waiting
-    )
-    .ok();
+    for (name, pool) in pools {
+        let name = escape_label(name);
+        for (state, value) in [
+            ("max", pool.max_size),
+            ("size", pool.size),
+            ("available", pool.available),
+            ("waiting", pool.waiting),
+        ] {
+            writeln!(
+                output,
+                "aeralyth_db_pool_connections{{pool=\"{name}\",state=\"{state}\"}} {value}"
+            )
+            .ok();
+        }
+    }
 }
 
-fn render_pool_checkout_metrics(output: &mut String, stats: &DurationStats) {
+fn render_pool_checkout_metrics(
+    output: &mut String,
+    checkouts: &BTreeMap<String, DurationStats>,
+    connections_created: &BTreeMap<String, u64>,
+    lifetime_recycles: &BTreeMap<String, u64>,
+) {
     writeln!(
         output,
         "# HELP aeralyth_db_pool_checkout_duration_seconds Database pool checkout latency."
@@ -285,12 +301,14 @@ fn render_pool_checkout_metrics(output: &mut String, stats: &DurationStats) {
         "# TYPE aeralyth_db_pool_checkout_duration_seconds histogram"
     )
     .ok();
-    render_duration_histogram(
-        output,
-        "aeralyth_db_pool_checkout_duration_seconds",
-        "",
-        stats,
-    );
+    for (pool, stats) in checkouts {
+        render_duration_histogram(
+            output,
+            "aeralyth_db_pool_checkout_duration_seconds",
+            &format!("pool=\"{}\"", escape_label(pool)),
+            stats,
+        );
+    }
     writeln!(
         output,
         "# HELP aeralyth_db_pool_checkout_failures_total Failed database pool checkouts."
@@ -301,12 +319,51 @@ fn render_pool_checkout_metrics(output: &mut String, stats: &DurationStats) {
         "# TYPE aeralyth_db_pool_checkout_failures_total counter"
     )
     .ok();
+    for (pool, stats) in checkouts {
+        writeln!(
+            output,
+            "aeralyth_db_pool_checkout_failures_total{{pool=\"{}\"}} {}",
+            escape_label(pool),
+            stats.failures
+        )
+        .ok();
+    }
     writeln!(
         output,
-        "aeralyth_db_pool_checkout_failures_total {}",
-        stats.failures
+        "# HELP aeralyth_db_pool_connections_created_total PostgreSQL connections created by pool."
     )
     .ok();
+    writeln!(
+        output,
+        "# TYPE aeralyth_db_pool_connections_created_total counter"
+    )
+    .ok();
+    for (pool, count) in connections_created {
+        writeln!(
+            output,
+            "aeralyth_db_pool_connections_created_total{{pool=\"{}\"}} {count}",
+            escape_label(pool),
+        )
+        .ok();
+    }
+    writeln!(
+        output,
+        "# HELP aeralyth_db_pool_lifetime_recycles_total Connections recycled after their jittered maximum lifetime."
+    )
+    .ok();
+    writeln!(
+        output,
+        "# TYPE aeralyth_db_pool_lifetime_recycles_total counter"
+    )
+    .ok();
+    for (pool, count) in lifetime_recycles {
+        writeln!(
+            output,
+            "aeralyth_db_pool_lifetime_recycles_total{{pool=\"{}\"}} {count}",
+            escape_label(pool),
+        )
+        .ok();
+    }
 }
 
 fn render_http_metrics(output: &mut String, http: &BTreeMap<HttpKey, HttpStats>) {
@@ -472,6 +529,12 @@ fn escape_label(value: &str) -> String {
         .replace('"', "\\\"")
 }
 
+fn increment_labeled_counter(counters: &Mutex<BTreeMap<String, u64>>, label: &str) {
+    let mut counters = lock_unpoisoned(counters);
+    let count = counters.entry(label.to_owned()).or_default();
+    *count = count.saturating_add(1);
+}
+
 fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex
         .lock()
@@ -499,18 +562,51 @@ mod tests {
             response_bytes: 1_024,
             database_checkouts: 1,
         });
-        metrics.record_pool_checkout(Duration::from_millis(2), true);
+        metrics.record_pool_checkout("request", Duration::from_millis(2), true);
+        metrics.record_pool_checkout("maintenance", Duration::from_millis(4), true);
+        metrics.record_pool_connection_created("request");
+        metrics.record_pool_connection_created("maintenance");
+        metrics.record_pool_lifetime_recycle("maintenance");
         metrics.record_maintenance("storage deletion", Duration::from_millis(4), true);
-        let rendered = metrics.render(PoolStatus {
-            max_size: 8,
-            size: 2,
-            available: 1,
-            waiting: 0,
-        });
+        let rendered = metrics.render(&[
+            (
+                "request",
+                PoolStatus {
+                    max_size: 8,
+                    size: 2,
+                    available: 1,
+                    waiting: 0,
+                },
+            ),
+            (
+                "maintenance",
+                PoolStatus {
+                    max_size: 2,
+                    size: 1,
+                    available: 1,
+                    waiting: 0,
+                },
+            ),
+        ]);
 
         assert!(rendered.contains("route=\"/api/files/{id}/download\""));
         assert!(rendered.contains("aeralyth_http_database_checkouts_total"));
-        assert!(rendered.contains("aeralyth_db_pool_checkout_duration_seconds"));
+        assert!(
+            rendered.contains("aeralyth_db_pool_connections{pool=\"request\",state=\"max\"} 8")
+        );
+        assert!(
+            rendered.contains("aeralyth_db_pool_connections{pool=\"maintenance\",state=\"max\"} 2")
+        );
+        assert!(
+            rendered
+                .contains("aeralyth_db_pool_checkout_duration_seconds_count{pool=\"request\"} 1")
+        );
+        assert!(
+            rendered.contains("aeralyth_db_pool_connections_created_total{pool=\"maintenance\"} 1")
+        );
+        assert!(
+            rendered.contains("aeralyth_db_pool_lifetime_recycles_total{pool=\"maintenance\"} 1")
+        );
         assert!(rendered.contains("worker=\"storage deletion\""));
         assert!(!rendered.contains("secret-token"));
     }
