@@ -39,13 +39,16 @@ import {
   type UploadTreeEntry,
 } from "@/features/dashboard/folder-upload-conflicts";
 import type { FolderZipWorkerResponse } from "@/features/dashboard/folder-zip-messages";
+import { GitIgnoreReviewDialog } from "@/features/dashboard/gitignore-review-dialog";
 import {
   UploadProgressPanel,
   type UploadProgressSession,
 } from "@/features/dashboard/upload-progress-panel";
 import {
+  finalizeFolderUploadSelection,
   getUploadSelectionError,
   MAX_UPLOAD_BYTES,
+  type PreparedFolderUploadSelection,
   prepareFolderUploadSelection,
 } from "@/features/dashboard/upload-selection-policy";
 import { uploadEncryptedSelections } from "@/features/vault/encrypted-upload";
@@ -55,6 +58,11 @@ import { useVault } from "@/features/vault/vault-provider";
 type UploadSelection = {
   file: File;
   relativePath: string;
+};
+
+type PendingGitIgnoreReview = {
+  prepared: PreparedFolderUploadSelection<UploadSelection>;
+  createRepository: boolean;
 };
 
 type PendingFolderUpload = {
@@ -199,6 +207,8 @@ function useUploadPanelController({
   const [uploadSession, setUploadSession] =
     useState<UploadProgressSession | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
+  const [pendingGitIgnoreReview, setPendingGitIgnoreReview] =
+    useState<PendingGitIgnoreReview | null>(null);
   const [pendingFolderUpload, setPendingFolderUpload] =
     useState<PendingFolderUpload | null>(null);
   const [pendingReplacementUpload, setPendingReplacementUpload] =
@@ -577,6 +587,8 @@ function useUploadPanelController({
             batchStart,
             batchStart + MULTIPART_PRESIGN_BATCH_SIZE,
           );
+          // Batches stay sequential to cap hashing blobs, signed URLs, and uploads in memory.
+          // react-doctor-disable-next-line react-doctor/async-await-in-loop
           const prepared = await mapWithConcurrency(
             batch,
             MULTIPART_CONCURRENCY,
@@ -781,50 +793,74 @@ function useUploadPanelController({
       return;
     }
 
-    let uploadFiles = files;
-    let ignoredFiles = 0;
     const createRepository = folderUploadCreatesRepository(surface);
     if (folderSelection) {
-      setPreparingMessage("Applying .gitignore");
+      setPreparingMessage("Reading .gitignore");
       setIsPreparingSelection(true);
+      let prepared: PreparedFolderUploadSelection<UploadSelection>;
       try {
-        const prepared = await prepareFolderUploadSelection(files);
-        uploadFiles = prepared.files;
-        ignoredFiles = prepared.ignoredFiles;
-        if (prepared.error) {
-          setIsPreparingSelection(false);
-          setUploadError(prepared.error);
-          return;
-        }
+        prepared = await prepareFolderUploadSelection(files);
       } catch (error) {
-        setIsPreparingSelection(false);
         setUploadError(
           error instanceof Error && error.message
             ? error.message
-            : "The .gitignore rules could not be applied.",
+            : "The .gitignore rules could not be read.",
         );
         return;
+      } finally {
+        setIsPreparingSelection(false);
       }
-      setIsPreparingSelection(false);
 
-      if (uploadFiles.length === 0) {
-        setUploadError(
-          "Every file in this folder is excluded by its .gitignore rules or Git metadata filtering.",
-        );
+      if (prepared.error) {
+        setUploadError(prepared.error);
         return;
       }
-    }
 
-    if (createRepository) {
-      if (!folderSelection) {
-        setUploadError("Choose a project folder to create a repository.");
+      if (prepared.gitIgnoreItems.length > 0) {
+        setPendingGitIgnoreReview({ prepared, createRepository });
         return;
       }
-      queueFolderOrUpload(uploadFiles, ignoredFiles, createRepository);
+
+      if (prepared.files.length === 0) {
+        setUploadError("No uploadable files remain in this folder.");
+        return;
+      }
+
+      queueFolderOrUpload(
+        prepared.files,
+        prepared.gitMetadataFiles,
+        createRepository,
+      );
       return;
     }
 
-    queueFolderOrUpload(uploadFiles, ignoredFiles);
+    if (createRepository) {
+      setUploadError("Choose a project folder to create a repository.");
+      return;
+    }
+
+    queueFolderOrUpload(files);
+  }
+
+  function confirmGitIgnoreReview(selectedIgnoredFiles: UploadSelection[]) {
+    if (!pendingGitIgnoreReview) return;
+
+    const finalized = finalizeFolderUploadSelection(
+      pendingGitIgnoreReview.prepared,
+      selectedIgnoredFiles,
+    );
+    if (finalized.error) {
+      setUploadError(finalized.error);
+      return;
+    }
+
+    const createRepository = pendingGitIgnoreReview.createRepository;
+    setPendingGitIgnoreReview(null);
+    queueFolderOrUpload(
+      finalized.files,
+      finalized.ignoredFiles,
+      createRepository,
+    );
   }
 
   function queueFolderOrUpload(
@@ -1169,13 +1205,16 @@ function useUploadPanelController({
     fileInputRef,
     folderInputRef,
     handleFileChange,
+    pendingGitIgnoreReview,
     pendingFolderUpload,
     pendingReplacementUpload,
     compressionError,
     compressionProgress,
+    closePendingGitIgnoreReview: () => setPendingGitIgnoreReview(null),
     closePendingFolderUpload: () => setPendingFolderUpload(null),
     closePendingReplacementUpload: () => setPendingReplacementUpload(null),
     confirmReplacementUpload,
+    confirmGitIgnoreReview,
     uploadPendingFolder,
     startFolderCompression,
     cancelCompression,
@@ -1194,13 +1233,16 @@ function UploadPanelView({
   fileInputRef,
   folderInputRef,
   handleFileChange,
+  pendingGitIgnoreReview,
   pendingFolderUpload,
   pendingReplacementUpload,
   compressionError,
   compressionProgress,
+  closePendingGitIgnoreReview,
   closePendingFolderUpload,
   closePendingReplacementUpload,
   confirmReplacementUpload,
+  confirmGitIgnoreReview,
   uploadPendingFolder,
   startFolderCompression,
   cancelCompression,
@@ -1326,6 +1368,19 @@ function UploadPanelView({
             />
           </div>
         </div>
+      ) : null}
+
+      {pendingGitIgnoreReview ? (
+        <GitIgnoreReviewDialog
+          items={pendingGitIgnoreReview.prepared.gitIgnoreItems}
+          autoIncludedFiles={pendingGitIgnoreReview.prepared.files}
+          gitIgnoreFileCount={
+            pendingGitIgnoreReview.prepared.gitIgnoreFileCount
+          }
+          gitMetadataFiles={pendingGitIgnoreReview.prepared.gitMetadataFiles}
+          onClose={closePendingGitIgnoreReview}
+          onContinue={confirmGitIgnoreReview}
+        />
       ) : null}
 
       {pendingReplacementUpload ? (
@@ -2017,7 +2072,7 @@ function formatFolderSelectionSummary(pendingUpload: PendingFolderUpload) {
 
   const ignoredSummary =
     pendingUpload.ignoredFiles > 0
-      ? ` · ${formatIgnoredFiles(pendingUpload.ignoredFiles)} skipped`
+      ? ` · ${formatIgnoredFiles(pendingUpload.ignoredFiles)} excluded`
       : "";
 
   return `${fileCount} · ${formatUploadBytes(pendingUpload.totalBytes)}${ignoredSummary}`;

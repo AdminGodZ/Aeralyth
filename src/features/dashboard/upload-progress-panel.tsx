@@ -236,10 +236,10 @@ export function UploadProgressPanel({
               />
               <p className="text-xs leading-5 text-muted-foreground">
                 <span className="font-medium text-foreground">
-                  {session.ignoredFiles.toLocaleString()} local-only{" "}
-                  {session.ignoredFiles === 1 ? "file" : "files"} skipped.
+                  {session.ignoredFiles.toLocaleString()}{" "}
+                  {session.ignoredFiles === 1 ? "file" : "files"} excluded.
                 </span>{" "}
-                Ignored by .gitignore or Git metadata rules.
+                Left out during folder review or removed as Git metadata.
               </p>
             </div>
           ) : null}

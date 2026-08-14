@@ -134,11 +134,18 @@ export function RepositoryOverview({
                             Private
                           </Badge>
                         </div>
-                        <p className="mt-2 text-sm text-muted-foreground">
-                          {repository.description ||
-                            "Project folder stored in Aeralyth"}
-                        </p>
-                        <p className="mt-3 text-xs text-muted-foreground">
+                        {repository.description ? (
+                          <p className="mt-2 text-sm text-muted-foreground">
+                            {repository.description}
+                          </p>
+                        ) : null}
+                        <p
+                          className={
+                            repository.description
+                              ? "mt-3 text-xs text-muted-foreground"
+                              : "mt-2 text-xs text-muted-foreground"
+                          }
+                        >
                           Updated {formatRepositoryDate(repository.updatedAt)}
                         </p>
                       </div>

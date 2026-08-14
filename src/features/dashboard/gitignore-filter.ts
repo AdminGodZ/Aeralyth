@@ -15,14 +15,36 @@ type IgnoreMatcher = {
   matcher: Ignore;
 };
 
+export type GitIgnoreSelectionPartition<T extends GitIgnoreSelection> = {
+  includedSelections: T[];
+  ignoredSelections: T[];
+  gitMetadataSelections: T[];
+  gitIgnoreFileCount: number;
+};
+
 export async function filterGitIgnoredSelections<T extends GitIgnoreSelection>(
   selections: readonly T[],
 ): Promise<T[]> {
+  const partition = await partitionGitIgnoredSelections(selections);
+  return partition.includedSelections;
+}
+
+export async function partitionGitIgnoredSelections<
+  T extends GitIgnoreSelection,
+>(selections: readonly T[]): Promise<GitIgnoreSelectionPartition<T>> {
   if (selections.length === 0) {
-    return [];
+    return {
+      includedSelections: [],
+      ignoredSelections: [],
+      gitMetadataSelections: [],
+      gitIgnoreFileCount: 0,
+    };
   }
 
   const normalizedSelections = normalizeSelections(selections);
+  const gitMetadataSelections = normalizedSelections.flatMap(
+    ({ selection, path }) => (isGitMetadataPath(path) ? [selection] : []),
+  );
   const uploadableSelections = normalizedSelections.filter(
     ({ path }) => !isGitMetadataPath(path),
   );
@@ -31,7 +53,14 @@ export async function filterGitIgnoredSelections<T extends GitIgnoreSelection>(
   );
 
   if (ignoreFiles.length === 0) {
-    return uploadableSelections.map(({ selection }) => selection);
+    return {
+      includedSelections: uploadableSelections.map(
+        ({ selection }) => selection,
+      ),
+      ignoredSelections: [],
+      gitMetadataSelections,
+      gitIgnoreFileCount: 0,
+    };
   }
 
   ignoreFiles.sort((left, right) => {
@@ -50,6 +79,8 @@ export async function filterGitIgnoredSelections<T extends GitIgnoreSelection>(
 
     let patterns: string;
     try {
+      // Parent rules must be applied before deciding whether a nested .gitignore is reachable.
+      // react-doctor-disable-next-line react-doctor/async-await-in-loop
       patterns = await selection.file.text();
     } catch {
       throw new Error(
@@ -59,9 +90,22 @@ export async function filterGitIgnoredSelections<T extends GitIgnoreSelection>(
     activeMatchers.push({ directory, matcher: ignore().add(patterns) });
   }
 
-  return uploadableSelections.flatMap(({ selection, path }) =>
-    isIgnored(path, false, activeMatchers) ? [] : [selection],
-  );
+  const includedSelections: T[] = [];
+  const ignoredSelections: T[] = [];
+  for (const { selection, path } of uploadableSelections) {
+    if (isIgnored(path, false, activeMatchers)) {
+      ignoredSelections.push(selection);
+    } else {
+      includedSelections.push(selection);
+    }
+  }
+
+  return {
+    includedSelections,
+    ignoredSelections,
+    gitMetadataSelections,
+    gitIgnoreFileCount: ignoreFiles.length,
+  };
 }
 
 function isGitMetadataPath(path: string): boolean {
