@@ -17,6 +17,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { popupSurfaceClassName } from "@/components/ui/popup-surface";
 import { getAuthState } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -66,7 +67,12 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
     <main className="relative isolate min-h-dvh overflow-hidden bg-background text-foreground">
       <DottedSurface className="opacity-70" />
       {loginAlertMessage ? (
-        <Alert className="fixed left-1/2 top-5 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-full border border-[#C90000]/30 bg-[#C90000]/10 px-5 py-3 text-[#C90000] shadow-[0_24px_80px_rgb(0_0_0/0.2)] ring-0 backdrop-blur-md backdrop-saturate-150">
+        <Alert
+          className={cn(
+            popupSurfaceClassName,
+            "fixed left-1/2 top-5 z-50 w-[calc(100%-2rem)] max-w-md -translate-x-1/2 rounded-full border-[#C90000]/30 px-5 py-3 text-[#C90000] shadow-[0_24px_80px_rgb(0_0_0/0.2)] ring-0",
+          )}
+        >
           <div className="flex items-center justify-center gap-2">
             <CircleAlert className="size-4 shrink-0" aria-hidden="true" />
             <AlertDescription className="text-center leading-none text-[#C90000]">

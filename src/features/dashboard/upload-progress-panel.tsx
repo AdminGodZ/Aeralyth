@@ -17,6 +17,7 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from "@/components/ui/popover";
+import { popupSurfaceClassName } from "@/components/ui/popup-surface";
 import { Progress } from "@/components/ui/progress";
 import { cn } from "@/lib/utils";
 
@@ -62,8 +63,9 @@ export function UploadProgressPanel({
     <Popover open={open} onOpenChange={setOpen}>
       <div
         className={cn(
-          "flex w-[22rem] max-w-[calc(100vw-2rem)] items-center overflow-hidden rounded-xl border bg-background/95 shadow-lg shadow-black/10 backdrop-blur-sm transition-colors sm:w-[26rem]",
-          failed ? "border-destructive/40" : "border-border/80",
+          "flex w-[22rem] max-w-[calc(100vw-2rem)] items-center overflow-hidden rounded-xl shadow-lg shadow-black/10 transition-colors sm:w-[26rem]",
+          popupSurfaceClassName,
+          failed && "border-destructive/40",
         )}
       >
         <PopoverTrigger asChild>

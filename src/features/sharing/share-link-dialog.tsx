@@ -680,7 +680,7 @@ function CustomExpirationPicker({
       <PopoverContent
         align="start"
         collisionPadding={12}
-        className="w-auto overflow-hidden rounded-2xl border-border/80 bg-popover/95 p-0 shadow-xl backdrop-blur-xl"
+        className="w-auto overflow-hidden rounded-2xl p-0 shadow-xl"
       >
         <Calendar
           mode="single"
