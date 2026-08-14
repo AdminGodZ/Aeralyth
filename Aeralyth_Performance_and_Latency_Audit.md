@@ -290,6 +290,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-015 [P1] Successful multipart completion always performs an additional S3 HEAD
 
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** `complete_multipart` now returns the provider's ETag and checksum together with the already-validated expected length. Both legacy-file and encrypted-vault completion paths consume that response directly, so normal successful multipart completion contains no HEAD request; metadata lookup remains only for direct single-object uploads and ambiguous completion-error reconciliation. Rust regression guards inspect both completion call paths and fail if a normal multipart HEAD is reintroduced, and the full backend suite plus strict Clippy passed.
+
 **Confidence:** Confirmed
 
 **Evidence:** The storage completion helper discards useful `CompleteMultipartUpload` response metadata, and upload routes then call `object_metadata` to verify the completed object.
@@ -302,6 +306,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-016 [P1] Completion polling can turn into repeated S3 verification
 
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** Upload status is now a database-only endpoint and cannot access object storage. Ambiguous completion is owned by a dedicated one-second maintenance worker that atomically claims rows with `FOR UPDATE SKIP LOCKED`, leases one claimant, persists attempt count, next retry, last error, verified checksum/ETag, and applies bounded exponential backoff with stable jitter. Route and worker share one replacement-aware finalization transaction, while expired pending cleanup no longer races completing uploads. Migration `009-upload-completion` passed a clean-schema apply and replay, and regression tests fail if polling regains metadata/finalization calls or claimant/error persistence is removed.
+
 **Confidence:** Confirmed
 
 **Evidence:** The browser polls upload status while completion is in progress. Backend completion/status paths can reconcile object metadata, causing repeated provider calls when finalization is slow or retried.
@@ -313,6 +321,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** While artificially delaying S3 completion, repeated status GETs must not increase S3 request count.
 
 ## PERF-017 [P1] Global JSON extraction occurs before handler-level authentication and CSRF
+
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** All 23 protected JSON routes now extract only the unread payload handle, authenticate the session or editor grant, validate mutation CSRF, and only then decode through explicit per-route limits ranging from 16 KiB to 8 MiB. Expensive vault setup/publish/share mutations are additionally capped at eight globally and three per user, with queued requests still unread. A raw localhost request declaring an 8 MiB body but sending only its 129-byte headers received `401 Unauthorized` in `0.47 ms`, proving the authenticated file-upload handler responded without waiting for or reading the body. The durable 32-request concurrent check measured `20.03 ms` rejection p95 while simultaneous health requests stayed at `40.78 ms` p95; it now runs in performance CI. Parser limit/content-type tests, route-coverage guards, limiter tests, 85 frontend tests, 18 performance tests, 50 backend tests, strict Clippy, TypeScript, lint, and a webpack production build passed.
 
 **Confidence:** Confirmed
 

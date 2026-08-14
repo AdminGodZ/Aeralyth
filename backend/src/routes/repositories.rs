@@ -2,7 +2,7 @@ use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Row;
 
-use crate::auth::{SessionPrincipal, require_csrf, require_principal};
+use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
 use crate::state::AppState;
 
 const MAX_REPOSITORY_ENTRIES: i64 = 500;
@@ -10,6 +10,7 @@ const MAX_REPOSITORY_ARCHIVE_ENTRIES: i64 = 50_000;
 const MAX_REPOSITORY_ARCHIVE_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 const MAX_REPOSITORY_DESCRIPTION_CHARS: usize = 350;
 const MAX_REPOSITORY_NAME_CHARS: usize = 100;
+const REPOSITORY_JSON_LIMIT: usize = 16 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -146,10 +147,12 @@ pub async fn list(state: web::Data<AppState>, request: HttpRequest) -> Result<Ht
 pub async fn create(
     state: web::Data<AppState>,
     request: HttpRequest,
-    body: web::Json<CreateRepositoryRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     let owner = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+    let body =
+        parse_json_body::<CreateRepositoryRequest>(&request, body, REPOSITORY_JSON_LIMIT).await?;
     let root_folder_id = body.root_folder_id.trim();
     if root_folder_id.is_empty() {
         return Err(error::ErrorBadRequest("root folder is required"));
@@ -204,10 +207,13 @@ pub async fn create(
 pub async fn create_empty(
     state: web::Data<AppState>,
     request: HttpRequest,
-    body: web::Json<CreateEmptyRepositoryRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     let owner = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+    let body =
+        parse_json_body::<CreateEmptyRepositoryRequest>(&request, body, REPOSITORY_JSON_LIMIT)
+            .await?;
     if state.config.e2ee_mode.is_enabled() {
         return Ok(HttpResponse::Conflict()
             .body("encrypted repositories must create their root through the vault"));
@@ -312,10 +318,12 @@ pub async fn update(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<String>,
-    body: web::Json<UpdateRepositoryRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     let owner = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+    let body =
+        parse_json_body::<UpdateRepositoryRequest>(&request, body, REPOSITORY_JSON_LIMIT).await?;
     let repository_id = path.into_inner();
     let description = normalize_description(Some(&body.description))?;
     let updated = state

@@ -10,12 +10,13 @@ use sha2::{Digest, Sha256};
 use tokio::fs::File as AsyncFile;
 use tokio::io::AsyncReadExt;
 
-use crate::auth::{require_csrf, require_principal, session_principal};
+use crate::auth::{parse_json_body, require_csrf, require_principal, session_principal};
 use crate::state::AppState;
 
 pub(crate) const SHARE_TOKEN_HEADER: &str = "x-aeralyth-share-token";
 const MIN_LINK_LIFETIME_SECONDS: i64 = 5 * 60;
 const MAX_LINK_LIFETIME_SECONDS: i64 = 365 * 24 * 60 * 60;
+const SHARE_LINK_JSON_LIMIT: usize = 16 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -128,10 +129,12 @@ struct DownloadFile {
 pub async fn create(
     state: web::Data<AppState>,
     request: HttpRequest,
-    body: web::Json<CreateShareLinkRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     let owner = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+    let body =
+        parse_json_body::<CreateShareLinkRequest>(&request, body, SHARE_LINK_JSON_LIMIT).await?;
     let access_scope = validate_access_scope(&body.access_scope)?;
     let permission = validate_permission(&body.permission)?;
     let expires_in_seconds = validate_expiration(body.expires_in_seconds)?;

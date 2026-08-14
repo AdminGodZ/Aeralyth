@@ -8,7 +8,7 @@ use base64::{
 use futures_util::future::try_join_all;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{SessionPrincipal, require_csrf, require_principal};
+use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
 use crate::config::E2eeMode;
 use crate::db::{query_one_cached, query_opt_cached};
 use crate::e2ee::{
@@ -27,6 +27,9 @@ const MAX_IDENTITY_PRIVATE_CIPHERTEXT: usize = 8_192;
 const MAX_ACCOUNT_STATE_CIPHERTEXT: usize = 4 * 1024 * 1024;
 const MAX_MANIFEST_CIPHERTEXT: usize = 1024 * 1024;
 const MAX_PRESIGN_PARTS: usize = 32;
+const VAULT_CONTROL_JSON_LIMIT: usize = 64 * 1024;
+const VAULT_ACCOUNT_JSON_LIMIT: usize = 6 * 1024 * 1024;
+const VAULT_PUBLISH_JSON_LIMIT: usize = 8 * 1024 * 1024;
 const SHARED_DOWNLOAD_AUTHORIZATION_QUERY: &str = "
     WITH RECURSIVE ancestors AS (
       SELECT id, parent_id FROM files
@@ -777,11 +780,14 @@ pub async fn claim_migration(
 pub async fn setup(
     state: web::Data<AppState>,
     request: HttpRequest,
-    body: web::Json<VaultSetupRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+    let _mutation_permit = state.vault_mutation_limiter.acquire(&user.id).await;
+    let body =
+        parse_json_body::<VaultSetupRequest>(&request, body, VAULT_ACCOUNT_JSON_LIMIT).await?;
     let material = validate_setup_material(&body)?;
     let fingerprint =
         identity_fingerprint(&material.x25519_public_key, &material.ed25519_public_key);
@@ -951,11 +957,14 @@ pub async fn unlock_material(
 pub async fn rewrap(
     state: web::Data<AppState>,
     request: HttpRequest,
-    body: web::Json<VaultRewrapRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+    let _mutation_permit = state.vault_mutation_limiter.acquire(&user.id).await;
+    let body =
+        parse_json_body::<VaultRewrapRequest>(&request, body, VAULT_ACCOUNT_JSON_LIMIT).await?;
     validate_kdf(&body.kdf)?;
     let kdf_salt = decode_fixed::<16>(&body.kdf.salt, "KDF salt")?.to_vec();
     let password_wrapper_id =
@@ -1097,11 +1106,13 @@ pub async fn trust_identity(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<String>,
-    body: web::Json<TrustIdentityRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+    let body =
+        parse_json_body::<TrustIdentityRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT).await?;
     let peer_user_id = path.into_inner();
     let key_version = i64::try_from(body.key_version)
         .map_err(|_| error::ErrorBadRequest("identity key version is invalid"))?;
@@ -1152,11 +1163,13 @@ pub async fn trust_identity(
 pub async fn init_upload(
     state: web::Data<AppState>,
     request: HttpRequest,
-    body: web::Json<VaultUploadInitRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+    let body =
+        parse_json_body::<VaultUploadInitRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT).await?;
     require_configured_vault(&state, &user).await?;
     validate_node_id(&body.node_id)?;
     let generation_id = decode_fixed::<16>(&body.generation_id, "generation id")?.to_vec();
@@ -1461,7 +1474,7 @@ pub async fn presign_content(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<String>,
-    body: web::Json<ChecksumRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
@@ -1472,6 +1485,7 @@ pub async fn presign_content(
     if upload.mode != "single" || upload.status != "pending" {
         return Ok(HttpResponse::Conflict().finish());
     }
+    let body = parse_json_body::<ChecksumRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT).await?;
     let checksum = validate_sha256_checksum(&body.checksum_sha256)?;
     let reserved = state
         .db
@@ -1517,7 +1531,7 @@ pub async fn presign_part(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<(String, i32)>,
-    body: web::Json<ChecksumRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
@@ -1529,6 +1543,7 @@ pub async fn presign_part(
     if upload.mode != "multipart" || upload.status != "pending" {
         return Ok(HttpResponse::Conflict().finish());
     }
+    let body = parse_json_body::<ChecksumRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT).await?;
     let total = u64::try_from(upload.ciphertext_length)
         .map_err(|_| error::ErrorInternalServerError("ciphertext length is invalid"))?;
     let part_number_u64 = u64::try_from(part_number)
@@ -1572,7 +1587,7 @@ pub async fn presign_parts(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<String>,
-    body: web::Json<PartChecksumsRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let principal = require_principal(&state, &request).await?;
@@ -1583,6 +1598,8 @@ pub async fn presign_parts(
     if upload.mode != "multipart" || upload.status != "pending" {
         return Ok(HttpResponse::Conflict().finish());
     }
+    let body =
+        parse_json_body::<PartChecksumsRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT).await?;
     if body.parts.is_empty() || body.parts.len() > MAX_PRESIGN_PARTS {
         return Err(error::ErrorBadRequest(
             "multipart presign batch must contain 1 to 32 parts",
@@ -1655,7 +1672,7 @@ pub async fn publish_upload(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<String>,
-    body: web::Json<PublishUploadRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
@@ -1669,6 +1686,9 @@ pub async fn publish_upload(
     if !matches!(upload.status.as_str(), "pending" | "completing") {
         return Ok(HttpResponse::Conflict().body("upload cannot be published"));
     }
+    let _mutation_permit = state.vault_mutation_limiter.acquire(&user.id).await;
+    let body =
+        parse_json_body::<PublishUploadRequest>(&request, body, VAULT_PUBLISH_JSON_LIMIT).await?;
 
     let decoded = decode_and_verify_node_record(&state, &user, &body).await?;
     validate_record_for_upload(&decoded, &upload)?;
@@ -1684,11 +1704,14 @@ pub async fn publish_record(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<String>,
-    body: web::Json<PublishRecordRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+    let _mutation_permit = state.vault_mutation_limiter.acquire(&user.id).await;
+    let body =
+        parse_json_body::<PublishRecordRequest>(&request, body, VAULT_PUBLISH_JSON_LIMIT).await?;
     let upload_body = PublishUploadRequest {
         parts: Vec::new(),
         bootstrap_cbor: body.bootstrap_cbor.clone(),
@@ -2078,11 +2101,15 @@ pub async fn publish_share_directory(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<String>,
-    body: web::Json<PublishShareDirectoryRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let principal = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+    let _mutation_permit = state.vault_mutation_limiter.acquire(&principal.id).await;
+    let body =
+        parse_json_body::<PublishShareDirectoryRequest>(&request, body, VAULT_PUBLISH_JSON_LIMIT)
+            .await?;
     let node_id = path.into_inner();
     validate_node_id(&node_id)?;
     let mut client = state
@@ -2326,11 +2353,14 @@ pub async fn publish_share_directory(
 pub async fn create_share(
     state: web::Data<AppState>,
     request: HttpRequest,
-    body: web::Json<CreateShareRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+    let _mutation_permit = state.vault_mutation_limiter.acquire(&user.id).await;
+    let body =
+        parse_json_body::<CreateShareRequest>(&request, body, VAULT_PUBLISH_JSON_LIMIT).await?;
     validate_prefixed_id(&body.share_id, "shr_", "share id")?;
     validate_node_id(&body.root_node_id)?;
     if body.recipient_id == user.id {
@@ -2617,11 +2647,14 @@ pub async fn begin_epoch_rotation(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<String>,
-    body: web::Json<BeginEpochRotationRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+    let body =
+        parse_json_body::<BeginEpochRotationRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT)
+            .await?;
     let share_id = path.into_inner();
     let mut client = state
         .db
@@ -2785,11 +2818,14 @@ pub async fn publish_epoch_rotation(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<(String, i64)>,
-    body: web::Json<PublishEpochRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
+    let _mutation_permit = state.vault_mutation_limiter.acquire(&user.id).await;
+    let body =
+        parse_json_body::<PublishEpochRequest>(&request, body, VAULT_PUBLISH_JSON_LIMIT).await?;
     let (share_id, pending_epoch) = path.into_inner();
     let requested_snapshot_hash =
         decode_fixed::<32>(&body.fence_snapshot_hash, "fence snapshot hash")?;
@@ -3894,27 +3930,35 @@ async fn finalize_ciphertext_object(
         }
     }
     state.db.release_request_connection().await;
+    let mut completed_metadata = None;
     if upload.mode == "multipart" {
         let multipart_id = upload
             .multipart_upload_id
             .as_deref()
             .ok_or_else(|| error::ErrorInternalServerError("multipart upload id is missing"))?;
-        if let Err(complete_error) = state
+        match state
             .storage
-            .complete_multipart(object_key, multipart_id, parts)
+            .complete_multipart(
+                object_key,
+                multipart_id,
+                parts,
+                u64::try_from(upload.ciphertext_length)
+                    .map_err(|_| error::ErrorInternalServerError("invalid ciphertext length"))?,
+            )
             .await
         {
-            match state.storage.object_metadata(object_key).await {
+            Ok(metadata) => completed_metadata = Some(metadata),
+            Err(complete_error) => match state.storage.object_metadata(object_key).await {
                 Ok(metadata) => return verify_object_metadata(upload, metadata).map(Some),
                 Err(metadata_error) if metadata_error.is_not_found() => {
                     state
-                        .db
-                        .execute(
-                            "UPDATE vault_uploads SET status = 'pending', expires_at = now() + interval '24 hours' WHERE id = $1 AND owner_id = $2 AND status = 'completing'",
-                            &[&upload.id, &user.id],
-                        )
-                        .await
-                        .map_err(error::ErrorInternalServerError)?;
+                            .db
+                            .execute(
+                                "UPDATE vault_uploads SET status = 'pending', expires_at = now() + interval '24 hours' WHERE id = $1 AND owner_id = $2 AND status = 'completing'",
+                                &[&upload.id, &user.id],
+                            )
+                            .await
+                            .map_err(error::ErrorInternalServerError)?;
                     return Err(error::ErrorBadGateway(complete_error));
                 }
                 Err(metadata_error) => {
@@ -3928,14 +3972,17 @@ async fn finalize_ciphertext_object(
                         "upload completion is being reconciled; retry shortly",
                     ));
                 }
-            }
+            },
         }
     }
-    let metadata = state
-        .storage
-        .object_metadata(object_key)
-        .await
-        .map_err(error::ErrorBadGateway)?;
+    let metadata = match completed_metadata {
+        Some(metadata) => metadata,
+        None => state
+            .storage
+            .object_metadata(object_key)
+            .await
+            .map_err(error::ErrorBadGateway)?,
+    };
     verify_object_metadata(upload, metadata).map(Some)
 }
 

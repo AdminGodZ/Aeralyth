@@ -6,6 +6,7 @@ mod observability;
 mod routes;
 mod state;
 mod storage;
+mod upload_completion;
 
 use actix_web::http::header::{CONTENT_LENGTH, HeaderName, HeaderValue};
 use actix_web::{App, HttpServer, dev::Service, web};
@@ -15,7 +16,7 @@ use tokio::sync::watch;
 use tracing::Instrument;
 
 use config::E2eeMode;
-use state::AppState;
+use state::{AppState, MutationLimiter};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -71,6 +72,7 @@ async fn main() -> std::io::Result<()> {
         db,
         metrics: metrics.clone(),
         storage,
+        vault_mutation_limiter: MutationLimiter::new(8, 3),
     });
 
     tracing::info!(bind_addr, "starting Aeralyth API");
@@ -81,7 +83,6 @@ async fn main() -> std::io::Result<()> {
         let request_metrics = server_metrics.clone();
         App::new()
             .app_data(state.clone())
-            .app_data(web::JsonConfig::default().limit(8 * 1024 * 1024))
             .wrap_fn(move |request, service| {
                 let metrics = request_metrics.clone();
                 let method = request.method().as_str().to_owned();

@@ -13,14 +13,19 @@ use serde::{Deserialize, Serialize};
 use tokio::fs::{File as AsyncFile, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::auth::{SessionPrincipal, require_csrf, require_principal};
+use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
 use crate::db::{query_cached, query_one_cached, query_opt_cached};
 use crate::routes::share_links::{
     EditorShareGrant, editor_grant_from_header, editor_parent, validate_editor_replacement,
 };
 use crate::routes::upload_reservations::{reservation_amount, reserve_upload_capacity};
 use crate::state::AppState;
-use crate::storage::{ObjectMetadata, UploadedPart};
+use crate::storage::UploadedPart;
+use crate::upload_completion::{
+    FileUploadFinalizeOutcome, FileUploadRecord, completion_retry_delay_seconds,
+    defer_file_upload_completion, file_upload_from_row, file_upload_metadata_matches,
+    finalize_file_upload_record, transition_file_upload_to_cleanup,
+};
 
 const MAX_UPLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const UPLOAD_LENGTH_HEADER: &str = "x-aeralyth-upload-length";
@@ -30,6 +35,9 @@ const MAX_PAGE_SIZE: usize = 100;
 const MAX_PRESIGN_PARTS: usize = 32;
 const MAX_FOLDER_MANIFEST_PATHS: usize = 1_000;
 const MAX_FOLDER_MANIFEST_FOLDERS: usize = MAX_FOLDER_MANIFEST_PATHS * 63;
+const FOLDER_MANIFEST_JSON_LIMIT: usize = 2 * 1024 * 1024;
+const UPLOAD_CONTROL_JSON_LIMIT: usize = 64 * 1024;
+const UPLOAD_COMPLETION_JSON_LIMIT: usize = 4 * 1024 * 1024;
 
 #[derive(Deserialize)]
 pub(crate) struct FilesQuery {
@@ -255,24 +263,6 @@ struct StoredFile {
     mime_type: Option<String>,
 }
 
-struct UploadRecord {
-    id: String,
-    file_id: String,
-    owner_id: String,
-    parent_id: Option<String>,
-    original_name: String,
-    object_key: String,
-    mime_type: Option<String>,
-    size_bytes: i64,
-    mode: String,
-    part_size_bytes: Option<i64>,
-    multipart_upload_id: Option<String>,
-    status: String,
-    checksum_sha256: Option<String>,
-    share_link_id: Option<String>,
-    replacement_file_id: Option<String>,
-}
-
 struct UploadActor {
     owner_id: String,
     share_link_id: Option<String>,
@@ -369,13 +359,15 @@ pub async fn storage(state: web::Data<AppState>, request: HttpRequest) -> Result
 pub async fn create_folder_manifest(
     state: web::Data<AppState>,
     request: HttpRequest,
-    body: web::Json<FolderManifestRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
     if state.config.e2ee_mode.is_enabled() {
         return Ok(HttpResponse::Conflict()
             .body("plaintext folder manifests are disabled; use the encrypted vault upload API"));
     }
+    let body = parse_json_body::<FolderManifestRequest>(&request, body, FOLDER_MANIFEST_JSON_LIMIT)
+        .await?;
     if body.relative_paths.is_empty() || body.relative_paths.len() > MAX_FOLDER_MANIFEST_PATHS {
         return Err(error::ErrorBadRequest("invalid folder manifest size"));
     }
@@ -506,7 +498,7 @@ pub async fn create_folder_manifest(
 pub async fn init_upload(
     state: web::Data<AppState>,
     request: HttpRequest,
-    body: web::Json<UploadInitRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
 
@@ -514,6 +506,8 @@ pub async fn init_upload(
         return Ok(HttpResponse::Conflict()
             .body("plaintext uploads are disabled; use the encrypted vault upload API"));
     }
+    let body =
+        parse_json_body::<UploadInitRequest>(&request, body, UPLOAD_CONTROL_JSON_LIMIT).await?;
 
     if body.size_bytes > MAX_UPLOAD_BYTES {
         return Err(error::ErrorPayloadTooLarge("file exceeds the 2 GB limit"));
@@ -1116,7 +1110,7 @@ pub async fn presign_upload_content(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<String>,
-    body: web::Json<UploadChecksumRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
     let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
@@ -1126,6 +1120,8 @@ pub async fn presign_upload_content(
     if upload.mode != "single" || upload.status != "pending" {
         return Ok(HttpResponse::Conflict().finish());
     }
+    let body =
+        parse_json_body::<UploadChecksumRequest>(&request, body, UPLOAD_CONTROL_JSON_LIMIT).await?;
 
     let checksum = validate_sha256_checksum(&body.checksum_sha256)?;
     let content_length = u64::try_from(upload.size_bytes)
@@ -1171,7 +1167,7 @@ pub async fn presign_upload_part(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<(String, i32)>,
-    body: web::Json<UploadChecksumRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
     let (upload_id, part_number) = path.into_inner();
@@ -1182,6 +1178,8 @@ pub async fn presign_upload_part(
     if upload.mode != "multipart" || upload.status != "pending" {
         return Ok(HttpResponse::Conflict().finish());
     }
+    let body =
+        parse_json_body::<UploadChecksumRequest>(&request, body, UPLOAD_CONTROL_JSON_LIMIT).await?;
 
     let size_bytes = u64::try_from(upload.size_bytes)
         .map_err(|_| error::ErrorInternalServerError("invalid upload size"))?;
@@ -1229,7 +1227,7 @@ pub async fn presign_upload_parts(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<String>,
-    body: web::Json<UploadPartUrlsRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
     let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
@@ -1238,6 +1236,8 @@ pub async fn presign_upload_parts(
     if upload.mode != "multipart" || upload.status != "pending" {
         return Ok(HttpResponse::Conflict().finish());
     }
+    let body =
+        parse_json_body::<UploadPartUrlsRequest>(&request, body, UPLOAD_CONTROL_JSON_LIMIT).await?;
     if body.parts.is_empty() || body.parts.len() > MAX_PRESIGN_PARTS {
         return Err(error::ErrorBadRequest(
             "multipart presign batch must contain 1 to 32 parts",
@@ -1309,7 +1309,7 @@ pub async fn complete_upload(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<String>,
-    body: web::Json<UploadCompleteRequest>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
     let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
@@ -1320,12 +1320,15 @@ pub async fn complete_upload(
     }
 
     if upload.status == "completing" {
-        return reconcile_completing_upload_response(&state, &upload).await;
+        return Ok(HttpResponse::Accepted().json(upload_complete_response(&upload, "completing")));
     }
 
     if upload.status != "pending" {
         return Ok(HttpResponse::Conflict().finish());
     }
+    let body =
+        parse_json_body::<UploadCompleteRequest>(&request, body, UPLOAD_COMPLETION_JSON_LIMIT)
+            .await?;
 
     let expected_size = u64::try_from(upload.size_bytes)
         .map_err(|_| error::ErrorInternalServerError("invalid upload size"))?;
@@ -1367,7 +1370,11 @@ pub async fn complete_upload(
         .execute(
             "
                 UPDATE file_uploads
-                SET status = 'completing', expires_at = now() + interval '5 minutes'
+                SET status = 'completing',
+                    expires_at = now() + interval '5 minutes',
+                    completion_available_at = now(),
+                    completion_locked_until = now() + interval '2 minutes',
+                    completion_last_error = NULL
                 WHERE id = $1 AND owner_id = $2 AND status = 'pending'
             ",
             &[&upload.id, &upload.owner_id],
@@ -1383,82 +1390,78 @@ pub async fn complete_upload(
         return if current.status == "completed" {
             Ok(HttpResponse::Ok().json(upload_complete_response(&current, "completed")))
         } else if current.status == "completing" {
-            reconcile_completing_upload_response(&state, &current).await
+            Ok(HttpResponse::Accepted().json(upload_complete_response(&current, "completing")))
         } else {
             Ok(HttpResponse::Conflict().json(upload_complete_response(&current, &current.status)))
         };
     }
     state.db.release_request_connection().await;
 
-    let mut metadata = None;
-
-    if upload.mode == "multipart" {
+    let metadata = if upload.mode == "multipart" {
         let multipart_upload_id = upload
             .multipart_upload_id
             .as_deref()
             .ok_or_else(|| error::ErrorInternalServerError("multipart upload id missing"))?;
 
-        if let Err(complete_error) = state
+        match state
             .storage
-            .complete_multipart(&upload.object_key, multipart_upload_id, &completed_parts)
+            .complete_multipart(
+                &upload.object_key,
+                multipart_upload_id,
+                &completed_parts,
+                expected_size,
+            )
             .await
         {
-            match state.storage.object_metadata(&upload.object_key).await {
-                Ok(existing_metadata) => {
-                    metadata = Some(existing_metadata);
-                }
-                Err(metadata_error) if metadata_error.is_not_found() => {
-                    state
-                        .db
-                        .execute(
-                            "UPDATE file_uploads SET status = 'pending', expires_at = now() + interval '24 hours' WHERE id = $1 AND owner_id = $2 AND status = 'completing'",
-                            &[&upload.id, &upload.owner_id],
-                        )
-                        .await
-                        .map_err(error::ErrorInternalServerError)?;
-                    return Err(error::ErrorBadGateway(complete_error));
-                }
-                Err(metadata_error) => {
-                    log::warn!(
-                        "multipart completion for {} is uncertain and will be reconciled: {}",
-                        upload.id,
-                        complete_error
-                    );
-                    log::warn!(
-                        "could not verify uncertain multipart completion {}: {}",
-                        upload.id,
-                        metadata_error
-                    );
-                    return Ok(HttpResponse::Accepted()
-                        .json(upload_complete_response(&upload, "completing")));
-                }
-            }
-        }
-    }
-
-    let metadata = match metadata {
-        Some(metadata) => metadata,
-        None => match state.storage.object_metadata(&upload.object_key).await {
             Ok(metadata) => metadata,
-            Err(metadata_error) => {
+            Err(complete_error) => {
+                let delay = completion_retry_delay_seconds(upload.completion_attempts, &upload.id);
                 log::warn!(
-                    "could not verify completing upload {}: {}",
+                    "multipart completion for {} is uncertain and will be reconciled in {delay}s: {}",
                     upload.id,
-                    metadata_error
+                    complete_error
                 );
+                defer_file_upload_completion(
+                    &state.db,
+                    &upload.id,
+                    &upload.owner_id,
+                    &complete_error.to_string(),
+                    delay,
+                )
+                .await
+                .map_err(error::ErrorInternalServerError)?;
                 return Ok(
                     HttpResponse::Accepted().json(upload_complete_response(&upload, "completing"))
                 );
             }
-        },
+        }
+    } else {
+        match state.storage.object_metadata(&upload.object_key).await {
+            Ok(metadata) => metadata,
+            Err(metadata_error) => {
+                let delay = completion_retry_delay_seconds(upload.completion_attempts, &upload.id);
+                log::warn!(
+                    "could not verify completing upload {}; background finalization will retry in {delay}s: {}",
+                    upload.id,
+                    metadata_error
+                );
+                defer_file_upload_completion(
+                    &state.db,
+                    &upload.id,
+                    &upload.owner_id,
+                    &metadata_error.to_string(),
+                    delay,
+                )
+                .await
+                .map_err(error::ErrorInternalServerError)?;
+                return Ok(
+                    HttpResponse::Accepted().json(upload_complete_response(&upload, "completing"))
+                );
+            }
+        }
     };
-    let checksum_mismatch = upload.mode == "single"
-        && upload
-            .checksum_sha256
-            .as_deref()
-            .is_none_or(|expected| metadata.checksum_sha256.as_deref() != Some(expected));
 
-    if metadata.size_bytes != expected_size || checksum_mismatch {
+    if !file_upload_metadata_matches(&upload, &metadata) {
         enqueue_upload_cleanup(
             &state,
             &upload.id,
@@ -1473,7 +1476,37 @@ pub async fn complete_upload(
         ));
     }
 
-    finalize_upload_record(&state, &upload, &metadata).await?;
+    match finalize_file_upload_record(
+        &state.db,
+        &upload,
+        &metadata,
+        state.config.storage_presign_seconds,
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    {
+        FileUploadFinalizeOutcome::Completed | FileUploadFinalizeOutcome::AlreadyCompleted => {}
+        FileUploadFinalizeOutcome::Missing => {
+            return Err(error::ErrorNotFound("upload no longer exists"));
+        }
+        FileUploadFinalizeOutcome::StateChanged => {
+            return Err(error::ErrorConflict("upload is no longer completing"));
+        }
+        FileUploadFinalizeOutcome::ReplacementMismatch => {
+            enqueue_upload_cleanup(
+                &state,
+                &upload.id,
+                &upload.owner_id,
+                &upload.object_key,
+                upload.multipart_upload_id.as_deref(),
+                &["completing"],
+            )
+            .await?;
+            return Err(error::ErrorConflict(
+                "the replacement file no longer matches the upload path",
+            ));
+        }
+    }
 
     Ok(HttpResponse::Created().json(upload_complete_response(&upload, "completed")))
 }
@@ -1488,243 +1521,17 @@ pub async fn upload_status(
         return Ok(HttpResponse::NotFound().finish());
     };
 
-    if upload.status == "completing" {
-        return reconcile_completing_upload_response(&state, &upload).await;
-    }
-
     let response = upload_complete_response(&upload, &upload.status);
 
     match upload.status.as_str() {
         "completed" | "pending" | "initializing" => Ok(HttpResponse::Ok().json(response)),
+        "completing" => Ok(HttpResponse::Accepted().json(response)),
         "aborting" | "aborted" => Ok(HttpResponse::Conflict().json(response)),
         _ => Ok(HttpResponse::Conflict().finish()),
     }
 }
 
-async fn reconcile_completing_upload_response(
-    state: &AppState,
-    upload: &UploadRecord,
-) -> Result<HttpResponse> {
-    state.db.release_request_connection().await;
-    let metadata = match state.storage.object_metadata(&upload.object_key).await {
-        Ok(metadata) => metadata,
-        Err(metadata_error) => {
-            if !metadata_error.is_not_found() {
-                log::warn!(
-                    "could not poll completing upload {}: {}",
-                    upload.id,
-                    metadata_error
-                );
-            }
-            return Ok(
-                HttpResponse::Accepted().json(upload_complete_response(upload, "completing"))
-            );
-        }
-    };
-    let expected_size = u64::try_from(upload.size_bytes)
-        .map_err(|_| error::ErrorInternalServerError("invalid upload size"))?;
-    let checksum_mismatch = upload.mode == "single"
-        && upload
-            .checksum_sha256
-            .as_deref()
-            .is_none_or(|expected| metadata.checksum_sha256.as_deref() != Some(expected));
-
-    if metadata.size_bytes != expected_size || checksum_mismatch {
-        enqueue_upload_cleanup(
-            state,
-            &upload.id,
-            &upload.owner_id,
-            &upload.object_key,
-            upload.multipart_upload_id.as_deref(),
-            &["completing"],
-        )
-        .await?;
-        return Ok(HttpResponse::Conflict().json(upload_complete_response(upload, "aborting")));
-    }
-
-    finalize_upload_record(state, upload, &metadata).await?;
-
-    Ok(HttpResponse::Ok().json(upload_complete_response(upload, "completed")))
-}
-
-async fn finalize_upload_record(
-    state: &AppState,
-    upload: &UploadRecord,
-    metadata: &ObjectMetadata,
-) -> Result<()> {
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let transaction = client
-        .transaction()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let current = transaction
-        .query_opt(
-            "SELECT status FROM file_uploads WHERE id = $1 AND owner_id = $2 FOR UPDATE",
-            &[&upload.id, &upload.owner_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let Some(current) = current else {
-        return Err(error::ErrorNotFound("upload no longer exists"));
-    };
-    let current_status: String = current.get("status");
-
-    if current_status == "completed" {
-        transaction
-            .commit()
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        return Ok(());
-    }
-    if current_status != "completing" {
-        return Err(error::ErrorConflict("upload is no longer completing"));
-    }
-
-    if let Some(replacement_file_id) = upload.replacement_file_id.as_deref() {
-        let target = if upload.share_link_id.is_some() {
-            transaction
-                .query_opt(
-                    "
-                        SELECT storage_name
-                        FROM files
-                        WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
-                          AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
-                        FOR UPDATE
-                    ",
-                    &[&replacement_file_id, &upload.owner_id],
-                )
-                .await
-                .map_err(error::ErrorInternalServerError)?
-        } else {
-            transaction
-                .query_opt(
-                    "
-                        SELECT storage_name
-                        FROM files
-                        WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
-                          AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
-                          AND parent_id IS NOT DISTINCT FROM $3
-                          AND lower(original_name) = lower($4)
-                        FOR UPDATE
-                    ",
-                    &[
-                        &replacement_file_id,
-                        &upload.owner_id,
-                        &upload.parent_id,
-                        &upload.original_name,
-                    ],
-                )
-                .await
-                .map_err(error::ErrorInternalServerError)?
-        };
-        let Some(target) = target else {
-            return Err(error::ErrorConflict(
-                "the replacement file no longer matches the upload path",
-            ));
-        };
-        let previous_storage_name: String = target.get("storage_name");
-        let previous_object_key = if previous_storage_name.contains('/') {
-            previous_storage_name
-        } else {
-            format!("{}/{}", upload.owner_id, previous_storage_name)
-        };
-        let presign_seconds = i64::try_from(state.config.storage_presign_seconds)
-            .map_err(|_| error::ErrorInternalServerError("invalid signature lifetime"))?;
-        transaction
-            .execute(
-                "
-                    INSERT INTO storage_deletion_jobs (object_key, available_at)
-                    VALUES ($1, now() + ($2::bigint * interval '1 second'))
-                    ON CONFLICT (object_key) DO UPDATE SET
-                      available_at = GREATEST(
-                        storage_deletion_jobs.available_at,
-                        EXCLUDED.available_at
-                      )
-                ",
-                &[&previous_object_key, &presign_seconds],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        transaction
-            .execute(
-                "
-                    UPDATE files
-                    SET original_name = $1,
-                        storage_name = $2,
-                        mime_type = $3,
-                        size_bytes = $4,
-                        checksum_sha256 = $5,
-                        object_etag = $6,
-                        updated_at = now()
-                    WHERE id = $7 AND owner_id = $8
-                ",
-                &[
-                    &upload.original_name,
-                    &upload.object_key,
-                    &upload.mime_type,
-                    &upload.size_bytes,
-                    &metadata.checksum_sha256,
-                    &metadata.etag,
-                    &replacement_file_id,
-                    &upload.owner_id,
-                ],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-    } else {
-        transaction
-            .execute(
-                "
-                    INSERT INTO files (
-                      id,
-                      owner_id,
-                      original_name,
-                      storage_name,
-                      mime_type,
-                      size_bytes,
-                      entry_type,
-                      parent_id,
-                      checksum_sha256,
-                      object_etag
-                    )
-                    VALUES ($1, $2, $3, $4, $5, $6, 'file', $7, $8, $9)
-                    ON CONFLICT (id) DO NOTHING
-                ",
-                &[
-                    &upload.file_id,
-                    &upload.owner_id,
-                    &upload.original_name,
-                    &upload.object_key,
-                    &upload.mime_type,
-                    &upload.size_bytes,
-                    &upload.parent_id,
-                    &metadata.checksum_sha256,
-                    &metadata.etag,
-                ],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-    }
-    transaction
-        .execute(
-            "UPDATE file_uploads SET status = 'completed', completed_at = now() WHERE id = $1 AND owner_id = $2 AND status = 'completing'",
-            &[&upload.id, &upload.owner_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .commit()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    Ok(())
-}
-
-fn upload_complete_response(upload: &UploadRecord, status: &str) -> UploadCompleteResponse {
+fn upload_complete_response(upload: &FileUploadRecord, status: &str) -> UploadCompleteResponse {
     UploadCompleteResponse {
         status: status.to_owned(),
         file_id: upload
@@ -3070,7 +2877,7 @@ async fn get_upload(
     state: &AppState,
     actor: &UploadActor,
     upload_id: &str,
-) -> Result<Option<UploadRecord>> {
+) -> Result<Option<FileUploadRecord>> {
     let row = state
         .db
         .query_opt(
@@ -3090,12 +2897,17 @@ async fn get_upload(
                   status,
                   checksum_sha256,
                   share_link_id,
-                  replacement_file_id
+                  replacement_file_id,
+                  expires_at,
+                  completion_attempts
                 FROM file_uploads
                 WHERE id = $1
                   AND owner_id = $2
                   AND ($3::text IS NULL OR share_link_id = $3)
-                  AND (status = 'completed' OR expires_at > now())
+                  AND (
+                    status IN ('completed', 'completing')
+                    OR expires_at > now()
+                  )
                 LIMIT 1
             ",
             &[&upload_id, &actor.owner_id, &actor.share_link_id],
@@ -3103,25 +2915,10 @@ async fn get_upload(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    Ok(row.map(|row| UploadRecord {
-        id: row.get("id"),
-        file_id: row.get("file_id"),
-        owner_id: row.get("owner_id"),
-        parent_id: row.get("parent_id"),
-        original_name: row.get("original_name"),
-        object_key: row.get("object_key"),
-        mime_type: row.get("mime_type"),
-        size_bytes: row.get("size_bytes"),
-        mode: row.get("upload_mode"),
-        part_size_bytes: row.get("part_size_bytes"),
-        multipart_upload_id: row.get("multipart_upload_id"),
-        status: row.get("status"),
-        checksum_sha256: row.get("checksum_sha256"),
-        share_link_id: row.get("share_link_id"),
-        replacement_file_id: row.get("replacement_file_id"),
-    }))
+    Ok(row.map(file_upload_from_row))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn find_resumable_upload(
     state: &AppState,
     owner_id: &str,
@@ -3131,7 +2928,7 @@ async fn find_resumable_upload(
     original_name: &str,
     mime_type: &Option<String>,
     size_bytes: i64,
-) -> Result<Option<UploadRecord>> {
+) -> Result<Option<FileUploadRecord>> {
     let parent_id = parent_id.map(str::to_owned);
     let row = state
         .db
@@ -3152,7 +2949,9 @@ async fn find_resumable_upload(
                   status,
                   checksum_sha256,
                   share_link_id,
-                  replacement_file_id
+                  replacement_file_id,
+                  expires_at,
+                  completion_attempts
                 FROM file_uploads
                 WHERE owner_id = $1
                   AND parent_id IS NOT DISTINCT FROM $2
@@ -3161,8 +2960,13 @@ async fn find_resumable_upload(
                   AND mime_type IS NOT DISTINCT FROM $5
                   AND share_link_id IS NOT DISTINCT FROM $6
                   AND replacement_file_id IS NOT DISTINCT FROM $7
-                  AND status IN ('initializing', 'pending', 'completing')
-                  AND expires_at > now()
+                  AND (
+                    status = 'completing'
+                    OR (
+                      status IN ('initializing', 'pending')
+                      AND expires_at > now()
+                    )
+                  )
                 ORDER BY created_at DESC
                 LIMIT 1
             ",
@@ -3179,23 +2983,7 @@ async fn find_resumable_upload(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    Ok(row.map(|row| UploadRecord {
-        id: row.get("id"),
-        file_id: row.get("file_id"),
-        owner_id: row.get("owner_id"),
-        parent_id: row.get("parent_id"),
-        original_name: row.get("original_name"),
-        object_key: row.get("object_key"),
-        mime_type: row.get("mime_type"),
-        size_bytes: row.get("size_bytes"),
-        mode: row.get("upload_mode"),
-        part_size_bytes: row.get("part_size_bytes"),
-        multipart_upload_id: row.get("multipart_upload_id"),
-        status: row.get("status"),
-        checksum_sha256: row.get("checksum_sha256"),
-        share_link_id: row.get("share_link_id"),
-        replacement_file_id: row.get("replacement_file_id"),
-    }))
+    Ok(row.map(file_upload_from_row))
 }
 
 async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<()> {
@@ -3240,66 +3028,19 @@ async fn enqueue_upload_cleanup(
     multipart_upload_id: Option<&str>,
     from_statuses: &[&str],
 ) -> Result<bool> {
-    let statuses = from_statuses
-        .iter()
-        .map(|status| (*status).to_owned())
-        .collect::<Vec<_>>();
-    let transitioned = state
-        .db
-        .query_opt(
-            "
-                WITH transitioned AS (
-                  UPDATE file_uploads
-                  SET status = 'aborting',
-                      multipart_upload_id = COALESCE($1, multipart_upload_id),
-                      expires_at = now() + interval '24 hours'
-                  WHERE id = $2
-                    AND owner_id = $3
-                    AND object_key = $4
-                    AND status = ANY($5)
-                  RETURNING object_key, multipart_upload_id, upload_mode, write_expires_at
-                )
-                INSERT INTO storage_deletion_jobs (
-                  object_key,
-                  multipart_upload_id,
-                  available_at
-                )
-                SELECT
-                  object_key,
-                  multipart_upload_id,
-                  CASE
-                    WHEN upload_mode = 'single'
-                      THEN GREATEST(COALESCE(write_expires_at, now()), now())
-                    ELSE now()
-                  END
-                FROM transitioned
-                ON CONFLICT (object_key) DO UPDATE SET
-                  multipart_upload_id = COALESCE(
-                    EXCLUDED.multipart_upload_id,
-                    storage_deletion_jobs.multipart_upload_id
-                  ),
-                  available_at = GREATEST(
-                    storage_deletion_jobs.available_at,
-                    EXCLUDED.available_at
-                  )
-                RETURNING object_key
-            ",
-            &[
-                &multipart_upload_id,
-                &upload_id,
-                &owner_id,
-                &object_key,
-                &statuses,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let did_transition = transitioned.is_some();
-
-    Ok(did_transition)
+    transition_file_upload_to_cleanup(
+        &state.db,
+        upload_id,
+        owner_id,
+        object_key,
+        multipart_upload_id,
+        from_statuses,
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)
 }
 
-fn upload_part_size(upload: &UploadRecord) -> Result<u64> {
+fn upload_part_size(upload: &FileUploadRecord) -> Result<u64> {
     upload
         .part_size_bytes
         .and_then(|value| u64::try_from(value).ok())

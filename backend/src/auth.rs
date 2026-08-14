@@ -1,5 +1,5 @@
-use actix_web::{HttpMessage, HttpRequest, Result, error};
-use serde::Serialize;
+use actix_web::{HttpMessage, HttpRequest, Result, dev, error, web};
+use serde::{Serialize, de::DeserializeOwned};
 use std::future::Future;
 
 use crate::state::AppState;
@@ -16,6 +16,25 @@ const SESSION_PRINCIPAL_QUERY: &str = "
       AND users.status = 'active'
     LIMIT 1
 ";
+
+pub async fn parse_json_body<T: DeserializeOwned>(
+    request: &HttpRequest,
+    payload: web::Payload,
+    limit: usize,
+) -> Result<T> {
+    decode_json_body(request, payload.into_inner(), limit).await
+}
+
+async fn decode_json_body<T: DeserializeOwned>(
+    request: &HttpRequest,
+    mut payload: dev::Payload,
+    limit: usize,
+) -> Result<T> {
+    web::JsonBody::<T>::new(request, &mut payload, None, true)
+        .limit(limit)
+        .await
+        .map_err(Into::into)
+}
 
 #[derive(Clone, Debug)]
 pub struct SessionPrincipal {
@@ -333,8 +352,10 @@ fn auth_user_from_row(row: tokio_postgres::Row, e2ee_mode: &str) -> AuthUser {
 mod tests {
     use super::{
         SESSION_PRINCIPAL_QUERY, SessionPrincipal, cached_or_load_principal, constant_time_equal,
+        decode_json_body,
     };
-    use actix_web::test as actix_test;
+    use actix_web::{http::StatusCode, test as actix_test};
+    use serde::Deserialize;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     #[test]
@@ -387,6 +408,55 @@ mod tests {
             1,
             "only the explicit admin session response may load a full profile"
         );
+    }
+
+    #[derive(Debug, Deserialize)]
+    struct JsonProbe {
+        value: String,
+    }
+
+    #[actix_web::test]
+    async fn bounded_json_decode_preserves_json_validation_and_limits() {
+        let (request, payload) = actix_test::TestRequest::post()
+            .insert_header(("content-type", "application/json"))
+            .set_payload(r#"{"value":"ok"}"#)
+            .to_http_parts();
+        let parsed = decode_json_body::<JsonProbe>(&request, payload, 64)
+            .await
+            .expect("small JSON should parse");
+        assert_eq!(parsed.value, "ok");
+
+        let (request, payload) = actix_test::TestRequest::post()
+            .insert_header(("content-type", "application/json"))
+            .set_payload(r#"{"value":"too large"}"#)
+            .to_http_parts();
+        let error = decode_json_body::<JsonProbe>(&request, payload, 8)
+            .await
+            .expect_err("oversized JSON should be rejected");
+        assert_eq!(
+            error.as_response_error().status_code(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[test]
+    fn protected_json_routes_keep_body_parsing_inside_authenticated_handlers() {
+        for (name, source, expected_payloads) in [
+            ("files", include_str!("routes/files.rs"), 6),
+            ("repositories", include_str!("routes/repositories.rs"), 3),
+            ("share links", include_str!("routes/share_links.rs"), 1),
+            ("vault", include_str!("routes/vault.rs"), 13),
+        ] {
+            assert!(
+                !source.contains("web::Json<"),
+                "{name} reintroduced eager JSON extraction"
+            );
+            assert_eq!(
+                source.matches("parse_json_body::<").count(),
+                expected_payloads,
+                "{name} JSON route coverage changed; authenticate before parsing any new body"
+            );
+        }
     }
 
     #[actix_web::test]

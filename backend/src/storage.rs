@@ -20,6 +20,11 @@ use crate::config::Config;
 use crate::db::Database;
 use crate::e2ee::{UPLOAD_PART_BYTES, uses_vault_multipart_upload};
 use crate::observability::Metrics;
+use crate::upload_completion::{
+    FileUploadFinalizeOutcome, claim_file_upload_completions, completion_retry_delay_seconds,
+    defer_file_upload_completion, file_upload_metadata_matches, finalize_file_upload_record,
+    transition_file_upload_to_cleanup,
+};
 
 const MULTIPART_RECONCILIATION_LOCK_ID: i64 = 4_133_797_884_291_001;
 const STORAGE_OBJECT_PREFIX: &str = "users/";
@@ -58,6 +63,7 @@ const USER_DELETION_PHASES: &[&str] = &[
 enum MaintenanceWorker {
     UserDeletion,
     StorageDeletion,
+    UploadFinalization,
     LegacyUploadExpiry,
     VaultUploadExpiry,
     InvitationExpiry,
@@ -82,6 +88,11 @@ const MAINTENANCE_SCHEDULES: &[MaintenanceSchedule] = &[
         worker: MaintenanceWorker::StorageDeletion,
         initial_delay: Duration::from_secs(1),
         interval: Duration::from_secs(10),
+    },
+    MaintenanceSchedule {
+        worker: MaintenanceWorker::UploadFinalization,
+        initial_delay: Duration::from_secs(0),
+        interval: Duration::from_secs(1),
     },
     MaintenanceSchedule {
         worker: MaintenanceWorker::LegacyUploadExpiry,
@@ -569,14 +580,28 @@ impl Storage {
         }
     }
 
+    pub fn presign_seconds(&self) -> u64 {
+        match self {
+            Self::Local { .. } => 0,
+            Self::S3 {
+                presign_seconds, ..
+            } => *presign_seconds,
+        }
+    }
+
     pub async fn complete_multipart(
         &self,
         object_key: &str,
         multipart_upload_id: &str,
         parts: &[UploadedPart],
-    ) -> Result<(), StorageError> {
+        expected_size_bytes: u64,
+    ) -> Result<ObjectMetadata, StorageError> {
         let Self::S3 { client, bucket, .. } = self else {
-            return Ok(());
+            return Ok(ObjectMetadata {
+                size_bytes: expected_size_bytes,
+                checksum_sha256: None,
+                etag: None,
+            });
         };
         let completed_parts = parts
             .iter()
@@ -592,7 +617,7 @@ impl Storage {
             .set_parts(Some(completed_parts))
             .build();
 
-        client
+        let output = client
             .complete_multipart_upload()
             .bucket(bucket)
             .key(object_key)
@@ -602,7 +627,11 @@ impl Storage {
             .await
             .map_err(storage_error)?;
 
-        Ok(())
+        Ok(ObjectMetadata {
+            size_bytes: expected_size_bytes,
+            checksum_sha256: output.checksum_sha256().map(str::to_owned),
+            etag: output.e_tag().map(str::to_owned),
+        })
     }
 
     pub async fn abort_multipart(
@@ -917,6 +946,7 @@ impl MaintenanceWorker {
         match self {
             Self::UserDeletion => "user deletion",
             Self::StorageDeletion => "storage deletion",
+            Self::UploadFinalization => "upload finalization",
             Self::LegacyUploadExpiry => "legacy upload expiry",
             Self::VaultUploadExpiry => "encrypted upload expiry",
             Self::InvitationExpiry => "invitation expiry",
@@ -933,6 +963,7 @@ impl MaintenanceWorker {
         match self {
             Self::UserDeletion => process_user_deletion_jobs(db).await,
             Self::StorageDeletion => process_deletion_jobs(db, storage).await,
+            Self::UploadFinalization => reconcile_file_upload_completions(db, storage).await,
             Self::LegacyUploadExpiry => expire_abandoned_uploads(db, storage).await,
             Self::VaultUploadExpiry => expire_abandoned_vault_uploads(db, storage).await,
             Self::InvitationExpiry => expire_invitations_batch(db).await,
@@ -1849,9 +1880,100 @@ async fn process_deletion_jobs(
     Ok(())
 }
 
-async fn expire_abandoned_uploads(
+async fn reconcile_file_upload_completions(
     db: &Database,
     storage: &Storage,
+) -> Result<(), Box<dyn StdError + Send + Sync>> {
+    let uploads = claim_file_upload_completions(db, 25).await?;
+
+    for upload in uploads {
+        let metadata = match storage.object_metadata(&upload.object_key).await {
+            Ok(metadata) => metadata,
+            Err(error) if error.is_not_found() && upload.expires_at <= SystemTime::now() => {
+                transition_file_upload_to_cleanup(
+                    db,
+                    &upload.id,
+                    &upload.owner_id,
+                    &upload.object_key,
+                    upload.multipart_upload_id.as_deref(),
+                    &["completing"],
+                )
+                .await?;
+                continue;
+            }
+            Err(error) => {
+                let delay = completion_retry_delay_seconds(upload.completion_attempts, &upload.id);
+                log::warn!(
+                    "upload completion {} will retry in {delay}s: {error}",
+                    upload.id
+                );
+                defer_file_upload_completion(
+                    db,
+                    &upload.id,
+                    &upload.owner_id,
+                    &error.to_string(),
+                    delay,
+                )
+                .await?;
+                continue;
+            }
+        };
+
+        if !file_upload_metadata_matches(&upload, &metadata) {
+            transition_file_upload_to_cleanup(
+                db,
+                &upload.id,
+                &upload.owner_id,
+                &upload.object_key,
+                upload.multipart_upload_id.as_deref(),
+                &["completing"],
+            )
+            .await?;
+            continue;
+        }
+
+        match finalize_file_upload_record(db, &upload, &metadata, storage.presign_seconds()).await {
+            Ok(
+                FileUploadFinalizeOutcome::Completed
+                | FileUploadFinalizeOutcome::AlreadyCompleted
+                | FileUploadFinalizeOutcome::Missing
+                | FileUploadFinalizeOutcome::StateChanged,
+            ) => {}
+            Ok(FileUploadFinalizeOutcome::ReplacementMismatch) => {
+                transition_file_upload_to_cleanup(
+                    db,
+                    &upload.id,
+                    &upload.owner_id,
+                    &upload.object_key,
+                    upload.multipart_upload_id.as_deref(),
+                    &["completing"],
+                )
+                .await?;
+            }
+            Err(error) => {
+                let delay = completion_retry_delay_seconds(upload.completion_attempts, &upload.id);
+                log::warn!(
+                    "upload completion {} database finalization will retry in {delay}s: {error}",
+                    upload.id
+                );
+                defer_file_upload_completion(
+                    db,
+                    &upload.id,
+                    &upload.owner_id,
+                    &error.to_string(),
+                    delay,
+                )
+                .await?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+async fn expire_abandoned_uploads(
+    db: &Database,
+    _storage: &Storage,
 ) -> Result<(), Box<dyn StdError + Send + Sync>> {
     let uploads = db
         .query(
@@ -1859,7 +1981,7 @@ async fn expire_abandoned_uploads(
                 WITH claimed AS (
                   SELECT id
                   FROM file_uploads
-                  WHERE status IN ('initializing', 'pending', 'completing', 'aborting')
+                  WHERE status IN ('initializing', 'pending', 'aborting')
                     AND expires_at <= now()
                   ORDER BY expires_at
                   LIMIT 25
@@ -1889,95 +2011,6 @@ async fn expire_abandoned_uploads(
 
     for upload in uploads {
         let id: String = upload.get("id");
-        let status: String = upload.get("status");
-        let object_key: String = upload.get("object_key");
-
-        if status == "completing" {
-            let expected_size: i64 = upload.get("size_bytes");
-            let expected_checksum: Option<String> = upload.get("checksum_sha256");
-            let upload_mode: String = upload.get("upload_mode");
-
-            let metadata = match storage.object_metadata(&object_key).await {
-                Ok(metadata) => Some(metadata),
-                Err(error) if error.is_not_found() => None,
-                Err(error) => {
-                    log::warn!(
-                        "could not verify finalizing upload {id}; reconciliation will retry: {error}"
-                    );
-                    continue;
-                }
-            };
-
-            if let Some(metadata) = metadata {
-                let size_matches = u64::try_from(expected_size).ok() == Some(metadata.size_bytes);
-                let checksum_matches = upload_mode != "single"
-                    || expected_checksum.as_deref() == metadata.checksum_sha256.as_deref();
-
-                if size_matches && checksum_matches {
-                    let mut client = db.get().await?;
-                    let transaction = client.transaction().await?;
-                    let current = transaction
-                        .query_opt(
-                            "SELECT status FROM file_uploads WHERE id = $1 FOR UPDATE",
-                            &[&id],
-                        )
-                        .await?;
-
-                    if current
-                        .as_ref()
-                        .is_none_or(|row| row.get::<_, String>("status") != "completing")
-                    {
-                        transaction.commit().await?;
-                        continue;
-                    }
-
-                    let file_id: String = upload.get("file_id");
-                    let owner_id: String = upload.get("owner_id");
-                    let parent_id: Option<String> = upload.get("parent_id");
-                    let original_name: String = upload.get("original_name");
-                    let mime_type: Option<String> = upload.get("mime_type");
-                    transaction
-                        .execute(
-                            "
-                                INSERT INTO files (
-                                  id,
-                                  owner_id,
-                                  original_name,
-                                  storage_name,
-                                  mime_type,
-                                  size_bytes,
-                                  entry_type,
-                                  parent_id,
-                                  checksum_sha256,
-                                  object_etag
-                                )
-                                VALUES ($1, $2, $3, $4, $5, $6, 'file', $7, $8, $9)
-                                ON CONFLICT (id) DO NOTHING
-                            ",
-                            &[
-                                &file_id,
-                                &owner_id,
-                                &original_name,
-                                &object_key,
-                                &mime_type,
-                                &expected_size,
-                                &parent_id,
-                                &metadata.checksum_sha256,
-                                &metadata.etag,
-                            ],
-                        )
-                        .await?;
-                    transaction
-                        .execute(
-                            "UPDATE file_uploads SET status = 'completed', completed_at = now() WHERE id = $1 AND status = 'completing'",
-                            &[&id],
-                        )
-                        .await?;
-                    transaction.commit().await?;
-                    continue;
-                }
-            }
-        }
 
         let mut client = db.get().await?;
         let transaction = client.transaction().await?;
@@ -1989,7 +2022,7 @@ async fn expire_abandoned_uploads(
                       SET status = 'aborting',
                           expires_at = now() + interval '24 hours'
                       WHERE id = $1
-                        AND status IN ('initializing', 'pending', 'completing', 'aborting')
+                        AND status IN ('initializing', 'pending', 'aborting')
                       RETURNING object_key, multipart_upload_id, upload_mode, write_expires_at
                     )
                     INSERT INTO storage_deletion_jobs (
