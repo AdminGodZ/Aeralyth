@@ -2309,22 +2309,10 @@ async fn list_entries(
               files.e2ee_state,
               files.favorite,
               NULL::text AS owner_username,
-              EXISTS (
-                SELECT 1 FROM file_shares
-                WHERE file_shares.file_id = files.id
-                  AND file_shares.owner_id = files.owner_id
-              ) OR EXISTS (
-                SELECT 1 FROM vault_shares
-                WHERE vault_shares.root_node_id = files.id
-                  AND vault_shares.owner_id = files.owner_id
-                  AND vault_shares.status IN ('active', 'rotating')
-              ) AS shared,
-              EXISTS (
-                SELECT 1 FROM share_links
-                WHERE share_links.root_file_id = files.id
-                  AND share_links.owner_id = files.owner_id
-                  AND share_links.revoked_at IS NULL
-                  AND (share_links.expires_at IS NULL OR share_links.expires_at > now())
+              (files.legacy_share_count > 0 OR files.vault_share_count > 0) AS shared,
+              (
+                files.permanent_share_link_count > 0
+                OR COALESCE(files.latest_share_link_expiry > now(), FALSE)
               ) AS has_active_share_link,
               NULL::text AS shared_at,
               to_char(files.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
@@ -3237,6 +3225,24 @@ mod tests {
         assert!(listing.contains("get_summary(&state, &user)"));
         assert!(!listing.contains("validate_shared_folder("));
         assert!(!listing.contains("get_shared_breadcrumbs("));
+    }
+
+    #[test]
+    fn owned_listing_reads_transactionally_maintained_share_state() {
+        let source = include_str!("files.rs");
+        let owned_listing = source
+            .split_once("async fn list_entries(")
+            .and_then(|(_, tail)| tail.split_once("async fn list_shared_entries("))
+            .map(|(listing, _)| listing)
+            .expect("owned listing source should remain inspectable");
+
+        assert!(owned_listing.contains("files.legacy_share_count > 0"));
+        assert!(owned_listing.contains("files.vault_share_count > 0"));
+        assert!(owned_listing.contains("files.permanent_share_link_count > 0"));
+        assert!(owned_listing.contains("COALESCE(files.latest_share_link_expiry > now(), FALSE)"));
+        assert!(!owned_listing.contains("SELECT 1 FROM file_shares"));
+        assert!(!owned_listing.contains("SELECT 1 FROM vault_shares"));
+        assert!(!owned_listing.contains("SELECT 1 FROM share_links"));
     }
 
     #[test]

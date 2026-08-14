@@ -11,6 +11,157 @@ const MAX_REPOSITORY_ARCHIVE_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 const MAX_REPOSITORY_DESCRIPTION_CHARS: usize = 350;
 const MAX_REPOSITORY_NAME_CHARS: usize = 100;
 const REPOSITORY_JSON_LIMIT: usize = 16 * 1024;
+const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
+    WITH RECURSIVE repository AS MATERIALIZED (
+      SELECT
+        repositories.id,
+        repositories.description,
+        repositories.root_file_id,
+        repositories.total_files,
+        repositories.total_folders,
+        repositories.tree_version,
+        repositories.counts_version,
+        owners.username AS owner_username,
+        roots.original_name AS root_name,
+        roots.e2ee_state AS root_e2ee_state,
+        roots.updated_at AS root_updated_at_value,
+        repositories.created_at AS created_at_value,
+        repositories.updated_at AS updated_at_value,
+        COALESCE(NULLIF(btrim($3::text), ''), repositories.root_file_id)
+          AS requested_folder_id
+      FROM repositories
+      INNER JOIN users AS owners ON owners.id = repositories.owner_id
+      INNER JOIN files AS roots ON roots.id = repositories.root_file_id
+      WHERE repositories.id = $1
+        AND repositories.owner_id = $2
+        AND roots.owner_id = repositories.owner_id
+        AND roots.entry_type = 'folder'
+        AND roots.state = 'active'
+      LIMIT 1
+    ),
+    ancestors AS (
+      SELECT
+        folder.id,
+        folder.original_name,
+        folder.parent_id,
+        folder.e2ee_state,
+        repository.root_file_id,
+        0::integer AS depth
+      FROM repository
+      INNER JOIN files AS folder ON folder.id = repository.requested_folder_id
+      WHERE folder.owner_id = $2
+        AND folder.entry_type = 'folder'
+        AND folder.state = 'active'
+
+      UNION ALL
+
+      SELECT
+        parent.id,
+        parent.original_name,
+        parent.parent_id,
+        parent.e2ee_state,
+        child.root_file_id,
+        child.depth + 1
+      FROM files AS parent
+      INNER JOIN ancestors AS child ON child.parent_id = parent.id
+      WHERE parent.owner_id = $2
+        AND parent.state = 'active'
+        AND child.id <> child.root_file_id
+        AND child.depth < 100
+    )
+    SELECT
+      repository.id,
+      repository.description,
+      repository.owner_username,
+      repository.root_file_id AS root_id,
+      repository.root_name,
+      repository.root_e2ee_state,
+      to_char(repository.root_updated_at_value AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+        AS root_updated_at,
+      to_char(repository.created_at_value AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+        AS created_at,
+      to_char(repository.updated_at_value AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+        AS updated_at,
+      repository.total_files,
+      repository.total_folders,
+      repository.tree_version,
+      repository.counts_version,
+      repository.requested_folder_id,
+      EXISTS (
+        SELECT 1
+        FROM ancestors AS authorization_path
+        WHERE authorization_path.id = authorization_path.root_file_id
+      ) AS folder_authorized,
+      ancestors.id AS breadcrumb_id,
+      ancestors.original_name AS breadcrumb_name,
+      ancestors.e2ee_state AS breadcrumb_e2ee_state,
+      COALESCE(ancestors.id <> repository.root_file_id, FALSE) AS include_breadcrumb
+    FROM repository
+    LEFT JOIN ancestors ON TRUE
+    ORDER BY ancestors.depth DESC
+"#;
+
+const REPOSITORY_CHILDREN_QUERY: &str = r#"
+    SELECT
+      id,
+      original_name,
+      mime_type,
+      entry_type,
+      parent_id,
+      size_bytes,
+      e2ee_state,
+      to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at
+    FROM files
+    WHERE owner_id = $1
+      AND parent_id = $2
+      AND state = 'active'
+    ORDER BY CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END,
+             lower(original_name),
+             id
+    LIMIT $3
+"#;
+
+const REFRESH_REPOSITORY_TOTALS_QUERY: &str = r#"
+    WITH RECURSIVE repository_snapshot AS MATERIALIZED (
+      SELECT root_file_id, tree_version
+      FROM repositories
+      WHERE id = $1 AND owner_id = $2
+      LIMIT 1
+    ),
+    tree AS (
+      SELECT files.id, files.entry_type, ARRAY[files.id]::text[] AS visited_ids
+      FROM files
+      INNER JOIN repository_snapshot
+        ON repository_snapshot.root_file_id = files.id
+      WHERE files.owner_id = $2 AND files.state = 'active'
+
+      UNION ALL
+
+      SELECT child.id, child.entry_type, tree.visited_ids || child.id
+      FROM files AS child
+      INNER JOIN tree ON child.parent_id = tree.id
+      WHERE child.owner_id = $2
+        AND child.state = 'active'
+        AND NOT child.id = ANY(tree.visited_ids)
+    ),
+    totals AS (
+      SELECT
+        count(*) FILTER (WHERE entry_type = 'file')::bigint AS total_files,
+        GREATEST(count(*) FILTER (WHERE entry_type = 'folder') - 1, 0)::bigint
+          AS total_folders
+      FROM tree
+    )
+    UPDATE repositories
+    SET total_files = totals.total_files,
+        total_folders = totals.total_folders,
+        counts_version = repository_snapshot.tree_version
+    FROM repository_snapshot
+    CROSS JOIN totals
+    WHERE repositories.id = $1
+      AND repositories.owner_id = $2
+      AND repositories.tree_version = repository_snapshot.tree_version
+    RETURNING repositories.total_files, repositories.total_folders
+"#;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -70,6 +221,21 @@ struct RepositorySummary {
     root: RepositoryRoot,
     created_at: String,
     updated_at: String,
+    #[serde(skip)]
+    total_files: i64,
+    #[serde(skip)]
+    total_folders: i64,
+    #[serde(skip)]
+    tree_version: i64,
+    #[serde(skip)]
+    counts_version: i64,
+}
+
+struct RepositoryDetailContext {
+    repository: RepositorySummary,
+    current_folder_id: String,
+    breadcrumbs: Vec<RepositoryBreadcrumb>,
+    folder_authorized: bool,
 }
 
 #[derive(Serialize)]
@@ -124,7 +290,11 @@ pub async fn list(state: web::Data<AppState>, request: HttpRequest) -> Result<Ht
                   roots.e2ee_state AS root_e2ee_state,
                   to_char(roots.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS root_updated_at,
                   to_char(repositories.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
-                  to_char(repositories.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at
+                  to_char(repositories.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
+                  repositories.total_files,
+                  repositories.total_folders,
+                  repositories.tree_version,
+                  repositories.counts_version
                 FROM repositories
                 INNER JOIN users AS owners ON owners.id = repositories.owner_id
                 INNER JOIN files AS roots ON roots.id = repositories.root_file_id
@@ -140,7 +310,7 @@ pub async fn list(state: web::Data<AppState>, request: HttpRequest) -> Result<Ht
         .map_err(error::ErrorInternalServerError)?;
 
     Ok(HttpResponse::Ok().json(RepositoriesResponse {
-        repositories: rows.into_iter().map(repository_summary_from_row).collect(),
+        repositories: rows.iter().map(repository_summary_from_row).collect(),
     }))
 }
 
@@ -357,125 +527,61 @@ pub async fn detail(
 ) -> Result<HttpResponse> {
     let owner = require_principal(&state, &request).await?;
     let repository_id = path.into_inner();
-    let Some(repository) = get_repository_summary(&state, &owner, &repository_id).await? else {
-        return Ok(HttpResponse::NotFound().finish());
-    };
-    let root_folder_id = repository.root.id.clone();
     let requested_folder_id = query
         .folder
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or(&root_folder_id)
-        .to_owned();
-
-    if !folder_is_in_repository(&state, &owner.id, &root_folder_id, &requested_folder_id).await? {
+        .filter(|value| !value.is_empty());
+    let Some(mut context) =
+        get_repository_detail_context(&state, &owner, &repository_id, requested_folder_id).await?
+    else {
+        return Ok(HttpResponse::NotFound().finish());
+    };
+    if !context.folder_authorized {
         return Ok(HttpResponse::NotFound().body("repository folder not found"));
     }
 
-    let breadcrumb_rows = state
-        .db
-        .query(
-            "
-                WITH RECURSIVE ancestors AS (
-                  SELECT id, original_name, parent_id, e2ee_state, 0::integer AS depth
-                  FROM files
-                  WHERE id = $1 AND owner_id = $2 AND state = 'active'
-                  UNION ALL
-                  SELECT parent.id, parent.original_name, parent.parent_id, parent.e2ee_state, ancestors.depth + 1
-                  FROM files AS parent
-                  INNER JOIN ancestors ON ancestors.parent_id = parent.id
-                  WHERE parent.owner_id = $2
-                    AND parent.state = 'active'
-                    AND ancestors.id <> $3
-                    AND ancestors.depth < 100
-                )
-                SELECT id, original_name, e2ee_state
-                FROM ancestors
-                WHERE id <> $3
-                ORDER BY depth DESC
-            ",
-            &[&requested_folder_id, &owner.id, &root_folder_id],
+    let counts_are_stale = context.repository.counts_version != context.repository.tree_version;
+    let (mut entry_rows, refreshed_totals) = if counts_are_stale {
+        futures_util::try_join!(
+            list_repository_children(&state, &owner.id, &context.current_folder_id),
+            refresh_repository_totals(&state, &owner.id, &repository_id),
+        )?
+    } else {
+        (
+            list_repository_children(&state, &owner.id, &context.current_folder_id).await?,
+            None,
         )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    };
 
-    let mut entry_rows = state
-        .db
-        .query(
-            "
-                SELECT
-                  id,
-                  original_name,
-                  mime_type,
-                  entry_type,
-                  parent_id,
-                  size_bytes,
-                  e2ee_state,
-                  to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at
-                FROM files
-                WHERE owner_id = $1
-                  AND parent_id = $2
-                  AND state = 'active'
-                ORDER BY CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END,
-                         lower(original_name),
-                         id
-                LIMIT $3
-            ",
-            &[
-                &owner.id,
-                &requested_folder_id,
-                &(MAX_REPOSITORY_ENTRIES + 1),
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let refreshed_totals = if counts_are_stale && refreshed_totals.is_none() {
+        // A concurrent structural write advanced the tree version while the
+        // count was running. One new statement gets a fresh snapshot without
+        // ever publishing totals for the wrong version.
+        refresh_repository_totals(&state, &owner.id, &repository_id).await?
+    } else {
+        refreshed_totals
+    };
+    if let Some(summary) = refreshed_totals {
+        context.repository.total_files = summary.total_files;
+        context.repository.total_folders = summary.total_folders;
+    }
+
     let entries_truncated = entry_rows.len() > MAX_REPOSITORY_ENTRIES as usize;
     entry_rows.truncate(MAX_REPOSITORY_ENTRIES as usize);
 
-    let summary_row = state
-        .db
-        .query_one(
-            "
-                WITH RECURSIVE tree AS (
-                  SELECT id, entry_type
-                  FROM files
-                  WHERE id = $1 AND owner_id = $2 AND state = 'active'
-                  UNION
-                  SELECT child.id, child.entry_type
-                  FROM files AS child
-                  INNER JOIN tree ON child.parent_id = tree.id
-                  WHERE child.owner_id = $2 AND child.state = 'active'
-                )
-                SELECT
-                  count(*) FILTER (WHERE entry_type = 'file')::bigint AS total_files,
-                  GREATEST(count(*) FILTER (WHERE entry_type = 'folder') - 1, 0)::bigint AS total_folders
-                FROM tree
-            ",
-            &[&root_folder_id, &owner.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
     Ok(HttpResponse::Ok().json(RepositoryDetailResponse {
-        repository,
-        current_folder_id: requested_folder_id,
-        breadcrumbs: breadcrumb_rows
-            .into_iter()
-            .map(|row| RepositoryBreadcrumb {
-                id: row.get("id"),
-                name: row.get("original_name"),
-                e2ee_state: row.get("e2ee_state"),
-            })
-            .collect(),
+        summary: RepositoryTreeSummary {
+            total_files: context.repository.total_files,
+            total_folders: context.repository.total_folders,
+        },
+        repository: context.repository,
+        current_folder_id: context.current_folder_id,
+        breadcrumbs: context.breadcrumbs,
         entries: entry_rows
             .into_iter()
             .map(repository_entry_from_row)
             .collect(),
-        summary: RepositoryTreeSummary {
-            total_files: summary_row.get("total_files"),
-            total_folders: summary_row.get("total_folders"),
-        },
         entries_truncated,
     }))
 }
@@ -578,6 +684,81 @@ pub async fn archive_manifest(
     }))
 }
 
+async fn get_repository_detail_context(
+    state: &AppState,
+    owner: &SessionPrincipal,
+    repository_id: &str,
+    requested_folder_id: Option<&str>,
+) -> Result<Option<RepositoryDetailContext>> {
+    let rows = state
+        .db
+        .query(
+            REPOSITORY_DETAIL_CONTEXT_QUERY,
+            &[&repository_id, &owner.id, &requested_folder_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let Some(first_row) = rows.first() else {
+        return Ok(None);
+    };
+
+    let folder_authorized: bool = first_row.get("folder_authorized");
+    let breadcrumbs = if folder_authorized {
+        rows.iter()
+            .filter(|row| row.get::<_, bool>("include_breadcrumb"))
+            .map(|row| RepositoryBreadcrumb {
+                id: row.get("breadcrumb_id"),
+                name: row.get("breadcrumb_name"),
+                e2ee_state: row.get("breadcrumb_e2ee_state"),
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    Ok(Some(RepositoryDetailContext {
+        repository: repository_summary_from_row(first_row),
+        current_folder_id: first_row.get("requested_folder_id"),
+        breadcrumbs,
+        folder_authorized,
+    }))
+}
+
+async fn list_repository_children(
+    state: &AppState,
+    owner_id: &str,
+    folder_id: &str,
+) -> Result<Vec<Row>> {
+    state
+        .db
+        .query(
+            REPOSITORY_CHILDREN_QUERY,
+            &[&owner_id, &folder_id, &(MAX_REPOSITORY_ENTRIES + 1)],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)
+}
+
+async fn refresh_repository_totals(
+    state: &AppState,
+    owner_id: &str,
+    repository_id: &str,
+) -> Result<Option<RepositoryTreeSummary>> {
+    let row = state
+        .db
+        .query_opt(
+            REFRESH_REPOSITORY_TOTALS_QUERY,
+            &[&repository_id, &owner_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    Ok(row.map(|row| RepositoryTreeSummary {
+        total_files: row.get("total_files"),
+        total_folders: row.get("total_folders"),
+    }))
+}
+
 async fn get_repository_summary(
     state: &AppState,
     owner: &SessionPrincipal,
@@ -596,7 +777,11 @@ async fn get_repository_summary(
                   roots.e2ee_state AS root_e2ee_state,
                   to_char(roots.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS root_updated_at,
                   to_char(repositories.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
-                  to_char(repositories.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at
+                  to_char(repositories.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
+                  repositories.total_files,
+                  repositories.total_folders,
+                  repositories.tree_version,
+                  repositories.counts_version
                 FROM repositories
                 INNER JOIN users AS owners ON owners.id = repositories.owner_id
                 INNER JOIN files AS roots ON roots.id = repositories.root_file_id
@@ -612,45 +797,10 @@ async fn get_repository_summary(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    Ok(row.map(repository_summary_from_row))
+    Ok(row.as_ref().map(repository_summary_from_row))
 }
 
-async fn folder_is_in_repository(
-    state: &AppState,
-    owner_id: &str,
-    root_folder_id: &str,
-    folder_id: &str,
-) -> Result<bool> {
-    let row = state
-        .db
-        .query_opt(
-            "
-                WITH RECURSIVE tree AS (
-                  SELECT id
-                  FROM files
-                  WHERE id = $1
-                    AND owner_id = $2
-                    AND entry_type = 'folder'
-                    AND state = 'active'
-                  UNION
-                  SELECT child.id
-                  FROM files AS child
-                  INNER JOIN tree ON child.parent_id = tree.id
-                  WHERE child.owner_id = $2
-                    AND child.entry_type = 'folder'
-                    AND child.state = 'active'
-                )
-                SELECT id FROM tree WHERE id = $3 LIMIT 1
-            ",
-            &[&root_folder_id, &owner_id, &folder_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    Ok(row.is_some())
-}
-
-fn repository_summary_from_row(row: Row) -> RepositorySummary {
+fn repository_summary_from_row(row: &Row) -> RepositorySummary {
     RepositorySummary {
         id: row.get("id"),
         owner_username: row.get("owner_username"),
@@ -664,6 +814,10 @@ fn repository_summary_from_row(row: Row) -> RepositorySummary {
         },
         created_at: row.get("created_at"),
         updated_at: row.get("updated_at"),
+        total_files: row.get("total_files"),
+        total_folders: row.get("total_folders"),
+        tree_version: row.get("tree_version"),
+        counts_version: row.get("counts_version"),
     }
 }
 
@@ -724,7 +878,67 @@ async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize_description, normalize_repository_name};
+    use super::{
+        REFRESH_REPOSITORY_TOTALS_QUERY, REPOSITORY_DETAIL_CONTEXT_QUERY, normalize_description,
+        normalize_repository_name,
+    };
+
+    #[test]
+    fn detail_authorizes_and_builds_breadcrumbs_with_one_upward_walk() {
+        assert!(REPOSITORY_DETAIL_CONTEXT_QUERY.contains("WITH RECURSIVE repository"));
+        assert!(REPOSITORY_DETAIL_CONTEXT_QUERY.contains("requested_folder_id"));
+        assert!(
+            REPOSITORY_DETAIL_CONTEXT_QUERY
+                .contains("INNER JOIN ancestors AS child ON child.parent_id = parent.id")
+        );
+        assert!(REPOSITORY_DETAIL_CONTEXT_QUERY.contains("authorization_path.id"));
+        assert!(!REPOSITORY_DETAIL_CONTEXT_QUERY.contains("child.parent_id = tree.id"));
+
+        let source = include_str!("repositories.rs");
+        let detail = source
+            .split_once("pub async fn detail(")
+            .and_then(|(_, tail)| tail.split_once("pub async fn archive_manifest("))
+            .map(|(detail, _)| detail)
+            .expect("repository detail source should remain inspectable");
+        assert!(detail.contains("get_repository_detail_context("));
+        assert!(detail.contains("futures_util::try_join!("));
+        assert!(!detail.contains("folder_is_in_repository("));
+    }
+
+    #[test]
+    fn detail_only_recounts_a_changed_tree_and_version_gates_publication() {
+        assert!(REFRESH_REPOSITORY_TOTALS_QUERY.contains("tree_version"));
+        assert!(REFRESH_REPOSITORY_TOTALS_QUERY.contains("counts_version"));
+        assert!(
+            REFRESH_REPOSITORY_TOTALS_QUERY
+                .contains("repositories.tree_version = repository_snapshot.tree_version")
+        );
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_query_contracts_prepare() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (client, connection) = tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+            .await
+            .expect("connect to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            connection
+                .await
+                .expect("PostgreSQL connection stays healthy");
+        });
+
+        for query in [
+            super::REPOSITORY_DETAIL_CONTEXT_QUERY,
+            super::REPOSITORY_CHILDREN_QUERY,
+            super::REFRESH_REPOSITORY_TOTALS_QUERY,
+        ] {
+            client
+                .prepare(query)
+                .await
+                .expect("repository query prepares");
+        }
+    }
 
     #[test]
     fn validates_and_normalizes_repository_names() {

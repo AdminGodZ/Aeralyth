@@ -562,6 +562,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-032 [P2] File rows execute several correlated share-existence checks
 
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** File rows now carry transactionally maintained legacy-share, vault-share, permanent-link, and latest-expiring-link metadata, populated by a replay-safe migration and kept current by statement-level triggers for insert, update, delete, revocation, status, recipient, and expiry transitions. Owned listings read those columns directly, with a null-safe active-link expression, instead of executing share-table probes per result row. Rollback-only plan regressions at both 50,000 and 1,000,000 repository nodes measured 9 shared-buffer hits for 50 rows and 28 for 500 rows, with no share relation or correlated `SubPlan` in either listing plan. Fresh-schema backfill, zero-row trigger safety, migration replay, exact production-query preparation, and a real authenticated listing returning concrete false flags all passed.
+
 **Confidence:** Confirmed
 
 **Evidence:** Listing SQL computes share flags using separate `EXISTS` checks against legacy shares, vault shares, and share links for each result row.
@@ -574,6 +578,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-033 [P1] Repository detail recomputes full-tree membership and counts on every navigation
 
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** Repository detail now resolves authorization, requested-folder metadata, and breadcrumbs in one upward ancestor walk, then performs only the bounded child listing during stable navigation. Repository file/folder totals are cached behind a trigger-maintained tree version; stale totals refresh once per structural version, publish only if that version remains current, and retry after a concurrent tree change rather than exposing stale counts. At both 50,000 and 1,000,000 nodes, the ancestor plan remained 13 rows and 54 shared-buffer hits; the one-time full refresh measured about 80 ms at 50,000 nodes and 1.94 seconds at 1,000,000 nodes instead of recurring on every folder click. A real repository request returned byte-identical first and cached responses in 8.965 ms and 5.059 ms respectively, while source and database regressions enforce the upward-query and version-gate design.
+
 **Confidence:** Confirmed
 
 **Evidence:** `backend/src/routes/repositories.rs::detail` recursively scans downward from the root to authorize the requested folder, runs another recursive breadcrumb query, lists children, and recursively counts the entire repository.
@@ -585,6 +593,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** At 50,000 and 1,000,000 nodes, folder-navigation latency should depend on depth and page size, not total tree size.
 
 ## PERF-034 [P1] Share-link browsing repeats recursive authorization and metadata queries
+
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** Public share browsing now resolves the active grant, recipient rule, root, requested node, upward root membership, and breadcrumbs in one authorization query, followed only by the bounded child query. Share downloads return authorization and file metadata from one database statement. At both 50,000 and 1,000,000 nodes, shared navigation remained 13 rows and 60 shared-buffer hits, while download authorization returned exactly two recursive rows for the tested child. Exact production SQL prepares against a fresh database, source guards prevent the retired serial helper chain from returning, and real runtime checks returned HTTP 200 for the unchanged folder response and for a 94-byte file download through a temporary link that was revoked and removed afterward.
 
 **Confidence:** Confirmed
 
