@@ -764,6 +764,8 @@ CREATE INDEX IF NOT EXISTS invitations_pending_expiry_idx
 CREATE UNIQUE INDEX IF NOT EXISTS invitations_pending_username_idx
   ON invitations (lower(invited_username))
   WHERE status = 'pending';
+CREATE UNIQUE INDEX IF NOT EXISTS users_username_ci_idx
+  ON users (lower(username));
 CREATE INDEX IF NOT EXISTS files_owner_id_idx ON files(owner_id);
 CREATE INDEX IF NOT EXISTS users_created_cursor_idx ON users(created_at ASC, id ASC);
 CREATE INDEX IF NOT EXISTS files_parent_id_idx ON files(parent_id);

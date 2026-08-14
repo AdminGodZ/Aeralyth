@@ -514,6 +514,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-029 [P2] Migration cleanup and claim paths are missing targeted partial indexes
 
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** Exact partial indexes now cover ordered legacy/staged file claims, per-owner incomplete migration summaries, and cleanup acknowledgements by non-null legacy object key. Production SQL is held in shared constants with source tests that keep each predicate and ordering aligned to its base-schema index. A rollback-only scale regression with 100,000 files and 100,000 migration rows requires the claim to use `files_e2ee_migration_claim_idx` without a Sort node, the summary to use both narrow partial indexes, and cleanup acknowledgement to use `vault_migrations_cleanup_object_idx`. Migration 013 builds missing indexes concurrently, rechecks them on replay, and passed fresh legacy-to-current plus base-migration replay tests.
+
 **Confidence:** Confirmed
 
 **Evidence:** `vault_migrations` is indexed by `(owner_id, state, updated_at)`, but cleanup can identify rows by legacy object key, and required/migration work scans file E2EE state.
@@ -526,6 +530,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-030 [P2] Case-insensitive username lookups lack a matching unique index
 
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** `users_username_ci_idx` now uniquely enforces the application's `lower(username)` equality rule, and password authentication was aligned with the already case-insensitive admin, invitation, sharing, and vault-identity lookups. A 100,000-user plan regression requires a case-insensitive lookup to use the unique expression index and proves that a differently-cased duplicate is rejected. A live preflight found zero non-lowercase or case-colliding usernames, the concurrent migration is active and valid, and a real login using `AdminGod` for the stored `admingod` account returned HTTP 303 successfully. Source guards prevent any identity lookup family from drifting away from the indexed rule.
+
 **Confidence:** Confirmed
 
 **Evidence:** Many routes use `lower(username) = lower($1)`, while the base table has a case-sensitive unique constraint on `username`.
@@ -537,6 +545,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Identity, invitation, admin, and share-recipient lookups should all use the same indexed equality rule.
 
 ## PERF-031 [P1] File listings perform multiple independent queries serially
+
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** Owned and shared folder validation now returns the authorized breadcrumb chain in the same recursive query, removing one serialized database round trip. Entry pagination and counter-summary retrieval are then polled concurrently through the existing request-scoped shared PostgreSQL connection, retaining one pool checkout while pipelining the independent work. Regression tests lock in both combined context queries and the concurrent join. On the same active folder and local API, matched 40-request samples improved from 3.141 ms median / 3.929 ms p95 to 2.211 ms median / 3.403 ms p95; the verified response retained the same folder ID, breadcrumb, 10 entries, seven summary fields, and pagination state. No UI or response-contract files changed.
 
 **Confidence:** Confirmed
 

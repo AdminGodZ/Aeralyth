@@ -78,6 +78,11 @@ const CLAIM_EXPIRED_FILE_UPLOADS_QUERY: &str = "
       uploads.status,
       uploads.checksum_sha256
 ";
+const COMPLETE_MIGRATION_CLEANUP_QUERY: &str = "
+    UPDATE vault_migrations
+    SET state = 'complete', updated_at = now()
+    WHERE legacy_object_key = $1 AND state = 'cleanup_queued'
+";
 const USER_DELETION_PHASES: &[&str] = &[
     "file_uploads",
     "vault_uploads",
@@ -1878,14 +1883,7 @@ async fn process_deletion_jobs(
                     )
                     .await?;
                 transaction
-                    .execute(
-                        "
-                            UPDATE vault_migrations
-                            SET state = 'complete', updated_at = now()
-                            WHERE legacy_object_key = $1 AND state = 'cleanup_queued'
-                        ",
-                        &[&object_key],
-                    )
+                    .execute(COMPLETE_MIGRATION_CLEANUP_QUERY, &[&object_key])
                     .await?;
                 transaction
                     .execute("DELETE FROM storage_deletion_jobs WHERE id = $1", &[&id])
@@ -2278,6 +2276,15 @@ mod tests {
         assert!(auth_schema.contains("file_uploads_global_expiry_idx"));
         let vault_schema = include_str!("../../database/init/002_e2ee.sql");
         assert!(vault_schema.contains("vault_uploads_global_expiry_idx"));
+    }
+
+    #[test]
+    fn migration_cleanup_acknowledgement_stays_on_its_partial_index() {
+        assert!(COMPLETE_MIGRATION_CLEANUP_QUERY.contains("legacy_object_key = $1"));
+        assert!(COMPLETE_MIGRATION_CLEANUP_QUERY.contains("state = 'cleanup_queued'"));
+
+        let vault_schema = include_str!("../../database/init/002_e2ee.sql");
+        assert!(vault_schema.contains("vault_migrations_cleanup_object_idx"));
     }
 
     #[actix_web::test]

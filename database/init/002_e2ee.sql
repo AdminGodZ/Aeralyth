@@ -452,6 +452,16 @@ CREATE TABLE IF NOT EXISTS vault_migrations (
 
 CREATE INDEX IF NOT EXISTS vault_migrations_owner_state_idx
   ON vault_migrations (owner_id, state, updated_at);
+CREATE INDEX IF NOT EXISTS vault_migrations_incomplete_owner_idx
+  ON vault_migrations (owner_id, node_id)
+  WHERE state <> 'complete';
+CREATE INDEX IF NOT EXISTS vault_migrations_cleanup_object_idx
+  ON vault_migrations (legacy_object_key)
+  WHERE state = 'cleanup_queued' AND legacy_object_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS files_e2ee_migration_claim_idx
+  ON files (owner_id, created_at, id)
+  INCLUDE (e2ee_state)
+  WHERE e2ee_state IN ('legacy', 'staged');
 
 CREATE INDEX IF NOT EXISTS vault_uploads_owner_status_idx
   ON vault_uploads (owner_id, status, expires_at);

@@ -80,6 +80,33 @@ const LATEST_SHARE_ENVELOPE_QUERY: &str = "
     ORDER BY envelopes.created_at DESC, envelopes.envelope_id DESC
     LIMIT 1
 ";
+const MIGRATION_CLAIM_QUERY: &str = "
+    SELECT files.id, files.parent_id, files.entry_type,
+           files.original_name, files.mime_type, files.size_bytes,
+           files.storage_name,
+           (extract(epoch FROM files.updated_at) * 1000)::bigint AS last_modified
+    FROM files
+    LEFT JOIN files AS parent ON parent.id = files.parent_id
+    WHERE files.owner_id = $1
+      AND files.e2ee_state IN ('legacy', 'staged')
+      AND (files.parent_id IS NULL OR parent.e2ee_state = 'encrypted')
+    ORDER BY files.created_at, files.id
+    LIMIT 1
+    FOR UPDATE OF files SKIP LOCKED
+";
+const MIGRATION_SUMMARY_QUERY: &str = "
+    SELECT
+      (SELECT count(*)::bigint FROM files
+       WHERE owner_id = $1 AND e2ee_state = 'legacy') AS legacy_nodes,
+      (SELECT count(DISTINCT pending.node_id)::bigint
+       FROM (
+         SELECT id AS node_id FROM files
+         WHERE owner_id = $1 AND e2ee_state = 'staged'
+         UNION ALL
+         SELECT node_id FROM vault_migrations
+         WHERE owner_id = $1 AND state <> 'complete'
+       ) AS pending) AS incomplete_nodes
+";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -648,23 +675,7 @@ pub async fn claim_migration(
         .await
         .map_err(error::ErrorInternalServerError)?;
     let candidate = transaction
-        .query_opt(
-            "
-                SELECT files.id, files.parent_id, files.entry_type,
-                       files.original_name, files.mime_type, files.size_bytes,
-                       files.storage_name,
-                       (extract(epoch FROM files.updated_at) * 1000)::bigint AS last_modified
-                FROM files
-                LEFT JOIN files AS parent ON parent.id = files.parent_id
-                WHERE files.owner_id = $1
-                  AND files.e2ee_state IN ('legacy', 'staged')
-                  AND (files.parent_id IS NULL OR parent.e2ee_state = 'encrypted')
-                ORDER BY files.created_at, files.id
-                LIMIT 1
-                FOR UPDATE OF files SKIP LOCKED
-            ",
-            &[&user.id],
-        )
+        .query_opt(MIGRATION_CLAIM_QUERY, &[&user.id])
         .await
         .map_err(error::ErrorInternalServerError)?;
     let Some(candidate) = candidate else {
@@ -5165,22 +5176,7 @@ async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<
 async fn migration_summary(state: &AppState, user: &SessionPrincipal) -> Result<MigrationSummary> {
     let row = state
         .db
-        .query_one(
-            "
-                SELECT
-                  (SELECT count(*)::bigint FROM files
-                   WHERE owner_id = $1 AND e2ee_state = 'legacy') AS legacy_nodes,
-                  (SELECT count(DISTINCT pending.node_id)::bigint
-                   FROM (
-                     SELECT id AS node_id FROM files
-                     WHERE owner_id = $1 AND e2ee_state = 'staged'
-                     UNION ALL
-                     SELECT node_id FROM vault_migrations
-                     WHERE owner_id = $1 AND state <> 'complete'
-                   ) AS pending) AS incomplete_nodes
-            ",
-            &[&user.id],
-        )
+        .query_one(MIGRATION_SUMMARY_QUERY, &[&user.id])
         .await
         .map_err(error::ErrorInternalServerError)?;
     let legacy_nodes: i64 = row.get("legacy_nodes");
@@ -5573,6 +5569,21 @@ mod tests {
 
         let vault_schema = include_str!("../../../database/init/002_e2ee.sql");
         assert!(vault_schema.contains("vault_share_envelopes_recipient_latest_idx"));
+    }
+
+    #[test]
+    fn migration_queries_stay_aligned_with_their_partial_indexes() {
+        assert!(MIGRATION_CLAIM_QUERY.contains("files.e2ee_state IN ('legacy', 'staged')"));
+        assert!(MIGRATION_CLAIM_QUERY.contains("ORDER BY files.created_at, files.id"));
+        assert!(MIGRATION_CLAIM_QUERY.contains("FOR UPDATE OF files SKIP LOCKED"));
+        assert!(MIGRATION_SUMMARY_QUERY.contains("e2ee_state = 'legacy'"));
+        assert!(MIGRATION_SUMMARY_QUERY.contains("e2ee_state = 'staged'"));
+        assert!(MIGRATION_SUMMARY_QUERY.contains("state <> 'complete'"));
+
+        let vault_schema = include_str!("../../../database/init/002_e2ee.sql");
+        assert!(vault_schema.contains("files_e2ee_migration_claim_idx"));
+        assert!(vault_schema.contains("vault_migrations_incomplete_owner_idx"));
+        assert!(vault_schema.contains("vault_migrations_cleanup_object_idx"));
     }
 
     #[test]

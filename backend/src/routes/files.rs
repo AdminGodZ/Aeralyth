@@ -275,6 +275,11 @@ struct FilePage {
     has_more: bool,
 }
 
+struct FolderContext {
+    current_folder_id: Option<String>,
+    breadcrumbs: Vec<FolderBreadcrumb>,
+}
+
 struct ListedFile {
     entry: FileEntry,
     rank: i32,
@@ -309,32 +314,33 @@ pub async fn list_files(
         "updated"
     }));
     let direction = normalize_sort_direction(query.direction.as_deref(), sort);
-    let current_folder_id = match view {
-        "files" => validate_folder(&state, &user.id, query.folder.as_deref()).await?,
-        "shared" => validate_shared_folder(&state, &user, query.folder.as_deref()).await?,
-        _ => None,
+    let folder_context = match view {
+        "files" => resolve_owned_folder_context(&state, &user, query.folder.as_deref()).await?,
+        "shared" => resolve_shared_folder_context(&state, &user, query.folder.as_deref()).await?,
+        _ => FolderContext {
+            current_folder_id: None,
+            breadcrumbs: Vec::new(),
+        },
     };
-    let breadcrumbs = if view == "shared" {
-        get_shared_breadcrumbs(&state, &user, current_folder_id.as_deref()).await?
-    } else {
-        get_breadcrumbs(&state, &user, current_folder_id.as_deref()).await?
-    };
+    let current_folder_id = folder_context.current_folder_id;
+    let breadcrumbs = folder_context.breadcrumbs;
     let page_size = query
         .limit
         .unwrap_or(DEFAULT_PAGE_SIZE)
         .clamp(1, MAX_PAGE_SIZE);
-    let page = list_entries(
-        &state,
-        &user,
-        view,
-        current_folder_id.as_deref(),
-        sort,
-        direction,
-        query.cursor.as_deref(),
-        page_size,
-    )
-    .await?;
-    let summary = get_summary(&state, &user).await?;
+    let (page, summary) = futures_util::try_join!(
+        list_entries(
+            &state,
+            &user,
+            view,
+            current_folder_id.as_deref(),
+            sort,
+            direction,
+            query.cursor.as_deref(),
+            page_size,
+        ),
+        get_summary(&state, &user),
+    )?;
     let storage = storage_stats(&state, summary.used_bytes);
 
     Ok(HttpResponse::Ok().json(FilesResponse {
@@ -2038,168 +2044,136 @@ async fn validate_folder(
         .map(Some)
 }
 
-async fn validate_shared_folder(
+const OWNED_FOLDER_CONTEXT_QUERY: &str = "
+    WITH RECURSIVE ancestors AS (
+      SELECT id, original_name, parent_id, e2ee_state, 0 AS depth
+      FROM files
+      WHERE id = $1
+        AND owner_id = $2
+        AND entry_type = 'folder'
+        AND state = 'active'
+
+      UNION ALL
+
+      SELECT parent.id, parent.original_name, parent.parent_id,
+             parent.e2ee_state, child.depth + 1
+      FROM files AS parent
+      INNER JOIN ancestors AS child ON child.parent_id = parent.id
+      WHERE parent.owner_id = $2
+    )
+    SELECT id, original_name, e2ee_state
+    FROM ancestors
+    ORDER BY depth DESC
+";
+
+async fn resolve_owned_folder_context(
     state: &AppState,
     user: &SessionPrincipal,
     folder_id: Option<&str>,
-) -> Result<Option<String>> {
+) -> Result<FolderContext> {
     let Some(folder_id) = folder_id.map(str::trim).filter(|value| !value.is_empty()) else {
-        return Ok(None);
-    };
-    let accessible = state
-        .db
-        .query_opt(
-            "
-                WITH RECURSIVE ancestors AS (
-                  SELECT id, parent_id, owner_id
-                  FROM files
-                  WHERE id = $1 AND entry_type = 'folder' AND state = 'active'
-                  UNION ALL
-                  SELECT parent.id, parent.parent_id, parent.owner_id
-                  FROM files AS parent
-                  INNER JOIN ancestors AS child ON child.parent_id = parent.id
-                  WHERE parent.owner_id = child.owner_id AND parent.state = 'active'
-                )
-                SELECT $1::text AS id
-                FROM ancestors
-                WHERE EXISTS (
-                  SELECT 1
-                  FROM file_shares AS shares
-                  WHERE shares.file_id = ancestors.id
-                    AND shares.owner_id = ancestors.owner_id
-                    AND shares.recipient_id = $2
-                ) OR EXISTS (
-                  SELECT 1
-                  FROM vault_shares AS shares
-                  INNER JOIN vault_share_recipients AS recipients
-                    ON recipients.share_id = shares.id
-                   AND recipients.recipient_id = $2
-                   AND recipients.status = 'active'
-                  WHERE shares.root_node_id = ancestors.id
-                    AND shares.owner_id = ancestors.owner_id
-                    AND shares.status = 'active'
-                )
-                LIMIT 1
-            ",
-            &[&folder_id, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    accessible
-        .map(|row| row.get("id"))
-        .ok_or_else(|| error::ErrorNotFound("shared folder not found"))
-        .map(Some)
-}
-
-async fn get_breadcrumbs(
-    state: &AppState,
-    user: &SessionPrincipal,
-    folder_id: Option<&str>,
-) -> Result<Vec<FolderBreadcrumb>> {
-    let Some(folder_id) = folder_id else {
-        return Ok(Vec::new());
+        return Ok(FolderContext {
+            current_folder_id: None,
+            breadcrumbs: Vec::new(),
+        });
     };
     let rows = state
         .db
-        .query(
-            "
-                WITH RECURSIVE ancestors AS (
-                  SELECT id, original_name, parent_id, e2ee_state, 0 AS depth
-                  FROM files
-                  WHERE id = $1 AND owner_id = $2
-
-                  UNION ALL
-
-                  SELECT parent.id, parent.original_name, parent.parent_id, parent.e2ee_state, child.depth + 1
-                  FROM files AS parent
-                  INNER JOIN ancestors AS child ON child.parent_id = parent.id
-                  WHERE parent.owner_id = $2
-                )
-                SELECT id, original_name, e2ee_state
-                FROM ancestors
-                ORDER BY depth DESC
-            ",
-            &[&folder_id, &user.id],
-        )
+        .query(OWNED_FOLDER_CONTEXT_QUERY, &[&folder_id, &user.id])
         .await
         .map_err(error::ErrorInternalServerError)?;
+    if rows.is_empty() {
+        return Err(error::ErrorNotFound("folder not found"));
+    }
 
-    Ok(rows
-        .into_iter()
+    Ok(FolderContext {
+        current_folder_id: Some(folder_id.to_owned()),
+        breadcrumbs: folder_breadcrumbs_from_rows(rows),
+    })
+}
+
+const SHARED_FOLDER_CONTEXT_QUERY: &str = "
+    WITH RECURSIVE ancestors AS (
+      SELECT id, original_name, parent_id, owner_id, e2ee_state, 0 AS depth
+      FROM files
+      WHERE id = $1 AND entry_type = 'folder' AND state = 'active'
+
+      UNION ALL
+
+      SELECT parent.id, parent.original_name, parent.parent_id,
+             parent.owner_id, parent.e2ee_state, child.depth + 1
+      FROM files AS parent
+      INNER JOIN ancestors AS child ON child.parent_id = parent.id
+      WHERE parent.owner_id = child.owner_id AND parent.state = 'active'
+    ), legacy_access AS (
+      SELECT ancestors.depth AS root_depth
+      FROM ancestors
+      INNER JOIN file_shares AS shares
+        ON shares.file_id = ancestors.id
+       AND shares.owner_id = ancestors.owner_id
+       AND shares.recipient_id = $2
+    ), vault_access AS (
+      SELECT ancestors.depth AS root_depth
+      FROM ancestors
+      INNER JOIN vault_shares AS shares
+        ON shares.root_node_id = ancestors.id
+       AND shares.owner_id = ancestors.owner_id
+       AND shares.status = 'active'
+      INNER JOIN vault_share_recipients AS recipients
+        ON recipients.share_id = shares.id
+       AND recipients.recipient_id = $2
+       AND recipients.status = 'active'
+    ), access AS (
+      SELECT candidates.root_depth
+      FROM (
+        SELECT root_depth FROM legacy_access
+        UNION ALL
+        SELECT root_depth FROM vault_access
+      ) AS candidates
+      ORDER BY candidates.root_depth
+      LIMIT 1
+    )
+    SELECT ancestors.id, ancestors.original_name, ancestors.e2ee_state
+    FROM ancestors
+    CROSS JOIN access
+    WHERE ancestors.depth <= access.root_depth
+    ORDER BY ancestors.depth DESC
+";
+
+async fn resolve_shared_folder_context(
+    state: &AppState,
+    user: &SessionPrincipal,
+    folder_id: Option<&str>,
+) -> Result<FolderContext> {
+    let Some(folder_id) = folder_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(FolderContext {
+            current_folder_id: None,
+            breadcrumbs: Vec::new(),
+        });
+    };
+    let rows = state
+        .db
+        .query(SHARED_FOLDER_CONTEXT_QUERY, &[&folder_id, &user.id])
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    if rows.is_empty() {
+        return Err(error::ErrorNotFound("shared folder not found"));
+    }
+
+    Ok(FolderContext {
+        current_folder_id: Some(folder_id.to_owned()),
+        breadcrumbs: folder_breadcrumbs_from_rows(rows),
+    })
+}
+
+fn folder_breadcrumbs_from_rows(rows: Vec<tokio_postgres::Row>) -> Vec<FolderBreadcrumb> {
+    rows.into_iter()
         .map(|row| FolderBreadcrumb {
             id: row.get("id"),
             name: row.get("original_name"),
             e2ee_state: row.get("e2ee_state"),
         })
-        .collect())
-}
-
-async fn get_shared_breadcrumbs(
-    state: &AppState,
-    user: &SessionPrincipal,
-    folder_id: Option<&str>,
-) -> Result<Vec<FolderBreadcrumb>> {
-    let Some(folder_id) = folder_id else {
-        return Ok(Vec::new());
-    };
-    let rows = state
-        .db
-        .query(
-            "
-                WITH RECURSIVE ancestors AS (
-                  SELECT id, original_name, parent_id, owner_id, e2ee_state, 0 AS depth
-                  FROM files WHERE id = $1
-                  UNION ALL
-                  SELECT parent.id, parent.original_name, parent.parent_id,
-                         parent.owner_id, parent.e2ee_state, child.depth + 1
-                  FROM files AS parent
-                  INNER JOIN ancestors AS child ON child.parent_id = parent.id
-                  WHERE parent.owner_id = child.owner_id
-                ), legacy_access AS (
-                  SELECT ancestors.depth AS root_depth
-                  FROM ancestors
-                  INNER JOIN file_shares AS shares
-                    ON shares.file_id = ancestors.id
-                   AND shares.owner_id = ancestors.owner_id
-                   AND shares.recipient_id = $2
-                ), vault_access AS (
-                  SELECT ancestors.depth AS root_depth
-                  FROM ancestors
-                  INNER JOIN vault_shares AS shares
-                    ON shares.root_node_id = ancestors.id
-                   AND shares.owner_id = ancestors.owner_id
-                   AND shares.status = 'active'
-                  INNER JOIN vault_share_recipients AS recipients
-                    ON recipients.share_id = shares.id
-                   AND recipients.recipient_id = $2
-                   AND recipients.status = 'active'
-                ), access AS (
-                  SELECT candidates.root_depth
-                  FROM (
-                    SELECT root_depth FROM legacy_access
-                    UNION ALL
-                    SELECT root_depth FROM vault_access
-                  ) AS candidates
-                  ORDER BY candidates.root_depth
-                  LIMIT 1
-                )
-                SELECT id, original_name, e2ee_state
-                FROM ancestors, access
-                WHERE ancestors.depth <= access.root_depth
-                ORDER BY ancestors.depth DESC
-            ",
-            &[&folder_id, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    Ok(rows
-        .into_iter()
-        .map(|row| FolderBreadcrumb {
-            id: row.get("id"),
-            name: row.get("original_name"),
-            e2ee_state: row.get("e2ee_state"),
-        })
-        .collect())
+        .collect()
 }
 
 async fn ensure_folder(
@@ -3232,9 +3206,38 @@ mod tests {
     use actix_web::test::TestRequest;
 
     use super::{
-        PlannedFolder, UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER, local_upload_chunk,
-        plan_folder_manifest, sanitize_upload_path,
+        OWNED_FOLDER_CONTEXT_QUERY, PlannedFolder, SHARED_FOLDER_CONTEXT_QUERY,
+        UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER, local_upload_chunk, plan_folder_manifest,
+        sanitize_upload_path,
     };
+
+    #[test]
+    fn listing_resolves_folder_access_and_breadcrumbs_in_one_query() {
+        assert!(OWNED_FOLDER_CONTEXT_QUERY.contains("entry_type = 'folder'"));
+        assert!(OWNED_FOLDER_CONTEXT_QUERY.contains("state = 'active'"));
+        assert!(OWNED_FOLDER_CONTEXT_QUERY.contains("ORDER BY depth DESC"));
+
+        assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("entry_type = 'folder'"));
+        assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("legacy_access AS"));
+        assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("vault_access AS"));
+        assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("ORDER BY ancestors.depth DESC"));
+    }
+
+    #[test]
+    fn listing_pipelines_entries_and_summary_after_folder_resolution() {
+        let source = include_str!("files.rs");
+        let listing = source
+            .split_once("pub async fn list_files")
+            .and_then(|(_, tail)| tail.split_once("pub async fn storage"))
+            .map(|(listing, _)| listing)
+            .expect("list_files source should remain inspectable");
+
+        assert!(listing.contains("futures_util::try_join!("));
+        assert!(listing.contains("list_entries("));
+        assert!(listing.contains("get_summary(&state, &user)"));
+        assert!(!listing.contains("validate_shared_folder("));
+        assert!(!listing.contains("get_shared_breadcrumbs("));
+    }
 
     #[test]
     fn parses_matching_local_upload_chunk_headers() {

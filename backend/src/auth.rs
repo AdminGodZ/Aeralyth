@@ -117,7 +117,7 @@ pub async fn authenticate_password(
                   ) AS profile_image_version,
                   EXISTS (SELECT 1 FROM user_vaults WHERE user_id = users.id) AS vault_configured
                 FROM users
-                WHERE username = $1
+                WHERE lower(username) = lower($1)
                   AND status = 'active'
                 LIMIT 1
             ",
@@ -416,6 +416,27 @@ mod tests {
                 "principal query unexpectedly selects {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn username_identity_uses_one_case_insensitive_indexed_rule() {
+        let authentication = include_str!("auth.rs");
+        let administration = include_str!("routes/admin.rs");
+        let files = include_str!("routes/files.rs");
+        let invitations = include_str!("routes/invitations.rs");
+        let share_links = include_str!("routes/share_links.rs");
+        let vault = include_str!("routes/vault.rs");
+
+        assert!(authentication.contains("WHERE lower(username) = lower($1)"));
+        assert!(administration.contains("WHERE lower(username) = lower($1)"));
+        assert!(files.contains("WHERE lower(username) = lower($1)"));
+        assert!(invitations.contains("lower(username) = lower(target.invited_username)"));
+        assert!(share_links.contains("WHERE lower(username) = lower($1)"));
+        assert!(vault.contains("WHERE lower(users.username) = lower($2)"));
+
+        let auth_schema = include_str!("../../database/init/001_auth.sql");
+        assert!(auth_schema.contains("CREATE UNIQUE INDEX IF NOT EXISTS users_username_ci_idx"));
+        assert!(auth_schema.contains("ON users (lower(username))"));
     }
 
     #[test]
