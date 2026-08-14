@@ -10,7 +10,7 @@ use sha2::{Digest, Sha256};
 use tokio::fs::File as AsyncFile;
 use tokio::io::AsyncReadExt;
 
-use crate::auth::{current_user, require_csrf, require_user};
+use crate::auth::{require_csrf, require_principal, session_principal};
 use crate::state::AppState;
 
 pub(crate) const SHARE_TOKEN_HEADER: &str = "x-aeralyth-share-token";
@@ -130,7 +130,7 @@ pub async fn create(
     request: HttpRequest,
     body: web::Json<CreateShareLinkRequest>,
 ) -> Result<HttpResponse> {
-    let owner = require_user(&state, &request).await?;
+    let owner = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let access_scope = validate_access_scope(&body.access_scope)?;
     let permission = validate_permission(&body.permission)?;
@@ -249,7 +249,7 @@ pub async fn list_owned(
     request: HttpRequest,
     query: web::Query<OwnedShareLinksQuery>,
 ) -> Result<HttpResponse> {
-    let owner = require_user(&state, &request).await?;
+    let owner = require_principal(&state, &request).await?;
     let rows = state
         .db
         .query(
@@ -304,7 +304,7 @@ pub async fn rotate(
     request: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
-    let owner = require_user(&state, &request).await?;
+    let owner = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let link_id = path.into_inner();
     let token = token_for_link(&state.config.share_link_secret, &link_id)?;
@@ -341,7 +341,7 @@ pub async fn revoke(
     request: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
-    let owner = require_user(&state, &request).await?;
+    let owner = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     state
         .db
@@ -641,7 +641,7 @@ async fn resolve_grant(state: &AppState, request: &HttpRequest, token: &str) -> 
     let access_scope: String = row.get("access_scope");
     let recipient_id: Option<String> = row.get("recipient_id");
     if access_scope == "account" {
-        let user = current_user(state, request)
+        let user = session_principal(state, request)
             .await?
             .ok_or_else(|| error::ErrorUnauthorized("sign in to open this share"))?;
         if recipient_id.as_deref() != Some(user.id.as_str()) {

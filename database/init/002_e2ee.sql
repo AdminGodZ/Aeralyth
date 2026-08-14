@@ -1,5 +1,22 @@
 -- Aeralyth encrypted vault protocol, format version 1.
--- This migration is intentionally idempotent so it can be applied on every deploy.
+-- This migration is immutable and recorded once in schema_migrations.
+
+\set ON_ERROR_STOP on
+
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version TEXT PRIMARY KEY,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+SELECT pg_advisory_xact_lock(hashtextextended('aeralyth:migration:002-e2ee', 0));
+
+SELECT NOT EXISTS (
+  SELECT 1 FROM schema_migrations WHERE version = '002-e2ee'
+) AS apply_migration \gset
+
+\if :apply_migration
 
 ALTER TABLE users
   ADD COLUMN IF NOT EXISTS vault_auto_lock_minutes INTEGER NOT NULL DEFAULT 15;
@@ -480,3 +497,12 @@ DROP TRIGGER IF EXISTS vault_share_wrapper_epoch_guard ON vault_share_wrappers;
 CREATE TRIGGER vault_share_wrapper_epoch_guard
 BEFORE INSERT OR UPDATE ON vault_share_wrappers
 FOR EACH ROW EXECUTE FUNCTION enforce_vault_share_epoch_write();
+
+INSERT INTO schema_migrations (version)
+VALUES ('002-e2ee');
+
+\else
+\echo 'Skipping already-applied migration 002-e2ee'
+\endif
+
+COMMIT;

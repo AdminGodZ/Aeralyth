@@ -8,7 +8,7 @@ use base64::{
 use futures_util::future::try_join_all;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AuthUser, require_csrf, require_principal, require_user};
+use crate::auth::{SessionPrincipal, require_csrf, require_principal};
 use crate::config::E2eeMode;
 use crate::db::{query_one_cached, query_opt_cached};
 use crate::e2ee::{
@@ -16,8 +16,8 @@ use crate::e2ee::{
     CRYPTO_CHUNK_BYTES, FORMAT_VERSION, MAX_CIPHERTEXT_BYTES, SHARE_DIRECTORY_VERSION,
     SHARE_ENVELOPE_VERSION, UPLOAD_PART_BYTES, WrapperSetCommitment, decode_bootstrap,
     decode_share_directory, decode_share_envelope, decode_wrapper, sha256,
-    verify_ed25519_signature, verify_node_record, verify_share_envelope, verify_wrapper_set_proof,
-    wrapper_set_commitment,
+    uses_vault_multipart_upload, verify_ed25519_signature, verify_node_record,
+    verify_share_envelope, verify_wrapper_set_proof, wrapper_set_commitment,
 };
 use crate::routes::upload_reservations::{reservation_amount, reserve_upload_capacity};
 use crate::state::AppState;
@@ -589,7 +589,7 @@ struct DecodedNodeRecord {
 }
 
 pub async fn status(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     let configured = state
         .db
         .query_opt(
@@ -615,7 +615,7 @@ pub async fn claim_migration(
     if state.config.e2ee_mode != E2eeMode::Migrate {
         return Ok(HttpResponse::NotFound().finish());
     }
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     let mut client = state
@@ -780,7 +780,7 @@ pub async fn setup(
     body: web::Json<VaultSetupRequest>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let material = validate_setup_material(&body)?;
     let fingerprint =
@@ -884,7 +884,7 @@ pub async fn unlock_material(
     request: HttpRequest,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     let row = state
         .db
         .query_opt(
@@ -954,7 +954,7 @@ pub async fn rewrap(
     body: web::Json<VaultRewrapRequest>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     validate_kdf(&body.kdf)?;
     let kdf_salt = decode_fixed::<16>(&body.kdf.salt, "KDF salt")?.to_vec();
@@ -1054,7 +1054,7 @@ pub async fn identity(
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     let username = path.into_inner();
     let row = state
         .db
@@ -1100,7 +1100,7 @@ pub async fn trust_identity(
     body: web::Json<TrustIdentityRequest>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let peer_user_id = path.into_inner();
     let key_version = i64::try_from(body.key_version)
@@ -1155,7 +1155,7 @@ pub async fn init_upload(
     body: web::Json<VaultUploadInitRequest>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     validate_node_id(&body.node_id)?;
@@ -1261,7 +1261,7 @@ pub async fn init_upload(
     };
     let mode = if body.entry_type == "folder" {
         "none"
-    } else if body.ciphertext_length >= UPLOAD_PART_BYTES {
+    } else if uses_vault_multipart_upload(body.ciphertext_length) {
         "multipart"
     } else {
         "single"
@@ -1658,7 +1658,7 @@ pub async fn publish_upload(
     body: web::Json<PublishUploadRequest>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let upload = get_upload(&state, &user.id, &path.into_inner())
         .await?
@@ -1687,7 +1687,7 @@ pub async fn publish_record(
     body: web::Json<PublishRecordRequest>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let upload_body = PublishUploadRequest {
         parts: Vec::new(),
@@ -1805,7 +1805,7 @@ pub async fn download_plan(
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     let node_id = path.into_inner();
     let row = state
@@ -1904,7 +1904,7 @@ pub async fn abort_upload(
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let Some(upload) = get_upload(&state, &user.id, &path.into_inner()).await? else {
         return Ok(HttpResponse::NoContent().finish());
@@ -1955,7 +1955,7 @@ pub async fn share_plan(
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     let node_id = path.into_inner();
     validate_node_id(&node_id)?;
@@ -1985,7 +1985,7 @@ pub async fn share_contexts(
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     let node_id = path.into_inner();
     validate_node_id(&node_id)?;
@@ -2329,7 +2329,7 @@ pub async fn create_share(
     body: web::Json<CreateShareRequest>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     validate_prefixed_id(&body.share_id, "shr_", "share id")?;
     validate_node_id(&body.root_node_id)?;
@@ -2479,7 +2479,7 @@ pub async fn create_share(
 
 pub async fn list_shares(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     let rows = state
         .db
@@ -2541,7 +2541,7 @@ pub async fn pending_epoch_rotation(
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     let share_id = path.into_inner();
     let mut client = state
@@ -2620,7 +2620,7 @@ pub async fn begin_epoch_rotation(
     body: web::Json<BeginEpochRotationRequest>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let share_id = path.into_inner();
     let mut client = state
@@ -2788,7 +2788,7 @@ pub async fn publish_epoch_rotation(
     body: web::Json<PublishEpochRequest>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let (share_id, pending_epoch) = path.into_inner();
     let requested_snapshot_hash =
@@ -2999,7 +2999,7 @@ pub async fn abort_epoch_rotation(
     path: web::Path<(String, i64)>,
 ) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let (share_id, pending_epoch) = path.into_inner();
     let mut client = state
@@ -3869,7 +3869,7 @@ fn append_length_prefixed(output: &mut Vec<u8>, value: &[u8]) {
 
 async fn finalize_ciphertext_object(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     upload: &VaultUpload,
     parts: &[UploadedPart],
 ) -> Result<Option<ObjectMetadata>> {
@@ -3960,7 +3960,7 @@ fn verify_object_metadata(
 
 async fn publish_record_transaction(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     upload: &VaultUpload,
     decoded: &DecodedNodeRecord,
     metadata: Option<&ObjectMetadata>,
@@ -4248,7 +4248,7 @@ async fn publish_record_transaction(
 
 async fn decode_and_verify_node_record(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     body: &PublishUploadRequest,
 ) -> Result<DecodedNodeRecord> {
     let bootstrap_cbor = decode_limited(&body.bootstrap_cbor, 65_536, "bootstrap record")?;
@@ -4599,7 +4599,7 @@ async fn lock_share_topology(
 
 async fn current_publish_response(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     node_id: &str,
 ) -> Result<HttpResponse> {
     let row = state
@@ -4636,7 +4636,7 @@ async fn current_publish_response(
 
 async fn shared_download_plan(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     node_id: &str,
 ) -> Result<HttpResponse> {
     let mut client = state
@@ -5059,7 +5059,7 @@ fn upload_plan(
 
 async fn validate_encrypted_parent(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     parent_id: Option<&str>,
 ) -> Result<Option<String>> {
     let Some(parent_id) = parent_id.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -5084,7 +5084,7 @@ async fn validate_encrypted_parent(
     Ok(Some(parent_id.to_owned()))
 }
 
-async fn require_configured_vault(state: &AppState, user: &AuthUser) -> Result<()> {
+async fn require_configured_vault(state: &AppState, user: &SessionPrincipal) -> Result<()> {
     let configured = state
         .db
         .query_opt("SELECT 1 FROM user_vaults WHERE user_id = $1", &[&user.id])
@@ -5114,7 +5114,7 @@ async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<
     require_csrf(state, request, token).await
 }
 
-async fn migration_summary(state: &AppState, user: &AuthUser) -> Result<MigrationSummary> {
+async fn migration_summary(state: &AppState, user: &SessionPrincipal) -> Result<MigrationSummary> {
     let row = state
         .db
         .query_one(

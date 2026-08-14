@@ -18,6 +18,8 @@
     "db:test:performance-ledger": "docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U aeralyth -d aeralyth < database/tests/performance_ledger.sql",
     "db:test:performance-ledger-concurrency": "bash database/tests/concurrent_reservations.sh",
     "db:test:performance-ledger-fresh": "bash database/tests/fresh_performance_ledger.sh",
+    "db:test:migration-replay": "bash database/tests/migration_replay.sh",
+    "db:bench:auth-principal": "bash database/tests/auth_principal_benchmark.sh",
     "build": "next build",
     "prebuild": "npm run worker:build",
     "worker:build": "npm run worker:zip && npm run worker:vault",

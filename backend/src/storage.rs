@@ -18,7 +18,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep};
 
 use crate::config::Config;
 use crate::db::Database;
-use crate::e2ee::UPLOAD_PART_BYTES;
+use crate::e2ee::{UPLOAD_PART_BYTES, uses_vault_multipart_upload};
 use crate::observability::Metrics;
 
 const MULTIPART_RECONCILIATION_LOCK_ID: i64 = 4_133_797_884_291_001;
@@ -354,7 +354,7 @@ impl Storage {
             ));
         };
 
-        if size_bytes >= UPLOAD_PART_BYTES {
+        if uses_vault_multipart_upload(size_bytes) {
             let output = client
                 .create_multipart_upload()
                 .bucket(bucket)

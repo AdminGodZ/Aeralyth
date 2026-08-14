@@ -3,7 +3,7 @@ use actix_web::http::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION};
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use futures_util::StreamExt;
 
-use crate::auth::{CSRF_FIELD, require_csrf, require_user};
+use crate::auth::{CSRF_FIELD, require_csrf, require_principal};
 use crate::state::AppState;
 
 const MAX_PROFILE_IMAGE_BYTES: usize = 2 * 1024 * 1024;
@@ -31,7 +31,7 @@ pub async fn update(
     request: HttpRequest,
     mut payload: Multipart,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     let mut update = ProfileUpdate::default();
 
     while let Some(field_result) = payload.next().await {
@@ -259,7 +259,7 @@ pub async fn update(
 }
 
 pub async fn avatar(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     let Some(row) = state
         .db
         .query_opt(

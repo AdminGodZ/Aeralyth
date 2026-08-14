@@ -1,3 +1,20 @@
+\set ON_ERROR_STOP on
+
+BEGIN;
+
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version TEXT PRIMARY KEY,
+  applied_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+SELECT pg_advisory_xact_lock(hashtextextended('aeralyth:migration:001-auth', 0));
+
+SELECT NOT EXISTS (
+  SELECT 1 FROM schema_migrations WHERE version = '001-auth'
+) AS apply_migration \gset
+
+\if :apply_migration
+
 CREATE EXTENSION IF NOT EXISTS pgcrypto;
 
 CREATE TABLE IF NOT EXISTS users (
@@ -764,3 +781,12 @@ CREATE INDEX IF NOT EXISTS file_shares_recipient_created_idx
 INSERT INTO users (id, username, password_hash, role)
 VALUES ('usr_admingod', 'admingod', crypt('admingod', gen_salt('bf')), 'admin')
 ON CONFLICT (username) DO NOTHING;
+
+INSERT INTO schema_migrations (version)
+VALUES ('001-auth');
+
+\else
+\echo 'Skipping already-applied migration 001-auth'
+\endif
+
+COMMIT;

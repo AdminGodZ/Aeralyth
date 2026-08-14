@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use tokio::fs::{File as AsyncFile, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use crate::auth::{AuthUser, require_csrf, require_principal, require_user};
+use crate::auth::{SessionPrincipal, require_csrf, require_principal};
 use crate::db::query_opt_cached;
 use crate::routes::share_links::{
     EditorShareGrant, editor_grant_from_header, editor_parent, validate_editor_replacement,
@@ -285,7 +285,7 @@ pub async fn list_files(
     request: HttpRequest,
     query: web::Query<FilesQuery>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
 
     let view = normalize_view(query.view.as_deref());
     let sort = normalize_sort(query.sort.as_deref()).or(Some(if view == "files" {
@@ -335,7 +335,7 @@ pub async fn list_files(
 }
 
 pub async fn storage(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     let summary = get_summary(&state, &user).await?;
 
     Ok(HttpResponse::Ok().json(storage_stats(&state, summary.used_bytes)))
@@ -1609,7 +1609,7 @@ pub async fn download(
     request: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     let Some(file) = get_download_file(&state, &user, &path.into_inner()).await? else {
         return Ok(HttpResponse::NotFound().finish());
     };
@@ -1680,7 +1680,7 @@ pub async fn share(
     path: web::Path<String>,
     form: web::Form<ShareForm>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
     let wants_json = request_wants_json(&request);
     if state.config.e2ee_mode.is_enabled() {
@@ -1785,7 +1785,7 @@ pub async fn unshare(
     path: web::Path<String>,
     form: web::Form<UnshareForm>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
     let file_id = path.into_inner();
     let recipient_id = form
@@ -1834,7 +1834,7 @@ pub async fn trash(
     path: web::Path<String>,
     form: web::Form<CsrfForm>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
     let wants_json = request_wants_json(&request);
     let file_id = path.into_inner();
@@ -1884,7 +1884,7 @@ pub async fn restore(
     path: web::Path<String>,
     form: web::Form<CsrfForm>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
 
     state
@@ -1925,7 +1925,7 @@ pub async fn toggle_favorite(
     path: web::Path<String>,
     form: web::Form<CsrfForm>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
     let wants_json = request_wants_json(&request);
     let file_id = path.into_inner();
@@ -1965,7 +1965,7 @@ pub async fn delete(
     path: web::Path<String>,
     form: web::Form<CsrfForm>,
 ) -> Result<HttpResponse> {
-    let user = require_user(&state, &request).await?;
+    let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
     let file_id = path.into_inner();
     let Some(file) = get_file(&state, &user, &file_id, false).await? else {
@@ -2071,7 +2071,7 @@ async fn validate_folder(
 
 async fn validate_shared_folder(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     folder_id: Option<&str>,
 ) -> Result<Option<String>> {
     let Some(folder_id) = folder_id.map(str::trim).filter(|value| !value.is_empty()) else {
@@ -2124,7 +2124,7 @@ async fn validate_shared_folder(
 
 async fn get_breadcrumbs(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     folder_id: Option<&str>,
 ) -> Result<Vec<FolderBreadcrumb>> {
     let Some(folder_id) = folder_id else {
@@ -2167,7 +2167,7 @@ async fn get_breadcrumbs(
 
 async fn get_shared_breadcrumbs(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     folder_id: Option<&str>,
 ) -> Result<Vec<FolderBreadcrumb>> {
     let Some(folder_id) = folder_id else {
@@ -2314,7 +2314,7 @@ async fn ensure_folder(
 #[allow(clippy::too_many_arguments)]
 async fn list_entries(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     view: &str,
     folder_id: Option<&str>,
     sort: Option<&str>,
@@ -2467,7 +2467,7 @@ async fn list_entries(
 
 async fn list_shared_entries(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     folder_id: Option<&str>,
     sort: &str,
     direction: &str,
@@ -2569,7 +2569,7 @@ async fn list_shared_entries(
 
 async fn list_shared_folder_entries(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     folder_id: &str,
     sort: &str,
     direction: &str,
@@ -2804,7 +2804,7 @@ fn encode_file_cursor(cursor: &FileCursor) -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-async fn get_summary(state: &AppState, user: &AuthUser) -> Result<FilesSummary> {
+async fn get_summary(state: &AppState, user: &SessionPrincipal) -> Result<FilesSummary> {
     let row = state
         .db
         .query_one(
@@ -2839,7 +2839,7 @@ async fn get_summary(state: &AppState, user: &AuthUser) -> Result<FilesSummary> 
 
 async fn get_file(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     file_id: &str,
     active_only: bool,
 ) -> Result<Option<StoredFile>> {
@@ -2876,7 +2876,7 @@ async fn get_file(
 
 async fn get_download_file(
     state: &AppState,
-    user: &AuthUser,
+    user: &SessionPrincipal,
     file_id: &str,
 ) -> Result<Option<StoredFile>> {
     let row = state

@@ -6,6 +6,16 @@ use crate::state::AppState;
 
 pub const SESSION_COOKIE: &str = "aeralyth_session";
 pub const CSRF_FIELD: &str = "csrf_token";
+const SESSION_PRINCIPAL_QUERY: &str = "
+    SELECT sessions.id AS session_id, sessions.csrf_token,
+           users.id, users.role, users.status
+    FROM sessions
+    INNER JOIN users ON users.id = sessions.user_id
+    WHERE sessions.token_hash = encode(digest($1::text, 'sha256'), 'hex')
+      AND sessions.expires_at > now()
+      AND users.status = 'active'
+    LIMIT 1
+";
 
 #[derive(Clone, Debug)]
 pub struct SessionPrincipal {
@@ -22,6 +32,10 @@ impl SessionPrincipal {
             && !self.id.is_empty()
             && matches!(self.role.as_str(), "admin" | "user")
             && self.status == "active"
+    }
+
+    pub fn is_admin(&self) -> bool {
+        self.role == "admin"
     }
 }
 
@@ -186,19 +200,7 @@ pub async fn session_principal(
         };
         let row = state
             .db
-            .query_opt(
-                "
-                    SELECT sessions.id AS session_id, sessions.csrf_token,
-                           users.id, users.role, users.status
-                    FROM sessions
-                    INNER JOIN users ON users.id = sessions.user_id
-                    WHERE sessions.token_hash = encode(digest($1::text, 'sha256'), 'hex')
-                      AND sessions.expires_at > now()
-                      AND users.status = 'active'
-                    LIMIT 1
-                ",
-                &[&cookie.value()],
-            )
+            .query_opt(SESSION_PRINCIPAL_QUERY, &[&cookie.value()])
             .await
             .map_err(error::ErrorInternalServerError)?;
         Ok(row.as_ref().map(session_principal_from_row))
@@ -239,7 +241,17 @@ pub async fn require_user(state: &AppState, request: &HttpRequest) -> Result<Aut
         .ok_or_else(|| error::ErrorUnauthorized("authentication required"))
 }
 
-pub async fn require_admin(state: &AppState, request: &HttpRequest) -> Result<AuthUser> {
+pub async fn require_admin(state: &AppState, request: &HttpRequest) -> Result<SessionPrincipal> {
+    let principal = require_principal(state, request).await?;
+
+    if principal.is_admin() {
+        return Ok(principal);
+    }
+
+    Err(error::ErrorForbidden("admin access required"))
+}
+
+pub async fn require_admin_user(state: &AppState, request: &HttpRequest) -> Result<AuthUser> {
     let user = require_user(state, request).await?;
 
     if user.is_admin() {
@@ -319,7 +331,9 @@ fn auth_user_from_row(row: tokio_postgres::Row, e2ee_mode: &str) -> AuthUser {
 
 #[cfg(test)]
 mod tests {
-    use super::{SessionPrincipal, cached_or_load_principal, constant_time_equal};
+    use super::{
+        SESSION_PRINCIPAL_QUERY, SessionPrincipal, cached_or_load_principal, constant_time_equal,
+    };
     use actix_web::test as actix_test;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -328,6 +342,51 @@ mod tests {
         assert!(constant_time_equal(b"csrf-token", b"csrf-token"));
         assert!(!constant_time_equal(b"csrf-token", b"csrf-tokem"));
         assert!(!constant_time_equal(b"csrf-token", b"csrf"));
+    }
+
+    #[test]
+    fn session_principal_query_stays_narrow() {
+        for forbidden in [
+            "username",
+            "display_name",
+            "theme_preference",
+            "accent_color",
+            "profile_image",
+            "user_vaults",
+            "vault_configured",
+        ] {
+            assert!(
+                !SESSION_PRINCIPAL_QUERY.contains(forbidden),
+                "principal query unexpectedly selects {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn ordinary_route_modules_do_not_load_full_profiles() {
+        for (name, source) in [
+            ("files", include_str!("routes/files.rs")),
+            ("repositories", include_str!("routes/repositories.rs")),
+            ("share links", include_str!("routes/share_links.rs")),
+            ("vault", include_str!("routes/vault.rs")),
+            ("profile mutations", include_str!("routes/profile.rs")),
+        ] {
+            assert!(
+                !source.contains("require_user("),
+                "{name} route reintroduced full-profile authentication"
+            );
+            assert!(
+                !source.contains("current_user("),
+                "{name} route reintroduced full-profile authentication"
+            );
+        }
+
+        let admin_routes = include_str!("routes/admin.rs");
+        assert_eq!(
+            admin_routes.matches("require_admin_user(").count(),
+            1,
+            "only the explicit admin session response may load a full profile"
+        );
     }
 
     #[actix_web::test]

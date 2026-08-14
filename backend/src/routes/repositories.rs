@@ -2,7 +2,7 @@ use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::Row;
 
-use crate::auth::{AuthUser, require_csrf, require_user};
+use crate::auth::{SessionPrincipal, require_csrf, require_principal};
 use crate::state::AppState;
 
 const MAX_REPOSITORY_ENTRIES: i64 = 500;
@@ -109,7 +109,7 @@ struct RepositoryTreeSummary {
 }
 
 pub async fn list(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
-    let owner = require_user(&state, &request).await?;
+    let owner = require_principal(&state, &request).await?;
     let rows = state
         .db
         .query(
@@ -148,7 +148,7 @@ pub async fn create(
     request: HttpRequest,
     body: web::Json<CreateRepositoryRequest>,
 ) -> Result<HttpResponse> {
-    let owner = require_user(&state, &request).await?;
+    let owner = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let root_folder_id = body.root_folder_id.trim();
     if root_folder_id.is_empty() {
@@ -206,7 +206,7 @@ pub async fn create_empty(
     request: HttpRequest,
     body: web::Json<CreateEmptyRepositoryRequest>,
 ) -> Result<HttpResponse> {
-    let owner = require_user(&state, &request).await?;
+    let owner = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     if state.config.e2ee_mode.is_enabled() {
         return Ok(HttpResponse::Conflict()
@@ -314,7 +314,7 @@ pub async fn update(
     path: web::Path<String>,
     body: web::Json<UpdateRepositoryRequest>,
 ) -> Result<HttpResponse> {
-    let owner = require_user(&state, &request).await?;
+    let owner = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let repository_id = path.into_inner();
     let description = normalize_description(Some(&body.description))?;
@@ -347,7 +347,7 @@ pub async fn detail(
     path: web::Path<String>,
     query: web::Query<RepositoryQuery>,
 ) -> Result<HttpResponse> {
-    let owner = require_user(&state, &request).await?;
+    let owner = require_principal(&state, &request).await?;
     let repository_id = path.into_inner();
     let Some(repository) = get_repository_summary(&state, &owner, &repository_id).await? else {
         return Ok(HttpResponse::NotFound().finish());
@@ -477,7 +477,7 @@ pub async fn archive_manifest(
     request: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
-    let owner = require_user(&state, &request).await?;
+    let owner = require_principal(&state, &request).await?;
     let repository_id = path.into_inner();
     let Some(repository) = get_repository_summary(&state, &owner, &repository_id).await? else {
         return Ok(HttpResponse::NotFound().finish());
@@ -572,7 +572,7 @@ pub async fn archive_manifest(
 
 async fn get_repository_summary(
     state: &AppState,
-    owner: &AuthUser,
+    owner: &SessionPrincipal,
     repository_id: &str,
 ) -> Result<Option<RepositorySummary>> {
     let row = state

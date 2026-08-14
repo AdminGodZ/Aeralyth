@@ -130,6 +130,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-005 [P1] An exact 32 MiB encrypted object is forced through a one-part multipart upload
 
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** Encrypted upload planning and S3 preparation now share one `uses_vault_multipart_upload` predicate whose boundary is strictly greater than 32 MiB. The regression test covers ciphertext lengths one byte below, exactly at, and one byte above the fixed part size; only the last selects multipart. Both backend decision sites call that predicate, preventing their thresholds from drifting apart.
+
 **Confidence:** Confirmed
 
 **Evidence:** The encrypted upload mode uses a `>= UPLOAD_PART_BYTES` threshold, with `UPLOAD_PART_BYTES` equal to 32 MiB.
@@ -141,6 +145,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Upload payloads producing ciphertext lengths one byte below, exactly at, and one byte above 32 MiB. Only the last case should use multipart.
 
 ## PERF-006 [P1] Idempotent migration scripts perform global backfills and counter rebuilds
+
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** The base auth and E2EE migrations are now immutable, transactionally serialized with migration-specific PostgreSQL advisory locks, and recorded in `schema_migrations` only after success. An isolated PostgreSQL replay test applied both files twice while statement-level audit triggers watched application tables; the second pass retained both ledger versions and produced zero user, file, share, upload, invitation, or counter writes. The fresh performance-ledger migration suite also passed after replaying the guarded base migrations. A source contract test and migration policy prevent future global data work from being appended to routine replay paths.
 
 **Confidence:** Confirmed
 
@@ -169,6 +177,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Instrument SQL calls per route. Authenticated mutation endpoints should use one session lookup total, and part-presign batches should not repeat session work per part.
 
 ## PERF-008 [P1] Every ordinary authenticated request fetches full profile fields and a vault-existence subquery
+
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** Files, repositories, share links, vault operations, profile mutations, and ordinary admin authorization now use the request-local `SessionPrincipal`, whose SQL selects only session ID, CSRF token, user ID, role, and status. Full profile and vault configuration loading is confined to login and explicit session-profile responses. Query-shape and route-source regression tests reject profile columns, `user_vaults`, or full-profile authentication in ordinary route modules. In a matched isolated PostgreSQL benchmark with 10,000 warm samples per query, the returned row fell from 168 to 109 bytes and p95 database time fell from 7 µs to 4 µs; these are local comparative measurements, not a production-wide latency claim.
 
 **Confidence:** Confirmed
 

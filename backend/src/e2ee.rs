@@ -16,6 +16,10 @@ pub const ARGON2ID_OPERATIONS: u64 = 3;
 pub const ARGON2ID_MEMORY_BYTES: u64 = 256 * 1024 * 1024;
 pub const ARGON2ID_OUTPUT_BYTES: u64 = 32;
 
+pub const fn uses_vault_multipart_upload(ciphertext_bytes: u64) -> bool {
+    ciphertext_bytes > UPLOAD_PART_BYTES
+}
+
 const MAX_WRAPPERS_PER_RECORD: usize = 4_096;
 const MAX_SHARE_WRAPPERS: usize = 8_192;
 
@@ -911,6 +915,13 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::*;
+
+    #[test]
+    fn vault_multipart_upload_requires_more_than_one_full_part() {
+        assert!(!uses_vault_multipart_upload(UPLOAD_PART_BYTES - 1));
+        assert!(!uses_vault_multipart_upload(UPLOAD_PART_BYTES));
+        assert!(uses_vault_multipart_upload(UPLOAD_PART_BYTES + 1));
+    }
 
     #[test]
     fn merkle_tree_promotes_an_unpaired_hash() {

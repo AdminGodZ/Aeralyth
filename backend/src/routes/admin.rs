@@ -4,7 +4,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use deadpool_postgres::Transaction;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AuthUser, SESSION_COOKIE, require_admin, require_csrf};
+use crate::auth::{AuthUser, SESSION_COOKIE, require_admin, require_admin_user, require_csrf};
 use crate::state::AppState;
 
 const INVITATION_LIFETIME_DAYS: i64 = 7;
@@ -133,7 +133,7 @@ struct TargetUser {
 }
 
 pub async fn me(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
-    let user = require_admin(&state, &request).await?;
+    let user = require_admin_user(&state, &request).await?;
 
     Ok(HttpResponse::Ok().json(AdminSessionResponse { user }))
 }
