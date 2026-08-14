@@ -119,7 +119,8 @@ END $$;
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  token_hash TEXT NOT NULL UNIQUE,
+  token_hash BYTEA NOT NULL UNIQUE
+    CONSTRAINT sessions_token_hash_length CHECK (octet_length(token_hash) = 32),
   csrf_token TEXT,
   expires_at TIMESTAMPTZ NOT NULL,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -415,6 +416,15 @@ BEGIN
     new_admin := CASE WHEN NEW.status = 'active' AND NEW.role = 'admin' THEN 1 ELSE 0 END;
   END IF;
 
+  IF old_total = new_total
+     AND old_active = new_active
+     AND old_admin = new_admin THEN
+    IF TG_OP = 'DELETE' THEN
+      RETURN OLD;
+    END IF;
+    RETURN NEW;
+  END IF;
+
   UPDATE admin_directory_counters
   SET total_users = GREATEST(0, total_users + new_total - old_total),
       active_users = GREATEST(0, active_users + new_active - old_active),
@@ -431,9 +441,30 @@ END;
 $$;
 
 DROP TRIGGER IF EXISTS users_admin_counter_change ON users;
-CREATE TRIGGER users_admin_counter_change
-AFTER INSERT OR UPDATE OR DELETE ON users
+DROP TRIGGER IF EXISTS users_admin_counter_insert ON users;
+DROP TRIGGER IF EXISTS users_admin_counter_delete ON users;
+DROP TRIGGER IF EXISTS users_admin_counter_update ON users;
+CREATE TRIGGER users_admin_counter_insert
+AFTER INSERT ON users
 FOR EACH ROW EXECUTE FUNCTION update_admin_user_counters();
+CREATE TRIGGER users_admin_counter_delete
+AFTER DELETE ON users
+FOR EACH ROW EXECUTE FUNCTION update_admin_user_counters();
+CREATE TRIGGER users_admin_counter_update
+AFTER UPDATE OF role, status ON users
+FOR EACH ROW
+WHEN (
+  ROW(
+    OLD.status <> 'deleting',
+    OLD.status = 'active',
+    OLD.status = 'active' AND OLD.role = 'admin'
+  ) IS DISTINCT FROM ROW(
+    NEW.status <> 'deleting',
+    NEW.status = 'active',
+    NEW.status = 'active' AND NEW.role = 'admin'
+  )
+)
+EXECUTE FUNCTION update_admin_user_counters();
 
 CREATE OR REPLACE FUNCTION update_admin_invitation_counters()
 RETURNS TRIGGER
@@ -449,6 +480,13 @@ BEGIN
 
   IF TG_OP <> 'DELETE' THEN
     new_pending := CASE WHEN NEW.status = 'pending' THEN 1 ELSE 0 END;
+  END IF;
+
+  IF old_pending = new_pending THEN
+    IF TG_OP = 'DELETE' THEN
+      RETURN OLD;
+    END IF;
+    RETURN NEW;
   END IF;
 
   UPDATE admin_directory_counters
@@ -468,9 +506,20 @@ END;
 $$;
 
 DROP TRIGGER IF EXISTS invitations_admin_counter_change ON invitations;
-CREATE TRIGGER invitations_admin_counter_change
-AFTER INSERT OR UPDATE OR DELETE ON invitations
+DROP TRIGGER IF EXISTS invitations_admin_counter_insert ON invitations;
+DROP TRIGGER IF EXISTS invitations_admin_counter_delete ON invitations;
+DROP TRIGGER IF EXISTS invitations_admin_counter_update ON invitations;
+CREATE TRIGGER invitations_admin_counter_insert
+AFTER INSERT ON invitations
 FOR EACH ROW EXECUTE FUNCTION update_admin_invitation_counters();
+CREATE TRIGGER invitations_admin_counter_delete
+AFTER DELETE ON invitations
+FOR EACH ROW EXECUTE FUNCTION update_admin_invitation_counters();
+CREATE TRIGGER invitations_admin_counter_update
+AFTER UPDATE OF status ON invitations
+FOR EACH ROW
+WHEN ((OLD.status = 'pending') IS DISTINCT FROM (NEW.status = 'pending'))
+EXECUTE FUNCTION update_admin_invitation_counters();
 
 CREATE OR REPLACE FUNCTION update_file_counters()
 RETURNS TRIGGER
@@ -703,7 +752,7 @@ SET total_users = (SELECT count(*) FROM users WHERE status <> 'deleting'),
 WHERE singleton = TRUE;
 
 CREATE INDEX IF NOT EXISTS sessions_user_id_idx ON sessions(user_id);
-CREATE INDEX IF NOT EXISTS sessions_expires_at_idx ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS sessions_expiry_cleanup_idx ON sessions(expires_at, id);
 CREATE INDEX IF NOT EXISTS invitations_created_by_idx ON invitations(created_by);
 CREATE INDEX IF NOT EXISTS invitations_created_cursor_idx
   ON invitations(created_at DESC, id DESC);

@@ -386,6 +386,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-021 [P2] Every successful login synchronously deletes all expired sessions
 
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** Successful login now performs only password authentication and its own session insert; expired-session deletion runs in an independently supervised maintenance worker on the maintenance database pool. Each run is capped at four 1,000-row keyset batches using `FOR UPDATE SKIP LOCKED` and the `(expires_at, id)` cleanup index. A rollback-only regression seeded 1,000,000 expired sessions, confirmed the cleanup plan used that index, deleted exactly 1,000 rows, and left the active session plus the other 999,000 expired rows intact. A source guard fails if session deletion is added back to the login handler.
+
 **Confidence:** Confirmed
 
 **Evidence:** `backend/src/routes/auth.rs::login` inserts a session and then executes `DELETE FROM sessions WHERE expires_at <= now()` before responding.
@@ -397,6 +401,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Seed millions of expired sessions and confirm login latency is independent of the backlog.
 
 ## PERF-022 [P2] Session tokens are hashed repeatedly inside SQL
+
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** Session tokens are now SHA-256 hashed once in Rust and stored and queried as fixed-width, length-constrained 32-byte `BYTEA`. Authentication, full-profile lookup, CSRF retrieval/update, logout, and locked admin-session revalidation no longer hash tokens in PostgreSQL; already-resolved session IDs are reused where possible. The idempotent migration decodes existing hexadecimal text hashes without invalidating sessions, and the fresh-migration regression proves that compatibility path. Across 100,001 legacy sessions, the token index decreased from 12,394,496 to 5,931,008 bytes, while 20,000 warm indexed lookups decreased from 28,855 to 20,767 microseconds in the matched disposable-database run. Fixed-width hashing and source guards prevent PostgreSQL session hashing from being reintroduced. The migrated live API passed login, authenticated `/me`, CSRF retrieval, logout, and post-logout `401` verification.
 
 **Confidence:** Confirmed
 
@@ -425,6 +433,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** An `updated_at`-only update should not touch `user_file_counters`. Trashing 10,000 nodes should update each affected user's counter once, not 10,000 times.
 
 ## PERF-024 [P1] The global admin-user counter trigger fires on every user update
+
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** The catch-all user trigger is replaced by separate INSERT, DELETE, and `UPDATE OF role, status` triggers. The update trigger compares the actual total/active/admin contribution tuple, so even role changes on disabled users avoid the singleton row; the trigger function also returns before writing when deltas are zero. Invitation triggers use the same split and fire on updates only when pending membership changes. A write-capture regression proved profile/preference updates, unchanged role/status writes, disabled-user role changes, pending-to-pending invitation updates, and nonpending-to-nonpending transitions cause zero `admin_directory_counters` writes, while real contribution changes write exactly once and preserve source-of-truth counts. Fresh legacy migration and replay checks prove each table retains exactly the three scoped triggers and never restores the catch-all trigger.
 
 **Confidence:** Confirmed
 

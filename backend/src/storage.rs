@@ -30,6 +30,8 @@ const MULTIPART_RECONCILIATION_LOCK_ID: i64 = 4_133_797_884_291_001;
 const STORAGE_OBJECT_PREFIX: &str = "users/";
 const USER_DELETION_BATCH_SIZE: i64 = 500;
 const USER_DELETION_BATCHES_PER_TICK: usize = 32;
+const SESSION_EXPIRY_BATCH_SIZE: i64 = 1_000;
+const SESSION_EXPIRY_BATCHES_PER_TICK: usize = 4;
 const MAINTENANCE_RESTART_DELAY: Duration = Duration::from_secs(1);
 const USER_DELETION_PHASES: &[&str] = &[
     "file_uploads",
@@ -67,6 +69,7 @@ enum MaintenanceWorker {
     LegacyUploadExpiry,
     VaultUploadExpiry,
     InvitationExpiry,
+    SessionExpiry,
     MultipartReconciliation,
     CounterReconciliation,
 }
@@ -107,6 +110,11 @@ const MAINTENANCE_SCHEDULES: &[MaintenanceSchedule] = &[
     MaintenanceSchedule {
         worker: MaintenanceWorker::InvitationExpiry,
         initial_delay: Duration::from_secs(4),
+        interval: Duration::from_secs(10),
+    },
+    MaintenanceSchedule {
+        worker: MaintenanceWorker::SessionExpiry,
+        initial_delay: Duration::from_secs(5),
         interval: Duration::from_secs(10),
     },
     MaintenanceSchedule {
@@ -950,6 +958,7 @@ impl MaintenanceWorker {
             Self::LegacyUploadExpiry => "legacy upload expiry",
             Self::VaultUploadExpiry => "encrypted upload expiry",
             Self::InvitationExpiry => "invitation expiry",
+            Self::SessionExpiry => "session expiry",
             Self::MultipartReconciliation => "multipart reconciliation",
             Self::CounterReconciliation => "counter reconciliation",
         }
@@ -967,6 +976,7 @@ impl MaintenanceWorker {
             Self::LegacyUploadExpiry => expire_abandoned_uploads(db, storage).await,
             Self::VaultUploadExpiry => expire_abandoned_vault_uploads(db, storage).await,
             Self::InvitationExpiry => expire_invitations_batch(db).await,
+            Self::SessionExpiry => expire_sessions_batches(db).await,
             Self::MultipartReconciliation => {
                 reconcile_orphaned_multipart_uploads(db, storage).await
             }
@@ -2077,6 +2087,35 @@ async fn expire_invitations_batch(db: &Database) -> Result<(), Box<dyn StdError 
         &[],
     )
     .await?;
+
+    Ok(())
+}
+
+async fn expire_sessions_batches(db: &Database) -> Result<(), Box<dyn StdError + Send + Sync>> {
+    for _ in 0..SESSION_EXPIRY_BATCHES_PER_TICK {
+        let deleted = db
+            .execute(
+                "
+                    WITH expired AS (
+                      SELECT id
+                      FROM sessions
+                      WHERE expires_at <= now()
+                      ORDER BY expires_at, id
+                      LIMIT $1
+                      FOR UPDATE SKIP LOCKED
+                    )
+                    DELETE FROM sessions
+                    USING expired
+                    WHERE sessions.id = expired.id
+                ",
+                &[&SESSION_EXPIRY_BATCH_SIZE],
+            )
+            .await?;
+
+        if deleted < SESSION_EXPIRY_BATCH_SIZE as u64 {
+            break;
+        }
+    }
 
     Ok(())
 }

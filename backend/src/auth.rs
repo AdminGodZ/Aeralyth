@@ -1,5 +1,6 @@
 use actix_web::{HttpMessage, HttpRequest, Result, dev, error, web};
 use serde::{Serialize, de::DeserializeOwned};
+use sha2::{Digest, Sha256};
 use std::future::Future;
 
 use crate::state::AppState;
@@ -11,7 +12,7 @@ const SESSION_PRINCIPAL_QUERY: &str = "
            users.id, users.role, users.status
     FROM sessions
     INNER JOIN users ON users.id = sessions.user_id
-    WHERE sessions.token_hash = encode(digest($1::text, 'sha256'), 'hex')
+    WHERE sessions.token_hash = $1
       AND sessions.expires_at > now()
       AND users.status = 'active'
     LIMIT 1
@@ -56,6 +57,14 @@ impl SessionPrincipal {
     pub fn is_admin(&self) -> bool {
         self.role == "admin"
     }
+
+    pub fn csrf_token(&self) -> Option<&str> {
+        self.csrf_token.as_deref()
+    }
+}
+
+pub fn hash_session_token(token: &str) -> [u8; 32] {
+    Sha256::digest(token.as_bytes()).into()
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -184,6 +193,7 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
             .await
             .map_err(error::ErrorInternalServerError)?
     } else {
+        let token_hash = hash_session_token(cookie.value());
         state
             .db
             .query_opt(
@@ -208,12 +218,12 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
                   EXISTS (SELECT 1 FROM user_vaults WHERE user_id = users.id) AS vault_configured
                 FROM sessions
                 INNER JOIN users ON users.id = sessions.user_id
-                WHERE sessions.token_hash = encode(digest($1::text, 'sha256'), 'hex')
+                WHERE sessions.token_hash = $1
                   AND sessions.expires_at > now()
                   AND users.status = 'active'
                 LIMIT 1
             ",
-                &[&cookie.value()],
+                &[&token_hash.as_slice()],
             )
             .await
             .map_err(error::ErrorInternalServerError)?
@@ -241,9 +251,10 @@ pub async fn session_principal(
         let Some(cookie) = request.cookie(SESSION_COOKIE) else {
             return Ok(None);
         };
+        let token_hash = hash_session_token(cookie.value());
         let row = state
             .db
-            .query_opt(SESSION_PRINCIPAL_QUERY, &[&cookie.value()])
+            .query_opt(SESSION_PRINCIPAL_QUERY, &[&token_hash.as_slice()])
             .await
             .map_err(error::ErrorInternalServerError)?;
         Ok(row.as_ref().map(session_principal_from_row))
@@ -376,7 +387,7 @@ fn auth_user_from_row(row: tokio_postgres::Row, e2ee_mode: &str) -> AuthUser {
 mod tests {
     use super::{
         SESSION_PRINCIPAL_QUERY, SessionPrincipal, cached_or_load_principal, constant_time_equal,
-        decode_json_body,
+        decode_json_body, hash_session_token,
     };
     use actix_web::{http::StatusCode, test as actix_test};
     use serde::Deserialize;
@@ -405,6 +416,46 @@ mod tests {
                 "principal query unexpectedly selects {forbidden}"
             );
         }
+    }
+
+    #[test]
+    fn session_tokens_are_hashed_in_application_to_fixed_width() {
+        assert_eq!(
+            hash_session_token("session-token"),
+            [
+                0xc1, 0x01, 0xe9, 0x11, 0x46, 0x9c, 0x96, 0x91, 0x71, 0x04, 0x0b, 0x50, 0xd7, 0x05,
+                0x43, 0x31, 0x3c, 0xf9, 0x68, 0xfd, 0xef, 0x5b, 0xac, 0xc7, 0x80, 0x77, 0x6f, 0x8f,
+                0xb3, 0x99, 0xab, 0x36,
+            ]
+        );
+    }
+
+    #[test]
+    fn runtime_session_queries_never_hash_tokens_in_postgres() {
+        let database_hash_call = ["encode(", "digest("].concat();
+        let parameterized_database_hash = ["digest(", "$"].concat();
+        for (name, source) in [
+            ("authentication", include_str!("auth.rs")),
+            ("session routes", include_str!("routes/auth.rs")),
+        ] {
+            assert!(
+                !source.contains(&database_hash_call),
+                "{name} reintroduced PostgreSQL session-token hashing"
+            );
+            assert!(
+                !source.contains(&parameterized_database_hash),
+                "{name} reintroduced parameterized PostgreSQL session-token hashing"
+            );
+        }
+
+        let database_session_hash = ["sessions.token_hash = encode(", "digest("].concat();
+        let parameterized_session_hash = ["sessions.token_hash = digest(", "$"].concat();
+        let admin_source = include_str!("routes/admin.rs");
+        assert!(
+            !admin_source.contains(&database_session_hash)
+                && !admin_source.contains(&parameterized_session_hash),
+            "admin transaction checks reintroduced PostgreSQL session-token hashing"
+        );
     }
 
     #[test]

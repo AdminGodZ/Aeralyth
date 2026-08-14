@@ -4,7 +4,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use deadpool_postgres::Transaction;
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AuthUser, SESSION_COOKIE, require_admin, require_admin_user, require_csrf};
+use crate::auth::{AuthUser, require_admin, require_admin_user, require_csrf};
 use crate::state::AppState;
 
 const INVITATION_LIFETIME_DAYS: i64 = 7;
@@ -374,7 +374,6 @@ pub async fn update_user_role(
 ) -> Result<HttpResponse> {
     let current_user = require_admin(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
-    let session_token = get_session_token(&request)?;
     let target_user_id = path.into_inner();
     let Some(role) = normalize_role(&form.role) else {
         return Ok(redirect("/users?user=invalid-role"));
@@ -397,7 +396,7 @@ pub async fn update_user_role(
     require_transaction_admin_session(
         &transaction,
         &current_user.id,
-        &session_token,
+        &current_user.session_id,
         &form.csrf_token,
     )
     .await?;
@@ -437,7 +436,6 @@ pub async fn update_user_status(
 ) -> Result<HttpResponse> {
     let current_user = require_admin(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
-    let session_token = get_session_token(&request)?;
     let target_user_id = path.into_inner();
     let Some(status) = normalize_status(&form.status) else {
         return Ok(redirect("/users?user=invalid-status"));
@@ -460,7 +458,7 @@ pub async fn update_user_status(
     require_transaction_admin_session(
         &transaction,
         &current_user.id,
-        &session_token,
+        &current_user.session_id,
         &form.csrf_token,
     )
     .await?;
@@ -500,7 +498,6 @@ pub async fn update_user(
 ) -> Result<HttpResponse> {
     let current_user = require_admin(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
-    let session_token = get_session_token(&request)?;
     let target_user_id = path.into_inner();
     let username = normalize_username(&form.username);
     let display_name = normalize_display_name(&form.display_name);
@@ -528,7 +525,7 @@ pub async fn update_user(
     require_transaction_admin_session(
         &transaction,
         &current_user.id,
-        &session_token,
+        &current_user.session_id,
         &form.csrf_token,
     )
     .await?;
@@ -592,7 +589,6 @@ pub async fn delete_user(
 ) -> Result<HttpResponse> {
     let current_user = require_admin(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
-    let session_token = get_session_token(&request)?;
     let target_user_id = path.into_inner();
 
     if target_user_id == current_user.id {
@@ -612,7 +608,7 @@ pub async fn delete_user(
     require_transaction_admin_session(
         &transaction,
         &current_user.id,
-        &session_token,
+        &current_user.session_id,
         &form.csrf_token,
     )
     .await?;
@@ -1015,7 +1011,7 @@ async fn lock_admin_user_mutations(transaction: &Transaction<'_>) -> Result<()> 
 async fn require_transaction_admin_session(
     transaction: &Transaction<'_>,
     user_id: &str,
-    session_token: &str,
+    session_id: &str,
     csrf_token: &str,
 ) -> Result<()> {
     let active_admin_session = transaction
@@ -1024,7 +1020,7 @@ async fn require_transaction_admin_session(
                 SELECT sessions.id
                 FROM sessions
                 INNER JOIN users ON users.id = sessions.user_id
-                WHERE sessions.token_hash = encode(digest($1::text, 'sha256'), 'hex')
+                WHERE sessions.id = $1
                   AND sessions.csrf_token = $2
                   AND sessions.expires_at > now()
                   AND users.id = $3
@@ -1033,7 +1029,7 @@ async fn require_transaction_admin_session(
                 LIMIT 1
                 FOR SHARE OF sessions
             ",
-            &[&session_token, &csrf_token.trim(), &user_id],
+            &[&session_id, &csrf_token.trim(), &user_id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -1043,13 +1039,6 @@ async fn require_transaction_admin_session(
     }
 
     Ok(())
-}
-
-fn get_session_token(request: &HttpRequest) -> Result<String> {
-    request
-        .cookie(SESSION_COOKIE)
-        .map(|cookie| cookie.value().to_owned())
-        .ok_or_else(|| error::ErrorUnauthorized("authentication required"))
 }
 
 async fn get_target_user(

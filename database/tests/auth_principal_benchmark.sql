@@ -4,7 +4,7 @@ INSERT INTO sessions (id, user_id, token_hash, csrf_token, expires_at)
 VALUES (
   'ses_auth_principal_benchmark',
   'usr_admingod',
-  encode(digest('auth-principal-benchmark-token'::text, 'sha256'), 'hex'),
+  '\xdf464c2995ef29c10a3b69bfaf1ff6081f4dc55511c2d0af0e373b196fac8b7e'::bytea,
   'auth-principal-benchmark-csrf',
   now() + interval '1 hour'
 );
@@ -23,7 +23,7 @@ BEGIN
     PERFORM sessions.id, sessions.csrf_token, users.id, users.role, users.status
     FROM sessions
     INNER JOIN users ON users.id = sessions.user_id
-    WHERE sessions.token_hash = encode(digest('auth-principal-benchmark-token'::text, 'sha256'), 'hex')
+    WHERE sessions.token_hash = '\xdf464c2995ef29c10a3b69bfaf1ff6081f4dc55511c2d0af0e373b196fac8b7e'::bytea
       AND sessions.expires_at > now()
       AND users.status = 'active'
     LIMIT 1;
@@ -48,7 +48,7 @@ BEGIN
       EXISTS (SELECT 1 FROM user_vaults WHERE user_id = users.id)
     FROM sessions
     INNER JOIN users ON users.id = sessions.user_id
-    WHERE sessions.token_hash = encode(digest('auth-principal-benchmark-token'::text, 'sha256'), 'hex')
+    WHERE sessions.token_hash = '\xdf464c2995ef29c10a3b69bfaf1ff6081f4dc55511c2d0af0e373b196fac8b7e'::bytea
       AND sessions.expires_at > now()
       AND users.status = 'active'
     LIMIT 1;
@@ -77,7 +77,7 @@ BEGIN
         EXISTS (SELECT 1 FROM user_vaults WHERE user_id = users.id)
       FROM sessions
       INNER JOIN users ON users.id = sessions.user_id
-      WHERE sessions.token_hash = encode(digest('auth-principal-benchmark-token'::text, 'sha256'), 'hex')
+      WHERE sessions.token_hash = '\xdf464c2995ef29c10a3b69bfaf1ff6081f4dc55511c2d0af0e373b196fac8b7e'::bytea
         AND sessions.expires_at > now()
         AND users.status = 'active'
       LIMIT 1;
@@ -92,7 +92,7 @@ BEGIN
     PERFORM sessions.id, sessions.csrf_token, users.id, users.role, users.status
     FROM sessions
     INNER JOIN users ON users.id = sessions.user_id
-    WHERE sessions.token_hash = encode(digest('auth-principal-benchmark-token'::text, 'sha256'), 'hex')
+    WHERE sessions.token_hash = '\xdf464c2995ef29c10a3b69bfaf1ff6081f4dc55511c2d0af0e373b196fac8b7e'::bytea
       AND sessions.expires_at > now()
       AND users.status = 'active'
     LIMIT 1;
@@ -124,7 +124,7 @@ BEGIN
         EXISTS (SELECT 1 FROM user_vaults WHERE user_id = users.id)
       FROM sessions
       INNER JOIN users ON users.id = sessions.user_id
-      WHERE sessions.token_hash = encode(digest('auth-principal-benchmark-token'::text, 'sha256'), 'hex')
+      WHERE sessions.token_hash = '\xdf464c2995ef29c10a3b69bfaf1ff6081f4dc55511c2d0af0e373b196fac8b7e'::bytea
         AND sessions.expires_at > now()
         AND users.status = 'active'
       LIMIT 1;

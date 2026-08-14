@@ -5,7 +5,10 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use std::net::{IpAddr, Ipv4Addr};
 
-use crate::auth::{SESSION_COOKIE, authenticate_password, current_user, require_csrf};
+use crate::auth::{
+    SESSION_COOKIE, authenticate_password, current_user, hash_session_token, require_csrf,
+    require_principal,
+};
 use crate::state::AppState;
 
 const DEFAULT_SESSION_SECONDS: i64 = 24 * 60 * 60;
@@ -67,6 +70,7 @@ pub async fn login(
         DEFAULT_SESSION_SECONDS
     };
     let token = create_session_token()?;
+    let token_hash = hash_session_token(&token);
     let csrf_token = create_session_token()?;
 
     state
@@ -77,19 +81,18 @@ pub async fn login(
                 VALUES (
                   gen_random_uuid()::text,
                   $1,
-                  encode(digest($2::text, 'sha256'), 'hex'),
+                  $2,
                   $3,
                   now() + ($4::bigint * interval '1 second')
                 )
             ",
-            &[&user.id, &token, &csrf_token, &session_seconds],
+            &[
+                &user.id,
+                &token_hash.as_slice(),
+                &csrf_token,
+                &session_seconds,
+            ],
         )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    state
-        .db
-        .execute("DELETE FROM sessions WHERE expires_at <= now()", &[])
         .await
         .map_err(error::ErrorInternalServerError)?;
 
@@ -114,19 +117,15 @@ pub async fn logout(
 ) -> Result<HttpResponse> {
     require_csrf(&state, &request, &form.csrf_token).await?;
 
-    if let Some(cookie) = request.cookie(SESSION_COOKIE) {
-        state
-            .db
-            .execute(
-                "
-                    DELETE FROM sessions
-                    WHERE token_hash = encode(digest($1::text, 'sha256'), 'hex')
-                ",
-                &[&cookie.value()],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-    }
+    let principal = require_principal(&state, &request).await?;
+    state
+        .db
+        .execute(
+            "DELETE FROM sessions WHERE id = $1",
+            &[&principal.session_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
 
     Ok(HttpResponse::SeeOther()
         .insert_header((LOCATION, "/login"))
@@ -135,35 +134,14 @@ pub async fn logout(
 }
 
 pub async fn csrf(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
-    let Some(cookie) = request.cookie(SESSION_COOKIE) else {
+    let Some(principal) = crate::auth::session_principal(&state, &request).await? else {
         return Ok(HttpResponse::Unauthorized().finish());
     };
 
-    let existing = state
-        .db
-        .query_opt(
-            "
-                SELECT sessions.csrf_token
-                FROM sessions
-                INNER JOIN users ON users.id = sessions.user_id
-                WHERE sessions.token_hash = encode(digest($1::text, 'sha256'), 'hex')
-                  AND sessions.expires_at > now()
-                  AND users.status = 'active'
-                LIMIT 1
-            ",
-            &[&cookie.value()],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    let Some(existing) = existing else {
-        return Ok(HttpResponse::Unauthorized().finish());
-    };
-
-    let csrf_token: Option<String> = existing.get("csrf_token");
-
-    if let Some(csrf_token) = csrf_token.filter(|token| !token.is_empty()) {
-        return Ok(HttpResponse::Ok().json(CsrfResponse { csrf_token }));
+    if let Some(csrf_token) = principal.csrf_token().filter(|token| !token.is_empty()) {
+        return Ok(HttpResponse::Ok().json(CsrfResponse {
+            csrf_token: csrf_token.to_owned(),
+        }));
     }
 
     let csrf_token = create_session_token()?;
@@ -173,11 +151,11 @@ pub async fn csrf(state: web::Data<AppState>, request: HttpRequest) -> Result<Ht
             "
                 UPDATE sessions
                 SET csrf_token = $2
-                WHERE token_hash = encode(digest($1::text, 'sha256'), 'hex')
+                WHERE id = $1
                   AND expires_at > now()
                 RETURNING csrf_token
             ",
-            &[&cookie.value(), &csrf_token],
+            &[&principal.session_id, &csrf_token],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -294,6 +272,22 @@ mod tests {
         assert_eq!(
             encode_query_component("/s/a b?x=1&y=2"),
             "%2Fs%2Fa%20b%3Fx%3D1%26y%3D2"
+        );
+    }
+
+    #[test]
+    fn login_does_not_synchronously_clean_expired_sessions() {
+        let source = include_str!("auth.rs");
+        let login_source = source
+            .split_once("pub async fn login(")
+            .expect("login handler must exist")
+            .1
+            .split_once("pub async fn logout(")
+            .expect("logout handler must follow login")
+            .0;
+        assert!(
+            !login_source.contains("DELETE FROM sessions"),
+            "login reintroduced session cleanup"
         );
     }
 }
