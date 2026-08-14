@@ -325,6 +325,11 @@ CREATE TABLE IF NOT EXISTS vault_share_envelopes (
     REFERENCES vault_identity_keys(user_id, key_version)
 );
 
+CREATE INDEX IF NOT EXISTS vault_share_envelopes_recipient_latest_idx
+  ON vault_share_envelopes (
+    share_id, epoch, recipient_id, created_at DESC, envelope_id DESC
+  );
+
 CREATE TABLE IF NOT EXISTS vault_share_wrappers (
   wrapper_id BYTEA PRIMARY KEY CHECK (octet_length(wrapper_id) = 16),
   share_id TEXT NOT NULL,
@@ -450,6 +455,9 @@ CREATE INDEX IF NOT EXISTS vault_migrations_owner_state_idx
 
 CREATE INDEX IF NOT EXISTS vault_uploads_owner_status_idx
   ON vault_uploads (owner_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS vault_uploads_global_expiry_idx
+  ON vault_uploads (expires_at, id)
+  WHERE status IN ('initializing', 'pending', 'completing', 'aborting');
 CREATE INDEX IF NOT EXISTS vault_node_records_owner_idx
   ON vault_node_records (owner_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS vault_generations_owner_idx
@@ -464,39 +472,73 @@ RETURNS TRIGGER
 LANGUAGE plpgsql
 AS $$
 DECLARE
-  share_row vault_shares%ROWTYPE;
+  share_row RECORD;
+  write_epoch BIGINT;
 BEGIN
-  SELECT * INTO share_row
-  FROM vault_shares
-  WHERE id = NEW.share_id
-  FOR SHARE;
+  FOR share_row IN
+    SELECT shares.id,
+           shares.status,
+           shares.active_epoch,
+           shares.pending_epoch,
+           shares.publication_fenced,
+           writes.epochs
+    FROM vault_shares AS shares
+    INNER JOIN (
+      SELECT share_id, array_agg(DISTINCT epoch ORDER BY epoch) AS epochs
+      FROM new_share_writes
+      GROUP BY share_id
+    ) AS writes ON writes.share_id = shares.id
+    ORDER BY shares.id
+    FOR SHARE OF shares
+  LOOP
+    IF share_row.status = 'revoked' THEN
+      RAISE EXCEPTION 'share is not writable';
+    END IF;
 
-  IF NOT FOUND OR share_row.status = 'revoked' THEN
-    RAISE EXCEPTION 'share is not writable';
-  END IF;
+    FOREACH write_epoch IN ARRAY share_row.epochs
+    LOOP
+      IF share_row.publication_fenced
+         AND write_epoch = share_row.active_epoch THEN
+        RAISE EXCEPTION 'old share epoch is fenced';
+      END IF;
 
-  IF share_row.publication_fenced AND NEW.epoch = share_row.active_epoch THEN
-    RAISE EXCEPTION 'old share epoch is fenced';
-  END IF;
+      IF write_epoch <> share_row.active_epoch
+         AND write_epoch IS DISTINCT FROM share_row.pending_epoch THEN
+        RAISE EXCEPTION 'share epoch is not active or pending';
+      END IF;
+    END LOOP;
+  END LOOP;
 
-  IF NEW.epoch <> share_row.active_epoch
-     AND NEW.epoch IS DISTINCT FROM share_row.pending_epoch THEN
-    RAISE EXCEPTION 'share epoch is not active or pending';
-  END IF;
-
-  RETURN NEW;
+  RETURN NULL;
 END;
 $$;
 
 DROP TRIGGER IF EXISTS vault_share_envelope_epoch_guard ON vault_share_envelopes;
-CREATE TRIGGER vault_share_envelope_epoch_guard
-BEFORE INSERT OR UPDATE ON vault_share_envelopes
-FOR EACH ROW EXECUTE FUNCTION enforce_vault_share_epoch_write();
-
 DROP TRIGGER IF EXISTS vault_share_wrapper_epoch_guard ON vault_share_wrappers;
-CREATE TRIGGER vault_share_wrapper_epoch_guard
-BEFORE INSERT OR UPDATE ON vault_share_wrappers
-FOR EACH ROW EXECUTE FUNCTION enforce_vault_share_epoch_write();
+DROP TRIGGER IF EXISTS vault_share_envelope_epoch_guard_insert ON vault_share_envelopes;
+DROP TRIGGER IF EXISTS vault_share_envelope_epoch_guard_update ON vault_share_envelopes;
+DROP TRIGGER IF EXISTS vault_share_wrapper_epoch_guard_insert ON vault_share_wrappers;
+DROP TRIGGER IF EXISTS vault_share_wrapper_epoch_guard_update ON vault_share_wrappers;
+
+CREATE TRIGGER vault_share_envelope_epoch_guard_insert
+AFTER INSERT ON vault_share_envelopes
+REFERENCING NEW TABLE AS new_share_writes
+FOR EACH STATEMENT EXECUTE FUNCTION enforce_vault_share_epoch_write();
+
+CREATE TRIGGER vault_share_envelope_epoch_guard_update
+AFTER UPDATE ON vault_share_envelopes
+REFERENCING NEW TABLE AS new_share_writes
+FOR EACH STATEMENT EXECUTE FUNCTION enforce_vault_share_epoch_write();
+
+CREATE TRIGGER vault_share_wrapper_epoch_guard_insert
+AFTER INSERT ON vault_share_wrappers
+REFERENCING NEW TABLE AS new_share_writes
+FOR EACH STATEMENT EXECUTE FUNCTION enforce_vault_share_epoch_write();
+
+CREATE TRIGGER vault_share_wrapper_epoch_guard_update
+AFTER UPDATE ON vault_share_wrappers
+REFERENCING NEW TABLE AS new_share_writes
+FOR EACH STATEMENT EXECUTE FUNCTION enforce_vault_share_epoch_write();
 
 INSERT INTO schema_migrations (version)
 VALUES ('002-e2ee');

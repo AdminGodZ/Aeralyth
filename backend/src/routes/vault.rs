@@ -63,6 +63,23 @@ const SHARED_DOWNLOAD_AUTHORIZATION_QUERY: &str = "
     LIMIT 1
     FOR SHARE OF shares, recipients, epochs
 ";
+const LATEST_SHARE_ENVELOPE_QUERY: &str = "
+    SELECT envelopes.canonical_cbor, envelopes.signature,
+           envelopes.envelope_hash, envelopes.sender_key_version,
+           envelopes.recipient_key_version, envelopes.sender_id,
+           envelopes.recipient_id, envelopes.node_id,
+           envelopes.record_version, envelopes.previous_record_hash,
+           sender.x25519_public_key, sender.ed25519_public_key,
+           sender.fingerprint_sha256
+    FROM vault_share_envelopes AS envelopes
+    INNER JOIN vault_identity_keys AS sender
+      ON sender.user_id = envelopes.sender_id
+     AND sender.key_version = envelopes.sender_key_version
+    WHERE envelopes.share_id = $1 AND envelopes.epoch = $2
+      AND envelopes.recipient_id = $3
+    ORDER BY envelopes.created_at DESC, envelopes.envelope_id DESC
+    LIMIT 1
+";
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -4782,23 +4799,7 @@ async fn shared_download_plan(
     }
     let envelope = transaction
         .query_one(
-            "
-                SELECT envelopes.canonical_cbor, envelopes.signature,
-                       envelopes.envelope_hash, envelopes.sender_key_version,
-                       envelopes.recipient_key_version, envelopes.sender_id,
-                       envelopes.recipient_id, envelopes.node_id,
-                       envelopes.record_version, envelopes.previous_record_hash,
-                       sender.x25519_public_key, sender.ed25519_public_key,
-                       sender.fingerprint_sha256
-                FROM vault_share_envelopes AS envelopes
-                INNER JOIN vault_identity_keys AS sender
-                  ON sender.user_id = envelopes.sender_id
-                 AND sender.key_version = envelopes.sender_key_version
-                WHERE envelopes.share_id = $1 AND envelopes.epoch = $2
-                  AND envelopes.recipient_id = $3
-                ORDER BY envelopes.created_at DESC
-                LIMIT 1
-            ",
+            LATEST_SHARE_ENVELOPE_QUERY,
             &[&share_id, &active_epoch, &user.id],
         )
         .await
@@ -5555,6 +5556,36 @@ mod tests {
         );
         assert!(SHARED_DOWNLOAD_AUTHORIZATION_QUERY.contains("recipients.status = 'active'"));
         assert!(SHARED_DOWNLOAD_AUTHORIZATION_QUERY.contains("shares.status = 'active'"));
+    }
+
+    #[test]
+    fn latest_share_envelope_query_matches_the_no_sort_index_order() {
+        assert!(
+            LATEST_SHARE_ENVELOPE_QUERY
+                .contains("WHERE envelopes.share_id = $1 AND envelopes.epoch = $2")
+        );
+        assert!(LATEST_SHARE_ENVELOPE_QUERY.contains("envelopes.recipient_id = $3"));
+        assert!(
+            LATEST_SHARE_ENVELOPE_QUERY
+                .contains("ORDER BY envelopes.created_at DESC, envelopes.envelope_id DESC")
+        );
+        assert!(LATEST_SHARE_ENVELOPE_QUERY.contains("LIMIT 1"));
+
+        let vault_schema = include_str!("../../../database/init/002_e2ee.sql");
+        assert!(vault_schema.contains("vault_share_envelopes_recipient_latest_idx"));
+    }
+
+    #[test]
+    fn share_epoch_guards_stay_set_wise() {
+        let vault_schema = include_str!("../../../database/init/002_e2ee.sql");
+        assert_eq!(
+            vault_schema
+                .matches("REFERENCING NEW TABLE AS new_share_writes")
+                .count(),
+            4
+        );
+        assert!(!vault_schema.contains("BEFORE INSERT OR UPDATE ON vault_share_envelopes"));
+        assert!(!vault_schema.contains("BEFORE INSERT OR UPDATE ON vault_share_wrappers"));
     }
 
     #[test]

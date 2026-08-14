@@ -33,6 +33,51 @@ const USER_DELETION_BATCHES_PER_TICK: usize = 32;
 const SESSION_EXPIRY_BATCH_SIZE: i64 = 1_000;
 const SESSION_EXPIRY_BATCHES_PER_TICK: usize = 4;
 const MAINTENANCE_RESTART_DELAY: Duration = Duration::from_secs(1);
+const CLAIM_EXPIRED_VAULT_UPLOADS_QUERY: &str = "
+    WITH claimed AS (
+      SELECT id
+      FROM vault_uploads
+      WHERE status IN ('initializing', 'pending', 'completing', 'aborting')
+        AND expires_at <= now()
+      ORDER BY expires_at, id
+      LIMIT 25
+      FOR UPDATE SKIP LOCKED
+    )
+    UPDATE vault_uploads AS uploads
+    SET status = 'aborting', expires_at = now() + interval '5 minutes'
+    FROM claimed
+    WHERE uploads.id = claimed.id
+    RETURNING uploads.id, uploads.object_key,
+              uploads.multipart_upload_id, uploads.write_expires_at
+";
+const CLAIM_EXPIRED_FILE_UPLOADS_QUERY: &str = "
+    WITH claimed AS (
+      SELECT id
+      FROM file_uploads
+      WHERE status IN ('initializing', 'pending', 'aborting')
+        AND expires_at <= now()
+      ORDER BY expires_at, id
+      LIMIT 25
+      FOR UPDATE SKIP LOCKED
+    )
+    UPDATE file_uploads AS uploads
+    SET expires_at = now() + interval '5 minutes'
+    FROM claimed
+    WHERE uploads.id = claimed.id
+    RETURNING
+      uploads.id,
+      uploads.file_id,
+      uploads.owner_id,
+      uploads.parent_id,
+      uploads.original_name,
+      uploads.object_key,
+      uploads.mime_type,
+      uploads.size_bytes,
+      uploads.upload_mode,
+      uploads.multipart_upload_id,
+      uploads.status,
+      uploads.checksum_sha256
+";
 const USER_DELETION_PHASES: &[&str] = &[
     "file_uploads",
     "vault_uploads",
@@ -1467,28 +1512,7 @@ async fn expire_abandoned_vault_uploads(
     db: &Database,
     storage: &Storage,
 ) -> Result<(), Box<dyn StdError + Send + Sync>> {
-    let uploads = db
-        .query(
-            "
-                WITH claimed AS (
-                  SELECT id
-                  FROM vault_uploads
-                  WHERE status IN ('initializing', 'pending', 'completing', 'aborting')
-                    AND expires_at <= now()
-                  ORDER BY expires_at
-                  LIMIT 25
-                  FOR UPDATE SKIP LOCKED
-                )
-                UPDATE vault_uploads AS uploads
-                SET status = 'aborting', expires_at = now() + interval '5 minutes'
-                FROM claimed
-                WHERE uploads.id = claimed.id
-                RETURNING uploads.id, uploads.object_key,
-                          uploads.multipart_upload_id, uploads.write_expires_at
-            ",
-            &[],
-        )
-        .await?;
+    let uploads = db.query(CLAIM_EXPIRED_VAULT_UPLOADS_QUERY, &[]).await?;
 
     for upload in uploads {
         let id: String = upload.get("id");
@@ -1985,39 +2009,7 @@ async fn expire_abandoned_uploads(
     db: &Database,
     _storage: &Storage,
 ) -> Result<(), Box<dyn StdError + Send + Sync>> {
-    let uploads = db
-        .query(
-            "
-                WITH claimed AS (
-                  SELECT id
-                  FROM file_uploads
-                  WHERE status IN ('initializing', 'pending', 'aborting')
-                    AND expires_at <= now()
-                  ORDER BY expires_at
-                  LIMIT 25
-                  FOR UPDATE SKIP LOCKED
-                )
-                UPDATE file_uploads AS uploads
-                SET expires_at = now() + interval '5 minutes'
-                FROM claimed
-                WHERE uploads.id = claimed.id
-                RETURNING
-                  uploads.id,
-                  uploads.file_id,
-                  uploads.owner_id,
-                  uploads.parent_id,
-                  uploads.original_name,
-                  uploads.object_key,
-                  uploads.mime_type,
-                  uploads.size_bytes,
-                  uploads.upload_mode,
-                  uploads.multipart_upload_id,
-                  uploads.status,
-                  uploads.checksum_sha256
-            ",
-            &[],
-        )
-        .await?;
+    let uploads = db.query(CLAIM_EXPIRED_FILE_UPLOADS_QUERY, &[]).await?;
 
     for upload in uploads {
         let id: String = upload.get("id");
@@ -2262,6 +2254,31 @@ mod tests {
     };
 
     use super::*;
+
+    #[test]
+    fn upload_expiry_claims_stay_aligned_with_global_partial_indexes() {
+        assert!(
+            CLAIM_EXPIRED_FILE_UPLOADS_QUERY
+                .contains("status IN ('initializing', 'pending', 'aborting')")
+        );
+        assert!(
+            CLAIM_EXPIRED_VAULT_UPLOADS_QUERY
+                .contains("status IN ('initializing', 'pending', 'completing', 'aborting')")
+        );
+        for query in [
+            CLAIM_EXPIRED_FILE_UPLOADS_QUERY,
+            CLAIM_EXPIRED_VAULT_UPLOADS_QUERY,
+        ] {
+            assert!(query.contains("ORDER BY expires_at, id"));
+            assert!(query.contains("LIMIT 25"));
+            assert!(query.contains("FOR UPDATE SKIP LOCKED"));
+        }
+
+        let auth_schema = include_str!("../../database/init/001_auth.sql");
+        assert!(auth_schema.contains("file_uploads_global_expiry_idx"));
+        let vault_schema = include_str!("../../database/init/002_e2ee.sql");
+        assert!(vault_schema.contains("vault_uploads_global_expiry_idx"));
+    }
 
     #[actix_web::test]
     async fn maintenance_bulkheads_keep_running_when_one_task_stalls() {

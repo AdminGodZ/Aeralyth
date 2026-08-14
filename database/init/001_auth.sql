@@ -775,6 +775,9 @@ CREATE INDEX IF NOT EXISTS file_shares_owner_id_idx ON file_shares(owner_id);
 CREATE INDEX IF NOT EXISTS file_shares_recipient_id_idx ON file_shares(recipient_id);
 CREATE INDEX IF NOT EXISTS file_uploads_owner_status_expiry_idx
   ON file_uploads(owner_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS file_uploads_global_expiry_idx
+  ON file_uploads(expires_at, id)
+  WHERE status IN ('initializing', 'pending', 'aborting');
 CREATE INDEX IF NOT EXISTS storage_deletion_jobs_available_idx
   ON storage_deletion_jobs(available_at, locked_until, id);
 CREATE INDEX IF NOT EXISTS user_deletion_jobs_available_idx

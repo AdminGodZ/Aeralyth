@@ -450,6 +450,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-025 [P1] Share envelope and wrapper epoch guards query and lock the same share once per row
 
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** The row-level guards were replaced by INSERT/UPDATE statement triggers with transition tables. Each statement now deduplicates its `(share_id, epoch)` pairs, orders distinct shares before locking, and acquires one shared lock per affected share while preserving active, pending, fenced, revoked, and invalid-epoch rejection semantics. A rollback-only scale regression proved a 10,000-wrapper insert and a 100,000-envelope insert each invoke the guard once, rather than once per row. A fresh legacy-to-current migration test also asserts that both old row triggers remain absent, exactly four statement triggers remain, and migration replay is idempotent.
+
 **Confidence:** Confirmed
 
 **Evidence:** `database/init/002_e2ee.sql` installs row-level `BEFORE INSERT OR UPDATE` triggers. Every wrapper and every envelope selects `vault_shares ... FOR SHARE`.
@@ -478,6 +482,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-027 [P1] Expiry workers lack indexes that match their global claim queries
 
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** Exact partial global indexes now cover `(expires_at, id)` for the file- and vault-upload states claimed by their respective expiry workers, and both workers use deterministic `ORDER BY expires_at, id` ordering before `FOR UPDATE SKIP LOCKED`. The file index deliberately excludes `completing`, which is owned by the separate completion worker. An `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` regression with 100,000 file intents and 100,000 vault intents requires each production-shaped claim to use its named partial index without a Sort node. Rust source guards keep the claim predicates, ordering, and base-schema index definitions aligned, while the concurrent migration self-repairs missing or invalid indexes on replay.
+
 **Confidence:** Confirmed
 
 **Evidence:** `file_uploads` and `vault_uploads` have indexes beginning with `owner_id`, while maintenance searches globally by `status` and `expires_at`.
@@ -489,6 +497,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Use `EXPLAIN (ANALYZE, BUFFERS)` on a large fixture and require an index scan with bounded buffers.
 
 ## PERF-028 [P1] Shared-envelope lookup lacks its natural composite index
+
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** Shared download now uses deterministic newest-first ordering by `created_at DESC, envelope_id DESC`, backed by `vault_share_envelopes_recipient_latest_idx` on `(share_id, epoch, recipient_id, created_at DESC, envelope_id DESC)`. A 100,000-envelope `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` regression requires a one-row scan through that exact index and rejects any Sort node. A Rust source guard ties the production query to the index definition, and fresh migration plus replay tests verify that the concurrent migration leaves the index present and valid.
 
 **Confidence:** Confirmed
 
