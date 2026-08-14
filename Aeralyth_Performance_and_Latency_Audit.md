@@ -954,6 +954,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-070 [P0] Encrypted download assembly has a quadratic-copy accumulator
 
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** Encrypted downloads now fill one exact owned ciphertext buffer per crypto chunk with `ExactStreamReader` and transfer that buffer directly to the crypto worker. The 4 MiB/64 KiB fragmentation regression allocates exactly one 4 MiB buffer, versus more than 30 times that amount in the modeled former growing accumulator, and a wired decryption test assembles two differently sized crypto chunks from fragmented network reads before successful finalization.
+
 **Confidence:** Confirmed
 
 **Evidence:** `src/features/vault/encrypted-download.ts` appends each network chunk by allocating `left.length + right.length`, copies both, zeroes the old buffer, slices a complete ciphertext chunk, then clones it before worker transfer.
@@ -977,6 +981,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Test browsers without File System Access at 100 MiB, 1 GiB, and maximum size. Heap must remain bounded or the operation must be rejected early.
 
 ## PERF-072 [P0] Encrypted files and multipart parts are processed serially
+
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** Encrypted uploads now use a bounded four-part pipeline with one complete lookahead part, concurrent checksums, one batched presign call, four simultaneous PUTs, ordered completion, and a weighted global scheduler that permits up to three small files while making large files exclusive. Wired integration tests observed three concurrent small-file PUTs and four concurrent multipart PUTs, with presign batches `[1,2,3,4]` then `[5]` and ordered publication; deterministic performance budgets cap pipeline-owned 32 MiB part buffers at five parts (160 MiB) instead of allowing unbounded production.
 
 **Confidence:** Confirmed
 
@@ -1241,6 +1249,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Measure log events and CPU per GiB upload before and after sampling.
 
 ## PERF-094 [P0] The repository has no performance observability or load-regression harness
+
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** The backend now emits structured sampled request traces with request IDs, route-template latency/status/body/DB-checkout metrics, pool-checkout metrics, maintenance-worker metrics, `Server-Timing`, and a token-protected Prometheus endpoint. PostgreSQL preloads `pg_stat_statements`; the full migration chain enabled version 1.12 and the live statistics view contained normalized queries. Deterministic transfer budgets and a scheduled/PR CI workflow guard the fixed copy and concurrency invariants. The repeatable local HTTP check completed 250 of 250 requests at concurrency 20 with zero errors and 3.33 ms p95 against a 250 ms threshold, while also verifying the protected route metric.
 
 **Confidence:** Confirmed
 

@@ -19,6 +19,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep};
 use crate::config::Config;
 use crate::db::Database;
 use crate::e2ee::UPLOAD_PART_BYTES;
+use crate::observability::Metrics;
 
 const MULTIPART_RECONCILIATION_LOCK_ID: i64 = 4_133_797_884_291_001;
 const STORAGE_OBJECT_PREFIX: &str = "users/";
@@ -755,13 +756,19 @@ impl Storage {
     }
 }
 
-pub async fn run_maintenance(db: Database, storage: Storage, shutdown: watch::Receiver<bool>) {
+pub async fn run_maintenance(
+    db: Database,
+    storage: Storage,
+    metrics: Metrics,
+    shutdown: watch::Receiver<bool>,
+) {
     let mut supervisors = JoinSet::new();
     for schedule in MAINTENANCE_SCHEDULES.iter().copied() {
         supervisors.spawn(supervise_maintenance_worker(
             schedule,
             db.clone(),
             storage.clone(),
+            metrics.clone(),
             shutdown.clone(),
         ));
     }
@@ -777,6 +784,7 @@ async fn supervise_maintenance_worker(
     schedule: MaintenanceSchedule,
     db: Database,
     storage: Storage,
+    metrics: Metrics,
     shutdown: watch::Receiver<bool>,
 ) {
     loop {
@@ -788,12 +796,14 @@ async fn supervise_maintenance_worker(
             schedule,
             db.clone(),
             storage.clone(),
+            metrics.clone(),
             shutdown.clone(),
         ));
         let outcome = worker.await;
         if *shutdown.borrow() {
             return;
         }
+        metrics.record_maintenance_restart(schedule.worker.label());
 
         match outcome {
             Ok(()) => log::error!(
@@ -823,6 +833,7 @@ async fn run_maintenance_worker(
     schedule: MaintenanceSchedule,
     db: Database,
     storage: Storage,
+    metrics: Metrics,
     shutdown: watch::Receiver<bool>,
 ) {
     run_periodic_task(
@@ -832,8 +843,16 @@ async fn run_maintenance_worker(
         move || {
             let db = db.clone();
             let storage = storage.clone();
+            let metrics = metrics.clone();
             async move {
-                if let Err(error) = schedule.worker.run(&db, &storage).await {
+                let started = Instant::now();
+                let outcome = schedule.worker.run(&db, &storage).await;
+                metrics.record_maintenance(
+                    schedule.worker.label(),
+                    started.elapsed(),
+                    outcome.is_ok(),
+                );
+                if let Err(error) = outcome {
                     log::error!(
                         "{} maintenance worker failed: {error}",
                         schedule.worker.label()

@@ -3,13 +3,15 @@ use std::fmt;
 use std::future::Future;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use deadpool_postgres::{
     GenericClient, Hook, HookError, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime,
 };
 use tokio_postgres::types::ToSql;
 use tokio_postgres::{NoTls, Row};
+
+use crate::observability::Metrics;
 
 tokio::task_local! {
     static REQUEST_CONNECTION: Arc<RequestConnectionSlot<deadpool_postgres::Client>>;
@@ -72,6 +74,7 @@ impl<T> RequestConnectionSlot<T> {
 #[derive(Clone)]
 pub struct Database {
     pool: Pool,
+    metrics: Metrics,
 }
 
 #[derive(Debug)]
@@ -108,6 +111,7 @@ impl Database {
         database_url: &str,
         max_size: usize,
         wait_timeout: Duration,
+        metrics: Metrics,
     ) -> Result<Self, Box<dyn StdError + Send + Sync>> {
         let mut postgres_config = database_url.parse::<tokio_postgres::Config>()?;
         postgres_config.connect_timeout(Duration::from_secs(5));
@@ -137,7 +141,7 @@ impl Database {
             }))
             .runtime(Runtime::Tokio1)
             .build()?;
-        let database = Self { pool };
+        let database = Self { pool, metrics };
 
         database.ping().await?;
 
@@ -151,7 +155,7 @@ impl Database {
             return Ok(connection);
         }
 
-        let connection = self.pool.get().await.map_err(DatabaseError::from)?;
+        let connection = self.checkout().await?;
         if let Ok(slot) = REQUEST_CONNECTION.try_with(Arc::clone) {
             slot.record_checkout();
         }
@@ -159,7 +163,7 @@ impl Database {
     }
 
     pub async fn ping(&self) -> Result<(), DatabaseError> {
-        let connection = self.pool.get().await.map_err(DatabaseError::from)?;
+        let connection = self.checkout().await?;
         query_one_cached(&connection, "SELECT 1", &[])
             .await
             .map(|_| ())
@@ -224,28 +228,29 @@ impl Database {
         &self,
     ) -> Result<Arc<deadpool_postgres::Client>, DatabaseError> {
         if let Ok(slot) = REQUEST_CONNECTION.try_with(Arc::clone) {
-            return slot
-                .shared_or_try_init(|| async { self.pool.get().await.map_err(DatabaseError::from) })
-                .await;
+            return slot.shared_or_try_init(|| self.checkout()).await;
         }
 
-        self.pool
-            .get()
-            .await
-            .map(Arc::new)
-            .map_err(DatabaseError::from)
+        self.checkout().await.map(Arc::new)
+    }
+
+    async fn checkout(&self) -> Result<deadpool_postgres::Client, DatabaseError> {
+        let started = Instant::now();
+        let result = self.pool.get().await.map_err(DatabaseError::from);
+        self.metrics
+            .record_pool_checkout(started.elapsed(), result.is_ok());
+        result
     }
 }
 
-pub async fn scope_request<F, Output>(future: F) -> Output
+pub async fn scope_request<F, Output>(future: F) -> (Output, usize)
 where
     F: Future<Output = Output>,
 {
     let slot = Arc::new(RequestConnectionSlot::new());
     let output = REQUEST_CONNECTION.scope(Arc::clone(&slot), future).await;
     let checkouts = slot.checkout_count();
-    log::debug!("request used {checkouts} database pool checkouts");
-    output
+    (output, checkouts)
 }
 
 pub async fn query_cached<Client>(

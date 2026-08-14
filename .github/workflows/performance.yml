@@ -1,0 +1,71 @@
+name: Performance regression checks
+
+on:
+  pull_request:
+    paths:
+      - "backend/**"
+      - "database/**"
+      - "performance/**"
+      - "src/features/vault/**"
+      - "package.json"
+      - "package-lock.json"
+      - "vitest.performance.config.mts"
+      - ".github/workflows/performance.yml"
+  schedule:
+    - cron: "17 3 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: performance-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      AERALYTH_API_HOST: 127.0.0.1
+      AERALYTH_API_PORT: "18080"
+      AERALYTH_COOKIE_SECURE: "false"
+      AERALYTH_E2EE_MODE: "off"
+      AERALYTH_METRICS_TOKEN: ci-only-performance-token-000000000
+      AERALYTH_PERF_URL: http://127.0.0.1:18080/health
+      AERALYTH_PERF_MAX_P95_MS: "500"
+      DATABASE_URL: postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - run: npm ci
+      - run: docker compose up -d --wait postgres
+      - run: npm run db:migrate
+      - run: npm run test:performance
+      - name: Start API
+        run: |
+          cargo run --locked --manifest-path backend/Cargo.toml > backend-performance.log 2>&1 &
+          echo $! > backend-performance.pid
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:18080/health >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat backend-performance.log
+          exit 1
+      - run: npm run perf:http
+      - name: Show API log on failure
+        if: failure()
+        run: cat backend-performance.log
+      - name: Stop API
+        if: always()
+        run: kill "$(cat backend-performance.pid)" 2>/dev/null || true

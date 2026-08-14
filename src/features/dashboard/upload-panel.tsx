@@ -327,10 +327,13 @@ function useUploadPanelController({
     uploadAbortRef.current = controller;
     const uploadedByPart = new Map<string, number>();
     const uploadedByFile = new Map<number, number>();
+    const completedFileIndexes = new Set<number>();
+    const activeFileIndexes = new Set<number>();
     let uploadedBytes = 0;
     let activeFileIndex: number | null = null;
 
     const startFile = (fileIndex: number) => {
+      activeFileIndexes.add(fileIndex);
       activeFileIndex = fileIndex;
       setUploadSession((current) =>
         current?.status === "uploading"
@@ -344,6 +347,7 @@ function useUploadPanelController({
       );
     };
     const reportProgress = (fileIndex: number, key: string, loaded: number) => {
+      activeFileIndex = fileIndex;
       const previousPartBytes = uploadedByPart.get(key) ?? 0;
       const delta = Math.max(0, loaded - previousPartBytes);
       uploadedByPart.set(key, loaded);
@@ -370,15 +374,22 @@ function useUploadPanelController({
       const recordedBytes = uploadedByFile.get(fileIndex) ?? 0;
       uploadedBytes += Math.max(0, fileSize - recordedBytes);
       uploadedByFile.set(fileIndex, fileSize);
-      activeFileIndex = null;
+      completedFileIndexes.add(fileIndex);
+      activeFileIndexes.delete(fileIndex);
+      if (activeFileIndex === fileIndex) {
+        activeFileIndex = Array.from(activeFileIndexes).at(-1) ?? null;
+      }
       setUploadSession((current) =>
         current?.status === "uploading"
           ? {
               ...current,
               uploadedBytes: Math.min(current.totalBytes, uploadedBytes),
-              completedFiles: Math.max(current.completedFiles, fileIndex + 1),
-              activeFileIndex: null,
-              activeFileUploadedBytes: 0,
+              completedFiles: completedFileIndexes.size,
+              activeFileIndex,
+              activeFileUploadedBytes:
+                activeFileIndex === null
+                  ? 0
+                  : (uploadedByFile.get(activeFileIndex) ?? 0),
               updatedAt: Date.now(),
             }
           : current,
@@ -411,6 +422,7 @@ function useUploadPanelController({
             fileIndex,
             fileProcessedBytes,
           ) => {
+            activeFileIndex = fileIndex;
             uploadedBytes = processedBytes;
             uploadedByFile.set(fileIndex, fileProcessedBytes);
             setUploadSession((current) =>

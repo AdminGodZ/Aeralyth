@@ -32,6 +32,10 @@ pub struct Config {
     pub database_url_configured: bool,
     pub database_pool_max: usize,
     pub database_pool_wait_ms: u64,
+    pub metrics_token: Option<String>,
+    pub request_slow_ms: u64,
+    pub request_success_sample_rate: usize,
+    pub structured_logs: bool,
     pub cookie_secure: bool,
     pub storage_path: String,
     pub storage_backend: String,
@@ -86,13 +90,17 @@ impl Config {
             .map(|value| value.eq_ignore_ascii_case("production"))
             .unwrap_or(false)
             || first_env(&["RAILWAY_ENVIRONMENT_ID", "RAILWAY_PROJECT_ID"]).is_some();
+        let metrics_token = first_env(&["AERALYTH_METRICS_TOKEN"]);
+        if metrics_token.as_ref().is_some_and(|token| token.len() < 32) {
+            return Err("AERALYTH_METRICS_TOKEN must contain at least 32 bytes".to_owned());
+        }
         let share_link_secret = first_env(&["AERALYTH_SHARE_LINK_SECRET"])
             .or_else(|| (!is_production).then(|| database_url.clone()))
             .ok_or_else(|| {
                 "AERALYTH_SHARE_LINK_SECRET is required in production and must contain at least 32 bytes"
                     .to_owned()
             })?;
-        if share_link_secret.as_bytes().len() < 32 {
+        if share_link_secret.len() < 32 {
             return Err("AERALYTH_SHARE_LINK_SECRET must contain at least 32 bytes".to_owned());
         }
         let storage_backend = match explicit_storage_backend.as_deref() {
@@ -152,6 +160,17 @@ impl Config {
             database_url_configured,
             database_pool_max,
             database_pool_wait_ms,
+            metrics_token,
+            request_slow_ms: env_u64("AERALYTH_REQUEST_SLOW_MS", 500, 1, 60_000),
+            request_success_sample_rate: env_usize(
+                "AERALYTH_REQUEST_SUCCESS_SAMPLE_RATE",
+                100,
+                1,
+                1_000_000,
+            ),
+            structured_logs: env::var("AERALYTH_STRUCTURED_LOGS")
+                .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+                .unwrap_or(is_production),
             cookie_secure,
             storage_path,
             storage_backend,

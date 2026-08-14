@@ -79,13 +79,23 @@ export class ExactStreamReader {
 
   constructor(
     private readonly reader: ReadableStreamDefaultReader<Uint8Array>,
+    private readonly allocate: ByteAllocator = (length) =>
+      new Uint8Array(length),
   ) {}
 
   async readExactly(length: number): Promise<OwnedBytes | null> {
     if (!Number.isSafeInteger(length) || length < 0) {
       throw new Error("Read length must be a non-negative integer.");
     }
-    const output = new Uint8Array(length);
+    const output = this.allocate(length);
+    if (
+      output.length !== length ||
+      output.byteOffset !== 0 ||
+      output.byteLength !== output.buffer.byteLength
+    ) {
+      output.fill(0);
+      throw new Error("The stream allocator returned a non-owned range.");
+    }
     let outputOffset = 0;
 
     while (outputOffset < length) {

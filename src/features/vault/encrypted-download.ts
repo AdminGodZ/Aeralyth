@@ -1,3 +1,4 @@
+import { ExactStreamReader } from "@/features/vault/buffered-bytes";
 import {
   ciphertextChunkLength,
   type VaultDownloadPlan,
@@ -132,42 +133,44 @@ async function decryptEncryptedFile({
       `Encrypted download failed with status ${response.status}.`,
     );
   }
-  const reader = response.body.getReader();
-  let pending: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
+  const reader = new ExactStreamReader(response.body.getReader());
   let chunkIndex = 0;
   let received = 0;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    pending = appendBytes(pending, value);
-    received += value.length;
-
+  try {
     while (chunkIndex < plan.chunkCount) {
       const expected = ciphertextChunkLength(
         plan.ciphertextLength,
         plan.chunkCount,
         chunkIndex,
       );
-      if (pending.length < expected) break;
-      const ciphertext = pending.slice(0, expected);
-      pending = pending.slice(expected);
+      const ciphertext = await reader.readExactly(expected);
+      if (!ciphertext) {
+        throw new Error(
+          "The encrypted download ended before all chunks arrived.",
+        );
+      }
+      received += ciphertext.length;
       const decrypted = await client.decryptChunk(
         started.sessionId,
         chunkIndex,
-        copyArrayBuffer(ciphertext),
+        ciphertext.buffer,
       );
       await write(decrypted.plaintext);
       chunkIndex += 1;
       onProgress?.(Math.min(100, (received / plan.ciphertextLength) * 100));
     }
-  }
 
-  if (pending.length !== 0 || chunkIndex !== plan.chunkCount) {
-    throw new Error("The encrypted download ended before all chunks arrived.");
+    if (!(await reader.isAtEnd())) {
+      throw new Error(
+        "The encrypted download contains unexpected trailing data.",
+      );
+    }
+    await client.finalizeDecryption(started.sessionId);
+    onProgress?.(100);
+  } finally {
+    await reader.cancel();
   }
-  await client.finalizeDecryption(started.sessionId);
-  onProgress?.(100);
 }
 
 function getSaveFilePicker(): SaveFilePicker | null {
@@ -195,19 +198,4 @@ function safeDownloadName(name: string): string {
     character.charCodeAt(0) < 32 || forbidden.has(character) ? "_" : character,
   ).join("");
   return safe.slice(0, 240) || "download";
-}
-
-function appendBytes(
-  left: Uint8Array,
-  right: Uint8Array,
-): Uint8Array<ArrayBuffer> {
-  const output = new Uint8Array(left.length + right.length);
-  output.set(left);
-  output.set(right, left.length);
-  left.fill(0);
-  return output;
-}
-
-function copyArrayBuffer(value: Uint8Array): ArrayBuffer {
-  return Uint8Array.from(value).buffer;
 }

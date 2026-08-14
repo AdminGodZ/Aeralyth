@@ -3,6 +3,7 @@ mod auth;
 mod files;
 mod health;
 mod invitations;
+mod metrics;
 mod profile;
 mod repositories;
 mod share_links;
@@ -14,9 +15,11 @@ use actix_web::web;
 pub fn configure(config: &mut web::ServiceConfig) {
     config
         .route("/health", web::get().to(health::health))
+        .route("/metrics", web::get().to(metrics::metrics))
         .service(
             web::scope("/api")
                 .route("/health", web::get().to(health::health))
+                .route("/metrics", web::get().to(metrics::metrics))
                 .service(
                     web::scope("/auth")
                         .route("/login", web::post().to(auth::login))

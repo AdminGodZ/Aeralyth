@@ -82,4 +82,38 @@ describe("exact stream reads", () => {
     expect(await reader.readExactly(3)).toBeNull();
     await reader.cancel();
   });
+
+  it("allocates one owned output for a crypto chunk fragmented into network reads", async () => {
+    const networkChunkBytes = 64 * 1024;
+    const cryptoChunkBytes = 4 * 1024 * 1024;
+    let allocations = 0;
+    let allocatedBytes = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (
+          let offset = 0;
+          offset < cryptoChunkBytes;
+          offset += networkChunkBytes
+        ) {
+          controller.enqueue(new Uint8Array(networkChunkBytes).fill(7));
+        }
+        controller.close();
+      },
+    });
+    const reader = new ExactStreamReader(stream.getReader(), (length) => {
+      allocations += 1;
+      allocatedBytes += length;
+      return new Uint8Array(length);
+    });
+
+    const chunk = await reader.readExactly(cryptoChunkBytes);
+
+    expect(chunk).toHaveLength(cryptoChunkBytes);
+    expect(chunk?.[0]).toBe(7);
+    expect(chunk?.[cryptoChunkBytes - 1]).toBe(7);
+    expect(allocations).toBe(1);
+    expect(allocatedBytes).toBe(cryptoChunkBytes);
+    expect(await reader.isAtEnd()).toBe(true);
+    await reader.cancel();
+  });
 });

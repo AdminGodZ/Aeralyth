@@ -14,7 +14,6 @@ base64 = "0.22.1"
 deadpool-postgres = "0.14.1"
 dotenvy = "0.15"
 ed25519-dalek = "2.2.0"
-env_logger = "0.11"
 futures-util = "0.3.32"
 getrandom = "0.4.2"
 hmac = "0.12.1"
@@ -24,3 +23,5 @@ serde_json = "1"
 sha2 = "0.10.9"
 tokio = { version = "1", features = ["fs", "io-util", "sync", "time"] }
 tokio-postgres = "0.7.17"
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt", "json"] }

@@ -3,6 +3,12 @@ import type {
   FolderUploadResolution,
 } from "@/features/dashboard/folder-upload-conflicts";
 import {
+  BoundedBatchPipeline,
+  detectedCryptoConcurrency,
+  mapWithConcurrency,
+  WeightedSemaphore,
+} from "@/features/vault/bounded-async";
+import {
   ExactStreamReader,
   FixedSizeBufferAssembler,
 } from "@/features/vault/buffered-bytes";
@@ -25,19 +31,21 @@ import {
 } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
 
-const VAULT_PRESIGN_BATCH_SIZE = 8;
+const VAULT_PRESIGN_BATCH_SIZE = 4;
 const VAULT_UPLOAD_CONCURRENCY = 4;
+const VAULT_MULTIPART_LOOKAHEAD_PARTS = 1;
+const VAULT_SMALL_FILE_CONCURRENCY_MAX = 3;
+const VAULT_CONCURRENT_FILE_MAX_BYTES = 8 * 1024 * 1024;
 
 type PendingVaultPart = {
   partNumber: number;
   content: Uint8Array;
 };
 
-type MultipartBufferState = {
-  nextPartNumber: number;
-  pending: PendingVaultPart[];
-  completed: VaultCompletedPart[];
-};
+type MultipartUploadPipeline = BoundedBatchPipeline<
+  PendingVaultPart,
+  VaultCompletedPart
+>;
 
 export type EncryptedUploadSelection = {
   file: File;
@@ -105,34 +113,62 @@ export async function uploadEncryptedSelections({
     folderIds.set(path, result.nodeId);
   }
 
-  for (const [fileIndex, selection] of selections.entries()) {
-    assertNotAborted(signal);
-    onFileStart(fileIndex);
-    let fileProcessedBytes = 0;
-    const path = normalizeRelativePath(
-      selection.relativePath || selection.file.name,
-    );
-    const parentId = folderIds.get(parentDirectory(path));
-    if (parentId === undefined) {
-      throw new Error("The selected file hierarchy is invalid.");
-    }
-    // Keep one encrypted multipart upload active to bound browser memory and I/O.
-    // react-doctor-disable-next-line react-doctor/async-await-in-loop
-    await uploadEncryptedEntry({
-      file: selection.file,
-      name: baseName(path),
-      parentId: parentId || null,
-      csrfToken,
-      client,
-      signal,
-      replacement: resolution?.replacementFiles.get(path),
-      onChunk: (sourceBytes) => {
-        processedBytes += sourceBytes;
-        fileProcessedBytes += sourceBytes;
-        onProgress(processedBytes, totalBytes, fileIndex, fileProcessedBytes);
+  const fileConcurrency = detectedCryptoConcurrency(
+    VAULT_SMALL_FILE_CONCURRENCY_MAX,
+  );
+  const fileBudget = new WeightedSemaphore(fileConcurrency);
+  const operation = linkedAbortController(signal);
+  try {
+    await mapWithConcurrency(
+      selections,
+      fileConcurrency,
+      async (selection, fileIndex) => {
+        const weight =
+          selection.file.size <= VAULT_CONCURRENT_FILE_MAX_BYTES
+            ? 1
+            : fileConcurrency;
+        const release = await fileBudget.acquire(weight, operation.signal);
+        try {
+          assertNotAborted(operation.signal);
+          onFileStart(fileIndex);
+          let fileProcessedBytes = 0;
+          const path = normalizeRelativePath(
+            selection.relativePath || selection.file.name,
+          );
+          const parentId = folderIds.get(parentDirectory(path));
+          if (parentId === undefined) {
+            throw new Error("The selected file hierarchy is invalid.");
+          }
+          await uploadEncryptedEntry({
+            file: selection.file,
+            name: baseName(path),
+            parentId: parentId || null,
+            csrfToken,
+            client,
+            signal: operation.signal,
+            replacement: resolution?.replacementFiles.get(path),
+            onChunk: (sourceBytes) => {
+              processedBytes += sourceBytes;
+              fileProcessedBytes += sourceBytes;
+              onProgress(
+                processedBytes,
+                totalBytes,
+                fileIndex,
+                fileProcessedBytes,
+              );
+            },
+          });
+          onFileComplete(fileIndex);
+        } catch (error) {
+          if (!operation.signal.aborted) operation.abort(error);
+          throw error;
+        } finally {
+          release();
+        }
       },
-    });
-    onFileComplete(fileIndex);
+    );
+  } finally {
+    operation.dispose();
   }
 
   const rootFolders = folders.filter((path) => !path.includes("/"));
@@ -432,11 +468,13 @@ async function encryptAndUploadFile({
   const assembler = new FixedSizeBufferAssembler(
     encryptedUploadBufferSize(plan, started.ciphertextLength),
   );
-  const multipart: MultipartBufferState = {
-    nextPartNumber: 1,
-    pending: [],
-    completed: [],
-  };
+  const pipelineAbort = linkedAbortController(signal);
+  const multipart = createMultipartUploadPipeline(
+    csrfToken,
+    plan.uploadId,
+    pipelineAbort.signal,
+  );
+  let nextPartNumber = 1;
   let singleContent: Uint8Array | null = null;
   let ciphertextBytes = 0;
 
@@ -461,13 +499,10 @@ async function encryptAndUploadFile({
       onChunk(sourceBytes);
 
       if (plan.mode === "multipart") {
-        queueMultipartBuffers(multipart, ready);
-        await uploadReadyMultipartParts(
+        nextPartNumber = await queueMultipartBuffers(
           multipart,
-          csrfToken,
-          plan.uploadId,
-          signal,
-          false,
+          ready,
+          nextPartNumber,
         );
       } else if (ready.length > 0) {
         if (ready.length !== 1 || singleContent) {
@@ -489,20 +524,22 @@ async function encryptAndUploadFile({
       await uploadSingle(csrfToken, plan.uploadId, singleContent, signal);
     } else {
       const trailing = assembler.finish();
-      if (trailing) queueMultipartBuffers(multipart, [trailing]);
-      await uploadReadyMultipartParts(
-        multipart,
-        csrfToken,
-        plan.uploadId,
-        signal,
-        true,
-      );
+      if (trailing) {
+        nextPartNumber = await queueMultipartBuffers(
+          multipart,
+          [trailing],
+          nextPartNumber,
+        );
+      }
     }
-    return multipart.completed;
+    return await multipart.finish();
   } finally {
+    pipelineAbort.abort();
+    const abandoned = await multipart.stop();
     assembler.clear();
     singleContent?.fill(0);
-    for (const part of multipart.pending) part.content.fill(0);
+    for (const part of abandoned) part.content.fill(0);
+    pipelineAbort.dispose();
   }
 }
 
@@ -536,11 +573,13 @@ async function encryptAndUploadStream({
   const assembler = new FixedSizeBufferAssembler(
     encryptedUploadBufferSize(plan, started.ciphertextLength),
   );
-  const multipart: MultipartBufferState = {
-    nextPartNumber: 1,
-    pending: [],
-    completed: [],
-  };
+  const pipelineAbort = linkedAbortController(signal);
+  const multipart = createMultipartUploadPipeline(
+    csrfToken,
+    plan.uploadId,
+    pipelineAbort.signal,
+  );
+  let nextPartNumber = 1;
   let singleContent: Uint8Array | null = null;
   let processedBytes = 0;
   let ciphertextBytes = 0;
@@ -573,13 +612,10 @@ async function encryptAndUploadStream({
       onChunk(processedBytes);
 
       if (plan.mode === "multipart") {
-        queueMultipartBuffers(multipart, ready);
-        await uploadReadyMultipartParts(
+        nextPartNumber = await queueMultipartBuffers(
           multipart,
-          csrfToken,
-          plan.uploadId,
-          signal,
-          false,
+          ready,
+          nextPartNumber,
         );
       } else if (ready.length > 0) {
         if (ready.length !== 1 || singleContent) {
@@ -604,20 +640,22 @@ async function encryptAndUploadStream({
       await uploadSingle(csrfToken, plan.uploadId, singleContent, signal);
     } else {
       const trailing = assembler.finish();
-      if (trailing) queueMultipartBuffers(multipart, [trailing]);
-      await uploadReadyMultipartParts(
-        multipart,
-        csrfToken,
-        plan.uploadId,
-        signal,
-        true,
-      );
+      if (trailing) {
+        nextPartNumber = await queueMultipartBuffers(
+          multipart,
+          [trailing],
+          nextPartNumber,
+        );
+      }
     }
-    return multipart.completed;
+    return await multipart.finish();
   } finally {
+    pipelineAbort.abort();
+    const abandoned = await multipart.stop();
     assembler.clear();
     singleContent?.fill(0);
-    for (const part of multipart.pending) part.content.fill(0);
+    for (const part of abandoned) part.content.fill(0);
+    pipelineAbort.dispose();
     await reader.cancel();
   }
 }
@@ -634,32 +672,33 @@ function encryptedUploadBufferSize(
   return size;
 }
 
-function queueMultipartBuffers(
-  state: MultipartBufferState,
-  buffers: Uint8Array[],
-): void {
-  for (const content of buffers) {
-    state.pending.push({ partNumber: state.nextPartNumber, content });
-    state.nextPartNumber += 1;
-  }
-}
-
-async function uploadReadyMultipartParts(
-  state: MultipartBufferState,
+function createMultipartUploadPipeline(
   csrfToken: string,
   uploadId: string,
   signal: AbortSignal,
-  flushAll: boolean,
-): Promise<void> {
-  while (
-    state.pending.length >= VAULT_PRESIGN_BATCH_SIZE ||
-    (flushAll && state.pending.length > 0)
-  ) {
-    const batch = state.pending.splice(0, VAULT_PRESIGN_BATCH_SIZE);
-    state.completed.push(
-      ...(await uploadMultipartParts(csrfToken, uploadId, batch, signal)),
-    );
+): MultipartUploadPipeline {
+  return new BoundedBatchPipeline(
+    VAULT_PRESIGN_BATCH_SIZE,
+    VAULT_MULTIPART_LOOKAHEAD_PARTS,
+    (batch) => uploadMultipartParts(csrfToken, uploadId, batch, signal),
+  );
+}
+
+async function queueMultipartBuffers(
+  pipeline: MultipartUploadPipeline,
+  buffers: Uint8Array[],
+  nextPartNumber: number,
+): Promise<number> {
+  for (const [index, content] of buffers.entries()) {
+    try {
+      await pipeline.push({ partNumber: nextPartNumber, content });
+      nextPartNumber += 1;
+    } catch (error) {
+      for (const abandoned of buffers.slice(index)) abandoned.fill(0);
+      throw error;
+    }
   }
+  return nextPartNumber;
 }
 
 async function uploadSingle(
@@ -864,4 +903,20 @@ function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
 
 function assertNotAborted(signal: AbortSignal): void {
   if (signal.aborted) throw new DOMException("Upload canceled", "AbortError");
+}
+
+function linkedAbortController(parent: AbortSignal): {
+  signal: AbortSignal;
+  abort(reason?: unknown): void;
+  dispose(): void;
+} {
+  const controller = new AbortController();
+  const forward = () => controller.abort(parent.reason);
+  if (parent.aborted) forward();
+  else parent.addEventListener("abort", forward, { once: true });
+  return {
+    signal: controller.signal,
+    abort: (reason) => controller.abort(reason),
+    dispose: () => parent.removeEventListener("abort", forward),
+  };
 }
