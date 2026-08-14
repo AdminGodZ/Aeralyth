@@ -1,3 +1,5 @@
+use std::collections::{BTreeMap, HashMap};
+
 use actix_web::http::header::{
     ACCEPT, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION,
 };
@@ -12,7 +14,7 @@ use tokio::fs::{File as AsyncFile, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::auth::{SessionPrincipal, require_csrf, require_principal};
-use crate::db::query_opt_cached;
+use crate::db::{query_cached, query_one_cached, query_opt_cached};
 use crate::routes::share_links::{
     EditorShareGrant, editor_grant_from_header, editor_parent, validate_editor_replacement,
 };
@@ -26,6 +28,8 @@ const UPLOAD_OFFSET_HEADER: &str = "x-aeralyth-upload-offset";
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 100;
 const MAX_PRESIGN_PARTS: usize = 32;
+const MAX_FOLDER_MANIFEST_PATHS: usize = 1_000;
+const MAX_FOLDER_MANIFEST_FOLDERS: usize = MAX_FOLDER_MANIFEST_PATHS * 63;
 
 #[derive(Deserialize)]
 pub(crate) struct FilesQuery {
@@ -46,6 +50,27 @@ pub(crate) struct UploadInitRequest {
     mime_type: Option<String>,
     parent_id: Option<String>,
     replacement_file_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FolderManifestRequest {
+    relative_paths: Vec<String>,
+    parent_id: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FolderManifestResponse {
+    parent_ids: Vec<Option<String>>,
+    root_folder_id: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PlannedFolder {
+    path: String,
+    parent_path: Option<String>,
+    name: String,
 }
 
 #[derive(Deserialize)]
@@ -339,6 +364,143 @@ pub async fn storage(state: web::Data<AppState>, request: HttpRequest) -> Result
     let summary = get_summary(&state, &user).await?;
 
     Ok(HttpResponse::Ok().json(storage_stats(&state, summary.used_bytes)))
+}
+
+pub async fn create_folder_manifest(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    body: web::Json<FolderManifestRequest>,
+) -> Result<HttpResponse> {
+    let actor = require_upload_actor(&state, &request, true).await?;
+    if state.config.e2ee_mode.is_enabled() {
+        return Ok(HttpResponse::Conflict()
+            .body("plaintext folder manifests are disabled; use the encrypted vault upload API"));
+    }
+    if body.relative_paths.is_empty() || body.relative_paths.len() > MAX_FOLDER_MANIFEST_PATHS {
+        return Err(error::ErrorBadRequest("invalid folder manifest size"));
+    }
+
+    let upload_paths = body
+        .relative_paths
+        .iter()
+        .map(|path| sanitize_upload_path(path))
+        .collect::<Vec<_>>();
+    if upload_paths.iter().any(Vec::is_empty) {
+        return Err(error::ErrorBadRequest(
+            "folder manifest contains an invalid upload path",
+        ));
+    }
+
+    let base_parent_id = if let Some(grant) = &actor.editor_grant {
+        Some(editor_parent(&state, grant, body.parent_id.as_deref()).await?)
+    } else {
+        validate_folder(&state, &actor.owner_id, body.parent_id.as_deref()).await?
+    };
+    let levels = plan_folder_manifest(&upload_paths);
+    let folder_count = levels.iter().map(Vec::len).sum::<usize>();
+    if folder_count > MAX_FOLDER_MANIFEST_FOLDERS {
+        return Err(error::ErrorBadRequest(
+            "folder manifest contains too many folders",
+        ));
+    }
+    if levels.is_empty() {
+        return Ok(HttpResponse::Ok().json(FolderManifestResponse {
+            parent_ids: vec![base_parent_id; upload_paths.len()],
+            root_folder_id: None,
+        }));
+    }
+
+    let first_root_path = upload_paths
+        .iter()
+        .find(|path| path.len() > 1)
+        .and_then(|path| path.first())
+        .cloned();
+    let mut client = state
+        .db
+        .get()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let transaction = client
+        .transaction()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    query_one_cached(
+        &transaction,
+        "SELECT pg_advisory_xact_lock(hashtextextended('aeralyth:legacy-folder-tree:' || $1, 0))",
+        &[&actor.owner_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+
+    let mut resolved = HashMap::<String, String>::with_capacity(folder_count);
+    for level in levels {
+        let paths = level
+            .iter()
+            .map(|folder| folder.path.clone())
+            .collect::<Vec<_>>();
+        let parent_ids = level
+            .iter()
+            .map(|folder| {
+                let Some(parent_path) = folder.parent_path.as_ref() else {
+                    return Ok(base_parent_id.clone());
+                };
+                resolved.get(parent_path).cloned().map(Some).ok_or_else(|| {
+                    error::ErrorInternalServerError("folder manifest parent was not resolved")
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let names = level
+            .iter()
+            .map(|folder| folder.name.clone())
+            .collect::<Vec<_>>();
+        let rows = query_cached(
+            &transaction,
+            "
+                SELECT path, id
+                FROM ensure_legacy_folder_level($1, $2, $3, $4)
+            ",
+            &[&actor.owner_id, &paths, &parent_ids, &names],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+        if rows.len() != level.len() {
+            return Err(error::ErrorInternalServerError(
+                "folder manifest did not resolve every folder",
+            ));
+        }
+        for row in rows {
+            resolved.insert(row.get("path"), row.get("id"));
+        }
+    }
+
+    let parent_ids = upload_paths
+        .iter()
+        .map(|path| {
+            if path.len() <= 1 {
+                return Ok(base_parent_id.clone());
+            }
+            let parent_path = path[..path.len() - 1].join("/");
+            resolved
+                .get(&parent_path)
+                .cloned()
+                .map(Some)
+                .ok_or_else(|| {
+                    error::ErrorInternalServerError(
+                        "folder manifest did not resolve an upload parent",
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>>>()?;
+    let root_folder_id = first_root_path.and_then(|path| resolved.get(&path).cloned());
+    transaction
+        .commit()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::Ok().json(FolderManifestResponse {
+        parent_ids,
+        root_folder_id,
+    }))
 }
 
 pub async fn init_upload(
@@ -2249,59 +2411,26 @@ async fn ensure_folder(
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .query_one(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1 || '|' || COALESCE($2, '') || '|' || lower($3), 0))",
-            &[&owner_id, &parent_id, &name],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let existing = transaction
-        .query_opt(
-            "
-                SELECT id
-                FROM files
-                WHERE owner_id = $1
-                  AND entry_type = 'folder'
-                  AND state = 'active'
-                  AND parent_id IS NOT DISTINCT FROM $2
-                  AND lower(original_name) = lower($3)
-                LIMIT 1
-            ",
-            &[&owner_id, &parent_id, &name],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    if let Some(existing) = existing {
-        let folder_id = existing.get("id");
-        transaction
-            .commit()
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        return Ok(folder_id);
-    }
-
-    let storage_name = create_storage_name()?;
-    let row = transaction
-        .query_one(
-            "
-                INSERT INTO files (
-                  id,
-                  owner_id,
-                  original_name,
-                  storage_name,
-                  size_bytes,
-                  entry_type,
-                  parent_id
-                )
-                VALUES (gen_random_uuid()::text, $1, $2, $3, 0, 'folder', $4)
-                RETURNING id
-            ",
-            &[&owner_id, &name, &storage_name, &parent_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    query_one_cached(
+        &transaction,
+        "SELECT pg_advisory_xact_lock(hashtextextended('aeralyth:legacy-folder-tree:' || $1, 0))",
+        &[&owner_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    let paths = vec![name.to_owned()];
+    let parent_ids = vec![parent_id];
+    let names = vec![name.to_owned()];
+    let row = query_one_cached(
+        &transaction,
+        "
+            SELECT id
+            FROM ensure_legacy_folder_level($1, $2, $3, $4)
+        ",
+        &[&owner_id, &paths, &parent_ids, &names],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     let folder_id = row.get("id");
     transaction
         .commit()
@@ -3234,6 +3363,38 @@ fn sanitize_upload_path(filename: &str) -> Vec<String> {
         .collect()
 }
 
+fn plan_folder_manifest(upload_paths: &[Vec<String>]) -> Vec<Vec<PlannedFolder>> {
+    let mut levels = Vec::<BTreeMap<String, PlannedFolder>>::new();
+    for upload_path in upload_paths {
+        let mut path_components = Vec::<&str>::new();
+        let mut parent_path = None;
+        for (depth, name) in upload_path
+            .iter()
+            .take(upload_path.len().saturating_sub(1))
+            .enumerate()
+        {
+            path_components.push(name);
+            let path = path_components.join("/");
+            if levels.len() <= depth {
+                levels.push(BTreeMap::new());
+            }
+            levels[depth]
+                .entry(path.clone())
+                .or_insert_with(|| PlannedFolder {
+                    path: path.clone(),
+                    parent_path: parent_path.clone(),
+                    name: name.clone(),
+                });
+            parent_path = Some(path);
+        }
+    }
+
+    levels
+        .into_iter()
+        .map(|level| level.into_values().collect())
+        .collect()
+}
+
 fn upload_redirect_location(parent_id: Option<&str>, status: &str) -> String {
     match parent_id {
         Some(parent_id) => format!("/files?folder={parent_id}&file={status}"),
@@ -3329,7 +3490,10 @@ fn redirect(location: impl Into<String>) -> HttpResponse {
 mod tests {
     use actix_web::test::TestRequest;
 
-    use super::{UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER, local_upload_chunk};
+    use super::{
+        PlannedFolder, UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER, local_upload_chunk,
+        plan_folder_manifest, sanitize_upload_path,
+    };
 
     #[test]
     fn parses_matching_local_upload_chunk_headers() {
@@ -3367,5 +3531,33 @@ mod tests {
         assert!(local_upload_chunk(&incomplete, 12).is_err());
         assert!(local_upload_chunk(&out_of_bounds, 12).is_err());
         assert!(local_upload_chunk(&mismatched_length, 12).is_err());
+    }
+
+    #[test]
+    fn folder_manifest_deduplicates_shared_prefixes_by_depth() {
+        let paths = (0..1_000)
+            .map(|index| sanitize_upload_path(&format!("project/src/lib/file-{index}.ts")))
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            plan_folder_manifest(&paths),
+            vec![
+                vec![PlannedFolder {
+                    path: "project".to_owned(),
+                    parent_path: None,
+                    name: "project".to_owned(),
+                }],
+                vec![PlannedFolder {
+                    path: "project/src".to_owned(),
+                    parent_path: Some("project".to_owned()),
+                    name: "src".to_owned(),
+                }],
+                vec![PlannedFolder {
+                    path: "project/src/lib".to_owned(),
+                    parent_path: Some("project/src".to_owned()),
+                    name: "lib".to_owned(),
+                }],
+            ]
+        );
     }
 }

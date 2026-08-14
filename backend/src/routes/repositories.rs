@@ -227,8 +227,8 @@ pub async fn create_empty(
 
     transaction
         .query_one(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1 || '||' || lower($2), 0))",
-            &[&owner.id, &name],
+            "SELECT pg_advisory_xact_lock(hashtextextended('aeralyth:legacy-folder-tree:' || $1, 0))",
+            &[&owner.id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;

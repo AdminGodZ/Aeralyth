@@ -7,6 +7,7 @@ const migrationRoot = resolve(import.meta.dirname, "init");
 describe.each([
   ["001_auth.sql", "001-auth"],
   ["002_e2ee.sql", "002-e2ee"],
+  ["008_folder_manifest.sql", "008-folder-manifest"],
 ])("%s", (fileName, version) => {
   const migration = readFileSync(resolve(migrationRoot, fileName), "utf8");
 

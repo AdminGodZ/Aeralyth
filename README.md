@@ -100,12 +100,20 @@ Generate it once with `openssl rand -base64 32` and keep it stable; changing it
 does not break links already distributed, but those links can no longer be
 redisplayed in the owner dialog until they are explicitly replaced.
 
-The Next.js frontend proxies browser `/api/*` requests to the Actix backend.
-Override the target when Actix is not reachable at the local default:
+During `next dev`, the Next.js frontend proxies browser `/api/*` requests to
+the Actix backend. Override the local target when Actix is not reachable at the
+default:
 
 ```text
 AERALYTH_API_ORIGIN=http://127.0.0.1:8080
 ```
+
+Production keeps the same public `/api/*` URLs but routes them at ingress instead
+of invoking the Next.js server first. Vercel reads `vercel.ts` and resolves
+`AERALYTH_API_ORIGIN` from the deployment environment. A self-hosted reverse
+proxy must send `/api/*` directly to Actix and all page/static traffic to Next.
+Set `AERALYTH_ENABLE_NEXT_API_PROXY=true` only as an explicit compatibility
+fallback when running `next start` without an ingress router.
 
 You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
 

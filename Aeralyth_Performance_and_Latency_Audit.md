@@ -210,6 +210,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-010 [P1] All API control traffic takes an extra Next.js proxy hop
 
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** Production browser URLs remain same-origin `/api/*`, but Vercel now routes that namespace from its ingress layer straight to the configured Actix origin; the production Next configuration returns no API rewrite unless the standalone-server compatibility escape hatch is explicitly enabled. `next dev` retains the local proxy automatically. In matched 500-request, 20-concurrency local samples, direct Actix routing measured `2.11 ms` p50 and `3.04 ms` p95 versus `7.78 ms` p50 and `11.90 ms` p95 through the Next development proxy, with zero errors in both samples. Routing contract tests cover the real Next and Vercel configurations, run in the performance workflow, and the isolated production build passed.
+
 **Confidence:** Confirmed
 
 **Evidence:** `next.config.ts` rewrites every `/api/:path*` request to the Rust origin.
@@ -254,6 +258,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-013 [P1] One per-user counter row serializes upload starts and many file mutations
 
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** Upload admission now serializes only one short conditional update on the dedicated `user_storage_usage` quota ledger; favorite, trash, share, and UI count changes remain on the separate statement-aggregated `user_file_counters` row. A 40-client PostgreSQL burst admitted exactly ten quota-limited uploads, recorded zero writes to `user_file_counters`, and measured the reservation statement at `8.104 ms` mean and `12.757 ms` maximum across all 40 contending calls before releasing the ledger back to zero. The concurrency test now fails on any UI-counter write, missing measurement, incorrect admission/release result, or network-scale SQL regression, and runs in CI.
+
 **Confidence:** Confirmed
 
 **Evidence:** Upload initialization locks `user_file_counters`; file and share triggers also update the same row. Bulk trash/restore and concurrent upload starts target one hot tuple.
@@ -265,6 +273,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Track row-lock wait time by relation and tuple-heavy query. Concurrent starts should spend microseconds, not network-scale time, in the quota critical section.
 
 ## PERF-014 [P1] Folder creation opens one transaction per path component
+
+**Status:** Complete — implemented and verified on 2026-08-14.
+
+**Verification:** Legacy folder uploads now send one normalized folder manifest before file transfer. The backend deduplicates shared prefixes, resolves the entire tree in one transaction, and calls a set-based PostgreSQL primitive once per unique depth; a partial unique active-sibling index plus `ON CONFLICT` makes retries and concurrent creation idempotent. Each subsequent upload sends the already-resolved parent and basename, while the old per-file path contract remains as a compatibility fallback. A live 1,000-file tree with one shared three-level prefix returned all 1,000 parent mappings with exactly three SQL calls (`2.061 ms` mean, `3.984 ms` maximum), rather than 3,000 transactions. SQL guards prove one UI-counter write per inserted depth and zero writes/duplicates on replay, including case variants; fresh migration, HTTP idempotency, client contract, and Rust prefix-planning tests all pass in CI.
 
 **Confidence:** Confirmed
 

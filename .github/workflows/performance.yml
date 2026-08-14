@@ -6,6 +6,10 @@ on:
       - "backend/**"
       - "database/**"
       - "performance/**"
+      - "deployment/**"
+      - "next.config.ts"
+      - "vercel.ts"
+      - "src/features/dashboard/**"
       - "src/features/vault/**"
       - "package.json"
       - "package-lock.json"
@@ -49,7 +53,11 @@ jobs:
       - run: npm ci
       - run: docker compose up -d --wait postgres
       - run: npm run db:migrate
+      - run: npm run db:test:folder-manifest
+      - run: npm run db:test:folder-manifest-fresh
+      - run: npm run db:test:performance-ledger-concurrency
       - run: npm run test:performance
+      - run: cargo test --locked --manifest-path backend/Cargo.toml
       - name: Start API
         run: |
           cargo run --locked --manifest-path backend/Cargo.toml > backend-performance.log 2>&1 &

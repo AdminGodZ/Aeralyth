@@ -13,7 +13,12 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["performance/**/*.perf.ts"],
+    include: [
+      "performance/**/*.perf.ts",
+      "deployment/**/*.test.ts",
+      "database/migration-contract.test.ts",
+      "src/features/dashboard/legacy-folder-manifest.test.ts",
+    ],
     maxConcurrency: 1,
     sequence: {
       concurrent: false,

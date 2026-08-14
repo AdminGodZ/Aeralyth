@@ -41,6 +41,12 @@ import {
 import type { FolderZipWorkerResponse } from "@/features/dashboard/folder-zip-messages";
 import { GitIgnoreReviewDialog } from "@/features/dashboard/gitignore-review-dialog";
 import {
+  type LegacyFolderManifest,
+  legacyUploadTarget,
+  needsLegacyFolderManifest,
+  validateLegacyFolderManifest,
+} from "@/features/dashboard/legacy-folder-manifest";
+import {
   UploadProgressPanel,
   type UploadProgressSession,
 } from "@/features/dashboard/upload-progress-panel";
@@ -450,7 +456,28 @@ function useUploadPanelController({
         return;
       }
 
-      let rootFolderId: string | null = null;
+      const folderManifest = needsLegacyFolderManifest(
+        files.map(({ relativePath }) => relativePath),
+      )
+        ? await requestJson<LegacyFolderManifest>(
+            "/api/files/folder-manifests",
+            {
+              method: "POST",
+              headers: {
+                "Content-Type": "application/json",
+                ...requestAuthHeaders,
+              },
+              body: JSON.stringify({
+                relativePaths: files.map(({ relativePath }) => relativePath),
+                parentId: parentFolderId ?? null,
+              }),
+              signal: controller.signal,
+            },
+          ).then((manifest) =>
+            validateLegacyFolderManifest(manifest, files.length),
+          )
+        : null;
+      let rootFolderId: string | null = folderManifest?.rootFolderId ?? null;
       for (const [fileIndex, selection] of files.entries()) {
         if (controller.signal.aborted) {
           throw new DOMException("Upload canceled", "AbortError");
@@ -465,6 +492,7 @@ function useUploadPanelController({
           selection,
           fileIndex,
           resolution,
+          folderManifest?.parentIds[fileIndex],
           controller.signal,
           (key, loaded) => reportProgress(fileIndex, key, loaded),
         );
@@ -539,6 +567,7 @@ function useUploadPanelController({
     selection: UploadSelection,
     fileIndex: number,
     resolution: FolderUploadResolution | undefined,
+    resolvedParentId: string | null | undefined,
     signal: AbortSignal,
     reportProgress: (key: string, loaded: number) => void,
   ) {
@@ -546,6 +575,12 @@ function useUploadPanelController({
       throw new Error(`${selection.file.name} exceeds the 2 GB upload limit.`);
     }
 
+    const target = legacyUploadTarget({
+      relativePath: selection.relativePath,
+      fileName: selection.file.name,
+      baseParentId: parentFolderId ?? null,
+      resolvedParentId,
+    });
     const plan = await requestJson<UploadPlan>("/api/files/uploads", {
       method: "POST",
       headers: {
@@ -554,10 +589,10 @@ function useUploadPanelController({
       },
       body: JSON.stringify({
         name: selection.file.name,
-        relativePath: selection.relativePath,
+        relativePath: target.relativePath,
         sizeBytes: selection.file.size,
         mimeType: selection.file.type || null,
-        parentId: parentFolderId ?? null,
+        parentId: target.parentId,
         replacementFileId:
           replacementFileId ??
           resolution?.replacementFiles.get(

@@ -92,6 +92,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
                 )
                 .route("/repositories/{id}", web::get().to(repositories::detail))
                 .route("/files", web::get().to(files::list_files))
+                .route(
+                    "/files/folder-manifests",
+                    web::post().to(files::create_folder_manifest),
+                )
                 .route("/files/uploads", web::post().to(files::init_upload))
                 .route(
                     "/files/uploads/{id}/content",
