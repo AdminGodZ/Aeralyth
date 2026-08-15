@@ -1,9 +1,12 @@
+use std::collections::HashMap;
+
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use serde::{Deserialize, Serialize};
-use tokio_postgres::Row;
+use tokio_postgres::{IsolationLevel, Row};
 
 use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
 use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
+use crate::routes::tree_walk::{TREE_MUTATION_BATCH_SIZE, TreeWalkScope, walk_subtree};
 use crate::state::AppState;
 use crate::timestamps;
 
@@ -729,83 +732,96 @@ pub async fn archive_manifest(
         return Ok(HttpResponse::NotFound().finish());
     };
     let root_folder_id = repository.root.id.clone();
-    let rows = state
+    let mut client = state
         .db
-        .query(
-            "
-                WITH RECURSIVE tree AS (
-                  SELECT
-                    id,
-                    original_name,
-                    mime_type,
-                    entry_type,
-                    parent_id,
-                    size_bytes,
-                    e2ee_state,
-                    updated_at,
-                    ARRAY[id]::text[] AS visited_ids,
-                    0::integer AS depth
-                  FROM files
-                  WHERE id = $1
-                    AND owner_id = $2
-                    AND entry_type = 'folder'
-                    AND state = 'active'
-
-                  UNION ALL
-
-                  SELECT
-                    child.id,
-                    child.original_name,
-                    child.mime_type,
-                    child.entry_type,
-                    child.parent_id,
-                    child.size_bytes,
-                    child.e2ee_state,
-                    child.updated_at,
-                    tree.visited_ids || child.id,
-                    tree.depth + 1
-                  FROM files AS child
-                  INNER JOIN tree ON child.parent_id = tree.id
-                  WHERE child.owner_id = $2
-                    AND child.state = 'active'
-                    AND tree.depth < 100
-                    AND NOT child.id = ANY(tree.visited_ids)
-                )
-                SELECT
-                  id,
-                  original_name,
-                  mime_type,
-                  entry_type,
-                  parent_id,
-                  size_bytes,
-                  e2ee_state,
-                  updated_at
-                FROM tree
-                WHERE id <> $1
-                ORDER BY depth,
-                         CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END,
-                         lower(original_name),
-                         id
-                LIMIT $3
-            ",
-            &[
-                &root_folder_id,
-                &owner.id,
-                &(MAX_REPOSITORY_ARCHIVE_ENTRIES + 1),
-            ],
-        )
+        .get()
         .await
         .map_err(error::ErrorInternalServerError)?;
-
-    if rows.len() > MAX_REPOSITORY_ARCHIVE_ENTRIES as usize {
+    let transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let max_nodes = usize::try_from(MAX_REPOSITORY_ARCHIVE_ENTRIES)
+        .unwrap_or(usize::MAX)
+        .saturating_add(1);
+    let Some(tree) = walk_subtree(
+        &transaction,
+        TreeWalkScope {
+            owner_id: &owner.id,
+            root_id: &root_folder_id,
+            root_state: Some("active"),
+            child_state: Some("active"),
+            e2ee_state: None,
+            max_nodes,
+        },
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    else {
+        return Ok(HttpResponse::NotFound().finish());
+    };
+    if tree.truncated {
         return Ok(HttpResponse::PayloadTooLarge()
             .body("This repository has too many entries to download as one ZIP archive."));
     }
-
-    let total_bytes = rows
+    let depths = tree
+        .nodes
         .iter()
-        .filter(|row| row.get::<_, String>("entry_type") == "file")
-        .map(|row| row.get::<_, i64>("size_bytes").max(0))
+        .map(|node| (node.id.as_str(), node.depth))
+        .collect::<HashMap<_, _>>();
+    let descendant_ids = tree
+        .nodes
+        .iter()
+        .skip(1)
+        .map(|node| node.id.as_str())
+        .collect::<Vec<_>>();
+    let mut ordered_entries = Vec::with_capacity(descendant_ids.len());
+    for ids in descendant_ids.chunks(TREE_MUTATION_BATCH_SIZE) {
+        let rows = transaction
+            .query(
+                "
+                    SELECT id, original_name, mime_type, entry_type, parent_id,
+                           size_bytes, e2ee_state, updated_at
+                    FROM files
+                    WHERE owner_id = $2
+                      AND state = 'active'
+                      AND id = ANY($1::text[])
+                ",
+                &[&ids, &owner.id],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        for row in rows {
+            let id: String = row.get("id");
+            let entry = repository_entry_from_row(row);
+            let rank = i32::from(entry.entry_type != "folder");
+            ordered_entries.push((
+                depths.get(id.as_str()).copied().unwrap_or_default(),
+                rank,
+                entry.name.to_lowercase(),
+                id,
+                entry,
+            ));
+        }
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    ordered_entries.sort_unstable_by(|left, right| {
+        (&left.0, &left.1, &left.2, &left.3).cmp(&(&right.0, &right.1, &right.2, &right.3))
+    });
+    let entries = ordered_entries
+        .into_iter()
+        .map(|(_, _, _, _, entry)| entry)
+        .collect::<Vec<_>>();
+    let total_bytes = entries
+        .iter()
+        .filter(|entry| entry.entry_type == "file")
+        .map(|entry| entry.size_bytes.max(0))
         .fold(0_i64, i64::saturating_add);
     if total_bytes > MAX_REPOSITORY_ARCHIVE_BYTES {
         return Ok(HttpResponse::PayloadTooLarge()
@@ -814,7 +830,7 @@ pub async fn archive_manifest(
 
     Ok(HttpResponse::Ok().json(RepositoryArchiveManifestResponse {
         repository,
-        entries: rows.into_iter().map(repository_entry_from_row).collect(),
+        entries,
         total_bytes,
     }))
 }

@@ -12,11 +12,16 @@ use futures_util::{StreamExt, future::try_join_all, stream};
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File as AsyncFile, OpenOptions};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio_postgres::IsolationLevel;
 
 use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
 use crate::db::{query_cached, query_one_cached, query_opt_cached};
 use crate::routes::share_links::{
     EditorShareGrant, editor_grant_from_header, editor_parent, validate_editor_replacement,
+};
+use crate::routes::tree_walk::{
+    MAX_TREE_MUTATION_NODES, TREE_MUTATION_BATCH_SIZE, TreeWalkScope, update_tree_state,
+    walk_subtree,
 };
 use crate::routes::upload_reservations::{reservation_amount, reserve_upload_capacity};
 use crate::state::AppState;
@@ -34,6 +39,49 @@ const UPLOAD_OFFSET_HEADER: &str = "x-aeralyth-upload-offset";
 const DEFAULT_PAGE_SIZE: usize = 50;
 const MAX_PAGE_SIZE: usize = 100;
 const MAX_PRESIGN_PARTS: usize = 32;
+pub(crate) const DELETE_TREE_BATCH_QUERY: &str = "
+    WITH targets AS MATERIALIZED (
+      SELECT files.id, files.owner_id, files.storage_name,
+             files.entry_type
+      FROM files
+      WHERE files.owner_id = $2
+        AND files.id = ANY($1::text[])
+      FOR UPDATE
+    ), queued AS (
+      INSERT INTO storage_deletion_jobs (object_key, available_at)
+      SELECT
+        CASE
+          WHEN position('/' IN targets.storage_name) = 0
+            THEN targets.owner_id || '/' || targets.storage_name
+          ELSE targets.storage_name
+        END,
+        CASE
+          WHEN uploads.upload_mode = 'single'
+            THEN GREATEST(
+              COALESCE(uploads.write_expires_at, now()), now()
+            )
+          ELSE now()
+        END
+      FROM targets
+      LEFT JOIN file_uploads AS uploads
+        ON uploads.file_id = targets.id
+       AND uploads.status = 'completed'
+      WHERE targets.entry_type = 'file'
+      ON CONFLICT (object_key) DO UPDATE SET
+        available_at = GREATEST(
+          storage_deletion_jobs.available_at,
+          EXCLUDED.available_at
+        )
+      RETURNING object_key
+    ), deleted AS (
+      DELETE FROM files AS entries
+      USING targets
+      WHERE entries.id = targets.id
+        AND (SELECT count(*) FROM queued) >= 0
+      RETURNING entries.id
+    )
+    SELECT count(*)::bigint AS deleted FROM deleted
+";
 const MAX_FOLDER_MANIFEST_PATHS: usize = 1_000;
 const MAX_FOLDER_MANIFEST_FOLDERS: usize = MAX_FOLDER_MANIFEST_PATHS * 63;
 const FOLDER_MANIFEST_JSON_LIMIT: usize = 2 * 1024 * 1024;
@@ -257,7 +305,6 @@ pub struct StorageStats {
 }
 
 struct StoredFile {
-    id: String,
     owner_id: String,
     original_name: String,
     storage_name: String,
@@ -1814,35 +1861,40 @@ pub async fn trash(
     require_csrf(&state, &request, &form.csrf_token).await?;
     let wants_json = request_wants_json(&request);
     let file_id = path.into_inner();
-
-    state
+    let mut client = state
         .db
-        .execute(
-            "
-                WITH RECURSIVE subtree AS (
-                  SELECT id, ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
-                  FROM files
-                  WHERE id = $1
-                    AND owner_id = $2
-                    AND state = 'active'
-
-                  UNION ALL
-
-                  SELECT child.id, parent.visited_ids || child.id, parent.depth + 1
-                  FROM files AS child
-                  INNER JOIN subtree AS parent ON child.parent_id = parent.id
-                  WHERE child.owner_id = $2
-                    AND parent.depth < 100
-                    AND NOT child.id = ANY(parent.visited_ids)
-                )
-                UPDATE files
-                SET state = 'trashed',
-                    trashed_at = now(),
-                    updated_at = now()
-                WHERE id IN (SELECT id FROM subtree)
-            ",
-            &[&file_id, &user.id],
-        )
+        .get()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let tree = walk_subtree(
+        &transaction,
+        TreeWalkScope {
+            owner_id: &user.id,
+            root_id: &file_id,
+            root_state: Some("active"),
+            child_state: None,
+            e2ee_state: None,
+            max_nodes: MAX_TREE_MUTATION_NODES,
+        },
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    if tree.as_ref().is_some_and(|tree| tree.truncated) {
+        return Ok(HttpResponse::PayloadTooLarge().body("folder contains too many entries"));
+    }
+    if let Some(tree) = tree {
+        update_tree_state(&transaction, &tree.nodes, &user.id, "trashed")
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+    }
+    transaction
+        .commit()
         .await
         .map_err(error::ErrorInternalServerError)?;
 
@@ -1864,35 +1916,41 @@ pub async fn restore(
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
-
-    state
+    let file_id = path.into_inner();
+    let mut client = state
         .db
-        .execute(
-            "
-                WITH RECURSIVE subtree AS (
-                  SELECT id, ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
-                  FROM files
-                  WHERE id = $1
-                    AND owner_id = $2
-                    AND state = 'trashed'
-
-                  UNION ALL
-
-                  SELECT child.id, parent.visited_ids || child.id, parent.depth + 1
-                  FROM files AS child
-                  INNER JOIN subtree AS parent ON child.parent_id = parent.id
-                  WHERE child.owner_id = $2
-                    AND parent.depth < 100
-                    AND NOT child.id = ANY(parent.visited_ids)
-                )
-                UPDATE files
-                SET state = 'active',
-                    trashed_at = NULL,
-                    updated_at = now()
-                WHERE id IN (SELECT id FROM subtree)
-            ",
-            &[&path.into_inner(), &user.id],
-        )
+        .get()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let tree = walk_subtree(
+        &transaction,
+        TreeWalkScope {
+            owner_id: &user.id,
+            root_id: &file_id,
+            root_state: Some("trashed"),
+            child_state: None,
+            e2ee_state: None,
+            max_nodes: MAX_TREE_MUTATION_NODES,
+        },
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    if tree.as_ref().is_some_and(|tree| tree.truncated) {
+        return Ok(HttpResponse::PayloadTooLarge().body("folder contains too many entries"));
+    }
+    if let Some(tree) = tree {
+        update_tree_state(&transaction, &tree.nodes, &user.id, "active")
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+    }
+    transaction
+        .commit()
         .await
         .map_err(error::ErrorInternalServerError)?;
 
@@ -1948,72 +2006,48 @@ pub async fn delete(
     let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
     let file_id = path.into_inner();
-    let Some(file) = get_file(&state, &user, &file_id, false).await? else {
-        return Ok(redirect("/trash?file=missing"));
-    };
     let mut client = state
         .db
         .get()
         .await
         .map_err(error::ErrorInternalServerError)?;
     let transaction = client
-        .transaction()
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
         .await
         .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "
-                WITH RECURSIVE subtree AS (
-                  SELECT id, owner_id, storage_name, entry_type,
-                         ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
-                  FROM files
-                  WHERE id = $1 AND owner_id = $2 AND state = 'trashed'
-
-                  UNION ALL
-
-                  SELECT child.id, child.owner_id, child.storage_name, child.entry_type,
-                         parent.visited_ids || child.id, parent.depth + 1
-                  FROM files AS child
-                  INNER JOIN subtree AS parent ON child.parent_id = parent.id
-                  WHERE child.owner_id = $2
-                    AND parent.depth < 100
-                    AND NOT child.id = ANY(parent.visited_ids)
-                )
-                INSERT INTO storage_deletion_jobs (object_key, available_at)
-                SELECT
-                  CASE
-                    WHEN position('/' IN subtree.storage_name) = 0
-                      THEN subtree.owner_id || '/' || subtree.storage_name
-                    ELSE subtree.storage_name
-                  END,
-                  CASE
-                    WHEN uploads.upload_mode = 'single'
-                      THEN GREATEST(COALESCE(uploads.write_expires_at, now()), now())
-                    ELSE now()
-                  END
-                FROM subtree
-                LEFT JOIN file_uploads AS uploads
-                  ON uploads.file_id = subtree.id
-                 AND uploads.status = 'completed'
-                WHERE subtree.entry_type = 'file'
-                ON CONFLICT (object_key) DO UPDATE SET
-                  available_at = GREATEST(
-                    storage_deletion_jobs.available_at,
-                    EXCLUDED.available_at
-                  )
-            ",
-            &[&file.id, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    transaction
-        .execute(
-            "DELETE FROM files WHERE id = $1 AND owner_id = $2 AND state = 'trashed'",
-            &[&file.id, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let Some(mut tree) = walk_subtree(
+        &transaction,
+        TreeWalkScope {
+            owner_id: &user.id,
+            root_id: &file_id,
+            root_state: Some("trashed"),
+            child_state: None,
+            e2ee_state: None,
+            max_nodes: MAX_TREE_MUTATION_NODES,
+        },
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    else {
+        return Ok(redirect("/trash?file=missing"));
+    };
+    if tree.truncated {
+        return Ok(HttpResponse::PayloadTooLarge().body("folder contains too many entries"));
+    }
+    tree.nodes
+        .sort_unstable_by(|left, right| right.depth.cmp(&left.depth).then(left.id.cmp(&right.id)));
+    for nodes in tree.nodes.chunks(TREE_MUTATION_BATCH_SIZE) {
+        let ids = nodes
+            .iter()
+            .map(|node| node.id.as_str())
+            .collect::<Vec<_>>();
+        transaction
+            .query_one(DELETE_TREE_BATCH_QUERY, &[&ids, &user.id])
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+    }
     transaction
         .commit()
         .await
@@ -2756,43 +2790,6 @@ async fn get_summary(state: &AppState, user: &SessionPrincipal) -> Result<FilesS
     })
 }
 
-async fn get_file(
-    state: &AppState,
-    user: &SessionPrincipal,
-    file_id: &str,
-    active_only: bool,
-) -> Result<Option<StoredFile>> {
-    let state_predicate = if active_only {
-        "AND state = 'active'"
-    } else {
-        "AND state = 'trashed'"
-    };
-    let sql = format!(
-        "
-            SELECT id, owner_id, original_name, storage_name, mime_type
-            FROM files
-            WHERE id = $1
-              AND owner_id = $2
-              {state_predicate}
-            LIMIT 1
-        "
-    );
-
-    let row = state
-        .db
-        .query_opt(&sql, &[&file_id, &user.id])
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    Ok(row.map(|row| StoredFile {
-        id: row.get("id"),
-        owner_id: row.get("owner_id"),
-        original_name: row.get("original_name"),
-        storage_name: row.get("storage_name"),
-        mime_type: row.get("mime_type"),
-    }))
-}
-
 async fn get_download_file(
     state: &AppState,
     user: &SessionPrincipal,
@@ -2819,7 +2816,6 @@ async fn get_download_file(
                     AND NOT parent.id = ANY(child.visited_ids)
                 )
                 SELECT
-                  files.id,
                   files.owner_id,
                   files.original_name,
                   files.storage_name,
@@ -2852,7 +2848,6 @@ async fn get_download_file(
         .map_err(error::ErrorInternalServerError)?;
 
     Ok(row.map(|row| StoredFile {
-        id: row.get("id"),
         owner_id: row.get("owner_id"),
         original_name: row.get("original_name"),
         storage_name: row.get("storage_name"),

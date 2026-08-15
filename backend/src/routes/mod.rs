@@ -8,6 +8,7 @@ mod pagination;
 mod profile;
 mod repositories;
 mod share_links;
+mod tree_walk;
 mod upload_reservations;
 mod vault;
 

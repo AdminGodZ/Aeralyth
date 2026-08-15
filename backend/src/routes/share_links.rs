@@ -9,9 +9,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::fs::File as AsyncFile;
 use tokio::io::AsyncReadExt;
+use tokio_postgres::IsolationLevel;
 
 use crate::auth::{parse_json_body, require_csrf, require_principal, session_principal};
 use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
+use crate::routes::tree_walk::{
+    MAX_TREE_MUTATION_NODES, TreeWalkScope, update_tree_state, walk_subtree,
+};
 use crate::state::AppState;
 use crate::timestamps;
 
@@ -784,28 +788,40 @@ pub async fn remove_entry(
         ));
     }
     require_shared_node(&state, &grant, &file_id, None).await?;
-    state
+    let mut client = state
         .db
-        .execute(
-            "
-                WITH RECURSIVE subtree AS (
-                  SELECT id, ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
-                  FROM files
-                  WHERE id = $1 AND owner_id = $2 AND state = 'active'
-                  UNION ALL
-                  SELECT child.id, parent.visited_ids || child.id, parent.depth + 1
-                  FROM files AS child
-                  INNER JOIN subtree AS parent ON child.parent_id = parent.id
-                  WHERE child.owner_id = $2 AND child.state = 'active'
-                    AND parent.depth < 100
-                    AND NOT child.id = ANY(parent.visited_ids)
-                )
-                UPDATE files
-                SET state = 'trashed', trashed_at = now(), updated_at = now()
-                WHERE id IN (SELECT id FROM subtree)
-            ",
-            &[&file_id, &grant.owner_id],
-        )
+        .get()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let tree = walk_subtree(
+        &transaction,
+        TreeWalkScope {
+            owner_id: &grant.owner_id,
+            root_id: &file_id,
+            root_state: Some("active"),
+            child_state: Some("active"),
+            e2ee_state: None,
+            max_nodes: MAX_TREE_MUTATION_NODES,
+        },
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    if tree.as_ref().is_some_and(|tree| tree.truncated) {
+        return Ok(HttpResponse::PayloadTooLarge().body("folder contains too many entries"));
+    }
+    if let Some(tree) = tree {
+        update_tree_state(&transaction, &tree.nodes, &grant.owner_id, "trashed")
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+    }
+    transaction
+        .commit()
         .await
         .map_err(error::ErrorInternalServerError)?;
 

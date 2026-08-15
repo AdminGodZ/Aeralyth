@@ -706,6 +706,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-041 [P2] Admin and profile handlers perform avoidable serial round trips
 
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** The admin directory's three independent reads now pipeline concurrently over its one request-scoped PostgreSQL connection. Profile patching no longer reloads current settings: explicit keep/remove/replace fields feed one `UPDATE ... RETURNING`, preserving omitted values. The four protected admin role, status, full-update, and deletion paths now each combine authorization revalidation, CSRF validation, target locking, last-admin protection, and mutation in one atomic CTE statement after the cached principal lookup. A live isolated role update retained its `303` contract, changed the target, and `pg_stat_statements` recorded exactly one principal query plus one mutation query and zero explicit `BEGIN`/`COMMIT` commands; the profile and all four admin flows also passed live checks. Prepare, fixture, invariant, collision, and deletion-handoff tests prevent the removed round trips from returning.
+
 **Confidence:** Confirmed
 
 **Evidence:** Admin directory fetches users, invitations, and summary sequentially. Profile update performs auth, CSRF, current-settings SELECT, and UPDATE. Several create/update routes validate then insert then reload the same row.
@@ -718,6 +722,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-042 [P1] Shared download transactions keep locks while assembling the response
 
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** Shared-download planning now obtains the authorization, recipient, share-epoch, envelope, wrapper, and encrypted-file material as one consistent locked snapshot, commits immediately, and only then performs row extraction, CBOR decoding, hashing, base64 work, and storage URL presigning. The database fixture test proved a concurrent share mutation waits while the snapshot transaction is open, succeeds immediately after commit, and cannot invalidate the already-owned snapshot values. Exact query prepare/execution tests and a source-order regression guard require the commit to remain ahead of response assembly.
+
 **Confidence:** Confirmed
 
 **Evidence:** Encrypted shared download planning holds a transaction and `FOR SHARE` locks while running several queries, encoding base64, and generating the presigned URL.
@@ -729,6 +737,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Trace transaction duration and lock waits during concurrent downloads and rotations. The transaction should end before response serialization.
 
 ## PERF-043 [P2] Large recursive mutations run under a global 10-second statement timeout
+
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** Unbounded recursive subtree mutations were replaced with a repeatable-read, keyset-paginated walker capped at 1,000,000 nodes, using 16,384-row read pages and 5,000-row mutation, deletion, and metadata batches. Trash, restore, exact cleanup-queue deletion, share removal, encrypted snapshots, and repository manifests use the bounded path; a replay-safe migration adds the `(owner_id, parent_id, id)` walk index. With the global 10-second timeout unchanged, a 1,000,001-node fixture walked in 6.647 seconds, completed trash plus restore through 400 bounded statements in 91.505 seconds total, and kept its slowest mutation statement to 372.41 ms; the 100,001-node fixture also passed, with a 439.39 ms slowest mutation. Fresh-database migration replay, prepare/execution suites, a live nested trash/restore/delete flow, and source guards against recursive subtree SQL all passed.
 
 **Confidence:** Confirmed
 

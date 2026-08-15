@@ -7,6 +7,7 @@ use base64::{
 };
 use futures_util::future::try_join_all;
 use serde::{Deserialize, Serialize};
+use tokio_postgres::IsolationLevel;
 
 use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
 use crate::config::E2eeMode;
@@ -20,6 +21,9 @@ use crate::e2ee::{
     verify_share_envelope, verify_wrapper_set_proof, wrapper_set_commitment,
 };
 use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
+use crate::routes::tree_walk::{
+    MAX_TREE_MUTATION_NODES, TREE_MUTATION_BATCH_SIZE, TreeWalkScope, walk_subtree,
+};
 use crate::routes::upload_reservations::{reservation_amount, reserve_upload_capacity};
 use crate::state::AppState;
 use crate::storage::{ObjectMetadata, UploadedPart};
@@ -33,7 +37,7 @@ const MAX_PRESIGN_PARTS: usize = 32;
 const VAULT_CONTROL_JSON_LIMIT: usize = 64 * 1024;
 const VAULT_ACCOUNT_JSON_LIMIT: usize = 6 * 1024 * 1024;
 const VAULT_PUBLISH_JSON_LIMIT: usize = 8 * 1024 * 1024;
-const SHARED_DOWNLOAD_AUTHORIZATION_QUERY: &str = "
+const SHARED_DOWNLOAD_SNAPSHOT_QUERY: &str = "
     WITH RECURSIVE ancestors AS (
       SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
              0::integer AS depth FROM files
@@ -46,46 +50,143 @@ const SHARED_DOWNLOAD_AUTHORIZATION_QUERY: &str = "
       WHERE parent.state = 'active' AND parent.e2ee_state = 'encrypted'
         AND child.depth < 100
         AND NOT parent.id = ANY(child.visited_ids)
+    ), authorized_share AS MATERIALIZED (
+      SELECT shares.id AS share_id, shares.owner_id, shares.root_node_id,
+             shares.active_epoch, shares.record_version AS share_record_version,
+             shares.previous_record_hash AS share_previous_record_hash,
+             recipients.recipient_key_version,
+             epochs.protocol_version AS epoch_protocol_version,
+             epochs.wrapper_set_root AS epoch_wrapper_set_root,
+             epochs.wrapper_count AS epoch_wrapper_count
+      FROM vault_shares AS shares
+      INNER JOIN users AS owners
+        ON owners.id = shares.owner_id
+       AND owners.status = 'active'
+      INNER JOIN ancestors ON ancestors.id = shares.root_node_id
+      INNER JOIN vault_share_recipients AS recipients
+        ON recipients.share_id = shares.id
+       AND recipients.recipient_id = $2
+       AND recipients.status = 'active'
+      INNER JOIN vault_share_epochs AS epochs
+        ON epochs.share_id = shares.id
+       AND epochs.epoch = shares.active_epoch
+       AND epochs.status = 'published'
+      WHERE shares.status = 'active'
+      ORDER BY shares.created_at
+      LIMIT 1
+      FOR SHARE OF shares, recipients, epochs
+    ), node AS MATERIALIZED (
+      SELECT files.entry_type, files.current_generation_number,
+             files.current_generation_id,
+             records.bootstrap_cbor, records.bootstrap_signature,
+             records.encrypted_manifest, records.signer_key_version,
+             heads.record_version AS node_record_version, heads.record_hash,
+             signer.ed25519_public_key AS node_signer_ed25519_public_key,
+             generations.object_key, generations.ciphertext_length,
+             generations.crypto_chunk_bytes, generations.chunk_count,
+             generations.ciphertext_merkle_root
+      FROM authorized_share
+      INNER JOIN files
+        ON files.id = $1
+       AND files.owner_id = authorized_share.owner_id
+      INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
+      INNER JOIN vault_node_records AS records
+        ON records.node_id = heads.node_id
+       AND records.record_version = heads.record_version
+      INNER JOIN vault_identity_keys AS signer
+        ON signer.user_id = records.owner_id
+       AND signer.key_version = records.signer_key_version
+      LEFT JOIN vault_object_generations AS generations
+        ON generations.node_id = files.id
+       AND generations.generation_number = files.current_generation_number
+       AND generations.status = 'published'
+    ), current_wrappers AS MATERIALIZED (
+      SELECT DISTINCT ON (wrappers.wrapper_kind)
+             wrappers.wrapper_kind, wrappers.canonical_cbor,
+             wrappers.merkle_leaf_index, wrappers.merkle_proof,
+             wrappers.commitment_source
+      FROM authorized_share
+      CROSS JOIN node
+      INNER JOIN vault_share_wrappers AS wrappers
+        ON wrappers.share_id = authorized_share.share_id
+       AND wrappers.epoch = authorized_share.active_epoch
+       AND wrappers.node_id = $1
+       AND wrappers.record_version = node.node_record_version
+       AND (
+         wrappers.wrapper_kind = 'metadata'
+         OR (
+           wrappers.wrapper_kind = 'generation_dek'
+           AND wrappers.generation_id = node.current_generation_id
+         )
+       )
+      ORDER BY wrappers.wrapper_kind,
+               wrappers.record_version DESC,
+               wrappers.wrapper_id DESC
+    ), wrapper_snapshot AS MATERIALIZED (
+      SELECT
+        COALESCE(
+          array_agg(canonical_cbor ORDER BY wrapper_kind),
+          ARRAY[]::bytea[]
+        ) AS wrapper_cbors,
+        COALESCE(
+          array_agg(merkle_leaf_index ORDER BY wrapper_kind),
+          ARRAY[]::integer[]
+        ) AS wrapper_leaf_indexes,
+        COALESCE(
+          array_agg(merkle_proof ORDER BY wrapper_kind),
+          ARRAY[]::bytea[]
+        ) AS wrapper_merkle_proofs,
+        COALESCE(
+          array_agg(commitment_source ORDER BY wrapper_kind),
+          ARRAY[]::text[]
+        ) AS wrapper_commitment_sources
+      FROM current_wrappers
     )
-    SELECT shares.id, shares.owner_id, shares.root_node_id,
-           shares.active_epoch, shares.record_version,
-           shares.previous_record_hash,
-           recipients.recipient_key_version,
-           epochs.protocol_version, epochs.wrapper_set_root, epochs.wrapper_count
-    FROM vault_shares AS shares
-    INNER JOIN users AS owners
-      ON owners.id = shares.owner_id
-     AND owners.status = 'active'
-    INNER JOIN ancestors ON ancestors.id = shares.root_node_id
-    INNER JOIN vault_share_recipients AS recipients
-      ON recipients.share_id = shares.id
-     AND recipients.recipient_id = $2
-     AND recipients.status = 'active'
-    INNER JOIN vault_share_epochs AS epochs
-      ON epochs.share_id = shares.id
-     AND epochs.epoch = shares.active_epoch
-     AND epochs.status = 'published'
-    WHERE shares.status = 'active'
-    ORDER BY shares.created_at
-    LIMIT 1
-    FOR SHARE OF shares, recipients, epochs
-";
-const LATEST_SHARE_ENVELOPE_QUERY: &str = "
-    SELECT envelopes.canonical_cbor, envelopes.signature,
-           envelopes.envelope_hash, envelopes.sender_key_version,
-           envelopes.recipient_key_version, envelopes.sender_id,
-           envelopes.recipient_id, envelopes.node_id,
-           envelopes.record_version, envelopes.previous_record_hash,
-           sender.x25519_public_key, sender.ed25519_public_key,
-           sender.fingerprint_sha256
-    FROM vault_share_envelopes AS envelopes
-    INNER JOIN vault_identity_keys AS sender
-      ON sender.user_id = envelopes.sender_id
-     AND sender.key_version = envelopes.sender_key_version
-    WHERE envelopes.share_id = $1 AND envelopes.epoch = $2
-      AND envelopes.recipient_id = $3
-    ORDER BY envelopes.created_at DESC, envelopes.envelope_id DESC
-    LIMIT 1
+    SELECT authorized_share.*,
+           node.*,
+           wrapper_snapshot.*,
+           envelope.canonical_cbor AS envelope_cbor,
+           envelope.signature AS envelope_signature,
+           envelope.envelope_hash,
+           envelope.sender_key_version AS envelope_sender_key_version,
+           envelope.recipient_key_version AS envelope_recipient_key_version,
+           envelope.sender_id AS envelope_sender_id,
+           envelope.recipient_id AS envelope_recipient_id,
+           envelope.node_id AS envelope_node_id,
+           envelope.record_version AS envelope_record_version,
+           envelope.previous_record_hash AS envelope_previous_record_hash,
+           envelope.x25519_public_key AS envelope_sender_x25519_public_key,
+           envelope.ed25519_public_key AS envelope_sender_ed25519_public_key,
+           envelope.fingerprint_sha256 AS envelope_sender_fingerprint_sha256,
+           directory.canonical_cbor AS directory_cbor,
+           directory.signature AS directory_signature,
+           directory.wrapper_set_root AS directory_wrapper_set_root,
+           directory.wrapper_count AS directory_wrapper_count,
+           directory.signer_key_version AS directory_signer_key_version
+    FROM authorized_share
+    CROSS JOIN node
+    CROSS JOIN wrapper_snapshot
+    LEFT JOIN LATERAL (
+      SELECT envelopes.canonical_cbor, envelopes.signature,
+             envelopes.envelope_hash, envelopes.sender_key_version,
+             envelopes.recipient_key_version, envelopes.sender_id,
+             envelopes.recipient_id, envelopes.node_id,
+             envelopes.record_version, envelopes.previous_record_hash,
+             sender.x25519_public_key, sender.ed25519_public_key,
+             sender.fingerprint_sha256
+      FROM vault_share_envelopes AS envelopes
+      INNER JOIN vault_identity_keys AS sender
+        ON sender.user_id = envelopes.sender_id
+       AND sender.key_version = envelopes.sender_key_version
+      WHERE envelopes.share_id = authorized_share.share_id
+        AND envelopes.epoch = authorized_share.active_epoch
+        AND envelopes.recipient_id = $2
+      ORDER BY envelopes.created_at DESC, envelopes.envelope_id DESC
+      LIMIT 1
+    ) AS envelope ON TRUE
+    LEFT JOIN vault_share_wrapper_directories AS directory
+      ON directory.node_id = $1
+     AND directory.record_version = node.node_record_version
 ";
 const MIGRATION_CLAIM_QUERY: &str = "
     SELECT files.id, files.parent_id, files.entry_type,
@@ -470,6 +571,68 @@ struct ShareDirectoryResponse {
 struct ShareWrapperProofResponse {
     leaf_index: i32,
     proof: String,
+}
+
+struct SharedWrapperSnapshot {
+    canonical_cbor: Vec<u8>,
+    merkle_leaf_index: Option<i32>,
+    merkle_proof: Option<Vec<u8>>,
+    commitment_source: String,
+}
+
+struct SharedEnvelopeSnapshot {
+    canonical_cbor: Vec<u8>,
+    signature: Vec<u8>,
+    envelope_hash: Vec<u8>,
+    sender_key_version: i64,
+    recipient_key_version: i64,
+    sender_id: String,
+    recipient_id: String,
+    node_id: String,
+    record_version: i64,
+    previous_record_hash: Option<Vec<u8>>,
+    sender_x25519_public_key: Vec<u8>,
+    sender_ed25519_public_key: Vec<u8>,
+    sender_fingerprint_sha256: Vec<u8>,
+}
+
+struct SharedDirectorySnapshot {
+    canonical_cbor: Vec<u8>,
+    signature: Vec<u8>,
+    wrapper_set_root: Vec<u8>,
+    wrapper_count: i32,
+    signer_key_version: i64,
+}
+
+struct SharedDownloadSnapshot {
+    share_id: String,
+    owner_id: String,
+    root_node_id: String,
+    active_epoch: i64,
+    share_record_version: i64,
+    share_previous_record_hash: Option<Vec<u8>>,
+    recipient_key_version: i64,
+    epoch_protocol_version: i16,
+    epoch_wrapper_set_root: Option<Vec<u8>>,
+    epoch_wrapper_count: Option<i32>,
+    entry_type: String,
+    current_generation_number: i64,
+    current_generation_id: Vec<u8>,
+    bootstrap_cbor: Vec<u8>,
+    bootstrap_signature: Vec<u8>,
+    encrypted_manifest: Vec<u8>,
+    signer_key_version: i64,
+    node_record_version: i64,
+    record_hash: Vec<u8>,
+    node_signer_ed25519_public_key: Vec<u8>,
+    object_key: Option<String>,
+    ciphertext_length: Option<i64>,
+    crypto_chunk_bytes: Option<i32>,
+    chunk_count: Option<i32>,
+    ciphertext_merkle_root: Option<Vec<u8>>,
+    wrappers: Vec<SharedWrapperSnapshot>,
+    envelope: SharedEnvelopeSnapshot,
+    directory: Option<SharedDirectorySnapshot>,
 }
 
 #[derive(Deserialize)]
@@ -2048,7 +2211,10 @@ pub async fn share_plan(
         .await
         .map_err(error::ErrorInternalServerError)?;
     let transaction = client
-        .transaction()
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
         .await
         .map_err(error::ErrorInternalServerError)?;
     let snapshot = subtree_snapshot(&transaction, &node_id, &user.id).await?;
@@ -2471,7 +2637,9 @@ pub async fn create_share(
         .await
         .map_err(error::ErrorInternalServerError)?;
     let transaction = client
-        .transaction()
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
         .await
         .map_err(error::ErrorInternalServerError)?;
     lock_share_topology(&transaction, &user.id).await?;
@@ -2715,7 +2883,9 @@ pub async fn pending_epoch_rotation(
         .await
         .map_err(error::ErrorInternalServerError)?;
     let transaction = client
-        .transaction()
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
         .await
         .map_err(error::ErrorInternalServerError)?;
     let share = transaction
@@ -2797,7 +2967,9 @@ pub async fn begin_epoch_rotation(
         .await
         .map_err(error::ErrorInternalServerError)?;
     let transaction = client
-        .transaction()
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
         .await
         .map_err(error::ErrorInternalServerError)?;
     lock_share_topology(&transaction, &user.id).await?;
@@ -2974,7 +3146,9 @@ pub async fn publish_epoch_rotation(
         .await
         .map_err(error::ErrorInternalServerError)?;
     let transaction = client
-        .transaction()
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .start()
         .await
         .map_err(error::ErrorInternalServerError)?;
     lock_share_topology(&transaction, &user.id).await?;
@@ -3528,57 +3702,74 @@ fn validate_envelope(
 }
 
 async fn subtree_snapshot(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     root_node_id: &str,
     owner_id: &str,
 ) -> Result<Vec<SnapshotNode>> {
-    let rows = transaction
-        .query(
-            "
-                WITH RECURSIVE subtree AS (
-                  SELECT id, entry_type, current_generation_number, current_generation_id,
-                         ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
-                  FROM files
-                  WHERE id = $1 AND owner_id = $2
-                    AND state = 'active' AND e2ee_state = 'encrypted'
-                  UNION ALL
-                  SELECT child.id, child.entry_type, child.current_generation_number,
-                         child.current_generation_id, parent.visited_ids || child.id,
-                         parent.depth + 1
-                  FROM files AS child
-                  INNER JOIN subtree AS parent ON child.parent_id = parent.id
-                  WHERE child.owner_id = $2
-                    AND child.state = 'active' AND child.e2ee_state = 'encrypted'
-                    AND parent.depth < 100
-                    AND NOT child.id = ANY(parent.visited_ids)
-                )
-                SELECT subtree.id, subtree.entry_type,
-                       subtree.current_generation_number, subtree.current_generation_id,
-                       heads.record_version, heads.record_hash
-                FROM subtree
-                INNER JOIN vault_node_heads AS heads ON heads.node_id = subtree.id
-                ORDER BY subtree.id
-            ",
-            &[&root_node_id, &owner_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    if rows.is_empty() {
+    let Some(tree) = walk_subtree(
+        transaction,
+        TreeWalkScope {
+            owner_id,
+            root_id: root_node_id,
+            root_state: Some("active"),
+            child_state: Some("active"),
+            e2ee_state: Some("encrypted"),
+            max_nodes: MAX_TREE_MUTATION_NODES,
+        },
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    else {
         return Err(error::ErrorConflict(
             "shared subtree is empty or incomplete",
         ));
+    };
+    if tree.truncated {
+        return Err(error::ErrorPayloadTooLarge(
+            "shared subtree contains too many nodes",
+        ));
     }
-    Ok(rows
-        .into_iter()
-        .map(|row| SnapshotNode {
+    let node_ids = tree
+        .nodes
+        .iter()
+        .map(|node| node.id.as_str())
+        .collect::<Vec<_>>();
+    let mut snapshot = Vec::with_capacity(node_ids.len());
+    for ids in node_ids.chunks(TREE_MUTATION_BATCH_SIZE) {
+        let rows = transaction
+            .query(
+                "
+                    SELECT files.id, files.entry_type,
+                           files.current_generation_number,
+                           files.current_generation_id,
+                           heads.record_version, heads.record_hash
+                    FROM files
+                    INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
+                    WHERE files.owner_id = $2
+                      AND files.state = 'active'
+                      AND files.e2ee_state = 'encrypted'
+                      AND files.id = ANY($1::text[])
+                ",
+                &[&ids, &owner_id],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        snapshot.extend(rows.into_iter().map(|row| SnapshotNode {
             node_id: row.get("id"),
             entry_type: row.get("entry_type"),
             generation_number: row.get("current_generation_number"),
             generation_id: row.get("current_generation_id"),
             record_version: row.get("record_version"),
             record_hash: row.get("record_hash"),
-        })
-        .collect())
+        }));
+    }
+    if snapshot.len() != node_ids.len() {
+        return Err(error::ErrorConflict(
+            "shared subtree is empty or incomplete",
+        ));
+    }
+    snapshot.sort_unstable_by(|left, right| left.node_id.cmp(&right.node_id));
+    Ok(snapshot)
 }
 
 fn snapshot_hash(snapshot: &[SnapshotNode]) -> [u8; 32] {
@@ -4847,111 +5038,63 @@ async fn shared_download_plan(
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let share = transaction
-        .query_opt(SHARED_DOWNLOAD_AUTHORIZATION_QUERY, &[&node_id, &user.id])
+    let row = transaction
+        .query_opt(SHARED_DOWNLOAD_SNAPSHOT_QUERY, &[&node_id, &user.id])
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let Some(share) = share else {
+    // The row owns the complete consistent snapshot. Release all share,
+    // recipient, and epoch locks before decoding, hashing, base64 work, or S3
+    // URL signing; those steps cannot extend revocation safety after response.
+    transaction
+        .commit()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let Some(row) = row else {
         return Ok(HttpResponse::NotFound().finish());
     };
-    let share_id: String = share.get("id");
-    let owner_id: String = share.get("owner_id");
-    let root_node_id: String = share.get("root_node_id");
-    let active_epoch: i64 = share.get("active_epoch");
-    let share_record_version: i64 = share.get("record_version");
-    let share_previous_record_hash: Option<Vec<u8>> = share.get("previous_record_hash");
-    let recipient_key_version: i64 = share.get("recipient_key_version");
-    let epoch_protocol_version: i16 = share.get("protocol_version");
-    let epoch_wrapper_set_root: Option<Vec<u8>> = share.get("wrapper_set_root");
-    let epoch_wrapper_count: Option<i32> = share.get("wrapper_count");
-    let row = transaction
-        .query_one(
-            "
-                SELECT files.entry_type, files.current_generation_number,
-                       files.current_generation_id,
-                       records.bootstrap_cbor, records.bootstrap_signature,
-                       records.encrypted_manifest, records.signer_key_version,
-                       heads.record_version, heads.record_hash,
-                       signer.ed25519_public_key,
-                       generations.object_key, generations.ciphertext_length,
-                       generations.crypto_chunk_bytes, generations.chunk_count,
-                       generations.ciphertext_merkle_root
-                FROM files
-                INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
-                INNER JOIN vault_node_records AS records
-                  ON records.node_id = heads.node_id
-                 AND records.record_version = heads.record_version
-                INNER JOIN vault_identity_keys AS signer
-                  ON signer.user_id = records.owner_id
-                 AND signer.key_version = records.signer_key_version
-                LEFT JOIN vault_object_generations AS generations
-                  ON generations.node_id = files.id
-                 AND generations.generation_number = files.current_generation_number
-                 AND generations.status = 'published'
-                WHERE files.id = $1 AND files.owner_id = $2
-            ",
-            &[&node_id, &owner_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let generation_id: Vec<u8> = row.get("current_generation_id");
-    let node_record_version: i64 = row.get("record_version");
-    let wrapper_rows = transaction
-        .query(
-            "
-                SELECT canonical_cbor, merkle_leaf_index, merkle_proof,
-                       commitment_source
-                FROM (
-                  SELECT DISTINCT ON (wrapper_kind)
-                         wrapper_kind, canonical_cbor, record_version,
-                         merkle_leaf_index, merkle_proof, commitment_source
-                  FROM vault_share_wrappers
-                  WHERE share_id = $1 AND epoch = $2 AND node_id = $3
-                    AND record_version = $5
-                    AND (wrapper_kind = 'metadata'
-                         OR (wrapper_kind = 'generation_dek' AND generation_id = $4))
-                  ORDER BY wrapper_kind, record_version DESC, wrapper_id DESC
-                ) AS current_wrappers
-                ORDER BY wrapper_kind
-            ",
-            &[
-                &share_id,
-                &active_epoch,
-                &node_id,
-                &generation_id,
-                &node_record_version,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let expected_wrapper_count = if row.get::<_, String>("entry_type") == "file" {
-        2
-    } else {
-        1
-    };
-    if wrapper_rows.len() != expected_wrapper_count {
+    let SharedDownloadSnapshot {
+        share_id,
+        owner_id,
+        root_node_id,
+        active_epoch,
+        share_record_version,
+        share_previous_record_hash,
+        recipient_key_version,
+        epoch_protocol_version,
+        epoch_wrapper_set_root,
+        epoch_wrapper_count,
+        entry_type,
+        current_generation_number,
+        current_generation_id: generation_id,
+        bootstrap_cbor,
+        bootstrap_signature,
+        encrypted_manifest,
+        signer_key_version,
+        node_record_version,
+        record_hash,
+        node_signer_ed25519_public_key,
+        object_key,
+        ciphertext_length,
+        crypto_chunk_bytes,
+        chunk_count,
+        ciphertext_merkle_root,
+        wrappers: wrapper_snapshots,
+        envelope,
+        directory: directory_snapshot,
+    } = shared_download_snapshot_from_row(row)?;
+
+    let expected_wrapper_count = if entry_type == "file" { 2 } else { 1 };
+    if wrapper_snapshots.len() != expected_wrapper_count {
         return Ok(HttpResponse::Conflict().body("share material is still synchronizing"));
     }
-    let envelope = transaction
-        .query_one(
-            LATEST_SHARE_ENVELOPE_QUERY,
-            &[&share_id, &active_epoch, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let envelope_sender_id: String = envelope.get("sender_id");
-    let envelope_recipient_id: String = envelope.get("recipient_id");
-    let envelope_node_id: String = envelope.get("node_id");
-    let envelope_record_version: i64 = envelope.get("record_version");
-    let envelope_previous_record_hash: Option<Vec<u8>> = envelope.get("previous_record_hash");
-    let envelope_cbor: Vec<u8> = envelope.get("canonical_cbor");
     let decoded_envelope =
-        decode_share_envelope(&envelope_cbor).map_err(error::ErrorInternalServerError)?;
-    if envelope_sender_id != owner_id
-        || envelope_recipient_id != user.id
-        || envelope_node_id != root_node_id
-        || envelope_record_version != share_record_version
-        || envelope_previous_record_hash != share_previous_record_hash
+        decode_share_envelope(&envelope.canonical_cbor).map_err(error::ErrorInternalServerError)?;
+    if envelope.sender_id != owner_id
+        || envelope.recipient_id != user.id
+        || envelope.node_id != root_node_id
+        || envelope.record_version != share_record_version
+        || envelope.previous_record_hash != share_previous_record_hash
+        || envelope.recipient_key_version != recipient_key_version
         || i16::try_from(decoded_envelope.format_version).ok() != Some(epoch_protocol_version)
         || (epoch_protocol_version == SHARE_ENVELOPE_VERSION as i16
             && (decoded_envelope
@@ -4965,9 +5108,9 @@ async fn shared_download_plan(
             "published share envelope is inconsistent with its active epoch",
         ));
     }
-    let commitment_sources = wrapper_rows
+    let commitment_sources = wrapper_snapshots
         .iter()
-        .map(|wrapper| wrapper.get::<_, String>("commitment_source"))
+        .map(|wrapper| wrapper.commitment_source.as_str())
         .collect::<HashSet<_>>();
     if commitment_sources.len() != 1 {
         return Err(error::ErrorInternalServerError(
@@ -4975,28 +5118,11 @@ async fn shared_download_plan(
         ));
     }
     let uses_directory = commitment_sources.contains("directory");
-    let directory_row = if uses_directory {
-        transaction
-            .query_opt(
-                "
-                    SELECT canonical_cbor, signature, wrapper_set_root,
-                           wrapper_count, signer_key_version
-                    FROM vault_share_wrapper_directories
-                    WHERE node_id = $1 AND record_version = $2
-                ",
-                &[&node_id, &node_record_version],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?
-    } else {
-        None
-    };
-    if uses_directory && directory_row.is_none() {
+    if uses_directory && directory_snapshot.is_none() {
         return Err(error::ErrorInternalServerError(
             "share-wrapper directory is missing",
         ));
     }
-    let object_key: Option<String> = row.get("object_key");
     let download_url = if let Some(object_key) = object_key.as_deref() {
         state
             .storage
@@ -5006,58 +5132,56 @@ async fn shared_download_plan(
     } else {
         None
     };
-    let bootstrap_cbor: Vec<u8> = row.get("bootstrap_cbor");
     let bootstrap = decode_bootstrap(&bootstrap_cbor).map_err(error::ErrorInternalServerError)?;
     let epoch_root = epoch_wrapper_set_root
         .as_deref()
         .map(<[u8; 32]>::try_from)
         .transpose()
         .map_err(|_| error::ErrorInternalServerError("stored wrapper root is invalid"))?;
-    let directory_material = directory_row
-        .as_ref()
-        .map(|directory_row| -> Result<_> {
-            let canonical_cbor: Vec<u8> = directory_row.get("canonical_cbor");
-            let signature: Vec<u8> = directory_row.get("signature");
-            let root: Vec<u8> = directory_row.get("wrapper_set_root");
-            let root = <[u8; 32]>::try_from(root.as_slice())
+    let directory_material = directory_snapshot
+        .map(|directory| -> Result<_> {
+            let root = <[u8; 32]>::try_from(directory.wrapper_set_root.as_slice())
                 .map_err(|_| error::ErrorInternalServerError("stored directory root is invalid"))?;
-            let count: i32 = directory_row.get("wrapper_count");
-            let signer_key_version: i64 = directory_row.get("signer_key_version");
-            let decoded =
-                decode_share_directory(&canonical_cbor).map_err(error::ErrorInternalServerError)?;
+            let decoded = decode_share_directory(&directory.canonical_cbor)
+                .map_err(error::ErrorInternalServerError)?;
             if decoded.node_id != node_id
                 || i64::try_from(decoded.record_version).ok() != Some(node_record_version)
-                || decoded.record_hash.as_slice() != row.get::<_, Vec<u8>>("record_hash")
+                || decoded.record_hash.as_slice() != record_hash
                 || decoded.generation_id.as_slice() != generation_id
-                || i64::try_from(decoded.generation_number).ok()
-                    != Some(row.get("current_generation_number"))
-                || i64::try_from(decoded.signer_key_version).ok() != Some(signer_key_version)
+                || i64::try_from(decoded.generation_number).ok() != Some(current_generation_number)
+                || i64::try_from(decoded.signer_key_version).ok()
+                    != Some(directory.signer_key_version)
                 || decoded.wrapper_set_root != root
-                || i32::try_from(decoded.wrapper_count).ok() != Some(count)
+                || i32::try_from(decoded.wrapper_count).ok() != Some(directory.wrapper_count)
             {
                 return Err(error::ErrorInternalServerError(
                     "stored share-wrapper directory is inconsistent",
                 ));
             }
             verify_ed25519_signature(
-                &canonical_cbor,
-                &signature,
-                row.get::<_, Vec<u8>>("ed25519_public_key").as_slice(),
+                &directory.canonical_cbor,
+                &directory.signature,
+                &node_signer_ed25519_public_key,
             )
             .map_err(error::ErrorInternalServerError)?;
-            Ok((canonical_cbor, signature, root, count))
+            Ok((
+                directory.canonical_cbor,
+                directory.signature,
+                root,
+                directory.wrapper_count,
+            ))
         })
         .transpose()?;
-    let mut wrappers = Vec::with_capacity(wrapper_rows.len());
-    let mut wrapper_proofs = Vec::with_capacity(wrapper_rows.len());
-    let mut directory_proofs = Vec::with_capacity(wrapper_rows.len());
-    for wrapper in wrapper_rows {
-        let canonical: Vec<u8> = wrapper.get("canonical_cbor");
+    let mut wrappers = Vec::with_capacity(wrapper_snapshots.len());
+    let mut wrapper_proofs = Vec::with_capacity(wrapper_snapshots.len());
+    let mut directory_proofs = Vec::with_capacity(wrapper_snapshots.len());
+    for wrapper in wrapper_snapshots {
+        let canonical = wrapper.canonical_cbor;
         let wrapper_hash = sha256(&canonical);
         wrappers.push(encode_bytes(canonical));
-        let leaf_index: Option<i32> = wrapper.get("merkle_leaf_index");
-        let proof: Option<Vec<u8>> = wrapper.get("merkle_proof");
-        let commitment_source: String = wrapper.get("commitment_source");
+        let leaf_index = wrapper.merkle_leaf_index;
+        let proof = wrapper.merkle_proof;
+        let commitment_source = wrapper.commitment_source;
         let response_proof = match (commitment_source.as_str(), leaf_index, proof) {
             ("bootstrap" | "epoch", None, None) => None,
             (_, Some(leaf_index), Some(proof)) if proof.len() % 32 == 0 => {
@@ -5127,27 +5251,24 @@ async fn shared_download_plan(
         });
     let response = DownloadPlanResponse {
         node_id: node_id.to_owned(),
-        entry_type: row.get("entry_type"),
-        generation_number: row.get("current_generation_number"),
+        entry_type,
+        generation_number: current_generation_number,
         generation_id: encode_bytes(generation_id),
-        ciphertext_length: row.get::<_, Option<i64>>("ciphertext_length").unwrap_or(0),
-        crypto_chunk_bytes: row
-            .get::<_, Option<i32>>("crypto_chunk_bytes")
-            .unwrap_or(CRYPTO_CHUNK_BYTES as i32),
-        chunk_count: row.get::<_, Option<i32>>("chunk_count").unwrap_or(0),
+        ciphertext_length: ciphertext_length.unwrap_or(0),
+        crypto_chunk_bytes: crypto_chunk_bytes.unwrap_or(CRYPTO_CHUNK_BYTES as i32),
+        chunk_count: chunk_count.unwrap_or(0),
         ciphertext_merkle_root: encode_bytes(
-            row.get::<_, Option<Vec<u8>>>("ciphertext_merkle_root")
-                .unwrap_or_else(|| bootstrap.ciphertext_merkle_root.to_vec()),
+            ciphertext_merkle_root.unwrap_or_else(|| bootstrap.ciphertext_merkle_root.to_vec()),
         ),
         download_url,
         bootstrap_cbor: encode_bytes(bootstrap_cbor),
-        bootstrap_signature: encode_bytes(row.get::<_, Vec<u8>>("bootstrap_signature")),
-        encrypted_manifest: encode_bytes(row.get::<_, Vec<u8>>("encrypted_manifest")),
+        bootstrap_signature: encode_bytes(bootstrap_signature),
+        encrypted_manifest: encode_bytes(encrypted_manifest),
         wrappers,
-        signer_key_version: row.get("signer_key_version"),
-        signer_ed25519_public_key: encode_bytes(row.get::<_, Vec<u8>>("ed25519_public_key")),
-        record_version: row.get("record_version"),
-        record_hash: encode_bytes(row.get::<_, Vec<u8>>("record_hash")),
+        signer_key_version,
+        signer_ed25519_public_key: encode_bytes(node_signer_ed25519_public_key),
+        record_version: node_record_version,
+        record_hash: encode_bytes(record_hash),
         share: Some(ShareDownloadMaterial {
             share_id,
             epoch: active_epoch,
@@ -5156,33 +5277,136 @@ async fn shared_download_plan(
             recipient_id: user.id.clone(),
             record_version: share_record_version,
             previous_record_hash: share_previous_record_hash.map(encode_bytes),
-            envelope_cbor: encode_bytes(envelope_cbor),
-            envelope_signature: encode_bytes(envelope.get::<_, Vec<u8>>("signature")),
-            envelope_hash: encode_bytes(envelope.get::<_, Vec<u8>>("envelope_hash")),
-            sender_key_version: envelope.get("sender_key_version"),
-            sender_x25519_public_key: encode_bytes(envelope.get::<_, Vec<u8>>("x25519_public_key")),
-            sender_ed25519_public_key: encode_bytes(
-                envelope.get::<_, Vec<u8>>("ed25519_public_key"),
-            ),
-            sender_fingerprint_sha256: encode_bytes(
-                envelope.get::<_, Vec<u8>>("fingerprint_sha256"),
-            ),
+            envelope_cbor: encode_bytes(envelope.canonical_cbor),
+            envelope_signature: encode_bytes(envelope.signature),
+            envelope_hash: encode_bytes(envelope.envelope_hash),
+            sender_key_version: envelope.sender_key_version,
+            sender_x25519_public_key: encode_bytes(envelope.sender_x25519_public_key),
+            sender_ed25519_public_key: encode_bytes(envelope.sender_ed25519_public_key),
+            sender_fingerprint_sha256: encode_bytes(envelope.sender_fingerprint_sha256),
             recipient_key_version,
             wrapper_proofs,
             directory,
         }),
     };
 
-    // Keep the share and recipient locks until the complete key plan and its
-    // short-lived object URL have been assembled. Epoch rotation takes
-    // conflicting row locks, so it cannot publish a revocation in the middle
-    // of this authorization decision.
-    transaction
-        .commit()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
     Ok(HttpResponse::Ok().json(response))
+}
+
+fn shared_download_snapshot_from_row(row: tokio_postgres::Row) -> Result<SharedDownloadSnapshot> {
+    let wrapper_cbors: Vec<Vec<u8>> = row.get("wrapper_cbors");
+    let wrapper_leaf_indexes: Vec<Option<i32>> = row.get("wrapper_leaf_indexes");
+    let wrapper_merkle_proofs: Vec<Option<Vec<u8>>> = row.get("wrapper_merkle_proofs");
+    let wrapper_commitment_sources: Vec<String> = row.get("wrapper_commitment_sources");
+    let wrapper_count = wrapper_cbors.len();
+    if wrapper_leaf_indexes.len() != wrapper_count
+        || wrapper_merkle_proofs.len() != wrapper_count
+        || wrapper_commitment_sources.len() != wrapper_count
+    {
+        return Err(error::ErrorInternalServerError(
+            "shared download wrapper snapshot is misaligned",
+        ));
+    }
+    let wrappers = wrapper_cbors
+        .into_iter()
+        .zip(wrapper_leaf_indexes)
+        .zip(wrapper_merkle_proofs)
+        .zip(wrapper_commitment_sources)
+        .map(
+            |(((canonical_cbor, merkle_leaf_index), merkle_proof), commitment_source)| {
+                SharedWrapperSnapshot {
+                    canonical_cbor,
+                    merkle_leaf_index,
+                    merkle_proof,
+                    commitment_source,
+                }
+            },
+        )
+        .collect();
+
+    let envelope_cbor: Option<Vec<u8>> = row.get("envelope_cbor");
+    let Some(envelope_cbor) = envelope_cbor else {
+        return Err(error::ErrorInternalServerError(
+            "published share envelope is missing",
+        ));
+    };
+    let envelope = SharedEnvelopeSnapshot {
+        canonical_cbor: envelope_cbor,
+        signature: required_snapshot_column(&row, "envelope_signature")?,
+        envelope_hash: required_snapshot_column(&row, "envelope_hash")?,
+        sender_key_version: required_snapshot_column(&row, "envelope_sender_key_version")?,
+        recipient_key_version: required_snapshot_column(&row, "envelope_recipient_key_version")?,
+        sender_id: required_snapshot_column(&row, "envelope_sender_id")?,
+        recipient_id: required_snapshot_column(&row, "envelope_recipient_id")?,
+        node_id: required_snapshot_column(&row, "envelope_node_id")?,
+        record_version: required_snapshot_column(&row, "envelope_record_version")?,
+        previous_record_hash: row.get("envelope_previous_record_hash"),
+        sender_x25519_public_key: required_snapshot_column(
+            &row,
+            "envelope_sender_x25519_public_key",
+        )?,
+        sender_ed25519_public_key: required_snapshot_column(
+            &row,
+            "envelope_sender_ed25519_public_key",
+        )?,
+        sender_fingerprint_sha256: required_snapshot_column(
+            &row,
+            "envelope_sender_fingerprint_sha256",
+        )?,
+    };
+
+    let directory_cbor: Option<Vec<u8>> = row.get("directory_cbor");
+    let directory = directory_cbor
+        .map(|canonical_cbor| -> Result<_> {
+            Ok(SharedDirectorySnapshot {
+                canonical_cbor,
+                signature: required_snapshot_column(&row, "directory_signature")?,
+                wrapper_set_root: required_snapshot_column(&row, "directory_wrapper_set_root")?,
+                wrapper_count: required_snapshot_column(&row, "directory_wrapper_count")?,
+                signer_key_version: required_snapshot_column(&row, "directory_signer_key_version")?,
+            })
+        })
+        .transpose()?;
+
+    Ok(SharedDownloadSnapshot {
+        share_id: row.get("share_id"),
+        owner_id: row.get("owner_id"),
+        root_node_id: row.get("root_node_id"),
+        active_epoch: row.get("active_epoch"),
+        share_record_version: row.get("share_record_version"),
+        share_previous_record_hash: row.get("share_previous_record_hash"),
+        recipient_key_version: row.get("recipient_key_version"),
+        epoch_protocol_version: row.get("epoch_protocol_version"),
+        epoch_wrapper_set_root: row.get("epoch_wrapper_set_root"),
+        epoch_wrapper_count: row.get("epoch_wrapper_count"),
+        entry_type: row.get("entry_type"),
+        current_generation_number: row.get("current_generation_number"),
+        current_generation_id: row.get("current_generation_id"),
+        bootstrap_cbor: row.get("bootstrap_cbor"),
+        bootstrap_signature: row.get("bootstrap_signature"),
+        encrypted_manifest: row.get("encrypted_manifest"),
+        signer_key_version: row.get("signer_key_version"),
+        node_record_version: row.get("node_record_version"),
+        record_hash: row.get("record_hash"),
+        node_signer_ed25519_public_key: row.get("node_signer_ed25519_public_key"),
+        object_key: row.get("object_key"),
+        ciphertext_length: row.get("ciphertext_length"),
+        crypto_chunk_bytes: row.get("crypto_chunk_bytes"),
+        chunk_count: row.get("chunk_count"),
+        ciphertext_merkle_root: row.get("ciphertext_merkle_root"),
+        wrappers,
+        envelope,
+        directory,
+    })
+}
+
+fn required_snapshot_column<T>(row: &tokio_postgres::Row, name: &str) -> Result<T>
+where
+    T: for<'a> tokio_postgres::types::FromSql<'a>,
+{
+    row.get::<_, Option<T>>(name).ok_or_else(|| {
+        error::ErrorInternalServerError(format!("shared download snapshot is missing {name}"))
+    })
 }
 
 async fn get_upload(
@@ -5669,27 +5893,231 @@ mod tests {
     }
 
     #[test]
-    fn shared_download_authorization_locks_revocation_rows() {
+    fn shared_download_snapshot_releases_locks_before_response_work() {
         assert!(
-            SHARED_DOWNLOAD_AUTHORIZATION_QUERY.contains("FOR SHARE OF shares, recipients"),
-            "shared key plans must hold locks that conflict with epoch rotation"
+            SHARED_DOWNLOAD_SNAPSHOT_QUERY.contains("FOR SHARE OF shares, recipients"),
+            "the authorization snapshot must conflict with epoch rotation until copied"
         );
-        assert!(SHARED_DOWNLOAD_AUTHORIZATION_QUERY.contains("recipients.status = 'active'"));
-        assert!(SHARED_DOWNLOAD_AUTHORIZATION_QUERY.contains("shares.status = 'active'"));
+        assert!(SHARED_DOWNLOAD_SNAPSHOT_QUERY.contains("recipients.status = 'active'"));
+        assert!(SHARED_DOWNLOAD_SNAPSHOT_QUERY.contains("shares.status = 'active'"));
+        assert!(SHARED_DOWNLOAD_SNAPSHOT_QUERY.contains("wrapper_snapshot AS MATERIALIZED"));
+        assert!(SHARED_DOWNLOAD_SNAPSHOT_QUERY.contains("LEFT JOIN LATERAL"));
+
+        let source = include_str!("vault.rs");
+        let handler = source
+            .split_once("async fn shared_download_plan(")
+            .and_then(|(_, tail)| tail.split_once("async fn get_upload("))
+            .map(|(handler, _)| handler)
+            .expect("shared download handler should remain inspectable");
+        assert_eq!(handler.matches(".query_opt(").count(), 1);
+        let commit = handler.find(".commit()").expect("snapshot must commit");
+        for work in [
+            "shared_download_snapshot_from_row(row)",
+            "decode_share_envelope",
+            ".download_url(",
+            "encode_bytes(",
+        ] {
+            assert!(
+                commit
+                    < handler
+                        .find(work)
+                        .expect("response work must remain visible"),
+                "{work} moved back inside the shared download transaction"
+            );
+        }
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_query_contracts_prepare() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (client, connection) = tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+            .await
+            .expect("connect to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            connection
+                .await
+                .expect("PostgreSQL connection stays healthy");
+        });
+
+        client
+            .prepare(SHARED_DOWNLOAD_SNAPSHOT_QUERY)
+            .await
+            .expect("shared download snapshot query should prepare");
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_optimized_queries_execute() {
+        use tokio_postgres::error::SqlState;
+
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (mut snapshot_client, snapshot_connection) =
+            tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+                .await
+                .expect("connect snapshot client to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            snapshot_connection
+                .await
+                .expect("snapshot PostgreSQL connection stays healthy");
+        });
+        let (contender, contender_connection) =
+            tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+                .await
+                .expect("connect contender client to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            contender_connection
+                .await
+                .expect("contender PostgreSQL connection stays healthy");
+        });
+
+        snapshot_client
+            .batch_execute(
+                "INSERT INTO users (id, username, password_hash, role, status)
+                   VALUES
+                     ('usr_perf_share_owner', 'perf_share_owner', 'not-a-login-hash', 'user', 'active'),
+                     ('usr_perf_share_recipient', 'perf_share_recipient', 'not-a-login-hash', 'user', 'active');
+                 INSERT INTO vault_identity_keys (
+                   user_id, key_version, x25519_public_key, ed25519_public_key,
+                   fingerprint_sha256, status
+                 ) VALUES
+                   ('usr_perf_share_owner', 1, decode(repeat('11', 32), 'hex'),
+                    decode(repeat('12', 32), 'hex'), decode(repeat('13', 32), 'hex'), 'active'),
+                   ('usr_perf_share_recipient', 1, decode(repeat('21', 32), 'hex'),
+                    decode(repeat('22', 32), 'hex'), decode(repeat('23', 32), 'hex'), 'active');
+                 INSERT INTO files (
+                   id, owner_id, original_name, storage_name, size_bytes, entry_type,
+                   e2ee_state, current_generation_number, current_generation_id
+                 ) VALUES (
+                   'fil_perf_share_root', 'usr_perf_share_owner', 'shared-root',
+                   'perf-share/root', 0, 'folder', 'encrypted', 1,
+                   decode(repeat('31', 16), 'hex')
+                 );
+                 INSERT INTO vault_node_records (
+                   node_id, owner_id, record_version, record_hash,
+                   bootstrap_cbor, bootstrap_signature, encrypted_manifest,
+                   manifest_hash, signer_key_version
+                 ) VALUES (
+                   'fil_perf_share_root', 'usr_perf_share_owner', 1,
+                   decode(repeat('32', 32), 'hex'), decode(repeat('33', 128), 'hex'),
+                   decode(repeat('34', 64), 'hex'), decode(repeat('35', 16), 'hex'),
+                   decode(repeat('36', 32), 'hex'), 1
+                 );
+                 INSERT INTO vault_node_heads (
+                   node_id, owner_id, record_version, record_hash
+                 ) VALUES (
+                   'fil_perf_share_root', 'usr_perf_share_owner', 1,
+                   decode(repeat('32', 32), 'hex')
+                 );
+                 INSERT INTO vault_shares (
+                   id, owner_id, root_node_id, active_epoch, status, record_version,
+                   record_hash
+                 ) VALUES (
+                   'shr_perf_snapshot', 'usr_perf_share_owner', 'fil_perf_share_root',
+                   1, 'active', 1, decode(repeat('41', 32), 'hex')
+                 );
+                 INSERT INTO vault_share_epochs (share_id, epoch, status, protocol_version)
+                   VALUES ('shr_perf_snapshot', 1, 'published', 1);
+                 INSERT INTO vault_share_recipients (
+                   share_id, recipient_id, recipient_key_version, status
+                 ) VALUES (
+                   'shr_perf_snapshot', 'usr_perf_share_recipient', 1, 'active'
+                 );
+                 INSERT INTO vault_share_envelopes (
+                   envelope_id, share_id, epoch, sender_id, sender_key_version,
+                   recipient_id, recipient_key_version, node_id, permissions,
+                   record_version, encapsulated_key, ciphertext, canonical_cbor,
+                   signature, envelope_hash
+                 ) VALUES (
+                   decode(repeat('42', 16), 'hex'), 'shr_perf_snapshot', 1,
+                   'usr_perf_share_owner', 1, 'usr_perf_share_recipient', 1,
+                   'fil_perf_share_root', 'read', 1,
+                   decode(repeat('43', 32), 'hex'), decode(repeat('44', 48), 'hex'),
+                   decode(repeat('45', 128), 'hex'), decode(repeat('46', 64), 'hex'),
+                   decode(repeat('47', 32), 'hex')
+                 );
+                 INSERT INTO vault_share_wrappers (
+                   wrapper_id, share_id, epoch, node_id, wrapper_kind,
+                   record_version, canonical_cbor, wrapper_hash, commitment_source
+                 ) VALUES (
+                   decode(repeat('48', 16), 'hex'), 'shr_perf_snapshot', 1,
+                   'fil_perf_share_root', 'metadata', 1,
+                   decode(repeat('49', 64), 'hex'), decode(repeat('4a', 32), 'hex'),
+                   'epoch'
+                 );",
+            )
+            .await
+            .expect("shared-download fixture should insert");
+
+        let transaction = snapshot_client
+            .transaction()
+            .await
+            .expect("snapshot transaction should start");
+        let row = transaction
+            .query_one(
+                SHARED_DOWNLOAD_SNAPSHOT_QUERY,
+                &[&"fil_perf_share_root", &"usr_perf_share_recipient"],
+            )
+            .await
+            .expect("shared download snapshot should execute");
+
+        contender
+            .batch_execute("SET lock_timeout = '100ms'")
+            .await
+            .expect("contender lock timeout should apply");
+        let blocked = contender
+            .execute(
+                "UPDATE vault_shares SET updated_at = now() WHERE id = 'shr_perf_snapshot'",
+                &[],
+            )
+            .await
+            .expect_err("share mutation should wait while the snapshot lock is held");
+        assert_eq!(blocked.code(), Some(&SqlState::LOCK_NOT_AVAILABLE));
+
+        transaction
+            .commit()
+            .await
+            .expect("snapshot transaction should commit before response work");
+        let snapshot = shared_download_snapshot_from_row(row)
+            .expect("owned snapshot values should remain usable after commit");
+        assert_eq!(snapshot.share_id, "shr_perf_snapshot");
+        assert_eq!(snapshot.wrappers.len(), 1);
+        assert_eq!(snapshot.envelope.recipient_id, "usr_perf_share_recipient");
+        assert_eq!(
+            contender
+                .execute(
+                    "UPDATE vault_shares SET updated_at = now() WHERE id = 'shr_perf_snapshot'",
+                    &[],
+                )
+                .await
+                .expect("share mutation should proceed after snapshot commit"),
+            1
+        );
+        snapshot_client
+            .execute(
+                "DELETE FROM users WHERE id IN ('usr_perf_share_owner', 'usr_perf_share_recipient')",
+                &[],
+            )
+            .await
+            .expect("shared-download fixture should clean up");
     }
 
     #[test]
     fn latest_share_envelope_query_matches_the_no_sort_index_order() {
         assert!(
-            LATEST_SHARE_ENVELOPE_QUERY
-                .contains("WHERE envelopes.share_id = $1 AND envelopes.epoch = $2")
+            SHARED_DOWNLOAD_SNAPSHOT_QUERY
+                .contains("WHERE envelopes.share_id = authorized_share.share_id")
         );
-        assert!(LATEST_SHARE_ENVELOPE_QUERY.contains("envelopes.recipient_id = $3"));
         assert!(
-            LATEST_SHARE_ENVELOPE_QUERY
+            SHARED_DOWNLOAD_SNAPSHOT_QUERY
+                .contains("envelopes.epoch = authorized_share.active_epoch")
+        );
+        assert!(SHARED_DOWNLOAD_SNAPSHOT_QUERY.contains("envelopes.recipient_id = $2"));
+        assert!(
+            SHARED_DOWNLOAD_SNAPSHOT_QUERY
                 .contains("ORDER BY envelopes.created_at DESC, envelopes.envelope_id DESC")
         );
-        assert!(LATEST_SHARE_ENVELOPE_QUERY.contains("LIMIT 1"));
+        assert!(SHARED_DOWNLOAD_SNAPSHOT_QUERY.contains("LIMIT 1"));
 
         let vault_schema = include_str!("../../../database/init/002_e2ee.sql");
         assert!(vault_schema.contains("vault_share_envelopes_recipient_latest_idx"));

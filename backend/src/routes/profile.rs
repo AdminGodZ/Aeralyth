@@ -7,6 +7,41 @@ use crate::auth::{CSRF_FIELD, require_csrf, require_principal};
 use crate::state::AppState;
 
 const MAX_PROFILE_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+const PROFILE_IMAGE_KEEP: i16 = 0;
+const PROFILE_IMAGE_REMOVE: i16 = 1;
+const PROFILE_IMAGE_REPLACE: i16 = 2;
+
+const PROFILE_UPDATE_QUERY: &str = "
+    UPDATE users
+    SET display_name = CASE WHEN $2 THEN $1 ELSE display_name END,
+        theme_preference = COALESCE($3, theme_preference),
+        accent_color = COALESCE($4, accent_color),
+        folder_zip_prompt_enabled = COALESCE($5, folder_zip_prompt_enabled),
+        vault_auto_lock_minutes = COALESCE($6, vault_auto_lock_minutes),
+        profile_image_bytes = CASE $7::smallint
+          WHEN 1 THEN NULL
+          WHEN 2 THEN $8
+          ELSE profile_image_bytes
+        END,
+        profile_image_mime_type = CASE $7::smallint
+          WHEN 1 THEN NULL
+          WHEN 2 THEN $9
+          ELSE profile_image_mime_type
+        END,
+        profile_image_size_bytes = CASE $7::smallint
+          WHEN 1 THEN NULL
+          WHEN 2 THEN $10
+          ELSE profile_image_size_bytes
+        END,
+        profile_image_updated_at = CASE $7::smallint
+          WHEN 1 THEN NULL
+          WHEN 2 THEN now()
+          ELSE profile_image_updated_at
+        END,
+        updated_at = now()
+    WHERE id = $11
+    RETURNING id
+";
 
 #[derive(Default)]
 struct ProfileUpdate {
@@ -121,138 +156,53 @@ pub async fn update(
     };
     require_csrf(&state, &request, &csrf_token).await?;
 
-    let existing_settings = state
-        .db
-        .query_one(
-            "
-                SELECT
-                  display_name,
-                  COALESCE(theme_preference, 'system') AS theme_preference,
-                  COALESCE(accent_color, '#3088f0') AS accent_color,
-                  COALESCE(folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
-                  COALESCE(vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes
-                FROM users
-                WHERE id = $1
-                LIMIT 1
-            ",
-            &[&user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let existing_display_name: Option<String> = existing_settings.get("display_name");
-    let existing_theme_preference: String = existing_settings.get("theme_preference");
-    let existing_accent_color: String = existing_settings.get("accent_color");
-    let existing_folder_zip_prompt_enabled: bool =
-        existing_settings.get("folder_zip_prompt_enabled");
-    let existing_vault_auto_lock_minutes: i32 = existing_settings.get("vault_auto_lock_minutes");
-    let display_name = match update.display_name.as_deref() {
-        Some(display_name) => normalize_display_name(Some(display_name)),
-        None => existing_display_name,
-    };
+    let display_name_present = update.display_name.is_some();
+    let display_name = normalize_display_name(update.display_name.as_deref());
     let theme_preference = update
         .theme_preference
         .as_deref()
         .and_then(|theme_preference| normalize_theme_preference(Some(theme_preference)))
-        .map(str::to_owned)
-        .unwrap_or(existing_theme_preference);
+        .map(str::to_owned);
     let accent_color = update
         .accent_color
         .as_deref()
-        .and_then(|accent_color| normalize_accent_color(Some(accent_color)))
-        .unwrap_or(existing_accent_color);
-    let folder_zip_prompt_enabled = update
-        .folder_zip_prompt_enabled
-        .unwrap_or(existing_folder_zip_prompt_enabled);
-    let vault_auto_lock_minutes = update
-        .vault_auto_lock_minutes
-        .unwrap_or(existing_vault_auto_lock_minutes);
+        .and_then(|accent_color| normalize_accent_color(Some(accent_color)));
+    let (profile_image_action, profile_image_bytes, profile_image_mime_type, profile_image_size) =
+        if update.remove_profile_image {
+            (PROFILE_IMAGE_REMOVE, None, None, None)
+        } else if let Some(profile_image) = update.profile_image {
+            (
+                PROFILE_IMAGE_REPLACE,
+                Some(profile_image.bytes),
+                Some(profile_image.mime_type),
+                Some(profile_image.size_bytes),
+            )
+        } else {
+            (PROFILE_IMAGE_KEEP, None, None, None)
+        };
 
-    if update.remove_profile_image {
-        state
-            .db
-            .execute(
-                "
-                    UPDATE users
-                    SET display_name = $1,
-                        theme_preference = $2,
-                        accent_color = $3,
-                        folder_zip_prompt_enabled = $4,
-                        vault_auto_lock_minutes = $5,
-                        profile_image_bytes = NULL,
-                        profile_image_mime_type = NULL,
-                        profile_image_size_bytes = NULL,
-                        profile_image_updated_at = NULL,
-                        updated_at = now()
-                    WHERE id = $6
-                ",
-                &[
-                    &display_name,
-                    &theme_preference,
-                    &accent_color,
-                    &folder_zip_prompt_enabled,
-                    &vault_auto_lock_minutes,
-                    &user.id,
-                ],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-    } else if let Some(profile_image) = update.profile_image {
-        state
-            .db
-            .execute(
-                "
-                    UPDATE users
-                    SET display_name = $1,
-                        theme_preference = $2,
-                        accent_color = $3,
-                        folder_zip_prompt_enabled = $4,
-                        vault_auto_lock_minutes = $5,
-                        profile_image_bytes = $6,
-                        profile_image_mime_type = $7,
-                        profile_image_size_bytes = $8,
-                        profile_image_updated_at = now(),
-                        updated_at = now()
-                    WHERE id = $9
-                ",
-                &[
-                    &display_name,
-                    &theme_preference,
-                    &accent_color,
-                    &folder_zip_prompt_enabled,
-                    &vault_auto_lock_minutes,
-                    &profile_image.bytes,
-                    &profile_image.mime_type,
-                    &profile_image.size_bytes,
-                    &user.id,
-                ],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-    } else {
-        state
-            .db
-            .execute(
-                "
-                    UPDATE users
-                    SET display_name = $1,
-                        theme_preference = $2,
-                        accent_color = $3,
-                        folder_zip_prompt_enabled = $4,
-                        vault_auto_lock_minutes = $5,
-                        updated_at = now()
-                    WHERE id = $6
-                ",
-                &[
-                    &display_name,
-                    &theme_preference,
-                    &accent_color,
-                    &folder_zip_prompt_enabled,
-                    &vault_auto_lock_minutes,
-                    &user.id,
-                ],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+    let updated = state
+        .db
+        .query_opt(
+            PROFILE_UPDATE_QUERY,
+            &[
+                &display_name,
+                &display_name_present,
+                &theme_preference,
+                &accent_color,
+                &update.folder_zip_prompt_enabled,
+                &update.vault_auto_lock_minutes,
+                &profile_image_action,
+                &profile_image_bytes,
+                &profile_image_mime_type,
+                &profile_image_size,
+                &user.id,
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    if updated.is_none() {
+        return Err(error::ErrorUnauthorized("authentication required"));
     }
 
     Ok(redirect("/settings?profile=updated"))
@@ -398,4 +348,120 @@ fn redirect(location: &'static str) -> HttpResponse {
     HttpResponse::SeeOther()
         .insert_header((LOCATION, location))
         .finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PROFILE_UPDATE_QUERY;
+
+    #[test]
+    fn profile_patch_is_one_update_without_a_settings_reload() {
+        let normalized = PROFILE_UPDATE_QUERY.to_ascii_lowercase();
+        assert_eq!(normalized.matches("update users").count(), 1);
+        assert!(!normalized.contains("select "));
+        assert!(normalized.contains("returning id"));
+        assert!(normalized.contains("case when $2 then $1 else display_name end"));
+        assert!(normalized.contains("coalesce($3, theme_preference)"));
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_query_contracts_prepare() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (client, connection) = tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+            .await
+            .expect("connect to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            connection
+                .await
+                .expect("PostgreSQL connection stays healthy");
+        });
+
+        client
+            .prepare(PROFILE_UPDATE_QUERY)
+            .await
+            .expect("profile patch query should prepare");
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_optimized_queries_execute() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (mut client, connection) =
+            tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+                .await
+                .expect("connect to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            connection
+                .await
+                .expect("PostgreSQL connection stays healthy");
+        });
+        let transaction = client
+            .transaction()
+            .await
+            .expect("test transaction should start");
+        transaction
+            .execute(
+                "INSERT INTO users (
+                   id, username, password_hash, role, status, display_name,
+                   theme_preference, accent_color, folder_zip_prompt_enabled,
+                   vault_auto_lock_minutes
+                 ) VALUES (
+                   'usr_perf_profile', 'perf_profile', 'not-a-login-hash',
+                   'user', 'active', 'Before', 'system', '#112233', TRUE, 15
+                 )",
+                &[],
+            )
+            .await
+            .expect("profile fixture should insert");
+        let display_name = Some("Latency User");
+        let theme = Some("dark");
+        let accent: Option<&str> = None;
+        let zip_prompt = Some(false);
+        let auto_lock = Some(30_i32);
+        let image_bytes: Option<Vec<u8>> = None;
+        let image_mime: Option<String> = None;
+        let image_size: Option<i64> = None;
+        let row = transaction
+            .query_one(
+                PROFILE_UPDATE_QUERY,
+                &[
+                    &display_name,
+                    &true,
+                    &theme,
+                    &accent,
+                    &zip_prompt,
+                    &auto_lock,
+                    &0_i16,
+                    &image_bytes,
+                    &image_mime,
+                    &image_size,
+                    &"usr_perf_profile",
+                ],
+            )
+            .await
+            .expect("one-statement profile patch should execute");
+        assert_eq!(row.get::<_, String>("id"), "usr_perf_profile");
+        let stored = transaction
+            .query_one(
+                "SELECT display_name, theme_preference, accent_color,
+                        folder_zip_prompt_enabled, vault_auto_lock_minutes
+                 FROM users WHERE id = 'usr_perf_profile'",
+                &[],
+            )
+            .await
+            .expect("patched profile should remain readable");
+        assert_eq!(
+            stored.get::<_, Option<String>>("display_name").as_deref(),
+            Some("Latency User")
+        );
+        assert_eq!(stored.get::<_, String>("theme_preference"), "dark");
+        assert_eq!(stored.get::<_, String>("accent_color"), "#112233");
+        assert!(!stored.get::<_, bool>("folder_zip_prompt_enabled"));
+        assert_eq!(stored.get::<_, i32>("vault_auto_lock_minutes"), 30);
+        transaction
+            .rollback()
+            .await
+            .expect("profile fixture should roll back");
+    }
 }

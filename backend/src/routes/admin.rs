@@ -1,7 +1,6 @@
 use actix_web::http::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION};
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use deadpool_postgres::Transaction;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::{AuthUser, require_admin, require_admin_user, require_csrf};
@@ -12,6 +11,217 @@ const INVITATION_LIFETIME_DAYS: i64 = 7;
 const ADMIN_USER_MUTATION_LOCK_ID: i64 = 4_132_591_101;
 const DEFAULT_ADMIN_PAGE_SIZE: usize = 50;
 const MAX_ADMIN_PAGE_SIZE: usize = 100;
+const UPDATE_USER_ROLE_QUERY: &str = "
+    WITH mutation_lock AS MATERIALIZED (
+      SELECT pg_advisory_xact_lock($1)
+    ), authorized AS MATERIALIZED (
+      SELECT sessions.id
+      FROM mutation_lock
+      CROSS JOIN sessions
+      INNER JOIN users ON users.id = sessions.user_id
+      WHERE sessions.id = $2
+        AND sessions.csrf_token = $3
+        AND sessions.expires_at > now()
+        AND users.id = $4
+        AND users.role = 'admin'
+        AND users.status = 'active'
+      LIMIT 1
+      FOR SHARE OF sessions
+    ), target AS MATERIALIZED (
+      SELECT users.id, users.role, users.status
+      FROM users
+      WHERE users.id = $5
+        AND EXISTS (SELECT 1 FROM authorized)
+      FOR UPDATE
+    ), decision AS MATERIALIZED (
+      SELECT target.*,
+             target.role = 'admin'
+             AND target.status = 'active'
+             AND $6::text <> 'admin'
+             AND (
+               SELECT count(*) FROM users
+               WHERE role = 'admin' AND status = 'active'
+             ) <= 1 AS last_admin_blocked
+      FROM target
+    ), updated AS (
+      UPDATE users
+      SET role = $6, updated_at = now()
+      FROM decision
+      WHERE users.id = decision.id
+        AND NOT decision.last_admin_blocked
+      RETURNING users.id
+    )
+    SELECT EXISTS (SELECT 1 FROM authorized) AS authorized,
+           EXISTS (SELECT 1 FROM target) AS target_exists,
+           COALESCE((SELECT last_admin_blocked FROM decision), FALSE)
+             AS last_admin_blocked,
+           EXISTS (SELECT 1 FROM updated) AS updated
+";
+const UPDATE_USER_STATUS_QUERY: &str = "
+    WITH mutation_lock AS MATERIALIZED (
+      SELECT pg_advisory_xact_lock($1)
+    ), authorized AS MATERIALIZED (
+      SELECT sessions.id
+      FROM mutation_lock
+      CROSS JOIN sessions
+      INNER JOIN users ON users.id = sessions.user_id
+      WHERE sessions.id = $2
+        AND sessions.csrf_token = $3
+        AND sessions.expires_at > now()
+        AND users.id = $4
+        AND users.role = 'admin'
+        AND users.status = 'active'
+      LIMIT 1
+      FOR SHARE OF sessions
+    ), target AS MATERIALIZED (
+      SELECT users.id, users.role, users.status
+      FROM users
+      WHERE users.id = $5
+        AND EXISTS (SELECT 1 FROM authorized)
+      FOR UPDATE
+    ), decision AS MATERIALIZED (
+      SELECT target.*,
+             target.role = 'admin'
+             AND target.status = 'active'
+             AND $6::text = 'disabled'
+             AND (
+               SELECT count(*) FROM users
+               WHERE role = 'admin' AND status = 'active'
+             ) <= 1 AS last_admin_blocked
+      FROM target
+    ), updated AS (
+      UPDATE users
+      SET status = $6, updated_at = now()
+      FROM decision
+      WHERE users.id = decision.id
+        AND NOT decision.last_admin_blocked
+      RETURNING users.id
+    )
+    SELECT EXISTS (SELECT 1 FROM authorized) AS authorized,
+           EXISTS (SELECT 1 FROM target) AS target_exists,
+           COALESCE((SELECT last_admin_blocked FROM decision), FALSE)
+             AS last_admin_blocked,
+           EXISTS (SELECT 1 FROM updated) AS updated
+";
+const UPDATE_USER_QUERY: &str = "
+    WITH mutation_lock AS MATERIALIZED (
+      SELECT pg_advisory_xact_lock($1)
+    ), authorized AS MATERIALIZED (
+      SELECT sessions.id
+      FROM mutation_lock
+      CROSS JOIN sessions
+      INNER JOIN users ON users.id = sessions.user_id
+      WHERE sessions.id = $2
+        AND sessions.csrf_token = $3
+        AND sessions.expires_at > now()
+        AND users.id = $4
+        AND users.role = 'admin'
+        AND users.status = 'active'
+      LIMIT 1
+      FOR SHARE OF sessions
+    ), target AS MATERIALIZED (
+      SELECT users.id, users.role, users.status
+      FROM users
+      WHERE users.id = $5
+        AND EXISTS (SELECT 1 FROM authorized)
+      FOR UPDATE
+    ), decision AS MATERIALIZED (
+      SELECT target.*,
+             target.role = 'admin'
+             AND target.status = 'active'
+             AND ($8::text <> 'admin' OR $9::text <> 'active')
+             AND (
+               SELECT count(*) FROM users
+               WHERE role = 'admin' AND status = 'active'
+             ) <= 1 AS last_admin_blocked,
+             EXISTS (
+               SELECT 1 FROM users AS existing
+               WHERE lower(existing.username) = lower($6)
+                 AND existing.id <> target.id
+             ) AS username_in_use
+      FROM target
+    ), updated AS (
+      UPDATE users
+      SET username = $6,
+          display_name = $7,
+          role = $8,
+          status = $9,
+          updated_at = now()
+      FROM decision
+      WHERE users.id = decision.id
+        AND NOT decision.last_admin_blocked
+        AND NOT decision.username_in_use
+      RETURNING users.id
+    )
+    SELECT EXISTS (SELECT 1 FROM authorized) AS authorized,
+           EXISTS (SELECT 1 FROM target) AS target_exists,
+           COALESCE((SELECT last_admin_blocked FROM decision), FALSE)
+             AS last_admin_blocked,
+           COALESCE((SELECT username_in_use FROM decision), FALSE)
+             AS username_in_use,
+           EXISTS (SELECT 1 FROM updated) AS updated
+";
+const DELETE_USER_QUERY: &str = "
+    WITH mutation_lock AS MATERIALIZED (
+      SELECT pg_advisory_xact_lock($1)
+    ), authorized AS MATERIALIZED (
+      SELECT sessions.id
+      FROM mutation_lock
+      CROSS JOIN sessions
+      INNER JOIN users ON users.id = sessions.user_id
+      WHERE sessions.id = $2
+        AND sessions.csrf_token = $3
+        AND sessions.expires_at > now()
+        AND users.id = $4
+        AND users.role = 'admin'
+        AND users.status = 'active'
+      LIMIT 1
+      FOR SHARE OF sessions
+    ), target AS MATERIALIZED (
+      SELECT users.id, users.role, users.status
+      FROM users
+      WHERE users.id = $5
+        AND EXISTS (SELECT 1 FROM authorized)
+      FOR UPDATE
+    ), decision AS MATERIALIZED (
+      SELECT target.*,
+             target.role = 'admin'
+             AND target.status = 'active'
+             AND (
+               SELECT count(*) FROM users
+               WHERE role = 'admin' AND status = 'active'
+             ) <= 1 AS last_admin_blocked
+      FROM target
+    ), updated AS (
+      UPDATE users
+      SET status = 'deleting', updated_at = now()
+      FROM decision
+      WHERE users.id = decision.id
+        AND NOT decision.last_admin_blocked
+      RETURNING users.id
+    ), deleted_sessions AS (
+      DELETE FROM sessions
+      WHERE user_id IN (SELECT id FROM updated)
+      RETURNING user_id
+    ), queued AS (
+      INSERT INTO user_deletion_jobs (
+        user_id, phase, available_at, locked_until, last_error, updated_at
+      )
+      SELECT id, 'file_uploads', now(), NULL, NULL, now()
+      FROM updated
+      ON CONFLICT (user_id) DO UPDATE SET
+        available_at = LEAST(user_deletion_jobs.available_at, now()),
+        updated_at = now()
+      RETURNING user_id
+    )
+    SELECT EXISTS (SELECT 1 FROM authorized) AS authorized,
+           EXISTS (SELECT 1 FROM target) AS target_exists,
+           COALESCE((SELECT last_admin_blocked FROM decision), FALSE)
+             AS last_admin_blocked,
+           EXISTS (SELECT 1 FROM updated) AS updated,
+           (SELECT count(*) FROM deleted_sessions) AS deleted_sessions,
+           EXISTS (SELECT 1 FROM queued) AS queued
+";
 
 #[derive(Serialize)]
 struct AdminSessionResponse {
@@ -127,10 +337,13 @@ pub(crate) struct CsrfForm {
     csrf_token: String,
 }
 
-struct TargetUser {
-    id: String,
-    role: String,
-    status: String,
+struct AdminMutationOutcome {
+    authorized: bool,
+    target_exists: bool,
+    last_admin_blocked: bool,
+    username_in_use: bool,
+    updated: bool,
+    queued: bool,
 }
 
 pub async fn me(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
@@ -369,48 +582,30 @@ pub async fn update_user_role(
         return Ok(redirect("/users?user=self-protected"));
     }
 
-    let mut db = state
+    let outcome = state
         .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let transaction = db
-        .transaction()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    lock_admin_user_mutations(&transaction).await?;
-    require_transaction_admin_session(
-        &transaction,
-        &current_user.id,
-        &current_user.session_id,
-        &form.csrf_token,
-    )
-    .await?;
-
-    let Some(target_user) = get_target_user(&transaction, &target_user_id).await? else {
-        return Ok(redirect("/users?user=missing"));
-    };
-
-    if target_user.role == "admin"
-        && target_user.status == "active"
-        && role != "admin"
-        && active_admin_count(&transaction).await? <= 1
-    {
-        return Ok(redirect("/users?user=last-admin"));
-    }
-
-    transaction
-        .execute(
-            "UPDATE users SET role = $1, updated_at = now() WHERE id = $2",
-            &[&role, &target_user.id],
+        .query_one(
+            UPDATE_USER_ROLE_QUERY,
+            &[
+                &ADMIN_USER_MUTATION_LOCK_ID,
+                &current_user.session_id,
+                &form.csrf_token.trim(),
+                &current_user.id,
+                &target_user_id,
+                &role,
+            ],
         )
         .await
+        .map(admin_mutation_outcome)
         .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .commit()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
+    if let Some(response) = admin_mutation_failure(&outcome)? {
+        return Ok(response);
+    }
+    if !outcome.updated {
+        return Err(error::ErrorInternalServerError(
+            "admin role was not updated",
+        ));
+    }
     Ok(redirect("/users?user=updated"))
 }
 
@@ -431,48 +626,30 @@ pub async fn update_user_status(
         return Ok(redirect("/users?user=self-protected"));
     }
 
-    let mut db = state
+    let outcome = state
         .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let transaction = db
-        .transaction()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    lock_admin_user_mutations(&transaction).await?;
-    require_transaction_admin_session(
-        &transaction,
-        &current_user.id,
-        &current_user.session_id,
-        &form.csrf_token,
-    )
-    .await?;
-
-    let Some(target_user) = get_target_user(&transaction, &target_user_id).await? else {
-        return Ok(redirect("/users?user=missing"));
-    };
-
-    if target_user.role == "admin"
-        && target_user.status == "active"
-        && status == "disabled"
-        && active_admin_count(&transaction).await? <= 1
-    {
-        return Ok(redirect("/users?user=last-admin"));
-    }
-
-    transaction
-        .execute(
-            "UPDATE users SET status = $1, updated_at = now() WHERE id = $2",
-            &[&status, &target_user.id],
+        .query_one(
+            UPDATE_USER_STATUS_QUERY,
+            &[
+                &ADMIN_USER_MUTATION_LOCK_ID,
+                &current_user.session_id,
+                &form.csrf_token.trim(),
+                &current_user.id,
+                &target_user_id,
+                &status,
+            ],
         )
         .await
+        .map(admin_mutation_outcome)
         .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .commit()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
+    if let Some(response) = admin_mutation_failure(&outcome)? {
+        return Ok(response);
+    }
+    if !outcome.updated {
+        return Err(error::ErrorInternalServerError(
+            "admin status was not updated",
+        ));
+    }
     Ok(redirect("/users?user=updated"))
 }
 
@@ -498,72 +675,40 @@ pub async fn update_user(
         return Ok(redirect("/users?user=invalid-username"));
     }
 
-    let mut db = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let transaction = db
-        .transaction()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    lock_admin_user_mutations(&transaction).await?;
-    require_transaction_admin_session(
-        &transaction,
-        &current_user.id,
-        &current_user.session_id,
-        &form.csrf_token,
-    )
-    .await?;
-
-    let Some(target_user) = get_target_user(&transaction, &target_user_id).await? else {
-        return Ok(redirect("/users?user=missing"));
-    };
-
-    if target_user.id == current_user.id && (role != "admin" || status != "active") {
+    if target_user_id == current_user.id && (role != "admin" || status != "active") {
         return Ok(redirect("/users?user=self-protected"));
     }
 
-    if target_user.role == "admin"
-        && target_user.status == "active"
-        && (role != "admin" || status != "active")
-        && active_admin_count(&transaction).await? <= 1
-    {
-        return Ok(redirect("/users?user=last-admin"));
-    }
-
-    let username_in_use = transaction
-        .query_opt(
-            "SELECT id FROM users WHERE lower(username) = lower($1) AND id <> $2 LIMIT 1",
-            &[&username, &target_user.id],
+    let outcome = state
+        .db
+        .query_one(
+            UPDATE_USER_QUERY,
+            &[
+                &ADMIN_USER_MUTATION_LOCK_ID,
+                &current_user.session_id,
+                &form.csrf_token.trim(),
+                &current_user.id,
+                &target_user_id,
+                &username,
+                &display_name,
+                &role,
+                &status,
+            ],
         )
         .await
+        .map(admin_mutation_outcome)
         .map_err(error::ErrorInternalServerError)?;
-
-    if username_in_use.is_some() {
+    if let Some(response) = admin_mutation_failure(&outcome)? {
+        return Ok(response);
+    }
+    if outcome.username_in_use {
         return Ok(redirect("/users?user=user-exists"));
     }
-
-    transaction
-        .execute(
-            "
-                UPDATE users
-                SET username = $1,
-                    display_name = $2,
-                    role = $3,
-                    status = $4,
-                    updated_at = now()
-                WHERE id = $5
-            ",
-            &[&username, &display_name, &role, &status, &target_user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .commit()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
+    if !outcome.updated {
+        return Err(error::ErrorInternalServerError(
+            "admin user was not updated",
+        ));
+    }
     Ok(redirect("/users?user=updated"))
 }
 
@@ -581,72 +726,29 @@ pub async fn delete_user(
         return Ok(redirect("/users?user=self-protected"));
     }
 
-    let mut db = state
+    let row = state
         .db
-        .get()
+        .query_one(
+            DELETE_USER_QUERY,
+            &[
+                &ADMIN_USER_MUTATION_LOCK_ID,
+                &current_user.session_id,
+                &form.csrf_token.trim(),
+                &current_user.id,
+                &target_user_id,
+            ],
+        )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let transaction = db
-        .transaction()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    lock_admin_user_mutations(&transaction).await?;
-    require_transaction_admin_session(
-        &transaction,
-        &current_user.id,
-        &current_user.session_id,
-        &form.csrf_token,
-    )
-    .await?;
-
-    let Some(target_user) = get_target_user(&transaction, &target_user_id).await? else {
-        return Ok(redirect("/users?user=missing"));
-    };
-
-    if target_user.role == "admin"
-        && target_user.status == "active"
-        && active_admin_count(&transaction).await? <= 1
-    {
-        return Ok(redirect("/users?user=last-admin"));
+    let outcome = admin_mutation_outcome(row);
+    if let Some(response) = admin_mutation_failure(&outcome)? {
+        return Ok(response);
     }
-
-    transaction
-        .execute(
-            "
-                UPDATE users
-                SET status = 'deleting', updated_at = now()
-                WHERE id = $1
-            ",
-            &[&target_user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "DELETE FROM sessions WHERE user_id = $1",
-            &[&target_user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "
-                INSERT INTO user_deletion_jobs (
-                  user_id, phase, available_at, locked_until, last_error, updated_at
-                ) VALUES ($1, 'file_uploads', now(), NULL, NULL, now())
-                ON CONFLICT (user_id) DO UPDATE SET
-                  available_at = LEAST(user_deletion_jobs.available_at, now()),
-                  updated_at = now()
-            ",
-            &[&target_user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    transaction
-        .commit()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    if !outcome.updated || !outcome.queued {
+        return Err(error::ErrorInternalServerError(
+            "user deletion job was not queued",
+        ));
+    }
 
     Ok(redirect("/users?user=deleted"))
 }
@@ -1110,79 +1212,29 @@ fn encode_admin_cursor(cursor: &AdminCursor) -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
-async fn lock_admin_user_mutations(transaction: &Transaction<'_>) -> Result<()> {
-    transaction
-        .query_one(
-            "SELECT pg_advisory_xact_lock($1)",
-            &[&ADMIN_USER_MUTATION_LOCK_ID],
-        )
-        .await
-        .map(|_| ())
-        .map_err(error::ErrorInternalServerError)
+fn admin_mutation_outcome(row: tokio_postgres::Row) -> AdminMutationOutcome {
+    AdminMutationOutcome {
+        authorized: row.get("authorized"),
+        target_exists: row.get("target_exists"),
+        last_admin_blocked: row.get("last_admin_blocked"),
+        username_in_use: row.try_get("username_in_use").unwrap_or(false),
+        updated: row.get("updated"),
+        queued: row.try_get("queued").unwrap_or(false),
+    }
 }
 
-async fn require_transaction_admin_session(
-    transaction: &Transaction<'_>,
-    user_id: &str,
-    session_id: &str,
-    csrf_token: &str,
-) -> Result<()> {
-    let active_admin_session = transaction
-        .query_opt(
-            "
-                SELECT sessions.id
-                FROM sessions
-                INNER JOIN users ON users.id = sessions.user_id
-                WHERE sessions.id = $1
-                  AND sessions.csrf_token = $2
-                  AND sessions.expires_at > now()
-                  AND users.id = $3
-                  AND users.role = 'admin'
-                  AND users.status = 'active'
-                LIMIT 1
-                FOR SHARE OF sessions
-            ",
-            &[&session_id, &csrf_token.trim(), &user_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    if active_admin_session.is_none() {
+fn admin_mutation_failure(outcome: &AdminMutationOutcome) -> Result<Option<HttpResponse>> {
+    if !outcome.authorized {
         return Err(error::ErrorForbidden("admin access required"));
     }
+    if !outcome.target_exists {
+        return Ok(Some(redirect("/users?user=missing")));
+    }
+    if outcome.last_admin_blocked {
+        return Ok(Some(redirect("/users?user=last-admin")));
+    }
 
-    Ok(())
-}
-
-async fn get_target_user(
-    transaction: &Transaction<'_>,
-    user_id: &str,
-) -> Result<Option<TargetUser>> {
-    let row = transaction
-        .query_opt(
-            "SELECT id, role, status FROM users WHERE id = $1 LIMIT 1",
-            &[&user_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    Ok(row.map(|row| TargetUser {
-        id: row.get("id"),
-        role: row.get("role"),
-        status: row.get("status"),
-    }))
-}
-
-async fn active_admin_count(transaction: &Transaction<'_>) -> Result<i64> {
-    let row = transaction
-        .query_one(
-            "SELECT count(*) FROM users WHERE role = 'admin' AND status = 'active'",
-            &[],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    Ok(row.get(0))
+    Ok(None)
 }
 
 async fn expire_invitations_for_username(state: &AppState, username: &str) -> Result<()> {
@@ -1284,7 +1336,10 @@ fn redirect(location: impl AsRef<str>) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::literal_ilike_pattern;
+    use super::{
+        ADMIN_USER_MUTATION_LOCK_ID, DELETE_USER_QUERY, UPDATE_USER_QUERY, UPDATE_USER_ROLE_QUERY,
+        UPDATE_USER_STATUS_QUERY, admin_mutation_outcome, literal_ilike_pattern,
+    };
 
     #[test]
     fn admin_search_treats_wildcards_as_literal_text() {
@@ -1305,5 +1360,188 @@ mod tests {
         assert!(!source.contains(&("status ".to_owned() + "ILIKE")));
         assert!(source.contains("OR role = $5"));
         assert!(source.contains("OR invitations.status = $6"));
+    }
+
+    #[test]
+    fn admin_mutations_keep_invariants_in_one_statement_each() {
+        for query in [
+            UPDATE_USER_ROLE_QUERY,
+            UPDATE_USER_STATUS_QUERY,
+            UPDATE_USER_QUERY,
+            DELETE_USER_QUERY,
+        ] {
+            assert!(query.contains("pg_advisory_xact_lock"));
+            assert!(query.contains("authorized AS MATERIALIZED"));
+            assert!(query.contains("target AS MATERIALIZED"));
+            assert_eq!(query.matches("UPDATE users").count(), 1);
+            assert!(query.contains("RETURNING users.id"));
+        }
+
+        assert!(UPDATE_USER_QUERY.contains("username_in_use"));
+        assert!(DELETE_USER_QUERY.contains("DELETE FROM sessions"));
+        assert!(DELETE_USER_QUERY.contains("INSERT INTO user_deletion_jobs"));
+
+        let source = include_str!("admin.rs");
+        for (start, end) in [
+            (
+                "pub async fn update_user_role(",
+                "pub async fn update_user_status(",
+            ),
+            (
+                "pub async fn update_user_status(",
+                "pub async fn update_user(",
+            ),
+            ("pub async fn update_user(", "pub async fn delete_user("),
+            ("pub async fn delete_user(", "pub async fn user_avatar("),
+        ] {
+            let handler = source
+                .split_once(start)
+                .and_then(|(_, tail)| tail.split_once(end))
+                .map(|(handler, _)| handler)
+                .expect("admin mutation handler should remain inspectable");
+            assert_eq!(handler.matches(".query_one(").count(), 1);
+            assert!(!handler.contains(".transaction()"));
+            assert!(!handler.contains(".commit()"));
+            assert!(!handler.contains("get_target_user"));
+            assert!(!handler.contains("active_admin_count"));
+        }
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_query_contracts_prepare() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (client, connection) = tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+            .await
+            .expect("connect to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            connection
+                .await
+                .expect("PostgreSQL connection stays healthy");
+        });
+
+        for query in [
+            UPDATE_USER_ROLE_QUERY,
+            UPDATE_USER_STATUS_QUERY,
+            UPDATE_USER_QUERY,
+            DELETE_USER_QUERY,
+        ] {
+            client
+                .prepare(query)
+                .await
+                .expect("admin mutation query should prepare");
+        }
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_optimized_queries_execute() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (mut client, connection) =
+            tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+                .await
+                .expect("connect to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            connection
+                .await
+                .expect("PostgreSQL connection stays healthy");
+        });
+        let transaction = client
+            .transaction()
+            .await
+            .expect("test transaction should start");
+        transaction
+            .batch_execute(
+                "INSERT INTO users (id, username, password_hash, role, status)
+                   VALUES
+                     ('usr_perf_admin', 'perf_admin', 'not-a-login-hash', 'admin', 'active'),
+                     ('usr_perf_target', 'perf_target', 'not-a-login-hash', 'user', 'active');
+                 INSERT INTO sessions (
+                   id, user_id, token_hash, csrf_token, expires_at
+                 ) VALUES (
+                   'ses_perf_admin', 'usr_perf_admin',
+                   decode(repeat('a1', 32), 'hex'), 'csrf-perf-admin', now() + interval '1 hour'
+                 );",
+            )
+            .await
+            .expect("admin mutation fixtures should insert");
+
+        let role = transaction
+            .query_one(
+                UPDATE_USER_ROLE_QUERY,
+                &[
+                    &ADMIN_USER_MUTATION_LOCK_ID,
+                    &"ses_perf_admin",
+                    &"csrf-perf-admin",
+                    &"usr_perf_admin",
+                    &"usr_perf_target",
+                    &"admin",
+                ],
+            )
+            .await
+            .map(admin_mutation_outcome)
+            .expect("one-statement role update should execute");
+        assert!(role.authorized && role.target_exists && role.updated);
+        assert!(!role.last_admin_blocked);
+
+        let status = transaction
+            .query_one(
+                UPDATE_USER_STATUS_QUERY,
+                &[
+                    &ADMIN_USER_MUTATION_LOCK_ID,
+                    &"ses_perf_admin",
+                    &"csrf-perf-admin",
+                    &"usr_perf_admin",
+                    &"usr_perf_target",
+                    &"disabled",
+                ],
+            )
+            .await
+            .map(admin_mutation_outcome)
+            .expect("one-statement status update should execute");
+        assert!(status.authorized && status.target_exists && status.updated);
+
+        let display_name = Some("Updated Target");
+        let update = transaction
+            .query_one(
+                UPDATE_USER_QUERY,
+                &[
+                    &ADMIN_USER_MUTATION_LOCK_ID,
+                    &"ses_perf_admin",
+                    &"csrf-perf-admin",
+                    &"usr_perf_admin",
+                    &"usr_perf_target",
+                    &"perf_target_updated",
+                    &display_name,
+                    &"user",
+                    &"active",
+                ],
+            )
+            .await
+            .map(admin_mutation_outcome)
+            .expect("one-statement full update should execute");
+        assert!(update.authorized && update.target_exists && update.updated);
+        assert!(!update.username_in_use);
+
+        let deletion = transaction
+            .query_one(
+                DELETE_USER_QUERY,
+                &[
+                    &ADMIN_USER_MUTATION_LOCK_ID,
+                    &"ses_perf_admin",
+                    &"csrf-perf-admin",
+                    &"usr_perf_admin",
+                    &"usr_perf_target",
+                ],
+            )
+            .await
+            .map(admin_mutation_outcome)
+            .expect("one-statement deletion handoff should execute");
+        assert!(deletion.authorized && deletion.target_exists && deletion.updated);
+        assert!(deletion.queued);
+        transaction
+            .rollback()
+            .await
+            .expect("admin mutation fixtures should roll back");
     }
 }
