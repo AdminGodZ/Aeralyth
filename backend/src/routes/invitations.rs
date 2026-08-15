@@ -3,6 +3,7 @@ use actix_web::{HttpResponse, Result, error, web};
 use serde::{Deserialize, Serialize};
 
 use crate::state::AppState;
+use crate::timestamps;
 
 const MIN_PASSWORD_BYTES: usize = 8;
 const MAX_PASSWORD_BYTES: usize = 128;
@@ -39,7 +40,7 @@ pub async fn details(state: web::Data<AppState>, path: web::Path<String>) -> Res
                 SELECT
                   invited_username,
                   role,
-                  to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS expires_at
+                  expires_at
                 FROM invitations
                 WHERE token_hash = encode(digest($1::text, 'sha256'), 'hex')
                   AND status = 'pending'
@@ -59,7 +60,7 @@ pub async fn details(state: web::Data<AppState>, path: web::Path<String>) -> Res
         invitation: InvitationDetails {
             username: invitation.get("invited_username"),
             role: invitation.get("role"),
-            expires_at: invitation.get("expires_at"),
+            expires_at: timestamps::api(invitation.get("expires_at")),
         },
     }))
 }

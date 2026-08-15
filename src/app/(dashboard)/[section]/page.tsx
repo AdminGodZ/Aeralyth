@@ -97,7 +97,7 @@ export default async function SectionPage({
     : Promise.resolve<FilesState>({ status: "unavailable" });
   const repositoriesPromise =
     section.key === "repositories"
-      ? getRepositoriesState()
+      ? getRepositoriesState(cursor?.trim() || undefined)
       : Promise.resolve<RepositoriesState>({ status: "unavailable" });
   const [
     { csrfToken, currentUser },

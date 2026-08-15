@@ -19,11 +19,14 @@ use crate::e2ee::{
     uses_vault_multipart_upload, verify_ed25519_signature, verify_node_record,
     verify_share_envelope, verify_wrapper_set_proof, wrapper_set_commitment,
 };
+use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
 use crate::routes::upload_reservations::{reservation_amount, reserve_upload_capacity};
 use crate::state::AppState;
 use crate::storage::{ObjectMetadata, UploadedPart};
+use crate::timestamps;
 
 const MAX_IDENTITY_PRIVATE_CIPHERTEXT: usize = 8_192;
+const VAULT_SHARE_PAGE_SIZE: usize = 100;
 const MAX_ACCOUNT_STATE_CIPHERTEXT: usize = 4 * 1024 * 1024;
 const MAX_MANIFEST_CIPHERTEXT: usize = 1024 * 1024;
 const MAX_PRESIGN_PARTS: usize = 32;
@@ -32,13 +35,17 @@ const VAULT_ACCOUNT_JSON_LIMIT: usize = 6 * 1024 * 1024;
 const VAULT_PUBLISH_JSON_LIMIT: usize = 8 * 1024 * 1024;
 const SHARED_DOWNLOAD_AUTHORIZATION_QUERY: &str = "
     WITH RECURSIVE ancestors AS (
-      SELECT id, parent_id FROM files
+      SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
+             0::integer AS depth FROM files
       WHERE id = $1 AND state = 'active' AND e2ee_state = 'encrypted'
       UNION ALL
-      SELECT parent.id, parent.parent_id
+      SELECT parent.id, parent.parent_id,
+             child.visited_ids || parent.id, child.depth + 1
       FROM files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
       WHERE parent.state = 'active' AND parent.e2ee_state = 'encrypted'
+        AND child.depth < 100
+        AND NOT parent.id = ANY(child.visited_ids)
     )
     SELECT shares.id, shares.owner_id, shares.root_node_id,
            shares.active_epoch, shares.record_version,
@@ -510,6 +517,31 @@ struct OwnedShareResponse {
     pending_revoked_recipient_id: Option<String>,
     status: String,
     recipients: Vec<OwnedShareRecipient>,
+    #[serde(skip)]
+    cursor_created_at: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OwnedSharesQuery {
+    root_node_id: Option<String>,
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct OwnedSharesCursor {
+    scope: String,
+    root_node_id: Option<String>,
+    created_at: String,
+    id: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct OwnedSharesResponse {
+    shares: Vec<OwnedShareResponse>,
+    next_cursor: Option<String>,
+    has_more: bool,
 }
 
 #[derive(Serialize)]
@@ -2045,13 +2077,17 @@ pub async fn share_contexts(
         .query(
             "
                 WITH RECURSIVE ancestors AS (
-                  SELECT id, parent_id FROM files
+                  SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
+                         0::integer AS depth FROM files
                   WHERE id = $1 AND owner_id = $2 AND e2ee_state = 'encrypted'
                   UNION ALL
-                  SELECT parent.id, parent.parent_id
+                  SELECT parent.id, parent.parent_id,
+                         child.visited_ids || parent.id, child.depth + 1
                   FROM files AS parent
                   INNER JOIN ancestors AS child ON child.parent_id = parent.id
                   WHERE parent.owner_id = $2 AND parent.e2ee_state = 'encrypted'
+                    AND child.depth < 100
+                    AND NOT parent.id = ANY(child.visited_ids)
                 )
                 SELECT shares.id, shares.active_epoch,
                        owner_keys.wrapper_id, owner_keys.root_ciphertext
@@ -2184,13 +2220,17 @@ pub async fn publish_share_directory(
         .query(
             "
                 WITH RECURSIVE ancestors AS (
-                  SELECT id, parent_id FROM files
+                  SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
+                         0::integer AS depth FROM files
                   WHERE id = $1 AND owner_id = $2
                   UNION ALL
-                  SELECT parent.id, parent.parent_id
+                  SELECT parent.id, parent.parent_id,
+                         child.visited_ids || parent.id, child.depth + 1
                   FROM files AS parent
                   INNER JOIN ancestors AS child ON child.parent_id = parent.id
                   WHERE parent.owner_id = $2
+                    AND child.depth < 100
+                    AND NOT parent.id = ANY(child.visited_ids)
                 )
                 SELECT shares.id, shares.active_epoch
                 FROM vault_shares AS shares
@@ -2535,30 +2575,74 @@ pub async fn create_share(
     }))
 }
 
-pub async fn list_shares(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
+pub async fn list_shares(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    query: web::Query<OwnedSharesQuery>,
+) -> Result<HttpResponse> {
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
+    let root_node_id = query
+        .root_node_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+    let cursor = decode_cursor::<OwnedSharesCursor>(query.cursor.as_deref())?;
+    if cursor.as_ref().is_some_and(|cursor| {
+        cursor.scope != "owned-vault-shares" || cursor.root_node_id != root_node_id
+    }) {
+        return Err(error::ErrorBadRequest(
+            "pagination cursor does not match vault share list",
+        ));
+    }
+    let cursor_created_at = cursor.as_ref().map(|cursor| cursor.created_at.clone());
+    let cursor_id = cursor.as_ref().map(|cursor| cursor.id.clone());
+    let limit = row_limit(VAULT_SHARE_PAGE_SIZE)?;
     let rows = state
         .db
         .query(
             "
-                SELECT shares.id, shares.root_node_id, shares.active_epoch,
-                       shares.pending_epoch,
-                       shares.status, recipients.recipient_id,
+                WITH share_page AS MATERIALIZED (
+                  SELECT shares.id, shares.root_node_id, shares.active_epoch,
+                         shares.pending_epoch, shares.status, shares.created_at,
+                         shares.created_at AS cursor_created_at
+                  FROM vault_shares AS shares
+                  WHERE shares.owner_id = $1
+                    AND shares.status IN ('active', 'rotating')
+                    AND ($2::text IS NULL OR shares.root_node_id = $2)
+                    AND (
+                      $3::text IS NULL
+                      OR shares.created_at > $3::text::timestamptz
+                      OR (shares.created_at = $3::text::timestamptz AND shares.id > $4)
+                    )
+                  ORDER BY shares.created_at, shares.id
+                  LIMIT $5
+                )
+                SELECT share_page.id, share_page.root_node_id,
+                       share_page.active_epoch, share_page.pending_epoch,
+                       share_page.status, share_page.cursor_created_at,
+                       recipients.recipient_id,
                        recipients.recipient_key_version, users.username,
                        pending.recipient_id AS pending_revoked_recipient_id
-                FROM vault_shares AS shares
+                FROM share_page
                 LEFT JOIN vault_share_recipients AS recipients
-                  ON recipients.share_id = shares.id AND recipients.status = 'active'
+                  ON recipients.share_id = share_page.id AND recipients.status = 'active'
                 LEFT JOIN users ON users.id = recipients.recipient_id
                 LEFT JOIN vault_share_pending_revocations AS pending
-                  ON pending.share_id = shares.id
-                 AND pending.pending_epoch = shares.pending_epoch
-                WHERE shares.owner_id = $1 AND shares.status IN ('active', 'rotating')
-                ORDER BY shares.created_at, shares.id, recipients.joined_at
+                  ON pending.share_id = share_page.id
+                 AND pending.pending_epoch = share_page.pending_epoch
+                ORDER BY share_page.created_at, share_page.id,
+                         recipients.joined_at, recipients.recipient_id
             ",
-            &[&user.id],
+            &[
+                &user.id,
+                &root_node_id,
+                &cursor_created_at,
+                &cursor_id,
+                &limit,
+            ],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -2574,6 +2658,7 @@ pub async fn list_shares(state: web::Data<AppState>, request: HttpRequest) -> Re
                 pending_revoked_recipient_id: row.get("pending_revoked_recipient_id"),
                 status: row.get("status"),
                 recipients: Vec::new(),
+                cursor_created_at: timestamps::cursor(row.get("cursor_created_at")),
             });
         }
         if let (Some(user_id), Some(username), Some(key_version)) = (
@@ -2590,7 +2675,29 @@ pub async fn list_shares(state: web::Data<AppState>, request: HttpRequest) -> Re
         }
     }
 
-    Ok(HttpResponse::Ok().json(shares))
+    let has_more = shares.len() > VAULT_SHARE_PAGE_SIZE;
+    shares.truncate(VAULT_SHARE_PAGE_SIZE);
+    let next_cursor = if has_more {
+        shares
+            .last()
+            .map(|share| {
+                encode_cursor(&OwnedSharesCursor {
+                    scope: "owned-vault-shares".to_owned(),
+                    root_node_id,
+                    created_at: share.cursor_created_at.clone(),
+                    id: share.share_id.clone(),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+
+    Ok(HttpResponse::Ok().json(OwnedSharesResponse {
+        shares,
+        next_cursor,
+        has_more,
+    }))
 }
 
 pub async fn pending_epoch_rotation(
@@ -3429,16 +3536,21 @@ async fn subtree_snapshot(
         .query(
             "
                 WITH RECURSIVE subtree AS (
-                  SELECT id, entry_type, current_generation_number, current_generation_id
+                  SELECT id, entry_type, current_generation_number, current_generation_id,
+                         ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
                   FROM files
                   WHERE id = $1 AND owner_id = $2
                     AND state = 'active' AND e2ee_state = 'encrypted'
                   UNION ALL
-                  SELECT child.id, child.entry_type, child.current_generation_number, child.current_generation_id
+                  SELECT child.id, child.entry_type, child.current_generation_number,
+                         child.current_generation_id, parent.visited_ids || child.id,
+                         parent.depth + 1
                   FROM files AS child
                   INNER JOIN subtree AS parent ON child.parent_id = parent.id
                   WHERE child.owner_id = $2
                     AND child.state = 'active' AND child.e2ee_state = 'encrypted'
+                    AND parent.depth < 100
+                    AND NOT child.id = ANY(parent.visited_ids)
                 )
                 SELECT subtree.id, subtree.entry_type,
                        subtree.current_generation_number, subtree.current_generation_id,
@@ -3530,13 +3642,17 @@ async fn committed_share_wrappers(
             .query(
                 "
                     WITH RECURSIVE ancestors AS (
-                      SELECT id, parent_id FROM files
+                      SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
+                             0::integer AS depth FROM files
                       WHERE id = $1 AND owner_id = $2
                       UNION ALL
-                      SELECT parent.id, parent.parent_id
+                      SELECT parent.id, parent.parent_id,
+                             child.visited_ids || parent.id, child.depth + 1
                       FROM files AS parent
                       INNER JOIN ancestors AS child ON child.parent_id = parent.id
                       WHERE parent.owner_id = $2
+                        AND child.depth < 100
+                        AND NOT parent.id = ANY(child.visited_ids)
                     )
                     SELECT shares.id, shares.active_epoch
                     FROM vault_shares AS shares
@@ -3652,13 +3768,17 @@ async fn publication_share_wrappers(
             "
                 SELECT EXISTS (
                   WITH RECURSIVE ancestors AS (
-                    SELECT id, parent_id FROM files
+                    SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
+                           0::integer AS depth FROM files
                     WHERE id = $1 AND owner_id = $2
                     UNION ALL
-                    SELECT parent.id, parent.parent_id
+                    SELECT parent.id, parent.parent_id,
+                           child.visited_ids || parent.id, child.depth + 1
                     FROM files AS parent
                     INNER JOIN ancestors AS child ON child.parent_id = parent.id
                     WHERE parent.owner_id = $2
+                      AND child.depth < 100
+                      AND NOT parent.id = ANY(child.visited_ids)
                   )
                   SELECT 1
                   FROM vault_shares AS shares
@@ -4630,13 +4750,17 @@ async fn reject_fenced_share_write(
             "
                 SELECT EXISTS (
                   WITH RECURSIVE ancestors AS (
-                    SELECT id, parent_id FROM files
+                    SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
+                           0::integer AS depth FROM files
                     WHERE id = $1 AND owner_id = $2
                     UNION ALL
-                    SELECT parent.id, parent.parent_id
+                    SELECT parent.id, parent.parent_id,
+                           child.visited_ids || parent.id, child.depth + 1
                     FROM files AS parent
                     INNER JOIN ancestors AS child ON child.parent_id = parent.id
                     WHERE parent.owner_id = $2
+                      AND child.depth < 100
+                      AND NOT parent.id = ANY(child.visited_ids)
                   )
                   SELECT 1
                   FROM vault_shares AS shares

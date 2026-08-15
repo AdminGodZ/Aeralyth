@@ -73,14 +73,20 @@ function useVaultShareDialogController({
   const [complete, setComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ownedShares, setOwnedShares] = useState<VaultOwnedShare[]>([]);
+  const [sharesCursor, setSharesCursor] = useState<string | null>(null);
+  const [hasMoreShares, setHasMoreShares] = useState(false);
+  const [loadingMoreShares, setLoadingMoreShares] = useState(false);
 
   useEffect(() => {
     if (!open) return;
     let canceled = false;
-    void getOwnedVaultShares()
-      .then((shares) => {
-        if (!canceled)
-          setOwnedShares(shares.filter((share) => share.rootNodeId === nodeId));
+    void getOwnedVaultShares(nodeId)
+      .then((page) => {
+        if (!canceled) {
+          setOwnedShares(page.shares);
+          setSharesCursor(page.nextCursor);
+          setHasMoreShares(page.hasMore);
+        }
       })
       .catch(() => undefined);
     return () => {
@@ -135,8 +141,7 @@ function useVaultShareDialogController({
         recipientKeyVersion: identity.keyVersion,
         ...material,
       });
-      const shares = await getOwnedVaultShares();
-      setOwnedShares(shares.filter((share) => share.rootNodeId === nodeId));
+      await refreshOwnedShares();
       setComplete(true);
     } catch (failure) {
       setError(
@@ -256,8 +261,35 @@ function useVaultShareDialogController({
   }
 
   async function refreshOwnedShares(): Promise<void> {
-    const shares = await getOwnedVaultShares();
-    setOwnedShares(shares.filter((entry) => entry.rootNodeId === nodeId));
+    const page = await getOwnedVaultShares(nodeId);
+    setOwnedShares(page.shares);
+    setSharesCursor(page.nextCursor);
+    setHasMoreShares(page.hasMore);
+  }
+
+  async function loadMoreShares(): Promise<void> {
+    if (!sharesCursor || loadingMoreShares) return;
+    setLoadingMoreShares(true);
+    setError(null);
+    try {
+      const page = await getOwnedVaultShares(nodeId, sharesCursor);
+      setOwnedShares((current) => [
+        ...current,
+        ...page.shares.filter(
+          (share) => !current.some((entry) => entry.shareId === share.shareId),
+        ),
+      ]);
+      setSharesCursor(page.nextCursor);
+      setHasMoreShares(page.hasMore);
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : "More encrypted shares could not be loaded.",
+      );
+    } finally {
+      setLoadingMoreShares(false);
+    }
   }
 
   function close(next: boolean): void {
@@ -284,6 +316,9 @@ function useVaultShareDialogController({
     complete,
     error,
     ownedShares,
+    hasMoreShares,
+    loadingMoreShares,
+    loadMoreShares,
     lookup,
     share,
     revoke,
@@ -305,6 +340,9 @@ function VaultShareDialogView({
   complete,
   error,
   ownedShares,
+  hasMoreShares,
+  loadingMoreShares,
+  loadMoreShares,
   lookup,
   share,
   revoke,
@@ -410,6 +448,23 @@ function VaultShareDialogView({
                   )}
                 </div>
               </div>
+            ) : null}
+            {hasMoreShares ? (
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                disabled={loadingMoreShares}
+                onClick={() => void loadMoreShares()}
+              >
+                {loadingMoreShares ? (
+                  <LoaderCircle
+                    className="size-4 animate-spin"
+                    aria-hidden="true"
+                  />
+                ) : null}
+                Load more people
+              </Button>
             ) : null}
             <form
               className="flex items-end gap-2"

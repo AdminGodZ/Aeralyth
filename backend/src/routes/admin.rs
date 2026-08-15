@@ -6,6 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{AuthUser, require_admin, require_admin_user, require_csrf};
 use crate::state::AppState;
+use crate::timestamps;
 
 const INVITATION_LIFETIME_DAYS: i64 = 7;
 const ADMIN_USER_MUTATION_LOCK_ID: i64 = 4_132_591_101;
@@ -155,38 +156,23 @@ pub async fn users(
         .map(str::trim)
         .filter(|value| !value.is_empty())
         .map(|value| value.chars().take(100).collect::<String>());
-    let users = list_users(
-        &state,
-        query.users_cursor.as_deref(),
-        search.as_deref(),
-        page_size,
-    )
-    .await?;
-    let invitations = list_invitations(
-        &state,
-        query.invitations_cursor.as_deref(),
-        search.as_deref(),
-        page_size,
-    )
-    .await?;
-    let summary_row = state
-        .db
-        .query_one(
-            "
-                SELECT total_users, active_users, active_admins, pending_invitations
-                FROM admin_directory_counters
-                WHERE singleton = TRUE
-            ",
-            &[],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let summary = AdminUsersSummary {
-        total_users: summary_row.get("total_users"),
-        active_users: summary_row.get("active_users"),
-        admins: summary_row.get("active_admins"),
-        pending_invites: summary_row.get("pending_invitations"),
-    };
+    // All three reads share the request-scoped client and can be pipelined by
+    // tokio-postgres instead of paying three serial network round trips.
+    let (users, invitations, summary) = futures_util::try_join!(
+        list_users(
+            &state,
+            query.users_cursor.as_deref(),
+            search.as_deref(),
+            page_size,
+        ),
+        list_invitations(
+            &state,
+            query.invitations_cursor.as_deref(),
+            search.as_deref(),
+            page_size,
+        ),
+        load_admin_summary(&state),
+    )?;
 
     Ok(HttpResponse::Ok().json(AdminUsersResponse {
         users: users.items,
@@ -783,7 +769,14 @@ async fn list_users(
     page_size: usize,
 ) -> Result<AdminPage<AdminUser>> {
     let cursor = decode_admin_cursor(encoded_cursor, "users", search)?;
-    let search_pattern = search.map(|value| format!("%{value}%"));
+    let search_pattern = search.map(literal_ilike_pattern);
+    let normalized_search = search.map(str::to_ascii_lowercase);
+    let exact_role = normalized_search
+        .as_deref()
+        .filter(|value| matches!(*value, "admin" | "user"));
+    let exact_status = normalized_search
+        .as_deref()
+        .filter(|value| matches!(*value, "active" | "disabled"));
     let cursor_date = cursor.as_ref().map(|value| value.created_at.clone());
     let cursor_id = cursor.as_ref().map(|value| value.id.clone());
     let row_limit = i64::try_from(page_size + 1)
@@ -799,21 +792,19 @@ async fn list_users(
                   role,
                   status,
                   profile_image_bytes IS NOT NULL AS has_profile_image,
-                  to_char(
-                    COALESCE(profile_image_updated_at, updated_at) AT TIME ZONE 'UTC',
-                    'YYYYMMDDHH24MISSUS'
-                  ) AS profile_image_version,
-                  to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
-                  to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
-                  to_char(created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_created_at
+                  COALESCE(profile_image_updated_at, updated_at)
+                    AS profile_image_version_at,
+                  created_at,
+                  updated_at,
+                  created_at AS cursor_created_at
                 FROM users
                 WHERE status <> 'deleting'
                   AND (
                   $1::text IS NULL
-                  OR username ILIKE $1
-                  OR COALESCE(display_name, '') ILIKE $1
-                  OR role ILIKE $1
-                  OR status ILIKE $1
+                  OR username ILIKE $1 ESCAPE '\\'
+                  OR COALESCE(display_name, '') ILIKE $1 ESCAPE '\\'
+                  OR role = $5
+                  OR status = $6
                 )
                   AND (
                     $2::text IS NULL
@@ -823,7 +814,14 @@ async fn list_users(
                 ORDER BY created_at ASC, id ASC
                 LIMIT $4
             ",
-            &[&search_pattern, &cursor_date, &cursor_id, &row_limit],
+            &[
+                &search_pattern,
+                &cursor_date,
+                &cursor_id,
+                &row_limit,
+                &exact_role,
+                &exact_status,
+            ],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -835,7 +833,7 @@ async fn list_users(
                 encode_admin_cursor(&AdminCursor {
                     kind: "users".to_owned(),
                     query: search.map(str::to_owned),
-                    created_at: row.get("cursor_created_at"),
+                    created_at: timestamps::cursor(row.get("cursor_created_at")),
                     id: row.get("id"),
                 })
             })
@@ -849,14 +847,10 @@ async fn list_users(
         .map(|row| {
             let id: String = row.get("id");
             let has_profile_image: bool = row.get("has_profile_image");
-            let profile_image_version: Option<String> = row.get("profile_image_version");
-            let profile_image_url = has_profile_image.then(|| {
-                let version = profile_image_version
-                    .filter(|value| !value.is_empty())
-                    .unwrap_or_else(|| "1".to_owned());
-
-                format!("/api/admin/users/{id}/avatar?v={version}")
-            });
+            let profile_image_version =
+                timestamps::version_micros(row.get("profile_image_version_at"));
+            let profile_image_url = has_profile_image
+                .then(|| format!("/api/admin/users/{id}/avatar?v={profile_image_version}"));
 
             AdminUser {
                 id,
@@ -865,8 +859,8 @@ async fn list_users(
                 role: row.get("role"),
                 status: row.get("status"),
                 profile_image_url,
-                created_at: row.get("created_at"),
-                updated_at: row.get("updated_at"),
+                created_at: timestamps::api(row.get("created_at")),
+                updated_at: timestamps::api(row.get("updated_at")),
             }
         })
         .collect();
@@ -885,48 +879,132 @@ async fn list_invitations(
     page_size: usize,
 ) -> Result<AdminPage<Invitation>> {
     let cursor = decode_admin_cursor(encoded_cursor, "invitations", search)?;
-    let search_pattern = search.map(|value| format!("%{value}%"));
+    let search_pattern = search.map(literal_ilike_pattern);
+    let normalized_search = search.map(str::to_ascii_lowercase);
+    let exact_role = normalized_search
+        .as_deref()
+        .filter(|value| matches!(*value, "admin" | "user"));
+    let exact_status = normalized_search
+        .as_deref()
+        .filter(|value| matches!(*value, "pending" | "accepted" | "revoked" | "expired"));
     let cursor_date = cursor.as_ref().map(|value| value.created_at.clone());
     let cursor_id = cursor.as_ref().map(|value| value.id.clone());
     let row_limit = i64::try_from(page_size + 1)
         .map_err(|_| error::ErrorInternalServerError("invalid admin page size"))?;
-    let mut rows = state
-        .db
-        .query(
-            "
-                SELECT
-                  invitations.id,
-                  invitations.invited_username,
-                  invitations.role,
-                  invitations.status,
-                  users.username AS created_by_username,
-                  to_char(invitations.expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS expires_at,
-                  to_char(invitations.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
-                  to_char(invitations.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_created_at
-                FROM invitations
-                INNER JOIN users ON users.id = invitations.created_by
-                WHERE (
-                  $1::text IS NULL
-                  OR invitations.invited_username ILIKE $1
-                  OR invitations.role ILIKE $1
-                  OR invitations.status ILIKE $1
-                  OR users.username ILIKE $1
-                )
-                  AND (
-                    $2::text IS NULL
-                    OR invitations.created_at < $2::text::timestamptz
-                    OR (
-                      invitations.created_at = $2::text::timestamptz
-                      AND invitations.id < $3
+    let mut rows = if search_pattern.is_some() {
+        state
+            .db
+            .query(
+                "
+                    WITH candidate_ids AS MATERIALIZED (
+                      (
+                        SELECT invitations.id, invitations.created_at
+                        FROM invitations
+                        WHERE invitations.invited_username ILIKE $1 ESCAPE '\\'
+                          AND (
+                            $2::text IS NULL
+                            OR invitations.created_at < $2::text::timestamptz
+                            OR (invitations.created_at = $2::text::timestamptz AND invitations.id < $3)
+                          )
+                        ORDER BY invitations.created_at DESC, invitations.id DESC
+                        LIMIT $4
+                      )
+                      UNION
+                      (
+                        SELECT invitations.id, invitations.created_at
+                        FROM users
+                        INNER JOIN invitations ON invitations.created_by = users.id
+                        WHERE users.status <> 'deleting'
+                          AND users.username ILIKE $1 ESCAPE '\\'
+                          AND (
+                            $2::text IS NULL
+                            OR invitations.created_at < $2::text::timestamptz
+                            OR (invitations.created_at = $2::text::timestamptz AND invitations.id < $3)
+                          )
+                        ORDER BY invitations.created_at DESC, invitations.id DESC
+                        LIMIT $4
+                      )
+                      UNION
+                      (
+                        SELECT invitations.id, invitations.created_at
+                        FROM invitations
+                        WHERE invitations.role = $5
+                          AND (
+                            $2::text IS NULL
+                            OR invitations.created_at < $2::text::timestamptz
+                            OR (invitations.created_at = $2::text::timestamptz AND invitations.id < $3)
+                          )
+                        ORDER BY invitations.created_at DESC, invitations.id DESC
+                        LIMIT $4
+                      )
+                      UNION
+                      (
+                        SELECT invitations.id, invitations.created_at
+                        FROM invitations
+                        WHERE invitations.status = $6
+                          AND (
+                            $2::text IS NULL
+                            OR invitations.created_at < $2::text::timestamptz
+                            OR (invitations.created_at = $2::text::timestamptz AND invitations.id < $3)
+                          )
+                        ORDER BY invitations.created_at DESC, invitations.id DESC
+                        LIMIT $4
+                      )
                     )
-                  )
-                ORDER BY invitations.created_at DESC, invitations.id DESC
-                LIMIT $4
-            ",
-            &[&search_pattern, &cursor_date, &cursor_id, &row_limit],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+                    SELECT
+                      invitations.id,
+                      invitations.invited_username,
+                      invitations.role,
+                      invitations.status,
+                      users.username AS created_by_username,
+                      invitations.expires_at,
+                      invitations.created_at,
+                      invitations.created_at AS cursor_created_at
+                    FROM candidate_ids
+                    INNER JOIN invitations ON invitations.id = candidate_ids.id
+                    INNER JOIN users ON users.id = invitations.created_by
+                    ORDER BY candidate_ids.created_at DESC, candidate_ids.id DESC
+                    LIMIT $4
+                ",
+                &[
+                    &search_pattern,
+                    &cursor_date,
+                    &cursor_id,
+                    &row_limit,
+                    &exact_role,
+                    &exact_status,
+                ],
+            )
+            .await
+    } else {
+        state
+            .db
+            .query(
+                "
+                    SELECT
+                      invitations.id,
+                      invitations.invited_username,
+                      invitations.role,
+                      invitations.status,
+                      users.username AS created_by_username,
+                      invitations.expires_at,
+                      invitations.created_at,
+                      invitations.created_at AS cursor_created_at
+                    FROM invitations
+                    INNER JOIN users ON users.id = invitations.created_by
+                    WHERE (
+                      $1::text IS NULL
+                      OR invitations.created_at < $1::text::timestamptz
+                      OR (invitations.created_at = $1::text::timestamptz AND invitations.id < $2)
+                    )
+                    ORDER BY invitations.created_at DESC, invitations.id DESC
+                    LIMIT $3
+                ",
+                &[&cursor_date, &cursor_id, &row_limit],
+            )
+            .await
+    }
+    .map_err(error::ErrorInternalServerError)?;
     let has_more = rows.len() > page_size;
     rows.truncate(page_size);
     let next_cursor = if has_more {
@@ -935,7 +1013,7 @@ async fn list_invitations(
                 encode_admin_cursor(&AdminCursor {
                     kind: "invitations".to_owned(),
                     query: search.map(str::to_owned),
-                    created_at: row.get("cursor_created_at"),
+                    created_at: timestamps::cursor(row.get("cursor_created_at")),
                     id: row.get("id"),
                 })
             })
@@ -952,8 +1030,8 @@ async fn list_invitations(
             role: row.get("role"),
             status: row.get("status"),
             created_by_username: row.get("created_by_username"),
-            expires_at: row.get("expires_at"),
-            created_at: row.get("created_at"),
+            expires_at: timestamps::api(row.get("expires_at")),
+            created_at: timestamps::api(row.get("created_at")),
         })
         .collect();
 
@@ -962,6 +1040,41 @@ async fn list_invitations(
         next_cursor,
         has_more,
     })
+}
+
+async fn load_admin_summary(state: &AppState) -> Result<AdminUsersSummary> {
+    let row = state
+        .db
+        .query_one(
+            "
+                SELECT total_users, active_users, active_admins, pending_invitations
+                FROM admin_directory_counters
+                WHERE singleton = TRUE
+            ",
+            &[],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    Ok(AdminUsersSummary {
+        total_users: row.get("total_users"),
+        active_users: row.get("active_users"),
+        admins: row.get("active_admins"),
+        pending_invites: row.get("pending_invitations"),
+    })
+}
+
+fn literal_ilike_pattern(value: &str) -> String {
+    let mut pattern = String::with_capacity(value.len() + 2);
+    pattern.push('%');
+    for character in value.chars() {
+        if matches!(character, '\\' | '%' | '_') {
+            pattern.push('\\');
+        }
+        pattern.push(character);
+    }
+    pattern.push('%');
+    pattern
 }
 
 fn decode_admin_cursor(
@@ -1167,4 +1280,30 @@ fn redirect(location: impl AsRef<str>) -> HttpResponse {
     HttpResponse::SeeOther()
         .insert_header((LOCATION, location.as_ref().to_owned()))
         .finish()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::literal_ilike_pattern;
+
+    #[test]
+    fn admin_search_treats_wildcards_as_literal_text() {
+        assert_eq!(literal_ilike_pattern(r"a%b_c\d"), r"%a\%b\_c\\d%");
+    }
+
+    #[test]
+    fn directory_reads_remain_concurrent_and_exact_filters_are_normalized() {
+        let source = include_str!("admin.rs");
+        let handler = source
+            .split_once("pub async fn users(")
+            .and_then(|(_, tail)| tail.split_once("pub async fn create_invitation("))
+            .map(|(handler, _)| handler)
+            .expect("admin directory handler should remain inspectable");
+        assert!(handler.contains("futures_util::try_join!("));
+        assert!(handler.contains("load_admin_summary(&state)"));
+        assert!(!source.contains(&("role ".to_owned() + "ILIKE")));
+        assert!(!source.contains(&("status ".to_owned() + "ILIKE")));
+        assert!(source.contains("OR role = $5"));
+        assert!(source.contains("OR invitations.status = $6"));
+    }
 }

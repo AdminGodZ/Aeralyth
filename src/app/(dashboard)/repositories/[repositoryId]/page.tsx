@@ -7,7 +7,7 @@ import { getRepositoryDetailState } from "@/lib/api";
 
 type RepositoryPageProps = {
   params: Promise<{ repositoryId: string }>;
-  searchParams: Promise<{ file?: string; folder?: string }>;
+  searchParams: Promise<{ cursor?: string; file?: string; folder?: string }>;
 };
 
 export const dynamic = "force-dynamic";
@@ -21,14 +21,18 @@ export default async function RepositoryPage({
   params,
   searchParams,
 }: RepositoryPageProps) {
-  const [{ repositoryId }, { file, folder }] = await Promise.all([
+  const [{ repositoryId }, { cursor, file, folder }] = await Promise.all([
     params,
     searchParams,
   ]);
   const [{ csrfToken, currentUser }, repositoryDetailState] = await Promise.all(
     [
       getDashboardSession(),
-      getRepositoryDetailState(repositoryId, folder?.trim() || undefined),
+      getRepositoryDetailState(
+        repositoryId,
+        folder?.trim() || undefined,
+        cursor?.trim() || undefined,
+      ),
     ],
   );
 

@@ -135,6 +135,8 @@ export type SharedLinkData = {
   currentFolderId: string | null;
   breadcrumbs: SharedLinkBreadcrumb[];
   entries: SharedLinkEntry[];
+  nextCursor: string | null;
+  hasMore: boolean;
 };
 
 export type ShareLinkState =
@@ -242,6 +244,8 @@ export type RepositorySummary = {
 
 export type RepositoriesData = {
   repositories: RepositorySummary[];
+  nextCursor: string | null;
+  hasMore: boolean;
 };
 
 export type RepositoriesState =
@@ -277,6 +281,8 @@ export type RepositoryDetailData = {
     totalFolders: number;
   };
   entriesTruncated: boolean;
+  nextCursor: string | null;
+  hasMore: boolean;
 };
 
 export type RepositoryArchiveManifest = {
@@ -455,10 +461,15 @@ export async function getInvitationState(
 export async function getShareLinkState(
   token: string,
   folderId?: string,
+  cursor?: string,
 ): Promise<ShareLinkState> {
   const requestHeaders = await headers();
   const cookie = requestHeaders.get("cookie");
-  const query = folderId ? `?${new URLSearchParams({ folder: folderId })}` : "";
+  const params = new URLSearchParams({
+    ...(folderId ? { folder: folderId } : {}),
+    ...(cursor ? { cursor } : {}),
+  });
+  const query = params.size > 0 ? `?${params}` : "";
 
   try {
     return await requestApi<ShareLinkState>(
@@ -585,13 +596,15 @@ export async function getFilesState(
   }
 }
 
-export async function getRepositoriesState(): Promise<RepositoriesState> {
+export async function getRepositoriesState(
+  cursor?: string,
+): Promise<RepositoriesState> {
   const requestHeaders = await headers();
   const cookie = requestHeaders.get("cookie");
 
   try {
     return await requestApi<RepositoriesState>(
-      `${getApiOrigin()}/api/repositories`,
+      `${getApiOrigin()}/api/repositories${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`,
       {
         headers: getForwardedHeaders(requestHeaders, cookie),
         cache: "no-store",
@@ -621,10 +634,15 @@ export async function getRepositoriesState(): Promise<RepositoriesState> {
 export async function getRepositoryDetailState(
   repositoryId: string,
   folderId?: string,
+  cursor?: string,
 ): Promise<RepositoryDetailState> {
   const requestHeaders = await headers();
   const cookie = requestHeaders.get("cookie");
-  const query = folderId ? `?${new URLSearchParams({ folder: folderId })}` : "";
+  const params = new URLSearchParams({
+    ...(folderId ? { folder: folderId } : {}),
+    ...(cursor ? { cursor } : {}),
+  });
+  const query = params.size > 0 ? `?${params}` : "";
 
   try {
     return await requestApi<RepositoryDetailState>(
@@ -664,7 +682,9 @@ function isRepositoriesData(
 ): data is RepositoriesData {
   return (
     Array.isArray(data.repositories) &&
-    data.repositories.every(isRepositorySummary)
+    data.repositories.every(isRepositorySummary) &&
+    (typeof data.nextCursor === "string" || data.nextCursor === null) &&
+    typeof data.hasMore === "boolean"
   );
 }
 
@@ -686,7 +706,9 @@ function isRepositoryDetailData(
     data.summary !== undefined &&
     typeof data.summary.totalFiles === "number" &&
     typeof data.summary.totalFolders === "number" &&
-    typeof data.entriesTruncated === "boolean"
+    typeof data.entriesTruncated === "boolean" &&
+    (typeof data.nextCursor === "string" || data.nextCursor === null) &&
+    typeof data.hasMore === "boolean"
   );
 }
 

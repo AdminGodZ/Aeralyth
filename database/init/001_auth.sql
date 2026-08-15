@@ -770,8 +770,6 @@ CREATE INDEX IF NOT EXISTS files_owner_id_idx ON files(owner_id);
 CREATE INDEX IF NOT EXISTS users_created_cursor_idx ON users(created_at ASC, id ASC);
 CREATE INDEX IF NOT EXISTS files_parent_id_idx ON files(parent_id);
 CREATE INDEX IF NOT EXISTS files_state_idx ON files(state);
-CREATE INDEX IF NOT EXISTS files_updated_at_idx ON files(updated_at);
-CREATE INDEX IF NOT EXISTS files_favorite_idx ON files(favorite);
 CREATE INDEX IF NOT EXISTS file_shares_file_id_idx ON file_shares(file_id);
 CREATE INDEX IF NOT EXISTS file_shares_owner_id_idx ON file_shares(owner_id);
 CREATE INDEX IF NOT EXISTS file_shares_recipient_id_idx ON file_shares(recipient_id);
@@ -801,9 +799,6 @@ CREATE INDEX IF NOT EXISTS files_active_browse_updated_idx
   WHERE state = 'active';
 CREATE INDEX IF NOT EXISTS files_active_browse_updated_desc_idx
   ON files (owner_id, parent_id, ((CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END)), updated_at DESC, lower(original_name), id)
-  WHERE state = 'active';
-CREATE INDEX IF NOT EXISTS files_recent_owner_idx
-  ON files (owner_id, updated_at DESC, id)
   WHERE state = 'active';
 CREATE INDEX IF NOT EXISTS files_active_owner_name_idx
   ON files (owner_id, ((CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END)), lower(original_name), id)

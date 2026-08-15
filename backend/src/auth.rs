@@ -4,6 +4,7 @@ use sha2::{Digest, Sha256};
 use std::future::Future;
 
 use crate::state::AppState;
+use crate::timestamps;
 
 pub const SESSION_COOKIE: &str = "aeralyth_session";
 pub const CSRF_FIELD: &str = "csrf_token";
@@ -111,10 +112,8 @@ pub async fn authenticate_password(
                   COALESCE(folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
                   COALESCE(vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes,
                   profile_image_bytes IS NOT NULL AS has_profile_image,
-                  to_char(
-                    COALESCE(profile_image_updated_at, updated_at) AT TIME ZONE 'UTC',
-                    'YYYYMMDDHH24MISSMS'
-                  ) AS profile_image_version,
+                  COALESCE(profile_image_updated_at, updated_at)
+                    AS profile_image_version_at,
                   EXISTS (SELECT 1 FROM user_vaults WHERE user_id = users.id) AS vault_configured
                 FROM users
                 WHERE lower(username) = lower($1)
@@ -179,10 +178,8 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
                       COALESCE(users.folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
                       COALESCE(users.vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes,
                       users.profile_image_bytes IS NOT NULL AS has_profile_image,
-                      to_char(
-                        COALESCE(users.profile_image_updated_at, users.updated_at) AT TIME ZONE 'UTC',
-                        'YYYYMMDDHH24MISSMS'
-                      ) AS profile_image_version,
+                      COALESCE(users.profile_image_updated_at, users.updated_at)
+                        AS profile_image_version_at,
                       EXISTS (SELECT 1 FROM user_vaults WHERE user_id = users.id) AS vault_configured
                     FROM users
                     WHERE users.id = $1 AND users.status = 'active'
@@ -211,10 +208,8 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
                   COALESCE(users.folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
                   COALESCE(users.vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes,
                   users.profile_image_bytes IS NOT NULL AS has_profile_image,
-                  to_char(
-                    COALESCE(users.profile_image_updated_at, users.updated_at) AT TIME ZONE 'UTC',
-                    'YYYYMMDDHH24MISSMS'
-                  ) AS profile_image_version,
+                  COALESCE(users.profile_image_updated_at, users.updated_at)
+                    AS profile_image_version_at,
                   EXISTS (SELECT 1 FROM user_vaults WHERE user_id = users.id) AS vault_configured
                 FROM sessions
                 INNER JOIN users ON users.id = sessions.user_id
@@ -358,14 +353,9 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
 
 fn auth_user_from_row(row: tokio_postgres::Row, e2ee_mode: &str) -> AuthUser {
     let has_profile_image: bool = row.get("has_profile_image");
-    let profile_image_version: Option<String> = row.get("profile_image_version");
-    let profile_image_url = has_profile_image.then(|| {
-        let version = profile_image_version
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "1".to_owned());
-
-        format!("/api/profile/avatar?v={version}")
-    });
+    let profile_image_version = timestamps::version_millis(row.get("profile_image_version_at"));
+    let profile_image_url =
+        has_profile_image.then(|| format!("/api/profile/avatar?v={profile_image_version}"));
 
     AuthUser {
         id: row.get("id"),

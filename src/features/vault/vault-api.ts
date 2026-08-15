@@ -112,6 +112,12 @@ export type VaultOwnedShare = {
   }>;
 };
 
+export type VaultOwnedSharePage = {
+  shares: VaultOwnedShare[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
 export type VaultEpochRotationPlan = {
   shareId: string;
   pendingEpoch: number;
@@ -352,9 +358,17 @@ export function createVaultShare(
 }
 
 export function getOwnedVaultShares(
+  rootNodeId: string,
+  cursor?: string,
   signal?: AbortSignal,
-): Promise<VaultOwnedShare[]> {
-  return vaultRequest("/api/vault/shares", { signal });
+): Promise<VaultOwnedSharePage> {
+  return vaultRequest(
+    `/api/vault/shares?${new URLSearchParams({
+      rootNodeId,
+      ...(cursor ? { cursor } : {}),
+    })}`,
+    { signal },
+  );
 }
 
 export function beginVaultEpochRotation(

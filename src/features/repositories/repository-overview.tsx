@@ -1,11 +1,18 @@
 "use client";
 
 import { formatDistanceToNow } from "date-fns";
-import { BookMarked, FolderGit2, LockKeyhole, Search } from "lucide-react";
+import {
+  BookMarked,
+  ChevronRight,
+  FolderGit2,
+  LockKeyhole,
+  Search,
+} from "lucide-react";
 import Link from "next/link";
 import { useMemo, useState } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { UploadPanel } from "@/features/dashboard/upload-panel";
 import { NewRepositoryDialog } from "@/features/repositories/new-repository-dialog";
@@ -108,52 +115,67 @@ export function RepositoryOverview({
           ) : null}
 
           {visibleRepositories.length > 0 ? (
-            <ul className="divide-y" aria-label="Repositories">
-              {visibleRepositories.map((repository) => {
-                const repositoryName = names.nameFor(repository.root);
-                return (
-                  <li key={repository.id} className="px-4 py-5 sm:px-6">
-                    <div className="flex items-start gap-3">
-                      <BookMarked
-                        className="mt-0.5 size-5 shrink-0 text-muted-foreground"
-                        aria-hidden="true"
-                      />
-                      <div className="min-w-0 flex-1">
-                        <div className="flex min-w-0 flex-wrap items-center gap-2">
-                          <Link
-                            href={`/repositories/${encodeURIComponent(repository.id)}`}
-                            className="min-w-0 truncate font-display text-base font-semibold text-primary hover:underline"
+            <>
+              <ul className="divide-y" aria-label="Repositories">
+                {visibleRepositories.map((repository) => {
+                  const repositoryName = names.nameFor(repository.root);
+                  return (
+                    <li key={repository.id} className="px-4 py-5 sm:px-6">
+                      <div className="flex items-start gap-3">
+                        <BookMarked
+                          className="mt-0.5 size-5 shrink-0 text-muted-foreground"
+                          aria-hidden="true"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <div className="flex min-w-0 flex-wrap items-center gap-2">
+                            <Link
+                              href={`/repositories/${encodeURIComponent(repository.id)}`}
+                              className="min-w-0 truncate font-display text-base font-semibold text-primary hover:underline"
+                            >
+                              {repository.ownerUsername}/{repositoryName}
+                            </Link>
+                            <Badge variant="outline" className="h-5">
+                              <LockKeyhole
+                                className="size-3"
+                                aria-hidden="true"
+                              />
+                              Private
+                            </Badge>
+                          </div>
+                          {repository.description ? (
+                            <p className="mt-2 text-sm text-muted-foreground">
+                              {repository.description}
+                            </p>
+                          ) : null}
+                          <p
+                            className={
+                              repository.description
+                                ? "mt-3 text-xs text-muted-foreground"
+                                : "mt-2 text-xs text-muted-foreground"
+                            }
                           >
-                            {repository.ownerUsername}/{repositoryName}
-                          </Link>
-                          <Badge variant="outline" className="h-5">
-                            <LockKeyhole
-                              className="size-3"
-                              aria-hidden="true"
-                            />
-                            Private
-                          </Badge>
-                        </div>
-                        {repository.description ? (
-                          <p className="mt-2 text-sm text-muted-foreground">
-                            {repository.description}
+                            Updated {formatRepositoryDate(repository.updatedAt)}
                           </p>
-                        ) : null}
-                        <p
-                          className={
-                            repository.description
-                              ? "mt-3 text-xs text-muted-foreground"
-                              : "mt-2 text-xs text-muted-foreground"
-                          }
-                        >
-                          Updated {formatRepositoryDate(repository.updatedAt)}
-                        </p>
+                        </div>
                       </div>
-                    </div>
-                  </li>
-                );
-              })}
-            </ul>
+                    </li>
+                  );
+                })}
+              </ul>
+              {repositoriesState.data.hasMore &&
+              repositoriesState.data.nextCursor ? (
+                <div className="flex justify-end border-t px-4 py-3">
+                  <Button asChild variant="outline">
+                    <Link
+                      href={`/repositories?${new URLSearchParams({ cursor: repositoriesState.data.nextCursor })}`}
+                    >
+                      Next page
+                      <ChevronRight className="size-4" aria-hidden="true" />
+                    </Link>
+                  </Button>
+                </div>
+              ) : null}
+            </>
           ) : repositories.length === 0 ? (
             <div className="flex min-h-80 flex-col items-center justify-center px-6 py-12 text-center">
               <span className="flex size-16 items-center justify-center rounded-full bg-primary/10 text-primary">

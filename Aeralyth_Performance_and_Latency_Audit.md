@@ -610,6 +610,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-035 [P2] Several collections are capped or unbounded without real pagination
 
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** Repository lists, repository children, owned share links, shared children, and owned vault shares now use opaque, scope-bound keyset cursors over stable sort keys plus IDs. Every response is bounded and exposes `hasMore`/`nextCursor`; normal-size views are unchanged, while an existing-style continuation control appears only beyond the boundary. A fresh 100,000-row database test reached all 205 repositories, more than 100,000 repository/shared children, 105 links, and 205 vault shares over multiple pages without duplicates or omissions. Exact production queries prepared successfully. In the running application, a temporary 101-repository account rendered 100 items and one continuation, then exactly one final item and no continuation; both server-rendered pages returned HTTP 200 without framework error markers, after which the fixture was removed.
+
 **Confidence:** Confirmed
 
 **Evidence:** Repository list and vault share list are unbounded. Share-link listing is capped at 50 without a cursor. Shared children are capped at 500. Repository detail reports truncation at 500 but exposes no keyset continuation in the route.
@@ -621,6 +625,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Populate collections above each current limit and prove every item remains reachable with bounded response size.
 
 ## PERF-036 [P2] Recursive CTEs do not consistently defend against cycles or excessive depth
+
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** The database now enforces one documented maximum of 100 parent edges with statement-level transition-table guards. It rejects cycles, cross-owner parents, non-folder parents, and excessive depth with SQLSTATE `23514`; owner-scoped advisory locks serialize concurrent structural changes. Every recursive route query also tracks visited IDs and stops at depth 100, with a source regression test covering all four hierarchy route modules. Fresh-database injections proved cycle, cross-owner, and depth-101 mutations fail deterministically, while a valid depth-100 tree succeeds. Migration replay preserves exactly two hierarchy guards.
 
 **Confidence:** Confirmed
 
@@ -634,6 +642,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-037 [P2] The `files` table maintains many overlapping indexes
 
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** Representative `pg_stat_user_indexes`, `pg_stat_statements`, and listing plans were inspected before changing the schema; HypoPG was unavailable. Only the measured redundant `files_updated_at_idx`, `files_favorite_idx`, and `files_recent_owner_idx` were removed (approximately 11.6 MiB in the sampled database), while parent, state, migration, active browse, favorites, trash, and every sort-direction index were retained. Cursor-specific share-link and vault-share indexes were added. On a 100,000-row fresh database, all retained listing plans stayed on ordered partial indexes without a sort. For the same 1,000-row favorite/updated-at write sample, WAL fell from 3,896,808 to 2,715,086 bytes and runtime from 47.753 ms to 36.461 ms. The regression suite asserts both removed and required index sets and replays the migration.
+
 **Confidence:** Plan-dependent
 
 **Evidence:** The schema defines low-selectivity standalone indexes plus numerous ascending/descending browse indexes over similar owner/parent/sort prefixes.
@@ -645,6 +657,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** After each removal, compare write TPS, WAL bytes, and all listing plans. Never drop indexes solely from static inspection.
 
 ## PERF-038 [P3] Timestamp formatting is pushed into PostgreSQL across many hot queries
+
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** All 49 PostgreSQL `to_char` calls were removed from the hot auth, admin, file, invitation, repository, share-link, and vault route queries. `tokio-postgres` now decodes native `TIMESTAMPTZ` values through its `time` integration, and one Rust formatter preserves the existing seconds, cursor-microseconds, and avatar-version wire formats. At 1,000,000 rows, the same full-column timestamp query fell from 288.606 ms with database formatting to 67.949 ms with typed timestamps. Unit tests lock the exact wire formats, a source regression test rejects any reintroduced route-level `to_char`, fresh-database query contracts passed, and the running admin API returned the expected unchanged RFC 3339 strings for timestamps containing fractional seconds.
 
 **Confidence:** Confirmed
 
@@ -658,6 +674,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-039 [P3] Text identifiers enlarge indexes and joins
 
+**Status:** Complete — measured policy implemented and verified on 2026-08-15.
+
+**Verification:** New high-volume tables are now required to use native `UUID` or another compact internal identifier and expose prefixed strings only at the API boundary. The migration records a frozen allowlist of the existing legacy `TEXT` primary/foreign keys, and the database regression test proves that any newly introduced `TEXT` identifier is detected; the storage policy and migration criteria are documented in `database/IDENTIFIER_STORAGE_POLICY.md`. A matched 250,000-row primary-key plus parent-index benchmark measured 63,610,880 bytes for `TEXT` versus 34,971,648 bytes for native `UUID` (45.0% smaller). Existing identifiers were deliberately not rewritten because the audit classifies that whole-schema operation as a long-term, evidence-gated migration; this resolves the forward-looking recommendation without imposing a high-risk data/API rewrite prematurely.
+
 **Confidence:** Plan-dependent
 
 **Evidence:** Most primary and foreign keys are `TEXT`, including UUID-like file/user IDs and prefixed IDs.
@@ -669,6 +689,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Use `pg_relation_size` and representative join benchmarks to justify migration.
 
 ## PERF-040 [P2] Admin search uses leading-wildcard `ILIKE` across several columns
+
+**Status:** Complete — implemented and verified on 2026-08-15.
+
+**Verification:** Role and status searches are normalized into exact comparisons, literal substring terms escape `%`, `_`, and `\\`, and only username/display-name fields retain substring matching. Concurrently built partial `pg_trgm` GIN indexes cover those text fields. Invitation search first builds a bounded materialized candidate set from individually indexable username, creator, exact-role, and exact-status branches, while users, invitations, and the summary are pipelined concurrently over the request-scoped database connection. At 1,000,000 users plus 1,000,000 invitations, user search improved from 406.098 ms and 77,278 measured buffer references to 1.052 ms and 730; invitation search improved from 418.205 ms and 5,125,832 to 37.185 ms and 251,340. Fresh-database plan tests require the trigram indexes and migration replay contract. Live API checks proved substring search, exact `user`/`pending` filters, and literal `%` behavior, and the unchanged `/users` UI server-rendered the expected results.
 
 **Confidence:** Confirmed
 

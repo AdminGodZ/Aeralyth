@@ -21,6 +21,7 @@ use crate::routes::share_links::{
 use crate::routes::upload_reservations::{reservation_amount, reserve_upload_capacity};
 use crate::state::AppState;
 use crate::storage::UploadedPart;
+use crate::timestamps;
 use crate::upload_completion::{
     FileUploadFinalizeOutcome, FileUploadRecord, completion_retry_delay_seconds,
     defer_file_upload_completion, file_upload_from_row, file_upload_metadata_matches,
@@ -1819,7 +1820,7 @@ pub async fn trash(
         .execute(
             "
                 WITH RECURSIVE subtree AS (
-                  SELECT id
+                  SELECT id, ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
                   FROM files
                   WHERE id = $1
                     AND owner_id = $2
@@ -1827,10 +1828,12 @@ pub async fn trash(
 
                   UNION ALL
 
-                  SELECT child.id
+                  SELECT child.id, parent.visited_ids || child.id, parent.depth + 1
                   FROM files AS child
                   INNER JOIN subtree AS parent ON child.parent_id = parent.id
                   WHERE child.owner_id = $2
+                    AND parent.depth < 100
+                    AND NOT child.id = ANY(parent.visited_ids)
                 )
                 UPDATE files
                 SET state = 'trashed',
@@ -1867,7 +1870,7 @@ pub async fn restore(
         .execute(
             "
                 WITH RECURSIVE subtree AS (
-                  SELECT id
+                  SELECT id, ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
                   FROM files
                   WHERE id = $1
                     AND owner_id = $2
@@ -1875,10 +1878,12 @@ pub async fn restore(
 
                   UNION ALL
 
-                  SELECT child.id
+                  SELECT child.id, parent.visited_ids || child.id, parent.depth + 1
                   FROM files AS child
                   INNER JOIN subtree AS parent ON child.parent_id = parent.id
                   WHERE child.owner_id = $2
+                    AND parent.depth < 100
+                    AND NOT child.id = ANY(parent.visited_ids)
                 )
                 UPDATE files
                 SET state = 'active',
@@ -1959,16 +1964,20 @@ pub async fn delete(
         .execute(
             "
                 WITH RECURSIVE subtree AS (
-                  SELECT id, owner_id, storage_name, entry_type
+                  SELECT id, owner_id, storage_name, entry_type,
+                         ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
                   FROM files
                   WHERE id = $1 AND owner_id = $2 AND state = 'trashed'
 
                   UNION ALL
 
-                  SELECT child.id, child.owner_id, child.storage_name, child.entry_type
+                  SELECT child.id, child.owner_id, child.storage_name, child.entry_type,
+                         parent.visited_ids || child.id, parent.depth + 1
                   FROM files AS child
                   INNER JOIN subtree AS parent ON child.parent_id = parent.id
                   WHERE child.owner_id = $2
+                    AND parent.depth < 100
+                    AND NOT child.id = ANY(parent.visited_ids)
                 )
                 INSERT INTO storage_deletion_jobs (object_key, available_at)
                 SELECT
@@ -2046,7 +2055,8 @@ async fn validate_folder(
 
 const OWNED_FOLDER_CONTEXT_QUERY: &str = "
     WITH RECURSIVE ancestors AS (
-      SELECT id, original_name, parent_id, e2ee_state, 0 AS depth
+      SELECT id, original_name, parent_id, e2ee_state,
+             ARRAY[id]::text[] AS visited_ids, 0 AS depth
       FROM files
       WHERE id = $1
         AND owner_id = $2
@@ -2056,10 +2066,12 @@ const OWNED_FOLDER_CONTEXT_QUERY: &str = "
       UNION ALL
 
       SELECT parent.id, parent.original_name, parent.parent_id,
-             parent.e2ee_state, child.depth + 1
+             parent.e2ee_state, child.visited_ids || parent.id, child.depth + 1
       FROM files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
       WHERE parent.owner_id = $2
+        AND child.depth < 100
+        AND NOT parent.id = ANY(child.visited_ids)
     )
     SELECT id, original_name, e2ee_state
     FROM ancestors
@@ -2094,17 +2106,21 @@ async fn resolve_owned_folder_context(
 
 const SHARED_FOLDER_CONTEXT_QUERY: &str = "
     WITH RECURSIVE ancestors AS (
-      SELECT id, original_name, parent_id, owner_id, e2ee_state, 0 AS depth
+      SELECT id, original_name, parent_id, owner_id, e2ee_state,
+             ARRAY[id]::text[] AS visited_ids, 0 AS depth
       FROM files
       WHERE id = $1 AND entry_type = 'folder' AND state = 'active'
 
       UNION ALL
 
       SELECT parent.id, parent.original_name, parent.parent_id,
-             parent.owner_id, parent.e2ee_state, child.depth + 1
+             parent.owner_id, parent.e2ee_state,
+             child.visited_ids || parent.id, child.depth + 1
       FROM files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
       WHERE parent.owner_id = child.owner_id AND parent.state = 'active'
+        AND child.depth < 100
+        AND NOT parent.id = ANY(child.visited_ids)
     ), legacy_access AS (
       SELECT ancestors.depth AS root_depth
       FROM ancestors
@@ -2314,13 +2330,13 @@ async fn list_entries(
                 files.permanent_share_link_count > 0
                 OR COALESCE(files.latest_share_link_expiry > now(), FALSE)
               ) AS has_active_share_link,
-              NULL::text AS shared_at,
-              to_char(files.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
-              to_char(files.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
-              to_char(files.trashed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS trashed_at,
+              NULL::timestamptz AS shared_at,
+              files.created_at,
+              files.updated_at,
+              files.trashed_at,
               {rank}::integer AS cursor_rank,
               {name} AS cursor_name,
-              to_char({date} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_date
+              {date} AS cursor_date
             FROM files
             WHERE files.owner_id = $1
               AND ($2::text IS NULL OR $2::text IS NOT NULL)
@@ -2423,13 +2439,13 @@ async fn list_shared_entries(
               owners.username AS owner_username,
               true AS shared,
               false AS has_active_share_link,
-              to_char(file_shares.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS shared_at,
-              to_char(files.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
-              to_char(files.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
-              to_char(files.trashed_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS trashed_at,
+              file_shares.created_at AS shared_at,
+              files.created_at,
+              files.updated_at,
+              files.trashed_at,
               1::integer AS cursor_rank,
               {name} AS cursor_name,
-              to_char({date} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_date
+              {date} AS cursor_date
             FROM file_shares
             INNER JOIN files ON files.id = file_shares.file_id
             INNER JOIN users AS owners ON owners.id = files.owner_id
@@ -2508,12 +2524,17 @@ async fn list_shared_folder_entries(
     let sql = format!(
         "
             WITH RECURSIVE ancestors AS (
-              SELECT id, parent_id, owner_id FROM files WHERE id = $2
+              SELECT id, parent_id, owner_id,
+                     ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
+              FROM files WHERE id = $2
               UNION ALL
-              SELECT parent.id, parent.parent_id, parent.owner_id
+              SELECT parent.id, parent.parent_id, parent.owner_id,
+                     child.visited_ids || parent.id, child.depth + 1
               FROM files AS parent
               INNER JOIN ancestors AS child ON child.parent_id = parent.id
               WHERE parent.owner_id = child.owner_id
+                AND child.depth < 100
+                AND NOT parent.id = ANY(child.visited_ids)
             ), legacy_access AS (
               SELECT shares.id, shares.owner_id, shares.created_at
               FROM ancestors
@@ -2547,12 +2568,12 @@ async fn list_shared_folder_entries(
                    files.state, files.e2ee_state, false AS favorite,
                    owners.username AS owner_username, true AS shared,
                    false AS has_active_share_link,
-                   to_char(access.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS shared_at,
-                   to_char(files.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
-                   to_char(files.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
-                   NULL::text AS trashed_at, {rank}::integer AS cursor_rank,
+                   access.created_at AS shared_at,
+                   files.created_at,
+                   files.updated_at,
+                   NULL::timestamptz AS trashed_at, {rank}::integer AS cursor_rank,
                    {name} AS cursor_name,
-                   to_char({date} AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS.US\"Z\"') AS cursor_date
+                   {date} AS cursor_date
             FROM access
             INNER JOIN files ON files.owner_id = access.owner_id
               AND files.parent_id = $2 AND files.state = 'active'
@@ -2599,7 +2620,7 @@ fn listed_file_from_row(row: tokio_postgres::Row) -> ListedFile {
     ListedFile {
         rank: row.get("cursor_rank"),
         cursor_name: row.get("cursor_name"),
-        cursor_date: row.get("cursor_date"),
+        cursor_date: timestamps::cursor(row.get("cursor_date")),
         entry: FileEntry {
             id: row.get("id"),
             name,
@@ -2612,10 +2633,10 @@ fn listed_file_from_row(row: tokio_postgres::Row) -> ListedFile {
             owner_username: row.get("owner_username"),
             shared: row.get("shared"),
             has_active_share_link: row.get("has_active_share_link"),
-            shared_at: row.get("shared_at"),
-            created_at: row.get("created_at"),
-            updated_at: row.get("updated_at"),
-            trashed_at: row.get("trashed_at"),
+            shared_at: timestamps::optional_api(row.get("shared_at")),
+            created_at: timestamps::api(row.get("created_at")),
+            updated_at: timestamps::api(row.get("updated_at")),
+            trashed_at: timestamps::optional_api(row.get("trashed_at")),
             e2ee_state: row.get("e2ee_state"),
         },
     }
@@ -2782,16 +2803,20 @@ async fn get_download_file(
         .query_opt(
             "
                 WITH RECURSIVE ancestors AS (
-                  SELECT id, parent_id, owner_id
+                  SELECT id, parent_id, owner_id,
+                         ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
                   FROM files
                   WHERE id = $1
 
                   UNION ALL
 
-                  SELECT parent.id, parent.parent_id, parent.owner_id
+                  SELECT parent.id, parent.parent_id, parent.owner_id,
+                         child.visited_ids || parent.id, child.depth + 1
                   FROM files AS parent
                   INNER JOIN ancestors AS child ON child.parent_id = parent.id
                   WHERE parent.owner_id = child.owner_id
+                    AND child.depth < 100
+                    AND NOT parent.id = ANY(child.visited_ids)
                 )
                 SELECT
                   files.id,

@@ -16,6 +16,7 @@ import Link from "next/link";
 import { useMemo } from "react";
 
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { RepositoryCodeMenu } from "@/features/repositories/repository-code-menu";
 import { RepositoryDescription } from "@/features/repositories/repository-description";
 import { getRepositoryFilePresentation } from "@/features/repositories/repository-file-types";
@@ -234,10 +235,28 @@ function ReadyRepositoryDetail({
                 </tbody>
               </table>
 
-              {data.entriesTruncated ? (
-                <p className="border-t px-4 py-3 text-xs text-muted-foreground">
-                  Showing the first 500 entries in this folder.
-                </p>
+              {data.hasMore && data.nextCursor ? (
+                <div className="flex items-center justify-between gap-4 border-t px-4 py-3">
+                  <p className="text-xs text-muted-foreground">
+                    Showing 500 entries on this page.
+                  </p>
+                  <Button asChild variant="outline" size="sm">
+                    <Link
+                      href={{
+                        pathname: `/repositories/${encodeURIComponent(data.repository.id)}`,
+                        query: {
+                          ...(data.currentFolderId !== data.repository.root.id
+                            ? { folder: data.currentFolderId }
+                            : {}),
+                          cursor: data.nextCursor,
+                        },
+                      }}
+                    >
+                      Next page
+                      <ChevronRight className="size-4" aria-hidden="true" />
+                    </Link>
+                  </Button>
+                </div>
               ) : null}
             </section>
           )}

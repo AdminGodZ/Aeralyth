@@ -251,6 +251,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "time",
  "tokio",
  "tokio-postgres",
  "tracing",
@@ -2354,6 +2355,7 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "postgres-protocol",
+ "time",
 ]
 
 [[package]]

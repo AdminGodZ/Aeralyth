@@ -84,6 +84,12 @@ type OwnedShareLink = {
   urlPath: string | null;
 };
 
+type OwnedShareLinkPage = {
+  links: OwnedShareLink[];
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
 const expirationOptions = [
   { value: "3600", label: "1 hour" },
   { value: "86400", label: "1 day" },
@@ -137,7 +143,10 @@ export function ShareLinkDialog({
   const [copied, setCopied] = useState(false);
   const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
   const [links, setLinks] = useState<OwnedShareLink[]>([]);
+  const [linksCursor, setLinksCursor] = useState<string | null>(null);
+  const [hasMoreLinks, setHasMoreLinks] = useState(false);
   const [loadingLinks, setLoadingLinks] = useState(false);
+  const [loadingMoreLinks, setLoadingMoreLinks] = useState(false);
   const [busy, setBusy] = useState(false);
   const [revokingId, setRevokingId] = useState<string | null>(null);
   const [rotatingId, setRotatingId] = useState<string | null>(null);
@@ -153,7 +162,11 @@ export function ShareLinkDialog({
     const controller = new AbortController();
     setLoadingLinks(true);
     void requestOwnedLinks(itemId, controller.signal)
-      .then((ownedLinks) => setLinks(ownedLinks))
+      .then((page) => {
+        setLinks(page.links);
+        setLinksCursor(page.nextCursor);
+        setHasMoreLinks(page.hasMore);
+      })
       .catch((failure: unknown) => {
         if (!controller.signal.aborted) {
           setError(
@@ -169,6 +182,35 @@ export function ShareLinkDialog({
 
     return () => controller.abort();
   }, [itemId, open]);
+
+  async function loadMoreLinks(): Promise<void> {
+    if (!linksCursor || loadingMoreLinks) return;
+    setLoadingMoreLinks(true);
+    setError(null);
+    try {
+      const page = await requestOwnedLinks(
+        itemId,
+        new AbortController().signal,
+        linksCursor,
+      );
+      setLinks((current) => [
+        ...current,
+        ...page.links.filter(
+          (link) => !current.some((existing) => existing.id === link.id),
+        ),
+      ]);
+      setLinksCursor(page.nextCursor);
+      setHasMoreLinks(page.hasMore);
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : "Older links could not be loaded.",
+      );
+    } finally {
+      setLoadingMoreLinks(false);
+    }
+  }
 
   function close(nextOpen: boolean): void {
     if (busy || revokingId || rotatingId) return;
@@ -360,6 +402,8 @@ export function ShareLinkDialog({
             itemType={itemType}
             error={error}
             loadingLinks={loadingLinks}
+            loadingMoreLinks={loadingMoreLinks}
+            hasMoreLinks={hasMoreLinks}
             activeLinks={activeLinks}
             revokingId={revokingId}
             rotatingId={rotatingId}
@@ -368,6 +412,7 @@ export function ShareLinkDialog({
             onRevoke={(linkId) => void revoke(linkId)}
             onRotate={(linkId) => void rotate(linkId)}
             onCopy={(link) => void copyOwnedUrl(link)}
+            onLoadMore={() => void loadMoreLinks()}
             onCancel={() => close(false)}
             onSubmit={() => void createLink()}
           />
@@ -451,6 +496,8 @@ function ShareConfigurationForm({
   itemType,
   error,
   loadingLinks,
+  loadingMoreLinks,
+  hasMoreLinks,
   activeLinks,
   revokingId,
   rotatingId,
@@ -459,6 +506,7 @@ function ShareConfigurationForm({
   onRevoke,
   onRotate,
   onCopy,
+  onLoadMore,
   onCancel,
   onSubmit,
 }: {
@@ -475,6 +523,8 @@ function ShareConfigurationForm({
   itemType: "file" | "folder";
   error: string | null;
   loadingLinks: boolean;
+  loadingMoreLinks: boolean;
+  hasMoreLinks: boolean;
   activeLinks: OwnedShareLink[];
   revokingId: string | null;
   rotatingId: string | null;
@@ -483,6 +533,7 @@ function ShareConfigurationForm({
   onRevoke(linkId: string): void;
   onRotate(linkId: string): void;
   onCopy(link: OwnedShareLink): void;
+  onLoadMore(): void;
   onCancel(): void;
   onSubmit(): void;
 }) {
@@ -496,6 +547,8 @@ function ShareConfigurationForm({
     >
       <ActiveShareLinks
         loading={loadingLinks}
+        loadingMore={loadingMoreLinks}
+        hasMore={hasMoreLinks}
         links={activeLinks}
         revokingId={revokingId}
         rotatingId={rotatingId}
@@ -503,6 +556,7 @@ function ShareConfigurationForm({
         onRevoke={onRevoke}
         onRotate={onRotate}
         onCopy={onCopy}
+        onLoadMore={onLoadMore}
       />
 
       {activeLinks.length > 0 ? (
@@ -765,6 +819,8 @@ function TimePartSelect({
 
 function ActiveShareLinks({
   loading,
+  loadingMore,
+  hasMore,
   links,
   revokingId,
   rotatingId,
@@ -772,8 +828,11 @@ function ActiveShareLinks({
   onRevoke,
   onRotate,
   onCopy,
+  onLoadMore,
 }: {
   loading: boolean;
+  loadingMore: boolean;
+  hasMore: boolean;
   links: OwnedShareLink[];
   revokingId: string | null;
   rotatingId: string | null;
@@ -781,8 +840,9 @@ function ActiveShareLinks({
   onRevoke(linkId: string): void;
   onRotate(linkId: string): void;
   onCopy(link: OwnedShareLink): void;
+  onLoadMore(): void;
 }) {
-  if (!loading && links.length === 0) return null;
+  if (!loading && links.length === 0 && !hasMore) return null;
 
   return (
     <div className="space-y-3">
@@ -854,6 +914,20 @@ function ActiveShareLinks({
           />
         </article>
       ))}
+      {hasMore ? (
+        <Button
+          type="button"
+          variant="outline"
+          className="w-full"
+          disabled={loadingMore}
+          onClick={onLoadMore}
+        >
+          {loadingMore ? (
+            <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+          ) : null}
+          Load older links
+        </Button>
+      ) : null}
     </div>
   );
 }
@@ -1070,9 +1144,13 @@ async function requestCreateShareLink({
 async function requestOwnedLinks(
   itemId: string,
   signal: AbortSignal,
-): Promise<OwnedShareLink[]> {
+  cursor?: string,
+): Promise<OwnedShareLinkPage> {
   const response = await fetch(
-    `/api/share-links?${new URLSearchParams({ fileId: itemId })}`,
+    `/api/share-links?${new URLSearchParams({
+      fileId: itemId,
+      ...(cursor ? { cursor } : {}),
+    })}`,
     {
       headers: { Accept: "application/json" },
       cache: "no-store",
@@ -1082,7 +1160,7 @@ async function requestOwnedLinks(
   if (!response.ok) {
     throw new Error("Existing share links could not be loaded.");
   }
-  return (await response.json()) as OwnedShareLink[];
+  return (await response.json()) as OwnedShareLinkPage;
 }
 
 async function requestRevokeShareLink(

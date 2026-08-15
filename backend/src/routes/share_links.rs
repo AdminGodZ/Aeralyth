@@ -11,12 +11,16 @@ use tokio::fs::File as AsyncFile;
 use tokio::io::AsyncReadExt;
 
 use crate::auth::{parse_json_body, require_csrf, require_principal, session_principal};
+use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
 use crate::state::AppState;
+use crate::timestamps;
 
 pub(crate) const SHARE_TOKEN_HEADER: &str = "x-aeralyth-share-token";
 const MIN_LINK_LIFETIME_SECONDS: i64 = 5 * 60;
 const MAX_LINK_LIFETIME_SECONDS: i64 = 365 * 24 * 60 * 60;
 const SHARE_LINK_JSON_LIMIT: usize = 16 * 1024;
+const OWNED_SHARE_LINK_PAGE_SIZE: usize = 50;
+const SHARED_ENTRY_PAGE_SIZE: usize = 500;
 const SHARE_ACCESS_CONTEXT_QUERY: &str = r#"
     WITH RECURSIVE share_grant AS MATERIALIZED (
       SELECT
@@ -28,13 +32,11 @@ const SHARE_ACCESS_CONTEXT_QUERY: &str = r#"
         links.access_scope,
         links.permission,
         links.recipient_id,
-        to_char(links.expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
-          AS expires_at,
+        links.expires_at,
         roots.original_name AS root_name,
         roots.mime_type AS root_mime_type,
         roots.size_bytes AS root_size_bytes,
-        to_char(roots.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
-          AS root_updated_at
+        roots.updated_at AS root_updated_at
       FROM share_links AS links
       INNER JOIN users AS owners ON owners.id = links.owner_id
       INNER JOIN files AS roots ON roots.id = links.root_file_id
@@ -62,6 +64,7 @@ const SHARE_ACCESS_CONTEXT_QUERY: &str = r#"
         node.parent_id,
         node.original_name,
         requested.root_file_id,
+        ARRAY[node.id]::text[] AS visited_ids,
         0::integer AS depth
       FROM requested
       INNER JOIN files AS node ON node.id = requested.requested_node_id
@@ -83,6 +86,7 @@ const SHARE_ACCESS_CONTEXT_QUERY: &str = r#"
         parent.parent_id,
         parent.original_name,
         child.root_file_id,
+        child.visited_ids || parent.id,
         child.depth + 1
       FROM files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
@@ -90,6 +94,7 @@ const SHARE_ACCESS_CONTEXT_QUERY: &str = r#"
       WHERE parent.state = 'active'
         AND child.id <> child.root_file_id
         AND child.depth < 100
+        AND NOT parent.id = ANY(child.visited_ids)
     )
     SELECT
       requested.id,
@@ -131,8 +136,7 @@ const SHARE_DOWNLOAD_CONTEXT_QUERY: &str = r#"
         links.access_scope,
         links.permission,
         links.recipient_id,
-        to_char(links.expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
-          AS expires_at
+        links.expires_at
       FROM share_links AS links
       INNER JOIN users AS owners ON owners.id = links.owner_id
       INNER JOIN files AS roots ON roots.id = links.root_file_id
@@ -152,6 +156,7 @@ const SHARE_DOWNLOAD_CONTEXT_QUERY: &str = r#"
         target.storage_name,
         target.mime_type,
         share_grant.root_file_id,
+        ARRAY[target.id]::text[] AS visited_ids,
         0::integer AS depth
       FROM share_grant
       INNER JOIN files AS target ON target.id = $2
@@ -169,6 +174,7 @@ const SHARE_DOWNLOAD_CONTEXT_QUERY: &str = r#"
         parent.storage_name,
         parent.mime_type,
         child.root_file_id,
+        child.visited_ids || parent.id,
         child.depth + 1
       FROM files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
@@ -176,6 +182,7 @@ const SHARE_DOWNLOAD_CONTEXT_QUERY: &str = r#"
       WHERE parent.state = 'active'
         AND child.id <> child.root_file_id
         AND child.depth < 100
+        AND NOT parent.id = ANY(child.visited_ids)
     )
     SELECT
       share_grant.id,
@@ -214,11 +221,31 @@ pub(crate) struct CreateShareLinkRequest {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct OwnedShareLinksQuery {
     file_id: String,
+    cursor: Option<String>,
 }
 
 #[derive(Deserialize)]
 pub(crate) struct ShareAccessQuery {
     folder: Option<String>,
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct OwnedShareLinkCursor {
+    scope: String,
+    file_id: String,
+    created_at: String,
+    id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct SharedEntryCursor {
+    scope: String,
+    root_file_id: String,
+    folder_id: String,
+    rank: i32,
+    name: String,
+    id: String,
 }
 
 #[derive(Serialize)]
@@ -247,6 +274,14 @@ struct OwnedShareLinkResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct OwnedShareLinksResponse {
+    links: Vec<OwnedShareLinkResponse>,
+    next_cursor: Option<String>,
+    has_more: bool,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RotatedShareLinkResponse {
     url_path: String,
 }
@@ -262,6 +297,8 @@ struct ShareAccessResponse {
     current_folder_id: Option<String>,
     breadcrumbs: Vec<SharedBreadcrumbResponse>,
     entries: Vec<SharedEntryResponse>,
+    next_cursor: Option<String>,
+    has_more: bool,
 }
 
 #[derive(Serialize)]
@@ -308,6 +345,12 @@ struct ShareAccessContext {
     current_folder_id: Option<String>,
     breadcrumbs: Vec<SharedBreadcrumbResponse>,
     node_authorized: bool,
+}
+
+struct SharedEntryPage {
+    entries: Vec<SharedEntryResponse>,
+    next_cursor: Option<String>,
+    has_more: bool,
 }
 
 struct ShareDownloadContext {
@@ -415,8 +458,7 @@ pub async fn create(
                     ELSE now() + ($8::bigint * interval '1 second')
                   END
                 )
-                RETURNING
-                  to_char(expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS expires_at
+                RETURNING expires_at
             ",
             &[
                 &link_id,
@@ -440,7 +482,7 @@ pub async fn create(
             access_scope: access_scope.to_owned(),
             permission: permission.to_owned(),
             recipient_username,
-            expires_at: row.get("expires_at"),
+            expires_at: timestamps::optional_api(row.get("expires_at")),
         }))
 }
 
@@ -450,15 +492,27 @@ pub async fn list_owned(
     query: web::Query<OwnedShareLinksQuery>,
 ) -> Result<HttpResponse> {
     let owner = require_principal(&state, &request).await?;
-    let rows = state
+    let cursor = decode_cursor::<OwnedShareLinkCursor>(query.cursor.as_deref())?;
+    if cursor.as_ref().is_some_and(|cursor| {
+        cursor.scope != "owned-share-links" || cursor.file_id != query.file_id
+    }) {
+        return Err(error::ErrorBadRequest(
+            "pagination cursor does not match shared item",
+        ));
+    }
+    let cursor_created_at = cursor.as_ref().map(|cursor| cursor.created_at.clone());
+    let cursor_id = cursor.as_ref().map(|cursor| cursor.id.clone());
+    let limit = row_limit(OWNED_SHARE_LINK_PAGE_SIZE)?;
+    let mut rows = state
         .db
         .query(
             "
                 SELECT links.id, links.access_scope, links.permission,
                        links.token_hash,
                        recipients.username AS recipient_username,
-                       to_char(links.expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS expires_at,
-                       to_char(links.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
+                       links.expires_at,
+                       links.created_at,
+                       links.created_at AS cursor_created_at,
                        CASE
                          WHEN links.revoked_at IS NOT NULL THEN 'revoked'
                          WHEN links.expires_at IS NOT NULL AND links.expires_at <= now() THEN 'expired'
@@ -467,13 +521,40 @@ pub async fn list_owned(
                 FROM share_links AS links
                 LEFT JOIN users AS recipients ON recipients.id = links.recipient_id
                 WHERE links.owner_id = $1 AND links.root_file_id = $2
-                ORDER BY links.created_at DESC
-                LIMIT 50
+                  AND (
+                    $3::text IS NULL
+                    OR links.created_at < $3::text::timestamptz
+                    OR (links.created_at = $3::text::timestamptz AND links.id < $4)
+                  )
+                ORDER BY links.created_at DESC, links.id DESC
+                LIMIT $5
             ",
-            &[&owner.id, &query.file_id],
+            &[
+                &owner.id,
+                &query.file_id,
+                &cursor_created_at,
+                &cursor_id,
+                &limit,
+            ],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
+    let has_more = rows.len() > OWNED_SHARE_LINK_PAGE_SIZE;
+    rows.truncate(OWNED_SHARE_LINK_PAGE_SIZE);
+    let next_cursor = if has_more {
+        rows.last()
+            .map(|row| {
+                encode_cursor(&OwnedShareLinkCursor {
+                    scope: "owned-share-links".to_owned(),
+                    file_id: query.file_id.clone(),
+                    created_at: timestamps::cursor(row.get("cursor_created_at")),
+                    id: row.get("id"),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
     let links = rows
         .into_iter()
         .map(|row| {
@@ -486,8 +567,8 @@ pub async fn list_owned(
                 access_scope: row.get("access_scope"),
                 permission: row.get("permission"),
                 recipient_username: row.get("recipient_username"),
-                expires_at: row.get("expires_at"),
-                created_at: row.get("created_at"),
+                expires_at: timestamps::optional_api(row.get("expires_at")),
+                created_at: timestamps::api(row.get("created_at")),
                 status: row.get("status"),
                 url_path,
             })
@@ -496,7 +577,11 @@ pub async fn list_owned(
 
     Ok(HttpResponse::Ok()
         .insert_header((CACHE_CONTROL, "private, no-store"))
-        .json(links))
+        .json(OwnedShareLinksResponse {
+            links,
+            next_cursor,
+            has_more,
+        }))
 }
 
 pub async fn rotate(
@@ -576,11 +661,25 @@ pub async fn access(
     if !context.node_authorized {
         return Err(error::ErrorNotFound("shared item not found"));
     }
+    let cursor = decode_cursor::<SharedEntryCursor>(query.cursor.as_deref())?;
+    if cursor.as_ref().is_some_and(|cursor| {
+        context.current_folder_id.as_deref() != Some(cursor.folder_id.as_str())
+            || cursor.scope != "shared-entries"
+            || cursor.root_file_id != context.grant.root_file_id
+    }) {
+        return Err(error::ErrorBadRequest(
+            "pagination cursor does not match shared folder",
+        ));
+    }
 
-    let entries = if let Some(folder_id) = context.current_folder_id.as_deref() {
-        list_shared_children(&state, &context.grant, folder_id).await?
+    let entry_page = if let Some(folder_id) = context.current_folder_id.as_deref() {
+        list_shared_children(&state, &context.grant, folder_id, cursor.as_ref()).await?
     } else {
-        Vec::new()
+        SharedEntryPage {
+            entries: Vec::new(),
+            next_cursor: None,
+            has_more: false,
+        }
     };
 
     Ok(no_store(&mut HttpResponse::Ok()).json(ShareAccessResponse {
@@ -591,7 +690,9 @@ pub async fn access(
         root: context.root,
         current_folder_id: context.current_folder_id,
         breadcrumbs: context.breadcrumbs,
-        entries,
+        entries: entry_page.entries,
+        next_cursor: entry_page.next_cursor,
+        has_more: entry_page.has_more,
     }))
 }
 
@@ -688,13 +789,16 @@ pub async fn remove_entry(
         .execute(
             "
                 WITH RECURSIVE subtree AS (
-                  SELECT id FROM files
+                  SELECT id, ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
+                  FROM files
                   WHERE id = $1 AND owner_id = $2 AND state = 'active'
                   UNION ALL
-                  SELECT child.id
+                  SELECT child.id, parent.visited_ids || child.id, parent.depth + 1
                   FROM files AS child
                   INNER JOIN subtree AS parent ON child.parent_id = parent.id
                   WHERE child.owner_id = $2 AND child.state = 'active'
+                    AND parent.depth < 100
+                    AND NOT child.id = ANY(parent.visited_ids)
                 )
                 UPDATE files
                 SET state = 'trashed', trashed_at = now(), updated_at = now()
@@ -824,7 +928,7 @@ async fn get_share_access_context(
             mime_type: first_row.get("root_mime_type"),
             entry_type: first_row.get("root_type"),
             size_bytes: first_row.get("root_size_bytes"),
-            updated_at: first_row.get("root_updated_at"),
+            updated_at: timestamps::api(first_row.get("root_updated_at")),
         },
         current_folder_id: is_folder.then(|| first_row.get("requested_node_id")),
         grant,
@@ -878,7 +982,7 @@ fn share_grant_from_row(row: &tokio_postgres::Row) -> ShareGrant {
         root_entry_type: row.get("root_entry_type"),
         access_scope: row.get("access_scope"),
         permission: row.get("permission"),
-        expires_at: row.get("expires_at"),
+        expires_at: timestamps::optional_api(row.get("expires_at")),
         recipient_id: row.get("recipient_id"),
     }
 }
@@ -911,7 +1015,7 @@ async fn resolve_grant(state: &AppState, request: &HttpRequest, token: &str) -> 
                 SELECT links.id, links.owner_id, owners.username AS owner_username,
                        links.root_file_id, files.entry_type AS root_entry_type,
                        links.access_scope, links.permission, links.recipient_id,
-                       to_char(links.expires_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS expires_at
+                       links.expires_at
                 FROM share_links AS links
                 INNER JOIN users AS owners ON owners.id = links.owner_id
                 INNER JOIN files ON files.id = links.root_file_id
@@ -948,14 +1052,18 @@ async fn require_shared_node(
         .query_opt(
             "
                 WITH RECURSIVE ancestors AS (
-                  SELECT id, parent_id, entry_type
+                  SELECT id, parent_id, entry_type,
+                         ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
                   FROM files
                   WHERE id = $1 AND owner_id = $2 AND state = 'active'
                   UNION ALL
-                  SELECT parent.id, parent.parent_id, parent.entry_type
+                  SELECT parent.id, parent.parent_id, parent.entry_type,
+                         child.visited_ids || parent.id, child.depth + 1
                   FROM files AS parent
                   INNER JOIN ancestors AS child ON child.parent_id = parent.id
                   WHERE parent.owner_id = $2 AND parent.state = 'active'
+                    AND child.depth < 100
+                    AND NOT parent.id = ANY(child.visited_ids)
                 )
                 SELECT entry_type
                 FROM ancestors
@@ -981,25 +1089,72 @@ async fn list_shared_children(
     state: &AppState,
     grant: &ShareGrant,
     folder_id: &str,
-) -> Result<Vec<SharedEntryResponse>> {
-    let rows = state
+    cursor: Option<&SharedEntryCursor>,
+) -> Result<SharedEntryPage> {
+    let cursor_rank = cursor.map(|cursor| cursor.rank);
+    let cursor_name = cursor.map(|cursor| cursor.name.clone());
+    let cursor_id = cursor.map(|cursor| cursor.id.clone());
+    let limit = row_limit(SHARED_ENTRY_PAGE_SIZE)?;
+    let mut rows = state
         .db
         .query(
             "
                 SELECT id, original_name, mime_type, entry_type, size_bytes,
-                       to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at
+                       updated_at,
+                       CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END AS cursor_rank,
+                       lower(original_name) AS cursor_name
                 FROM files
                 WHERE owner_id = $1 AND parent_id = $2 AND state = 'active'
                   AND e2ee_state IN ('legacy', 'staged')
+                  AND (
+                    $3::integer IS NULL
+                    OR CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END > $3
+                    OR (
+                      CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END = $3
+                      AND (
+                        lower(original_name) > $4
+                        OR (lower(original_name) = $4 AND id > $5)
+                      )
+                    )
+                  )
                 ORDER BY CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END,
                          lower(original_name), id
-                LIMIT 500
+                LIMIT $6
             ",
-            &[&grant.owner_id, &folder_id],
+            &[
+                &grant.owner_id,
+                &folder_id,
+                &cursor_rank,
+                &cursor_name,
+                &cursor_id,
+                &limit,
+            ],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    Ok(rows.into_iter().map(shared_entry_from_row).collect())
+    let has_more = rows.len() > SHARED_ENTRY_PAGE_SIZE;
+    rows.truncate(SHARED_ENTRY_PAGE_SIZE);
+    let next_cursor = if has_more {
+        rows.last()
+            .map(|row| {
+                encode_cursor(&SharedEntryCursor {
+                    scope: "shared-entries".to_owned(),
+                    root_file_id: grant.root_file_id.clone(),
+                    folder_id: folder_id.to_owned(),
+                    rank: row.get("cursor_rank"),
+                    name: row.get("cursor_name"),
+                    id: row.get("id"),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    Ok(SharedEntryPage {
+        entries: rows.into_iter().map(shared_entry_from_row).collect(),
+        next_cursor,
+        has_more,
+    })
 }
 
 fn shared_entry_from_row(row: tokio_postgres::Row) -> SharedEntryResponse {
@@ -1009,7 +1164,7 @@ fn shared_entry_from_row(row: tokio_postgres::Row) -> SharedEntryResponse {
         mime_type: row.get("mime_type"),
         entry_type: row.get("entry_type"),
         size_bytes: row.get("size_bytes"),
-        updated_at: row.get("updated_at"),
+        updated_at: timestamps::api(row.get("updated_at")),
     }
 }
 

@@ -3,9 +3,12 @@ use serde::{Deserialize, Serialize};
 use tokio_postgres::Row;
 
 use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
+use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
 use crate::state::AppState;
+use crate::timestamps;
 
 const MAX_REPOSITORY_ENTRIES: i64 = 500;
+const REPOSITORY_LIST_PAGE_SIZE: usize = 100;
 const MAX_REPOSITORY_ARCHIVE_ENTRIES: i64 = 50_000;
 const MAX_REPOSITORY_ARCHIVE_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 const MAX_REPOSITORY_DESCRIPTION_CHARS: usize = 350;
@@ -46,6 +49,7 @@ const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
         folder.parent_id,
         folder.e2ee_state,
         repository.root_file_id,
+        ARRAY[folder.id]::text[] AS visited_ids,
         0::integer AS depth
       FROM repository
       INNER JOIN files AS folder ON folder.id = repository.requested_folder_id
@@ -61,6 +65,7 @@ const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
         parent.parent_id,
         parent.e2ee_state,
         child.root_file_id,
+        child.visited_ids || parent.id,
         child.depth + 1
       FROM files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
@@ -68,6 +73,7 @@ const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
         AND parent.state = 'active'
         AND child.id <> child.root_file_id
         AND child.depth < 100
+        AND NOT parent.id = ANY(child.visited_ids)
     )
     SELECT
       repository.id,
@@ -76,12 +82,9 @@ const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
       repository.root_file_id AS root_id,
       repository.root_name,
       repository.root_e2ee_state,
-      to_char(repository.root_updated_at_value AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
-        AS root_updated_at,
-      to_char(repository.created_at_value AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
-        AS created_at,
-      to_char(repository.updated_at_value AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
-        AS updated_at,
+      repository.root_updated_at_value AS root_updated_at,
+      repository.created_at_value AS created_at,
+      repository.updated_at_value AS updated_at,
       repository.total_files,
       repository.total_folders,
       repository.tree_version,
@@ -110,15 +113,28 @@ const REPOSITORY_CHILDREN_QUERY: &str = r#"
       parent_id,
       size_bytes,
       e2ee_state,
-      to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS updated_at
+      updated_at,
+      CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END AS cursor_rank,
+      lower(original_name) AS cursor_name
     FROM files
     WHERE owner_id = $1
       AND parent_id = $2
       AND state = 'active'
+      AND (
+        $3::integer IS NULL
+        OR CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END > $3
+        OR (
+          CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END = $3
+          AND (
+            lower(original_name) > $4
+            OR (lower(original_name) = $4 AND id > $5)
+          )
+        )
+      )
     ORDER BY CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END,
              lower(original_name),
              id
-    LIMIT $3
+    LIMIT $6
 "#;
 
 const REFRESH_REPOSITORY_TOTALS_QUERY: &str = r#"
@@ -129,7 +145,8 @@ const REFRESH_REPOSITORY_TOTALS_QUERY: &str = r#"
       LIMIT 1
     ),
     tree AS (
-      SELECT files.id, files.entry_type, ARRAY[files.id]::text[] AS visited_ids
+      SELECT files.id, files.entry_type, ARRAY[files.id]::text[] AS visited_ids,
+             0::integer AS depth
       FROM files
       INNER JOIN repository_snapshot
         ON repository_snapshot.root_file_id = files.id
@@ -137,11 +154,13 @@ const REFRESH_REPOSITORY_TOTALS_QUERY: &str = r#"
 
       UNION ALL
 
-      SELECT child.id, child.entry_type, tree.visited_ids || child.id
+      SELECT child.id, child.entry_type, tree.visited_ids || child.id,
+             tree.depth + 1
       FROM files AS child
       INNER JOIN tree ON child.parent_id = tree.id
       WHERE child.owner_id = $2
         AND child.state = 'active'
+        AND tree.depth < 100
         AND NOT child.id = ANY(tree.visited_ids)
     ),
     totals AS (
@@ -184,12 +203,38 @@ pub(crate) struct UpdateRepositoryRequest {
 #[derive(Deserialize)]
 pub(crate) struct RepositoryQuery {
     folder: Option<String>,
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct RepositoryListQuery {
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RepositoryListCursor {
+    scope: String,
+    updated_at: String,
+    name: String,
+    id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RepositoryEntryCursor {
+    scope: String,
+    repository_id: String,
+    folder_id: String,
+    rank: i32,
+    name: String,
+    id: String,
 }
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RepositoriesResponse {
     repositories: Vec<RepositorySummary>,
+    next_cursor: Option<String>,
+    has_more: bool,
 }
 
 #[derive(Serialize)]
@@ -201,6 +246,8 @@ struct RepositoryDetailResponse {
     entries: Vec<RepositoryEntry>,
     summary: RepositoryTreeSummary,
     entries_truncated: bool,
+    next_cursor: Option<String>,
+    has_more: bool,
 }
 
 #[derive(Serialize)]
@@ -275,9 +322,32 @@ struct RepositoryTreeSummary {
     total_folders: i64,
 }
 
-pub async fn list(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
+struct RepositoryEntryPage {
+    rows: Vec<Row>,
+    next_cursor: Option<String>,
+    has_more: bool,
+}
+
+pub async fn list(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    query: web::Query<RepositoryListQuery>,
+) -> Result<HttpResponse> {
     let owner = require_principal(&state, &request).await?;
-    let rows = state
+    let cursor = decode_cursor::<RepositoryListCursor>(query.cursor.as_deref())?;
+    if cursor
+        .as_ref()
+        .is_some_and(|cursor| cursor.scope != "repositories")
+    {
+        return Err(error::ErrorBadRequest(
+            "pagination cursor does not match repository list",
+        ));
+    }
+    let cursor_updated_at = cursor.as_ref().map(|cursor| cursor.updated_at.clone());
+    let cursor_name = cursor.as_ref().map(|cursor| cursor.name.clone());
+    let cursor_id = cursor.as_ref().map(|cursor| cursor.id.clone());
+    let limit = row_limit(REPOSITORY_LIST_PAGE_SIZE)?;
+    let mut rows = state
         .db
         .query(
             "
@@ -288,13 +358,15 @@ pub async fn list(state: web::Data<AppState>, request: HttpRequest) -> Result<Ht
                   roots.id AS root_id,
                   roots.original_name AS root_name,
                   roots.e2ee_state AS root_e2ee_state,
-                  to_char(roots.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS root_updated_at,
-                  to_char(repositories.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
-                  to_char(repositories.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
+                  roots.updated_at AS root_updated_at,
+                  repositories.created_at,
+                  repositories.updated_at,
                   repositories.total_files,
                   repositories.total_folders,
                   repositories.tree_version,
-                  repositories.counts_version
+                  repositories.counts_version,
+                  repositories.updated_at AS cursor_updated_at,
+                  lower(roots.original_name) AS cursor_name
                 FROM repositories
                 INNER JOIN users AS owners ON owners.id = repositories.owner_id
                 INNER JOIN files AS roots ON roots.id = repositories.root_file_id
@@ -302,15 +374,52 @@ pub async fn list(state: web::Data<AppState>, request: HttpRequest) -> Result<Ht
                   AND roots.owner_id = repositories.owner_id
                   AND roots.entry_type = 'folder'
                   AND roots.state = 'active'
+                  AND (
+                    $2::text IS NULL
+                    OR repositories.updated_at < $2::text::timestamptz
+                    OR (
+                      repositories.updated_at = $2::text::timestamptz
+                      AND (
+                        lower(roots.original_name) > $3
+                        OR (lower(roots.original_name) = $3 AND repositories.id > $4)
+                      )
+                    )
+                  )
                 ORDER BY repositories.updated_at DESC, lower(roots.original_name), repositories.id
+                LIMIT $5
             ",
-            &[&owner.id],
+            &[
+                &owner.id,
+                &cursor_updated_at,
+                &cursor_name,
+                &cursor_id,
+                &limit,
+            ],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
 
+    let has_more = rows.len() > REPOSITORY_LIST_PAGE_SIZE;
+    rows.truncate(REPOSITORY_LIST_PAGE_SIZE);
+    let next_cursor = if has_more {
+        rows.last()
+            .map(|row| {
+                encode_cursor(&RepositoryListCursor {
+                    scope: "repositories".to_owned(),
+                    updated_at: timestamps::cursor(row.get("cursor_updated_at")),
+                    name: row.get("cursor_name"),
+                    id: row.get("id"),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+
     Ok(HttpResponse::Ok().json(RepositoriesResponse {
         repositories: rows.iter().map(repository_summary_from_row).collect(),
+        next_cursor,
+        has_more,
     }))
 }
 
@@ -540,16 +649,39 @@ pub async fn detail(
     if !context.folder_authorized {
         return Ok(HttpResponse::NotFound().body("repository folder not found"));
     }
+    let entry_cursor = decode_cursor::<RepositoryEntryCursor>(query.cursor.as_deref())?;
+    if entry_cursor.as_ref().is_some_and(|cursor| {
+        cursor.scope != "repository-entries"
+            || cursor.repository_id != repository_id
+            || cursor.folder_id != context.current_folder_id
+    }) {
+        return Err(error::ErrorBadRequest(
+            "pagination cursor does not match repository folder",
+        ));
+    }
 
     let counts_are_stale = context.repository.counts_version != context.repository.tree_version;
-    let (mut entry_rows, refreshed_totals) = if counts_are_stale {
+    let (entry_page, refreshed_totals) = if counts_are_stale {
         futures_util::try_join!(
-            list_repository_children(&state, &owner.id, &context.current_folder_id),
+            list_repository_children(
+                &state,
+                &owner.id,
+                &repository_id,
+                &context.current_folder_id,
+                entry_cursor.as_ref(),
+            ),
             refresh_repository_totals(&state, &owner.id, &repository_id),
         )?
     } else {
         (
-            list_repository_children(&state, &owner.id, &context.current_folder_id).await?,
+            list_repository_children(
+                &state,
+                &owner.id,
+                &repository_id,
+                &context.current_folder_id,
+                entry_cursor.as_ref(),
+            )
+            .await?,
             None,
         )
     };
@@ -567,9 +699,6 @@ pub async fn detail(
         context.repository.total_folders = summary.total_folders;
     }
 
-    let entries_truncated = entry_rows.len() > MAX_REPOSITORY_ENTRIES as usize;
-    entry_rows.truncate(MAX_REPOSITORY_ENTRIES as usize);
-
     Ok(HttpResponse::Ok().json(RepositoryDetailResponse {
         summary: RepositoryTreeSummary {
             total_files: context.repository.total_files,
@@ -578,11 +707,14 @@ pub async fn detail(
         repository: context.repository,
         current_folder_id: context.current_folder_id,
         breadcrumbs: context.breadcrumbs,
-        entries: entry_rows
+        entries: entry_page
+            .rows
             .into_iter()
             .map(repository_entry_from_row)
             .collect(),
-        entries_truncated,
+        entries_truncated: entry_page.has_more,
+        next_cursor: entry_page.next_cursor,
+        has_more: entry_page.has_more,
     }))
 }
 
@@ -611,6 +743,7 @@ pub async fn archive_manifest(
                     size_bytes,
                     e2ee_state,
                     updated_at,
+                    ARRAY[id]::text[] AS visited_ids,
                     0::integer AS depth
                   FROM files
                   WHERE id = $1
@@ -629,12 +762,14 @@ pub async fn archive_manifest(
                     child.size_bytes,
                     child.e2ee_state,
                     child.updated_at,
+                    tree.visited_ids || child.id,
                     tree.depth + 1
                   FROM files AS child
                   INNER JOIN tree ON child.parent_id = tree.id
                   WHERE child.owner_id = $2
                     AND child.state = 'active'
                     AND tree.depth < 100
+                    AND NOT child.id = ANY(tree.visited_ids)
                 )
                 SELECT
                   id,
@@ -644,7 +779,7 @@ pub async fn archive_manifest(
                   parent_id,
                   size_bytes,
                   e2ee_state,
-                  to_char(updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at
+                  updated_at
                 FROM tree
                 WHERE id <> $1
                 ORDER BY depth,
@@ -727,16 +862,53 @@ async fn get_repository_detail_context(
 async fn list_repository_children(
     state: &AppState,
     owner_id: &str,
+    repository_id: &str,
     folder_id: &str,
-) -> Result<Vec<Row>> {
-    state
+    cursor: Option<&RepositoryEntryCursor>,
+) -> Result<RepositoryEntryPage> {
+    let cursor_rank = cursor.map(|cursor| cursor.rank);
+    let cursor_name = cursor.map(|cursor| cursor.name.clone());
+    let cursor_id = cursor.map(|cursor| cursor.id.clone());
+    let limit = row_limit(MAX_REPOSITORY_ENTRIES as usize)?;
+    let mut rows = state
         .db
         .query(
             REPOSITORY_CHILDREN_QUERY,
-            &[&owner_id, &folder_id, &(MAX_REPOSITORY_ENTRIES + 1)],
+            &[
+                &owner_id,
+                &folder_id,
+                &cursor_rank,
+                &cursor_name,
+                &cursor_id,
+                &limit,
+            ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)
+        .map_err(error::ErrorInternalServerError)?;
+    let has_more = rows.len() > MAX_REPOSITORY_ENTRIES as usize;
+    rows.truncate(MAX_REPOSITORY_ENTRIES as usize);
+    let next_cursor = if has_more {
+        rows.last()
+            .map(|row| {
+                encode_cursor(&RepositoryEntryCursor {
+                    scope: "repository-entries".to_owned(),
+                    repository_id: repository_id.to_owned(),
+                    folder_id: folder_id.to_owned(),
+                    rank: row.get("cursor_rank"),
+                    name: row.get("cursor_name"),
+                    id: row.get("id"),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+
+    Ok(RepositoryEntryPage {
+        rows,
+        next_cursor,
+        has_more,
+    })
 }
 
 async fn refresh_repository_totals(
@@ -775,9 +947,9 @@ async fn get_repository_summary(
                   roots.id AS root_id,
                   roots.original_name AS root_name,
                   roots.e2ee_state AS root_e2ee_state,
-                  to_char(roots.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS root_updated_at,
-                  to_char(repositories.created_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS created_at,
-                  to_char(repositories.updated_at AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"') AS updated_at,
+                  roots.updated_at AS root_updated_at,
+                  repositories.created_at,
+                  repositories.updated_at,
                   repositories.total_files,
                   repositories.total_folders,
                   repositories.tree_version,
@@ -810,10 +982,10 @@ fn repository_summary_from_row(row: &Row) -> RepositorySummary {
             id: row.get("root_id"),
             name: row.get("root_name"),
             e2ee_state: row.get("root_e2ee_state"),
-            updated_at: row.get("root_updated_at"),
+            updated_at: timestamps::api(row.get("root_updated_at")),
         },
-        created_at: row.get("created_at"),
-        updated_at: row.get("updated_at"),
+        created_at: timestamps::api(row.get("created_at")),
+        updated_at: timestamps::api(row.get("updated_at")),
         total_files: row.get("total_files"),
         total_folders: row.get("total_folders"),
         tree_version: row.get("tree_version"),
@@ -830,7 +1002,7 @@ fn repository_entry_from_row(row: Row) -> RepositoryEntry {
         parent_id: row.get("parent_id"),
         size_bytes: row.get("size_bytes"),
         e2ee_state: row.get("e2ee_state"),
-        updated_at: row.get("updated_at"),
+        updated_at: timestamps::api(row.get("updated_at")),
     }
 }
 

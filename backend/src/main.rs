@@ -7,6 +7,7 @@ mod passwords;
 mod routes;
 mod state;
 mod storage;
+mod timestamps;
 mod upload_completion;
 
 use actix_web::http::header::{CONTENT_LENGTH, HeaderName, HeaderValue};

@@ -4,6 +4,7 @@ mod files;
 mod health;
 mod invitations;
 mod metrics;
+mod pagination;
 mod profile;
 mod repositories;
 mod share_links;
@@ -195,4 +196,35 @@ pub fn configure(config: &mut web::ServiceConfig) {
                         ),
                 ),
         );
+}
+
+#[cfg(test)]
+mod hierarchy_query_tests {
+    #[test]
+    fn every_route_recursive_query_is_cycle_and_depth_bounded() {
+        for (name, source) in [
+            ("files", include_str!("files.rs")),
+            ("repositories", include_str!("repositories.rs")),
+            ("share_links", include_str!("share_links.rs")),
+            ("vault", include_str!("vault.rs")),
+        ] {
+            let production_source = source.split("#[cfg(test)]").next().unwrap_or(source);
+            let mut remainder = production_source;
+            while let Some((_, after_marker)) = remainder.split_once("WITH RECURSIVE") {
+                let boundary = after_marker
+                    .find("WITH RECURSIVE")
+                    .unwrap_or(after_marker.len());
+                let query = &after_marker[..boundary];
+                assert!(
+                    query.contains("visited_ids"),
+                    "{name} has a recursive query without visited-path protection"
+                );
+                assert!(
+                    query.contains("depth < 100"),
+                    "{name} has a recursive query without the depth limit"
+                );
+                remainder = &after_marker[boundary..];
+            }
+        }
+    }
 }

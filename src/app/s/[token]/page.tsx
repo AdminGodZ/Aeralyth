@@ -58,6 +58,7 @@ type SharedItemPageProps = {
     token: string;
   }>;
   searchParams: Promise<{
+    cursor?: string;
     folder?: string;
   }>;
 };
@@ -66,12 +67,12 @@ export default async function SharedItemPage({
   params,
   searchParams,
 }: SharedItemPageProps) {
-  const [{ token }, { folder: folderId }] = await Promise.all([
+  const [{ token }, { cursor, folder: folderId }] = await Promise.all([
     params,
     searchParams,
   ]);
-  const shareState = await getShareLinkState(token, folderId);
-  const returnPath = getSharePath(token, folderId);
+  const shareState = await getShareLinkState(token, folderId, cursor);
+  const returnPath = getSharePath(token, folderId, cursor);
 
   return (
     <main className="relative isolate min-h-dvh overflow-hidden bg-background px-4 py-8 text-foreground sm:px-6">
@@ -242,16 +243,34 @@ function SharedFolderView({
 
       <div>
         {data.entries.length > 0 ? (
-          <div className="space-y-2">
-            {data.entries.map((entry) => (
-              <SharedEntryRow
-                key={entry.id}
-                token={token}
-                entry={entry}
-                canEdit={data.permission === "editor"}
-              />
-            ))}
-          </div>
+          <>
+            <div className="space-y-2">
+              {data.entries.map((entry) => (
+                <SharedEntryRow
+                  key={entry.id}
+                  token={token}
+                  entry={entry}
+                  canEdit={data.permission === "editor"}
+                />
+              ))}
+            </div>
+            {data.hasMore && data.nextCursor ? (
+              <div className="mt-3 flex justify-end">
+                <Button asChild variant="outline">
+                  <Link
+                    href={getSharePath(
+                      token,
+                      data.currentFolderId ?? undefined,
+                      data.nextCursor,
+                    )}
+                  >
+                    Next page
+                    <ArrowRight className="size-4" aria-hidden="true" />
+                  </Link>
+                </Button>
+              </div>
+            ) : null}
+          </>
         ) : (
           <div className="rounded-2xl bg-background/70 px-5 py-12 text-center shadow-sm shadow-black/5 dark:bg-background/45">
             <Folder
@@ -439,11 +458,17 @@ function ShareStateCard({
   );
 }
 
-function getSharePath(token: string, folderId?: string): string {
+function getSharePath(
+  token: string,
+  folderId?: string,
+  cursor?: string,
+): string {
   const basePath = `/s/${encodeURIComponent(token)}`;
-  return folderId
-    ? `${basePath}?${new URLSearchParams({ folder: folderId })}`
-    : basePath;
+  const params = new URLSearchParams({
+    ...(folderId ? { folder: folderId } : {}),
+    ...(cursor ? { cursor } : {}),
+  });
+  return params.size > 0 ? `${basePath}?${params}` : basePath;
 }
 
 function getDownloadPath(token: string, fileId: string): string {
