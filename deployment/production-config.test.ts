@@ -17,13 +17,14 @@ describe("Railway production deployment", () => {
 
     const cacheMounts = dockerfile.match(/--mount=type=cache,[^\s\\]+/g) ?? [];
     expect(cacheMounts).toHaveLength(4);
-    const cacheIds = cacheMounts.map((mount) =>
-      mount
-        .split(",")
-        .find((option) => option.startsWith("id="))
-        ?.slice(3),
-    );
-    expect(cacheIds.every(Boolean)).toBe(true);
+    const railwayCachePrefix = "s/be1490eb-fe3f-4375-9927-54973fbfdd67-";
+    const cacheIds = cacheMounts.map((mount) => {
+      const options = Object.fromEntries(
+        mount.split(",").map((option) => option.split("=", 2)),
+      );
+      expect(options.id).toBe(`${railwayCachePrefix}${options.target}`);
+      return options.id;
+    });
     expect(new Set(cacheIds).size).toBe(cacheIds.length);
 
     const startup = read("scripts/start-production.sh");

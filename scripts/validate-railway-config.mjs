@@ -41,13 +41,20 @@ for (const [name, value] of [
 
 const cacheMounts = dockerfile.match(/--mount=type=cache,[^\s\\]+/g) ?? [];
 assert.ok(cacheMounts.length > 0, "Dockerfile must retain its build caches");
+const railwayCachePrefix = "s/be1490eb-fe3f-4375-9927-54973fbfdd67-";
 
 const cacheIds = cacheMounts.map((mount) => {
-  const id = mount
-    .split(",")
-    .find((option) => option.startsWith("id="))
-    ?.slice(3);
+  const options = Object.fromEntries(
+    mount.split(",").map((option) => option.split("=", 2)),
+  );
+  const { id, target } = options;
   assert.ok(id, `Railway requires an explicit id for cache mount: ${mount}`);
+  assert.ok(target, `Cache mount requires an explicit target: ${mount}`);
+  assert.equal(
+    id,
+    `${railwayCachePrefix}${target}`,
+    "Railway cache ids must use s/<service-id>-<target-path>",
+  );
   return id;
 });
 
