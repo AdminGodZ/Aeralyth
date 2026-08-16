@@ -44,6 +44,7 @@ describe("encrypted upload scheduling", () => {
   });
 
   it("runs three small encrypted files concurrently", async () => {
+    vi.stubGlobal("navigator", { hardwareConcurrency: 8 });
     let activePuts = 0;
     let peakPuts = 0;
     let releasePuts: (() => void) | undefined;
