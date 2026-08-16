@@ -43,12 +43,25 @@ FOR EACH ROW EXECUTE FUNCTION capture_perf_reservation_counter_write();
 SELECT pg_stat_statements_reset();
 SQL
 
+available_processors="$(
+  docker compose exec -T postgres getconf _NPROCESSORS_ONLN
+)"
+available_processors="${available_processors//[[:space:]]/}"
+if [[ ! "${available_processors}" =~ ^[1-9][0-9]*$ ]]; then
+  echo "Could not determine the PostgreSQL container CPU count." >&2
+  exit 1
+fi
+pgbench_threads="${available_processors}"
+if ((pgbench_threads > 8)); then
+  pgbench_threads=8
+fi
+
 docker compose exec -T postgres pgbench \
   -U aeralyth \
   -d aeralyth \
   -n \
   -c 40 \
-  -j 8 \
+  -j "${pgbench_threads}" \
   -t 1 \
   -f /docker-entrypoint-initdb.d/performance_reservation.pgbench
 
