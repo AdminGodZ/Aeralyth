@@ -25,6 +25,28 @@ const MAX_LINK_LIFETIME_SECONDS: i64 = 365 * 24 * 60 * 60;
 const SHARE_LINK_JSON_LIMIT: usize = 16 * 1024;
 const OWNED_SHARE_LINK_PAGE_SIZE: usize = 50;
 const SHARED_ENTRY_PAGE_SIZE: usize = 500;
+const INITIAL_SHARE_TOKEN_VERSION: i64 = 1;
+const SHARE_TOKEN_VERSION_LOCK_QUERY: &str = "
+    SELECT token_version
+    FROM share_links
+    WHERE id = $1
+      AND owner_id = $2
+      AND revoked_at IS NULL
+      AND (expires_at IS NULL OR expires_at > now())
+    FOR UPDATE
+";
+const SHARE_TOKEN_ROTATE_QUERY: &str = "
+    UPDATE share_links
+    SET token_hash = encode(digest($1::text, 'sha256'), 'hex'),
+        token_version = $2,
+        updated_at = now()
+    WHERE id = $3
+      AND owner_id = $4
+      AND token_version = $5
+      AND revoked_at IS NULL
+      AND (expires_at IS NULL OR expires_at > now())
+    RETURNING id
+";
 const SHARE_ACCESS_CONTEXT_QUERY: &str = r#"
     WITH RECURSIVE share_grant AS MATERIALIZED (
       SELECT
@@ -444,22 +466,26 @@ pub async fn create(
         .await
         .map_err(error::ErrorInternalServerError)?
         .get("id");
-    let token = token_for_link(&state.config.share_link_secret, &link_id)?;
+    let token = token_for_link(
+        &state.config.share_link_secret,
+        &link_id,
+        INITIAL_SHARE_TOKEN_VERSION,
+    )?;
     let row = state
         .db
         .query_one(
             "
                 INSERT INTO share_links (
-                  id, token_hash, owner_id, root_file_id, access_scope,
-                  permission, recipient_id, expires_at
+                  id, token_hash, token_version, owner_id, root_file_id,
+                  access_scope, permission, recipient_id, expires_at
                 )
                 VALUES (
                   $1,
                   encode(digest($2::text, 'sha256'), 'hex'),
-                  $3, $4, $5, $6, $7,
+                  $3, $4, $5, $6, $7, $8,
                   CASE
-                    WHEN $8::bigint IS NULL THEN NULL
-                    ELSE now() + ($8::bigint * interval '1 second')
+                    WHEN $9::bigint IS NULL THEN NULL
+                    ELSE now() + ($9::bigint * interval '1 second')
                   END
                 )
                 RETURNING expires_at
@@ -467,6 +493,7 @@ pub async fn create(
             &[
                 &link_id,
                 &token,
+                &INITIAL_SHARE_TOKEN_VERSION,
                 &owner.id,
                 &body.file_id,
                 &access_scope,
@@ -512,7 +539,7 @@ pub async fn list_owned(
         .query(
             "
                 SELECT links.id, links.access_scope, links.permission,
-                       links.token_hash,
+                       links.token_hash, links.token_version,
                        recipients.username AS recipient_username,
                        links.expires_at,
                        links.created_at,
@@ -563,7 +590,8 @@ pub async fn list_owned(
         .into_iter()
         .map(|row| {
             let id: String = row.get("id");
-            let token = token_for_link(&state.config.share_link_secret, &id)?;
+            let token_version: i64 = row.get("token_version");
+            let token = token_for_link(&state.config.share_link_secret, &id, token_version)?;
             let token_hash: String = row.get("token_hash");
             let url_path = (sha256_hex(&token) == token_hash).then(|| format!("/s/{token}"));
             Ok(OwnedShareLinkResponse {
@@ -596,27 +624,49 @@ pub async fn rotate(
     let owner = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let link_id = path.into_inner();
-    let token = token_for_link(&state.config.share_link_secret, &link_id)?;
-    let updated = state
+    let mut client = state
         .db
+        .get()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let transaction = client
+        .transaction()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let current = transaction
+        .query_opt(SHARE_TOKEN_VERSION_LOCK_QUERY, &[&link_id, &owner.id])
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let Some(current) = current else {
+        transaction
+            .rollback()
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        return Ok(HttpResponse::NotFound().body("active share link not found"));
+    };
+    let current_version: i64 = current.get("token_version");
+    let next_version = current_version
+        .checked_add(1)
+        .ok_or_else(|| error::ErrorInternalServerError("share token version exhausted"))?;
+    let token = token_for_link(&state.config.share_link_secret, &link_id, next_version)?;
+    let updated = transaction
         .query_opt(
-            "
-                UPDATE share_links
-                SET token_hash = encode(digest($1::text, 'sha256'), 'hex'),
-                    updated_at = now()
-                WHERE id = $2
-                  AND owner_id = $3
-                  AND revoked_at IS NULL
-                  AND (expires_at IS NULL OR expires_at > now())
-                RETURNING id
-            ",
-            &[&token, &link_id, &owner.id],
+            SHARE_TOKEN_ROTATE_QUERY,
+            &[&token, &next_version, &link_id, &owner.id, &current_version],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
     if updated.is_none() {
+        transaction
+            .rollback()
+            .await
+            .map_err(error::ErrorInternalServerError)?;
         return Ok(HttpResponse::NotFound().body("active share link not found"));
     }
+    transaction
+        .commit()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
 
     Ok(HttpResponse::Ok()
         .insert_header((CACHE_CONTROL, "private, no-store"))
@@ -1243,11 +1293,24 @@ fn validate_token(token: &str) -> Result<()> {
     Ok(())
 }
 
-fn token_for_link(secret: &str, link_id: &str) -> Result<String> {
+fn token_for_link(secret: &str, link_id: &str, token_version: i64) -> Result<String> {
+    if token_version < 0 {
+        return Err(error::ErrorInternalServerError(
+            "share token version is invalid",
+        ));
+    }
     let mut mac = Hmac::<Sha256>::new_from_slice(secret.as_bytes())
         .map_err(error::ErrorInternalServerError)?;
-    mac.update(b"aeralyth-share-link-v1\0");
-    mac.update(link_id.as_bytes());
+    if token_version == 0 {
+        // Version zero preserves links created before explicit rotation
+        // versions were introduced.
+        mac.update(b"aeralyth-share-link-v1\0");
+        mac.update(link_id.as_bytes());
+    } else {
+        mac.update(b"aeralyth-share-link-v2\0");
+        mac.update(link_id.as_bytes());
+        mac.update(&token_version.to_be_bytes());
+    }
     Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
 }
 
@@ -1268,7 +1331,8 @@ fn no_store(builder: &mut actix_web::HttpResponseBuilder) -> &mut actix_web::Htt
 #[cfg(test)]
 mod tests {
     use super::{
-        EditorShareGrant, SHARE_ACCESS_CONTEXT_QUERY, SHARE_DOWNLOAD_CONTEXT_QUERY, token_for_link,
+        EditorShareGrant, SHARE_ACCESS_CONTEXT_QUERY, SHARE_DOWNLOAD_CONTEXT_QUERY,
+        SHARE_TOKEN_ROTATE_QUERY, SHARE_TOKEN_VERSION_LOCK_QUERY, token_for_link,
         validate_access_scope, validate_editor_replacement, validate_expiration,
         validate_permission, validate_token,
     };
@@ -1328,9 +1392,144 @@ mod tests {
         for query in [
             super::SHARE_ACCESS_CONTEXT_QUERY,
             super::SHARE_DOWNLOAD_CONTEXT_QUERY,
+            SHARE_TOKEN_VERSION_LOCK_QUERY,
+            SHARE_TOKEN_ROTATE_QUERY,
         ] {
             client.prepare(query).await.expect("share query prepares");
         }
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_token_rotation_invalidates_the_old_token() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (mut client, connection) =
+            tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+                .await
+                .expect("connect to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            connection
+                .await
+                .expect("PostgreSQL connection stays healthy");
+        });
+        let transaction = client
+            .transaction()
+            .await
+            .expect("test transaction should start");
+        transaction
+            .batch_execute(
+                "INSERT INTO users (id, username, password_hash, role, status)
+                   VALUES ('usr_token_rotation', 'token_rotation', 'not-a-login-hash', 'user', 'active');
+                 INSERT INTO files (
+                   id, owner_id, original_name, storage_name, size_bytes,
+                   state, entry_type, e2ee_state
+                 ) VALUES (
+                   'fil_token_rotation', 'usr_token_rotation', 'rotation.txt',
+                   'tests/token-rotation.txt', 1, 'active', 'file', 'legacy'
+                 );",
+            )
+            .await
+            .expect("share-link fixtures should insert");
+
+        let secret = "0123456789abcdef0123456789abcdef";
+        let legacy_token =
+            token_for_link(secret, "link_token_rotation", 0).expect("legacy token should derive");
+        let legacy_version: i64 = transaction
+            .query_one(
+                "INSERT INTO share_links (
+                   id, token_hash, owner_id, root_file_id,
+                   access_scope, permission
+                 ) VALUES (
+                   'link_token_rotation', encode(digest($1::text, 'sha256'), 'hex'),
+                   'usr_token_rotation', 'fil_token_rotation', 'public', 'viewer'
+                 )
+                 RETURNING token_version",
+                &[&legacy_token],
+            )
+            .await
+            .expect("legacy writer share link should insert without a token version")
+            .get("token_version");
+        assert_eq!(
+            legacy_version, 0,
+            "the database default must preserve old-writer token derivation"
+        );
+        let locked = transaction
+            .query_one(
+                SHARE_TOKEN_VERSION_LOCK_QUERY,
+                &[&"link_token_rotation", &"usr_token_rotation"],
+            )
+            .await
+            .expect("active link should lock");
+        let current_version: i64 = locked.get("token_version");
+        let next_version = current_version + 1;
+        let rotated_token = token_for_link(secret, "link_token_rotation", next_version)
+            .expect("rotated token should derive");
+        transaction
+            .query_one(
+                SHARE_TOKEN_ROTATE_QUERY,
+                &[
+                    &rotated_token,
+                    &next_version,
+                    &"link_token_rotation",
+                    &"usr_token_rotation",
+                    &current_version,
+                ],
+            )
+            .await
+            .expect("share token should rotate");
+
+        let old_valid: bool = transaction
+            .query_one(
+                "SELECT EXISTS (
+                   SELECT 1 FROM share_links
+                   WHERE token_hash = encode(digest($1::text, 'sha256'), 'hex')
+                     AND revoked_at IS NULL
+                 ) AS valid",
+                &[&legacy_token],
+            )
+            .await
+            .expect("old token lookup should execute")
+            .get("valid");
+        let new_valid: bool = transaction
+            .query_one(
+                "SELECT EXISTS (
+                   SELECT 1 FROM share_links
+                   WHERE token_hash = encode(digest($1::text, 'sha256'), 'hex')
+                     AND revoked_at IS NULL
+                 ) AS valid",
+                &[&rotated_token],
+            )
+            .await
+            .expect("new token lookup should execute")
+            .get("valid");
+        assert_ne!(legacy_token, rotated_token);
+        assert!(
+            !old_valid,
+            "old bearer token must stop authorizing immediately"
+        );
+        assert!(new_valid, "rotated bearer token must authorize");
+
+        let old_writer_error = transaction
+            .execute(
+                "UPDATE share_links
+                 SET token_hash = encode(digest($1::text, 'sha256'), 'hex'),
+                     updated_at = now()
+                 WHERE id = 'link_token_rotation'",
+                &[&legacy_token],
+            )
+            .await
+            .expect_err("an old writer must not replace a versioned token");
+        assert!(
+            old_writer_error
+                .as_db_error()
+                .is_some_and(|error| error.message().contains("legacy share-link rotation")),
+            "the rollout guard should reject the legacy update: {old_writer_error}"
+        );
+
+        transaction
+            .rollback()
+            .await
+            .expect("share-link fixtures should roll back");
     }
 
     fn editor_grant(entry_type: &str) -> EditorShareGrant {
@@ -1343,15 +1542,24 @@ mod tests {
     }
 
     #[test]
-    fn generated_tokens_are_stable_and_have_256_url_safe_bits() {
+    fn generated_tokens_are_versioned_and_have_256_url_safe_bits() {
         let secret = "0123456789abcdef0123456789abcdef";
-        let first = token_for_link(secret, "link-1").expect("token");
-        let repeated = token_for_link(secret, "link-1").expect("token");
-        let second = token_for_link(secret, "link-2").expect("token");
+        let legacy = token_for_link(secret, "link-1", 0).expect("legacy token");
+        let first = token_for_link(secret, "link-1", 1).expect("token");
+        let repeated = token_for_link(secret, "link-1", 1).expect("token");
+        let rotated = token_for_link(secret, "link-1", 2).expect("rotated token");
+        let second = token_for_link(secret, "link-2", 1).expect("token");
+        assert_eq!(
+            legacy, "Lr2WgKghJZk_QU_d7xtxhHzNfD9i9OYvbi8iEKL7Wak",
+            "version zero must preserve already-issued links"
+        );
         assert_eq!(first.len(), 43);
         assert!(validate_token(&first).is_ok());
         assert_eq!(first, repeated);
+        assert_ne!(legacy, first);
+        assert_ne!(first, rotated);
         assert_ne!(first, second);
+        assert!(token_for_link(secret, "link-1", -1).is_err());
     }
 
     #[test]

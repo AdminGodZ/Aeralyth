@@ -1,6 +1,7 @@
 "use client";
 
 import {
+  KeyRound,
   LoaderCircle,
   Monitor,
   Moon,
@@ -25,6 +26,16 @@ import {
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  Dialog,
+  DialogClose,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+  DialogTrigger,
+} from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import {
@@ -401,6 +412,15 @@ function ProfileSettingsFormView({
             <Badge className="capitalize">{currentUser.status}</Badge>
           </AccountDetail>
         </dl>
+        <div className="mt-6 flex flex-col gap-3 border-t pt-6 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-sm font-medium">Login password</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Changing it signs this account out on every device.
+            </p>
+          </div>
+          <ChangePasswordDialog csrfToken={csrfToken} />
+        </div>
       </SettingsSection>
 
       <Separator />
@@ -503,6 +523,189 @@ function ProfileSettingsFormView({
       </div>
     </form>
   );
+}
+
+function ChangePasswordDialog({ csrfToken }: { csrfToken: string }) {
+  const currentPasswordId = useId();
+  const newPasswordId = useId();
+  const confirmPasswordId = useId();
+  const [open, setOpen] = useState(false);
+  const [isChanging, setIsChanging] = useState(false);
+  const [changeError, setChangeError] = useState<string | null>(null);
+
+  function changeOpen(nextOpen: boolean) {
+    if (!isChanging) {
+      setOpen(nextOpen);
+      if (!nextOpen) {
+        setChangeError(null);
+      }
+    }
+  }
+
+  async function changePassword(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (isChanging) {
+      return;
+    }
+
+    const form = event.currentTarget;
+    const data = new FormData(form);
+    const currentPassword = String(data.get("current_password") ?? "");
+    const newPassword = String(data.get("new_password") ?? "");
+    const confirmPassword = String(data.get("confirm_password") ?? "");
+    const newPasswordBytes = new TextEncoder().encode(newPassword).byteLength;
+
+    if (newPassword !== confirmPassword) {
+      setChangeError("The new passwords do not match.");
+      return;
+    }
+    if (newPasswordBytes < 12 || newPasswordBytes > 72) {
+      setChangeError("Use a new password between 12 and 72 bytes.");
+      return;
+    }
+
+    setIsChanging(true);
+    setChangeError(null);
+
+    try {
+      const response = await fetch("/api/profile/password", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken,
+        },
+        body: JSON.stringify({ currentPassword, newPassword }),
+      });
+
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(getPasswordChangeError(response.status, detail));
+      }
+
+      window.location.assign("/login?password=changed");
+    } catch (error) {
+      setChangeError(
+        error instanceof Error
+          ? error.message
+          : "The password could not be changed.",
+      );
+      setIsChanging(false);
+    }
+  }
+
+  return (
+    <Dialog open={open} onOpenChange={changeOpen}>
+      <DialogTrigger asChild>
+        <Button type="button" variant="outline">
+          <KeyRound className="size-4" aria-hidden="true" />
+          Change password
+        </Button>
+      </DialogTrigger>
+      <DialogContent>
+        <form className="contents" onSubmit={changePassword}>
+          <DialogHeader>
+            <DialogTitle>Change login password</DialogTitle>
+            <DialogDescription>
+              Enter your current password and choose a new one. You will need to
+              sign in again afterward.
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid gap-4">
+            <div className="grid gap-2">
+              <Label htmlFor={currentPasswordId}>Current password</Label>
+              <Input
+                id={currentPasswordId}
+                name="current_password"
+                type="password"
+                autoComplete="current-password"
+                required
+                maxLength={128}
+                disabled={isChanging}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor={newPasswordId}>New password</Label>
+              <Input
+                id={newPasswordId}
+                name="new_password"
+                type="password"
+                autoComplete="new-password"
+                required
+                minLength={12}
+                maxLength={72}
+                aria-describedby={`${newPasswordId}-hint`}
+                disabled={isChanging}
+              />
+              <p
+                id={`${newPasswordId}-hint`}
+                className="text-xs text-muted-foreground"
+              >
+                Use 12 to 72 bytes and do not reuse the current password.
+              </p>
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor={confirmPasswordId}>Confirm new password</Label>
+              <Input
+                id={confirmPasswordId}
+                name="confirm_password"
+                type="password"
+                autoComplete="new-password"
+                required
+                minLength={12}
+                maxLength={72}
+                disabled={isChanging}
+              />
+            </div>
+            {changeError ? (
+              <p className="text-sm text-destructive" role="alert">
+                {changeError}
+              </p>
+            ) : null}
+          </div>
+          <DialogFooter>
+            <DialogClose asChild>
+              <Button type="button" variant="outline" disabled={isChanging}>
+                Cancel
+              </Button>
+            </DialogClose>
+            <Button type="submit" disabled={isChanging}>
+              {isChanging ? (
+                <LoaderCircle
+                  className="size-4 animate-spin"
+                  aria-hidden="true"
+                />
+              ) : (
+                <KeyRound className="size-4" aria-hidden="true" />
+              )}
+              {isChanging ? "Changing..." : "Change password"}
+            </Button>
+          </DialogFooter>
+        </form>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function getPasswordChangeError(status: number, detail: string) {
+  if (detail.includes("current password is incorrect")) {
+    return "The current password is incorrect.";
+  }
+  if (detail.includes("new password must be different")) {
+    return "Choose a password different from the current one.";
+  }
+  if (detail.includes("12 to 72 bytes")) {
+    return "Use a new password between 12 and 72 bytes.";
+  }
+  if (status === 409) {
+    return "The password changed in another session. Sign in again and retry.";
+  }
+  if (status === 429) {
+    return "Too many password attempts. Wait a moment and try again.";
+  }
+
+  return "The password could not be changed.";
 }
 
 function AppearanceSettingsSection({

@@ -1,20 +1,10 @@
-name: Performance regression checks
+name: CI and performance gate
 
 on:
+  push:
+    branches:
+      - master
   pull_request:
-    paths:
-      - "backend/**"
-      - "database/**"
-      - "performance/**"
-      - "deployment/**"
-      - "next.config.ts"
-      - "vercel.ts"
-      - "src/features/dashboard/**"
-      - "src/features/vault/**"
-      - "package.json"
-      - "package-lock.json"
-      - "vitest.performance.config.mts"
-      - ".github/workflows/performance.yml"
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
@@ -23,13 +13,34 @@ permissions:
   contents: read
 
 concurrency:
-  group: performance-${{ github.ref }}
+  group: aeralyth-ci-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
-  regression:
+  frontend:
+    name: Frontend quality and production build
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run worker:build
+      - name: Verify committed vault worker is current
+        run: git diff --exit-code -- public/vault.worker.js
+      - run: npx tsc --noEmit
+      - run: npm run lint
+      - run: npm test
+      - run: npm run test:performance
+      - run: npm run build
+
+  backend-and-database:
+    name: Backend, migrations, and latency regressions
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
     env:
       AERALYTH_API_HOST: 127.0.0.1
       AERALYTH_API_PORT: "18080"
@@ -40,7 +51,6 @@ jobs:
       AERALYTH_PERF_URL: http://127.0.0.1:18080/health
       AERALYTH_PERF_MAX_P95_MS: "500"
       DATABASE_URL: postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth
-
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -48,18 +58,41 @@ jobs:
           node-version: 22
           cache: npm
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy,rustfmt
       - uses: Swatinem/rust-cache@v2
         with:
           workspaces: backend
       - run: npm ci
+      - run: cargo fmt --manifest-path backend/Cargo.toml --check
+      - run: cargo clippy --locked --manifest-path backend/Cargo.toml --all-targets -- -D warnings
       - run: docker compose up -d --wait postgres
       - run: npm run db:migrate
+      - name: Verify every migration replays safely
+        run: npm run db:migrate
+      - run: npm run db:test:migration-replay
       - run: npm run db:test:folder-manifest
       - run: npm run db:test:folder-manifest-fresh
       - run: npm run db:test:upload-completion-fresh
       - run: npm run db:test:performance-ledger-concurrency
-      - run: npm run test:performance
+      - run: npm run db:test:performance-ledger-fresh
+      - run: npm run db:test:session-counter-performance-fresh
+      - run: npm run db:test:vault-query-performance-fresh
+      - run: npm run db:test:migration-identity-performance-fresh
+      - run: npm run db:test:navigation-hot-paths-fresh
+      - run: npm run db:test:collection-hierarchy-performance-fresh
+      - run: npm run db:test:admin-search-identifier-performance-fresh
+      - run: npm run db:test:bounded-tree-operations-fresh
+      - run: npm run db:test:production-preflight-fresh
       - run: cargo test --locked --manifest-path backend/Cargo.toml
+      - name: Run PostgreSQL query-contract tests
+        run: cargo test --locked --manifest-path backend/Cargo.toml database_query_contracts_prepare -- --ignored --test-threads=1
+      - name: Run PostgreSQL mutation-contract tests
+        run: cargo test --locked --manifest-path backend/Cargo.toml database_optimized_queries_execute -- --ignored --test-threads=1
+      - name: Verify password and share-token security transactions
+        run: |
+          cargo test --locked --manifest-path backend/Cargo.toml database_password_change_revokes_every_session_atomically -- --ignored --test-threads=1
+          cargo test --locked --manifest-path backend/Cargo.toml database_token_rotation_invalidates_the_old_token -- --ignored --test-threads=1
       - name: Start API
         run: |
           cargo run --locked --manifest-path backend/Cargo.toml > backend-performance.log 2>&1 &
@@ -81,3 +114,113 @@ jobs:
       - name: Stop API
         if: always()
         run: kill "$(cat backend-performance.pid)" 2>/dev/null || true
+
+  production-image:
+    name: Railway production image smoke test
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: aeralyth-ci:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Start isolated PostgreSQL
+        run: docker compose up -d --wait postgres
+      - name: Start isolated S3-compatible storage
+        run: |
+          docker run --detach --name aeralyth-s3-smoke \
+            --network aeralyth_default \
+            -e MINIO_ROOT_USER=aeralyth-ci-access \
+            -e MINIO_ROOT_PASSWORD=aeralyth-ci-secret-key-000000000 \
+            quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e \
+            server /data --address :9000 --console-address :9001
+          for attempt in $(seq 1 60); do
+            if docker exec aeralyth-s3-smoke mc alias set \
+              local http://127.0.0.1:9000 \
+              aeralyth-ci-access aeralyth-ci-secret-key-000000000 \
+              >/dev/null 2>&1
+            then
+              break
+            fi
+            sleep 1
+          done
+          docker exec aeralyth-s3-smoke mc ready local
+          docker exec aeralyth-s3-smoke mc mb --ignore-existing local/aeralyth-ci
+      - name: Verify image-bundled migrations and production preflight
+        run: |
+          if docker run --rm --network aeralyth_default \
+            -e DATABASE_URL=postgres://aeralyth:aeralyth@postgres:5432/aeralyth \
+            -e AERALYTH_ENV=production \
+            aeralyth-ci:latest /app/scripts/migrate-production.sh \
+            > image-preflight.log 2>&1
+          then
+            echo "image preflight accepted the seeded password" >&2
+            exit 1
+          fi
+          grep --fixed-strings \
+            "production refuses to start while an account uses the local seed password" \
+            image-preflight.log
+          docker compose exec -T postgres psql \
+            -v ON_ERROR_STOP=1 \
+            -U aeralyth \
+            -d aeralyth \
+            -c "UPDATE users SET password_hash = crypt('production-ci-password', gen_salt('bf')) WHERE id = 'usr_admingod';"
+          docker run --rm --network aeralyth_default \
+            -e DATABASE_URL=postgres://aeralyth:aeralyth@postgres:5432/aeralyth \
+            -e AERALYTH_ENV=Production \
+            aeralyth-ci:latest /app/scripts/migrate-production.sh
+      - name: Verify production image on standard and colliding Railway ports
+        run: |
+          trap 'docker logs aeralyth-production-smoke 2>/dev/null || true' ERR
+          smoke_port() {
+            public_port="$1"
+            expected_api_port="$2"
+            docker run --detach --name aeralyth-production-smoke \
+              --network aeralyth_default \
+              --publish "18081:${public_port}" \
+              -e PORT="${public_port}" \
+              -e DATABASE_URL=postgres://aeralyth:aeralyth@postgres:5432/aeralyth \
+              -e AERALYTH_ENV=production \
+              -e AERALYTH_COOKIE_SECURE=true \
+              -e AERALYTH_E2EE_MODE=migrate \
+              -e AERALYTH_STORAGE_BACKEND=s3 \
+              -e AWS_ENDPOINT_URL=http://aeralyth-s3-smoke:9000 \
+              -e AWS_ACCESS_KEY_ID=aeralyth-ci-access \
+              -e AWS_SECRET_ACCESS_KEY=aeralyth-ci-secret-key-000000000 \
+              -e AWS_S3_BUCKET_NAME=aeralyth-ci \
+              -e AWS_DEFAULT_REGION=us-east-1 \
+              -e AWS_S3_URL_STYLE=path \
+              -e AERALYTH_S3_CSP_ORIGIN=http://aeralyth-s3-smoke:9000 \
+              -e AERALYTH_SHARE_LINK_SECRET=ci-only-share-link-secret-000000000 \
+              -e AERALYTH_METRICS_TOKEN=ci-only-metrics-token-0000000000000 \
+              aeralyth-ci:latest
+            for attempt in $(seq 1 90); do
+              if curl --fail --silent http://127.0.0.1:18081/health >/dev/null; then
+                break
+              fi
+              sleep 1
+            done
+            curl --fail --silent --show-error http://127.0.0.1:18081/health | grep '"service":"aeralyth-api"'
+            curl --fail --silent --show-error http://127.0.0.1:18081/api/health | grep '"service":"aeralyth-api"'
+            curl --fail --silent --show-error http://127.0.0.1:18081/login | grep 'Welcome back'
+            docker logs aeralyth-production-smoke 2>&1 | grep "127.0.0.1:${expected_api_port}"
+            docker rm --force aeralyth-production-smoke
+          }
+          smoke_port 8080 8081
+          smoke_port 8081 18080
+      - name: Show container log on failure
+        if: failure()
+        run: |
+          docker logs aeralyth-production-smoke 2>/dev/null || true
+          docker logs aeralyth-s3-smoke 2>/dev/null || true
+      - name: Stop production smoke services
+        if: always()
+        run: |
+          docker rm --force aeralyth-production-smoke 2>/dev/null || true
+          docker rm --force aeralyth-s3-smoke 2>/dev/null || true

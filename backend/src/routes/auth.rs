@@ -194,7 +194,7 @@ fn session_cookie(value: String, max_age_seconds: i64, secure: bool) -> Cookie<'
         .finish()
 }
 
-fn expired_session_cookie(secure: bool) -> Cookie<'static> {
+pub(super) fn expired_session_cookie(secure: bool) -> Cookie<'static> {
     Cookie::build(SESSION_COOKIE, "")
         .path("/")
         .http_only(true)

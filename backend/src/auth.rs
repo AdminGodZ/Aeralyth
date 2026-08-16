@@ -531,6 +531,7 @@ mod tests {
             ("files", include_str!("routes/files.rs"), 6),
             ("repositories", include_str!("routes/repositories.rs"), 3),
             ("share links", include_str!("routes/share_links.rs"), 1),
+            ("profile", include_str!("routes/profile.rs"), 2),
             ("vault", include_str!("routes/vault.rs"), 8),
         ] {
             assert!(
@@ -560,6 +561,7 @@ mod tests {
                 "invitation acceptance",
                 include_str!("routes/invitations.rs"),
             ),
+            ("password change", include_str!("routes/profile.rs")),
         ] {
             let crypt_call = ["cr", "ypt("].concat();
             let salt_call = ["gen_", "salt("].concat();

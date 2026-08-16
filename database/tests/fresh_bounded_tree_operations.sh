@@ -93,6 +93,19 @@ docker compose exec -T postgres psql \
   -d "${test_database}" \
   -f /docker-entrypoint-initdb.d/017_bounded_tree_operations.sql >/dev/null
 
+for migration in \
+  018_share_link_token_rotation.sql \
+  019_share_link_rollout_compatibility.sql \
+  020_share_link_legacy_writer_guard.sql
+do
+  docker compose exec -T postgres psql \
+    -q \
+    -v ON_ERROR_STOP=1 \
+    -U aeralyth \
+    -d "${test_database}" \
+    -f "/docker-entrypoint-initdb.d/${migration}" >/dev/null
+done
+
 page_plan=$(docker compose exec -T postgres psql \
   -qAt \
   -v ON_ERROR_STOP=1 \

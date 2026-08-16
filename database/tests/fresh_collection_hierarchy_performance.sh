@@ -111,6 +111,19 @@ after_wal=$(jq -r '.[0].Plan["WAL Bytes"] // 0' <<<"${after_plan}")
 before_ms=$(jq -r '.[0].Plan["Actual Total Time"]' <<<"${before_plan}")
 after_ms=$(jq -r '.[0].Plan["Actual Total Time"]' <<<"${after_plan}")
 
+for migration in \
+  018_share_link_token_rotation.sql \
+  019_share_link_rollout_compatibility.sql \
+  020_share_link_legacy_writer_guard.sql
+do
+  docker compose exec -T postgres psql \
+    -q \
+    -v ON_ERROR_STOP=1 \
+    -U aeralyth \
+    -d "${test_database}" \
+    -f "/docker-entrypoint-initdb.d/${migration}" >/dev/null
+done
+
 if (( after_wal >= before_wal )); then
   echo "index cleanup did not reduce measured WAL bytes: ${before_wal} -> ${after_wal}" >&2
   exit 1

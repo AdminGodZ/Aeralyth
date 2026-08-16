@@ -1,0 +1,13 @@
+.git
+.github
+.next
+.vercel
+backend/target
+coverage
+data
+node_modules
+.env
+.env.*
+!.env.example
+npm-debug.log*
+*.tsbuildinfo

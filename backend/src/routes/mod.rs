@@ -32,6 +32,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
                 .service(
                     web::scope("/profile")
                         .route("", web::post().to(profile::update))
+                        .route("/password", web::post().to(profile::change_password))
                         .route("/avatar", web::get().to(profile::avatar)),
                 )
                 .service(

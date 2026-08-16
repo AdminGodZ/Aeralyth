@@ -1482,15 +1482,19 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-101 [P2] Share-link token rotation is deterministic and does not actually rotate the URL token
 
+**Status:** Complete — implemented and verified on 2026-08-16.
+
+**Verification:** Share tokens now include a monotonically increasing per-link version in the HMAC input. Rotation locks the active link row, increments the version with overflow protection, stores only the new token hash, and commits the replacement atomically. Version zero preserves existing URLs and remains the database default for older writers, while current writers explicitly create version-one links. A database trigger prevents an overlapping or rolled-back old binary from changing a versioned token without advancing its version. Replay-safe migrations add, backfill, and guard this behavior; unit vectors lock legacy compatibility and version separation, and rollback-only PostgreSQL tests prove the old hash is invalid after rotation and an old-writer update is rejected. Through the built production image, a temporary link produced a different URL after rotation, the old URL returned `410 Gone`, the new URL returned `200`, and owner listing reconstructed only the new URL; all fixtures were removed afterward.
+
 **Confidence:** Confirmed
 
-**Evidence:** `token_for_link(secret, link_id)` is deterministic. The rotate endpoint calls it with the same link ID and secret, so it regenerates the same token.
+**Original evidence (resolved):** Before this fix, `token_for_link(secret, link_id)` was deterministic and the rotate endpoint called it with the same link ID and secret, regenerating the same token.
 
-**Impact:** This is primarily a correctness/security defect, but it also makes rotation work and cache invalidation pointless.
+**Resolved impact:** Rotation now invalidates the previous bearer URL immediately, including during supported rolling-deployment and rollback overlap.
 
-**Best solution:** Store a random per-link token/version or nonce. On rotation, generate a new random token, store only its hash, and invalidate the old token atomically. If deterministic recovery is required, include a monotonically increasing token version in the MAC input and URL.
+**Implemented solution:** Deterministic owner recovery is preserved by including a monotonically increasing token version in the MAC input and URL. PostgreSQL stores only the token hash and version, and a compatibility guard keeps legacy writers from corrupting versioned links.
 
-**Validation:** Create a link, rotate it, and assert that the new URL differs and the old URL is rejected.
+**Validation:** Automated unit, PostgreSQL, migration-contract, and production-route checks assert that a new URL differs, the old URL is rejected, owner reconstruction returns only the current URL, and a legacy writer cannot overwrite a versioned token.
 
 
 ---

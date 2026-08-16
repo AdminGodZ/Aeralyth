@@ -1,0 +1,16 @@
+{
+  "CORSRules": [
+    {
+      "AllowedOrigins": ["https://cloud.admingod.ch"],
+      "AllowedMethods": ["GET", "HEAD", "PUT"],
+      "AllowedHeaders": ["content-type", "range", "x-amz-checksum-sha256"],
+      "ExposeHeaders": [
+        "ETag",
+        "Content-Length",
+        "Content-Range",
+        "x-amz-checksum-sha256"
+      ],
+      "MaxAgeSeconds": 3600
+    }
+  ]
+}

@@ -128,17 +128,23 @@ default:
 AERALYTH_API_ORIGIN=http://127.0.0.1:8080
 ```
 
-Production keeps the same public `/api/*` URLs but routes them at ingress instead
-of invoking the Next.js server first. Vercel reads `vercel.ts` and resolves
-`AERALYTH_API_ORIGIN` from the deployment environment. A self-hosted reverse
-proxy must send `/api/*` directly to Actix and all page/static traffic to Next.
-Set `AERALYTH_ENABLE_NEXT_API_PROXY=true` only as an explicit compatibility
-fallback when running `next start` without an ingress router.
+Production keeps the same public `/api/*` URLs but routes them through Caddy:
+API and health traffic goes directly to Actix, while page and static traffic
+goes to the standalone Next.js server. The production image reserves port 8081
+for Actix so Caddy can safely bind Railway's public `PORT` even when it is 8080.
+The startup script also selects collision-free internal ports if `PORT` is
+customized to one of the normal internal defaults.
+Set
+`AERALYTH_ENABLE_NEXT_API_PROXY=true` only as an explicit compatibility fallback
+when running `next start` without that ingress router.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Railway production
 
-## Deploy on Vercel
+The repository includes one production image containing Caddy, the standalone
+Next.js server, and the Actix API. Railway runs migrations as a pre-deploy
+command and activates a deployment only after `/health` succeeds. PostgreSQL
+and the private S3 bucket remain separate Railway resources.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+Follow [docs/production-railway.md](docs/production-railway.md) for the ordered
+database cutover, variables, GitHub CI gate, bucket CORS, and
+`cloud.admingod.ch` domain setup.

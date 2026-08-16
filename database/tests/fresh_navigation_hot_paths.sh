@@ -78,6 +78,22 @@ docker compose exec -T postgres psql \
   -d "${test_database}" \
   -f /docker-entrypoint-initdb.d/014_navigation_hot_paths.sql >/dev/null
 
+# Query-contract tests exercise the current backend, so apply schema-only
+# migrations added after the migration under measurement before compiling its
+# prepared statements.
+for migration in \
+  018_share_link_token_rotation.sql \
+  019_share_link_rollout_compatibility.sql \
+  020_share_link_legacy_writer_guard.sql
+do
+  docker compose exec -T postgres psql \
+    -q \
+    -v ON_ERROR_STOP=1 \
+    -U aeralyth \
+    -d "${test_database}" \
+    -f "/docker-entrypoint-initdb.d/${migration}" >/dev/null
+done
+
 DATABASE_URL="postgres://aeralyth:aeralyth@127.0.0.1:5432/${test_database}" \
   cargo test \
     --quiet \

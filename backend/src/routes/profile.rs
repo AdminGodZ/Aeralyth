@@ -2,11 +2,18 @@ use actix_multipart::Multipart;
 use actix_web::http::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION};
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use futures_util::StreamExt;
+use serde::Deserialize;
 
-use crate::auth::{CSRF_FIELD, require_csrf, require_principal};
+use crate::auth::{CSRF_FIELD, parse_json_body, require_csrf, require_principal};
+use crate::passwords::PasswordError;
 use crate::state::AppState;
 
+use super::auth::expired_session_cookie;
+
 const MAX_PROFILE_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+const PASSWORD_CHANGE_JSON_LIMIT: usize = 1024;
+const MIN_NEW_PASSWORD_BYTES: usize = 12;
+const MAX_NEW_PASSWORD_BYTES: usize = 72;
 const PROFILE_IMAGE_KEEP: i16 = 0;
 const PROFILE_IMAGE_REMOVE: i16 = 1;
 const PROFILE_IMAGE_REPLACE: i16 = 2;
@@ -42,6 +49,32 @@ const PROFILE_UPDATE_QUERY: &str = "
     WHERE id = $11
     RETURNING id
 ";
+
+const PASSWORD_CHANGE_QUERY: &str = "
+    WITH changed AS (
+      UPDATE users
+      SET password_hash = $1,
+          updated_at = now()
+      WHERE id = $2
+        AND password_hash = $3
+        AND status = 'active'
+      RETURNING id
+    ), revoked_sessions AS (
+      DELETE FROM sessions
+      WHERE user_id IN (SELECT id FROM changed)
+      RETURNING id
+    )
+    SELECT changed.id,
+           (SELECT count(*)::bigint FROM revoked_sessions) AS revoked_session_count
+    FROM changed
+";
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PasswordChangeRequest {
+    current_password: String,
+    new_password: String,
+}
 
 #[derive(Default)]
 struct ProfileUpdate {
@@ -243,6 +276,86 @@ pub async fn avatar(state: web::Data<AppState>, request: HttpRequest) -> Result<
         .body(bytes))
 }
 
+pub async fn change_password(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    body: web::Payload,
+) -> Result<HttpResponse> {
+    let user = require_principal(&state, &request).await?;
+    require_header_csrf(&state, &request).await?;
+    let body = parse_json_body::<PasswordChangeRequest>(&request, body, PASSWORD_CHANGE_JSON_LIMIT)
+        .await?;
+
+    validate_new_password(&body.new_password)?;
+
+    let current_hash = state
+        .db
+        .query_opt(
+            "SELECT password_hash FROM users WHERE id = $1 AND status = 'active' LIMIT 1",
+            &[&user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?
+        .map(|row| row.get::<_, String>("password_hash"));
+    state.db.release_request_connection().await;
+
+    let current_password_valid = state
+        .passwords
+        .verify_candidate(&body.current_password, current_hash.as_deref())
+        .await
+        .map_err(map_password_error)?;
+    if !current_password_valid {
+        return Ok(HttpResponse::BadRequest().body("current password is incorrect"));
+    }
+    if body.current_password == body.new_password {
+        return Ok(HttpResponse::BadRequest().body("new password must be different"));
+    }
+
+    let new_hash = state
+        .passwords
+        .hash(&body.new_password)
+        .await
+        .map_err(map_password_error)?;
+    let changed = state
+        .db
+        .query_opt(PASSWORD_CHANGE_QUERY, &[&new_hash, &user.id, &current_hash])
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    if changed.is_none() {
+        return Ok(HttpResponse::Conflict().body("password changed concurrently; try again"));
+    }
+
+    Ok(HttpResponse::NoContent()
+        .cookie(expired_session_cookie(state.config.cookie_secure))
+        .finish())
+}
+
+async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<()> {
+    let token = request
+        .headers()
+        .get("x-csrf-token")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| error::ErrorForbidden("csrf token required"))?;
+    require_csrf(state, request, token).await
+}
+
+fn validate_new_password(password: &str) -> Result<()> {
+    if !(MIN_NEW_PASSWORD_BYTES..=MAX_NEW_PASSWORD_BYTES).contains(&password.len()) {
+        return Err(error::ErrorBadRequest(
+            "new password must contain 12 to 72 bytes",
+        ));
+    }
+
+    Ok(())
+}
+
+fn map_password_error(password_error: PasswordError) -> actix_web::Error {
+    match password_error {
+        PasswordError::Busy => error::ErrorTooManyRequests("too many password requests"),
+        _ => error::ErrorServiceUnavailable("password change temporarily unavailable"),
+    }
+}
+
 async fn drain_field(field: &mut actix_multipart::Field) -> Result<()> {
     while let Some(chunk) = field.next().await {
         chunk.map_err(error::ErrorBadRequest)?;
@@ -352,7 +465,44 @@ fn redirect(location: &'static str) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::PROFILE_UPDATE_QUERY;
+    use super::{PASSWORD_CHANGE_QUERY, PROFILE_UPDATE_QUERY, validate_new_password};
+
+    #[test]
+    fn password_change_requires_a_bcrypt_safe_strong_length() {
+        assert!(validate_new_password(&"a".repeat(11)).is_err());
+        assert!(validate_new_password(&"a".repeat(12)).is_ok());
+        assert!(validate_new_password(&"a".repeat(72)).is_ok());
+        assert!(validate_new_password(&"a".repeat(73)).is_err());
+    }
+
+    #[test]
+    fn password_change_revokes_sessions_only_after_the_hash_changes() {
+        let normalized = PASSWORD_CHANGE_QUERY.to_ascii_lowercase();
+        assert!(normalized.contains("update users"));
+        assert!(normalized.contains("password_hash = $3"));
+        assert!(normalized.contains("delete from sessions"));
+        assert!(normalized.contains("select id from changed"));
+    }
+
+    #[test]
+    fn password_change_authenticates_and_checks_csrf_before_parsing_json() {
+        let source = include_str!("profile.rs");
+        let handler = source
+            .split_once("pub async fn change_password(")
+            .and_then(|(_, tail)| tail.split_once("async fn require_header_csrf("))
+            .map(|(handler, _)| handler)
+            .expect("password handler should remain inspectable");
+        let authentication = handler
+            .find("require_principal(")
+            .expect("password change must authenticate");
+        let csrf = handler
+            .find("require_header_csrf(")
+            .expect("password change must validate CSRF");
+        let body = handler
+            .find("parse_json_body::<PasswordChangeRequest>")
+            .expect("password change must parse its bounded body");
+        assert!(authentication < csrf && csrf < body);
+    }
 
     #[test]
     fn profile_patch_is_one_update_without_a_settings_reload() {
@@ -381,6 +531,10 @@ mod tests {
             .prepare(PROFILE_UPDATE_QUERY)
             .await
             .expect("profile patch query should prepare");
+        client
+            .prepare(PASSWORD_CHANGE_QUERY)
+            .await
+            .expect("password change query should prepare");
     }
 
     #[actix_web::test]
@@ -463,5 +617,77 @@ mod tests {
             .rollback()
             .await
             .expect("profile fixture should roll back");
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_password_change_revokes_every_session_atomically() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (mut client, connection) =
+            tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+                .await
+                .expect("connect to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            connection
+                .await
+                .expect("PostgreSQL connection stays healthy");
+        });
+        let transaction = client
+            .transaction()
+            .await
+            .expect("test transaction should start");
+        let current_hash = bcrypt::hash("current-password", 6).expect("current hash");
+        let new_hash = bcrypt::hash("new-password-value", 6).expect("new hash");
+        transaction
+            .execute(
+                "INSERT INTO users (id, username, password_hash, role, status)
+                 VALUES ('usr_password_change', 'password_change', $1, 'user', 'active')",
+                &[&current_hash],
+            )
+            .await
+            .expect("password fixture should insert");
+        transaction
+            .batch_execute(
+                "INSERT INTO sessions (id, user_id, token_hash, csrf_token, expires_at)
+                 VALUES
+                   ('ses_password_change_1', 'usr_password_change',
+                    decode(repeat('b1', 32), 'hex'), 'csrf-password-1', now() + interval '1 hour'),
+                   ('ses_password_change_2', 'usr_password_change',
+                    decode(repeat('b2', 32), 'hex'), 'csrf-password-2', now() + interval '1 hour');",
+            )
+            .await
+            .expect("session fixtures should insert");
+
+        let changed = transaction
+            .query_one(
+                PASSWORD_CHANGE_QUERY,
+                &[&new_hash, &"usr_password_change", &current_hash],
+            )
+            .await
+            .expect("password change should execute");
+        assert_eq!(changed.get::<_, i64>("revoked_session_count"), 2);
+        let stored_hash: String = transaction
+            .query_one(
+                "SELECT password_hash FROM users WHERE id = 'usr_password_change'",
+                &[],
+            )
+            .await
+            .expect("changed user should remain readable")
+            .get("password_hash");
+        assert!(bcrypt::verify("new-password-value", &stored_hash).expect("new hash verifies"));
+        let remaining_sessions: i64 = transaction
+            .query_one(
+                "SELECT count(*)::bigint AS count FROM sessions WHERE user_id = 'usr_password_change'",
+                &[],
+            )
+            .await
+            .expect("session count should execute")
+            .get("count");
+        assert_eq!(remaining_sessions, 0);
+
+        transaction
+            .rollback()
+            .await
+            .expect("password fixture should roll back");
     }
 }
