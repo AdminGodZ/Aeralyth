@@ -116,6 +116,12 @@ describe("Railway production deployment", () => {
     expect(workflow).toContain('--publish "18081:' + "$" + '{public_port}"');
     expect(workflow).toContain("smoke_port 8080 8081");
     expect(workflow).toContain("smoke_port 8081 18080");
+    expect(workflow).toContain("verify_worker /vault.worker.js");
+    expect(workflow).toContain("verify_worker /folder-zip.worker.js");
+    expect(workflow).toContain(
+      "cache-control: private, no-cache, max-age=0, must-revalidate",
+    );
+    expect(workflow).toContain("cdn-cache-control: no-store");
   });
 
   it("refuses a fresh production database with the local seed password", () => {

@@ -192,6 +192,25 @@ jobs:
           smoke_port() {
             public_port="$1"
             expected_api_port="$2"
+            verify_worker() {
+              worker_path="$1"
+              worker_headers="$(mktemp)"
+              worker_body="$(mktemp)"
+              curl --fail --silent --show-error \
+                --dump-header "${worker_headers}" \
+                --output "${worker_body}" \
+                "http://127.0.0.1:18081${worker_path}"
+              test -s "${worker_body}"
+              test "$(grep --ignore-case --count '^cache-control:' "${worker_headers}" || true)" -eq 1
+              grep --ignore-case --fixed-strings --line-regexp \
+                $'cache-control: private, no-cache, max-age=0, must-revalidate\r' \
+                "${worker_headers}"
+              test "$(grep --ignore-case --count '^cdn-cache-control:' "${worker_headers}" || true)" -eq 1
+              grep --ignore-case --fixed-strings --line-regexp \
+                $'cdn-cache-control: no-store\r' \
+                "${worker_headers}"
+              rm --force "${worker_headers}" "${worker_body}"
+            }
             docker run --detach --name aeralyth-production-smoke \
               --network aeralyth_default \
               --publish "18081:${public_port}" \
@@ -220,6 +239,8 @@ jobs:
             curl --fail --silent --show-error http://127.0.0.1:18081/health | grep '"service":"aeralyth-api"'
             curl --fail --silent --show-error http://127.0.0.1:18081/api/health | grep '"service":"aeralyth-api"'
             curl --fail --silent --show-error http://127.0.0.1:18081/login | grep 'Welcome back'
+            verify_worker /vault.worker.js
+            verify_worker /folder-zip.worker.js
             docker logs aeralyth-production-smoke 2>&1 | grep "127.0.0.1:${expected_api_port}"
             docker rm --force aeralyth-production-smoke
           }
