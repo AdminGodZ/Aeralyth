@@ -6309,15 +6309,29 @@ fn validate_ciphertext_shape(entry_type: &str, ciphertext: u64, chunks: u64) -> 
 }
 
 fn validate_node_id(node_id: &str) -> Result<()> {
-    if !(8..=96).contains(&node_id.len())
-        || !node_id.starts_with("fil_")
-        || !node_id
-            .bytes()
-            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
-    {
+    if !is_modern_node_id(node_id) && !is_legacy_uuid_node_id(node_id) {
         return Err(error::ErrorBadRequest("node id is invalid"));
     }
     Ok(())
+}
+
+fn is_modern_node_id(node_id: &str) -> bool {
+    (8..=96).contains(&node_id.len())
+        && node_id.starts_with("fil_")
+        && node_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn is_legacy_uuid_node_id(node_id: &str) -> bool {
+    let bytes = node_id.as_bytes();
+    bytes.len() == 36
+        && bytes.iter().enumerate().all(|(index, byte)| match index {
+            8 | 13 | 18 | 23 => *byte == b'-',
+            _ => byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'),
+        })
+        && matches!(bytes[14], b'1'..=b'5')
+        && matches!(bytes[19], b'8' | b'9' | b'a' | b'b')
 }
 
 fn validate_prefixed_id(value: &str, prefix: &str, label: &str) -> Result<()> {
@@ -6772,6 +6786,25 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
 
     use super::*;
+
+    #[test]
+    fn node_id_validation_accepts_modern_and_legacy_ids() {
+        assert!(validate_node_id("fil_test").is_ok());
+        assert!(validate_node_id("0cd06ddb-e797-4e7d-baf3-caa3a7880544").is_ok());
+    }
+
+    #[test]
+    fn node_id_validation_rejects_malformed_ids() {
+        for node_id in [
+            "fil_abc",
+            "0CD06DDB-E797-4E7D-BAF3-CAA3A7880544",
+            "0cd06ddbe7974e7dbaf3caa3a7880544",
+            "0cd06ddb-e797-0e7d-baf3-caa3a7880544",
+            "0cd06ddb-e797-4e7d-7af3-caa3a7880544",
+        ] {
+            assert!(validate_node_id(node_id).is_err(), "accepted {node_id}");
+        }
+    }
 
     #[test]
     fn publication_pipeline_stays_decode_once_bounded_and_binary_first() {

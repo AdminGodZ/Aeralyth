@@ -25,6 +25,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { isVaultNodeId } from "@/features/vault/node-id";
 import type { VaultManifest } from "@/features/vault/protocol";
 import { enqueueShareDirectorySync } from "@/features/vault/share-directory-sync";
 import {
@@ -541,7 +542,7 @@ function getRequiredParentId(error: unknown): string | null {
   }
   const separator = error.message.lastIndexOf(":");
   const parentId = separator >= 0 ? error.message.slice(separator + 1) : "";
-  return /^fil_[A-Za-z0-9_-]+$/u.test(parentId) ? parentId : null;
+  return isVaultNodeId(parentId) ? parentId : null;
 }
 
 export function useVault(): VaultContextValue {

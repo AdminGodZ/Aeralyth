@@ -19,6 +19,7 @@ import {
   encodeShareEnvelope,
   encodeWrapper,
 } from "@/features/vault/cbor";
+import { isVaultNodeId } from "@/features/vault/node-id";
 import {
   ARGON2ID_PROFILE,
   asBufferSource,
@@ -2369,7 +2370,7 @@ function validatePassword(password: string): void {
 }
 
 function validateNodeId(nodeId: string): void {
-  if (!/^fil_[A-Za-z0-9_-]{4,92}$/u.test(nodeId)) {
+  if (!isVaultNodeId(nodeId)) {
     throw new Error("The vault node ID is invalid.");
   }
 }
