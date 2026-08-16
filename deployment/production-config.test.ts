@@ -57,7 +57,8 @@ describe("Railway production deployment", () => {
         preDeployCommand: string[];
         healthcheckPath: string;
         restartPolicyType: string;
-        overlapSeconds: string;
+        overlapSeconds: number;
+        drainingSeconds: number;
       };
     };
     expect(config.build).toEqual({
@@ -69,7 +70,8 @@ describe("Railway production deployment", () => {
     ]);
     expect(config.deploy.healthcheckPath).toBe("/health");
     expect(config.deploy.restartPolicyType).toBe("ON_FAILURE");
-    expect(config.deploy.overlapSeconds).toBe("0");
+    expect(config.deploy.overlapSeconds).toBe(0);
+    expect(config.deploy.drainingSeconds).toBe(30);
   });
 
   it("gates every master deployment on the complete GitHub workflow", () => {
@@ -79,6 +81,8 @@ describe("Railway production deployment", () => {
     expect(workflow).toContain("Frontend quality and production build");
     expect(workflow).toContain("Backend, migrations, and latency regressions");
     expect(workflow).toContain("Railway production image smoke test");
+    expect(workflow).toContain("Railway deployment config");
+    expect(workflow).toContain("npm run validate:railway");
     expect(workflow).toContain("npm run db:test:production-preflight-fresh");
     expect(workflow).toContain("-e AERALYTH_ENV=production");
     expect(workflow).toContain("-e AERALYTH_ENV=Production");

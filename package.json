@@ -53,6 +53,7 @@
     "lint": "biome check",
     "test": "vitest run",
     "test:performance": "vitest run --config vitest.performance.config.mts",
+    "validate:railway": "node scripts/validate-railway-config.mjs",
     "perf:http": "node performance/http-load.mjs",
     "perf:auth-before-body": "node performance/auth-before-body.mjs",
     "perf:auth-database-isolation": "node performance/auth-database-isolation.mjs",
