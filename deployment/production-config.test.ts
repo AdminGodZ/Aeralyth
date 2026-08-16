@@ -106,6 +106,9 @@ describe("Railway production deployment", () => {
     expect(workflow).toContain("Railway production image smoke test");
     expect(workflow).toContain("Railway deployment config");
     expect(workflow).toContain("npm run validate:railway");
+    expect(workflow).toContain(
+      "git diff --exit-code -- public/vault.worker.js public/folder-zip.worker.js src/generated/worker-assets.ts",
+    );
     expect(workflow).toContain("npm run db:test:production-preflight-fresh");
     expect(workflow).toContain("-e AERALYTH_ENV=production");
     expect(workflow).toContain("-e AERALYTH_ENV=Production");

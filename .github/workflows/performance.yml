@@ -40,8 +40,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run worker:build
-      - name: Verify committed vault worker is current
-        run: git diff --exit-code -- public/vault.worker.js
+      - name: Verify committed workers and fingerprints are current
+        run: git diff --exit-code -- public/vault.worker.js public/folder-zip.worker.js src/generated/worker-assets.ts
       - run: npx tsc --noEmit
       - run: npm run lint
       - run: npm test

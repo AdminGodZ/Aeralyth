@@ -60,6 +60,7 @@ import {
 import { uploadEncryptedSelections } from "@/features/vault/encrypted-upload";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import { useVault } from "@/features/vault/vault-provider";
+import { FOLDER_ZIP_WORKER_URL } from "@/generated/worker-assets";
 
 type UploadSelection = {
   file: File;
@@ -1126,7 +1127,7 @@ function useUploadPanelController({
     let worker: Worker;
 
     try {
-      worker = new Worker("/folder-zip.worker.js", {
+      worker = new Worker(FOLDER_ZIP_WORKER_URL, {
         type: "module",
         name: "aeralyth-folder-zip",
       });

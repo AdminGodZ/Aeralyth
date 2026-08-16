@@ -46,7 +46,7 @@
     "db:bench:auth-principal": "bash database/tests/auth_principal_benchmark.sh",
     "build": "next build",
     "prebuild": "npm run worker:build",
-    "worker:build": "npm run worker:zip && npm run worker:vault",
+    "worker:build": "npm run worker:zip && npm run worker:vault && node scripts/write-worker-assets.mjs",
     "worker:zip": "esbuild src/features/dashboard/folder-zip.worker.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=public/folder-zip.worker.js",
     "worker:vault": "esbuild src/features/vault/vault.worker.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=public/vault.worker.js",
     "start": "next start",

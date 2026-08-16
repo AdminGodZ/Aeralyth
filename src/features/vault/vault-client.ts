@@ -22,6 +22,7 @@ import type {
   VaultWorkerResponse,
   VaultWorkerResult,
 } from "@/features/vault/vault-messages";
+import { VAULT_WORKER_URL } from "@/generated/worker-assets";
 
 type WorkerCommand = VaultWorkerRequest extends infer Request
   ? Request extends { id: number }
@@ -51,7 +52,7 @@ export class VaultCryptoClient {
   private closed = false;
 
   constructor() {
-    this.worker = new Worker("/vault.worker.js", {
+    this.worker = new Worker(VAULT_WORKER_URL, {
       type: "module",
       name: "aeralyth-vault",
     });

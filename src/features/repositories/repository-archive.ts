@@ -6,6 +6,7 @@ import { readEncryptedFileBlob } from "@/features/vault/encrypted-download";
 import type { VaultManifest } from "@/features/vault/protocol";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
+import { FOLDER_ZIP_WORKER_URL } from "@/generated/worker-assets";
 import type {
   RepositoryArchiveManifest,
   RepositoryEntry,
@@ -249,7 +250,7 @@ function createArchive(
   }
 
   return new Promise((resolve, reject) => {
-    const worker = new Worker("/folder-zip.worker.js", {
+    const worker = new Worker(FOLDER_ZIP_WORKER_URL, {
       type: "module",
       name: "aeralyth-repository-zip",
     });
