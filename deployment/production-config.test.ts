@@ -68,9 +68,9 @@ describe("Railway production deployment", () => {
       "@workers path /vault.worker.js /folder-zip.worker.js",
     );
     expect(caddyfile).toContain(
-      'Cache-Control "private, no-cache, max-age=0, must-revalidate"',
+      '>Cache-Control "private, no-cache, max-age=0, must-revalidate"',
     );
-    expect(caddyfile).toContain('CDN-Cache-Control "no-store"');
+    expect(caddyfile).toContain('>CDN-Cache-Control "no-store"');
   });
 
   it("blocks activation unless migrations and health checks succeed", () => {
