@@ -9,6 +9,7 @@ mod state;
 mod storage;
 mod timestamps;
 mod upload_completion;
+mod vault_wire;
 
 use actix_web::http::header::{CONTENT_LENGTH, HeaderName, HeaderValue};
 use actix_web::{App, HttpServer, dev::Service, web};
@@ -18,7 +19,7 @@ use tokio::sync::watch;
 use tracing::Instrument;
 
 use config::E2eeMode;
-use state::{AppState, MutationLimiter};
+use state::{AppState, MutationLimiter, VaultValidationService};
 
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
@@ -109,6 +110,16 @@ async fn main() -> std::io::Result<()> {
         login_rate_limiter,
         storage,
         vault_mutation_limiter: MutationLimiter::new(8, 3),
+        vault_validation: VaultValidationService::new(
+            std::thread::available_parallelism()
+                .map(std::num::NonZeroUsize::get)
+                .unwrap_or(4)
+                .saturating_sub(1)
+                .clamp(1, 8),
+            2,
+            32,
+            8,
+        ),
     });
 
     tracing::info!(bind_addr, "starting Aeralyth API");

@@ -134,10 +134,10 @@ export type VaultManifest = {
 };
 
 export type VaultNodeRecord = {
-  bootstrapCbor: string;
-  bootstrapSignature: string;
-  encryptedManifest: string;
-  wrappers: string[];
+  bootstrapCbor: Uint8Array;
+  bootstrapSignature: Uint8Array;
+  encryptedManifest: Uint8Array;
+  wrappers: Uint8Array[];
 };
 
 export type VaultDownloadPlan = {

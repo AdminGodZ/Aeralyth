@@ -8,6 +8,14 @@ import type {
   VaultShareNodeSnapshot,
   VaultUnlockMaterial,
 } from "@/features/vault/protocol";
+import { fromBase64Url, toArrayBuffer } from "@/features/vault/protocol";
+import {
+  encodeCreateSharePublication,
+  encodeNodePublication,
+  encodePublishEpochPublication,
+  encodeShareDirectoryPublication,
+  VAULT_PUBLICATION_CONTENT_TYPE,
+} from "@/features/vault/vault-wire";
 
 export type VaultStatus = {
   mode: "off" | "migrate" | "required";
@@ -86,9 +94,12 @@ export type VaultSharePayload = {
   rootNodeId: string;
   recipientId: string;
   recipientKeyVersion: number;
-  wrappers: string[];
-  envelopes: Array<{ canonicalCbor: string; signature: string }>;
-  ownerEpochKey: { wrapperId: string; ciphertext: string };
+  wrappers: Uint8Array[];
+  envelopes: Array<{
+    canonicalCbor: Uint8Array;
+    signature: Uint8Array;
+  }>;
+  ownerEpochKey: { wrapperId: Uint8Array; ciphertext: Uint8Array };
 };
 
 export type VaultShareMutation = {
@@ -244,10 +255,10 @@ export function publishVaultUpload(
   record: VaultNodeRecord,
   signal?: AbortSignal,
 ): Promise<VaultPublishResponse> {
-  return vaultMutation(
+  return vaultBinaryMutation(
     `/api/vault/uploads/${encodeURIComponent(uploadId)}/publish`,
     csrfToken,
-    { parts, ...record },
+    encodeNodePublication(parts, record),
     signal,
   );
 }
@@ -262,20 +273,16 @@ export async function publishShareDirectory(
   csrfToken: string,
   job: VaultShareSyncJob,
   payload: {
-    directoryCbor: string;
-    directorySignature: string;
-    wrappers: string[];
+    directoryCbor: Uint8Array;
+    directorySignature: Uint8Array;
+    wrappers: Uint8Array[];
   } | null,
   signal?: AbortSignal,
 ): Promise<void> {
-  await vaultMutation(
+  await vaultBinaryMutation(
     `/api/vault/share-sync-jobs/${encodeURIComponent(job.nodeId)}`,
     csrfToken,
-    payload ?? {
-      directoryCbor: null,
-      directorySignature: null,
-      wrappers: [],
-    },
+    encodeShareDirectoryPublication(payload),
     signal,
   );
 }
@@ -354,7 +361,12 @@ export function createVaultShare(
   payload: VaultSharePayload,
   signal?: AbortSignal,
 ): Promise<VaultShareMutation> {
-  return vaultMutation("/api/vault/shares", csrfToken, payload, signal);
+  return vaultBinaryMutation(
+    "/api/vault/shares",
+    csrfToken,
+    encodeCreateSharePublication(payload),
+    signal,
+  );
 }
 
 export function getOwnedVaultShares(
@@ -401,16 +413,22 @@ export function publishVaultEpochRotation(
   epoch: number,
   payload: {
     fenceSnapshotHash: string;
-    wrappers: string[];
-    envelopes: Array<{ canonicalCbor: string; signature: string }>;
-    ownerEpochKey: { wrapperId: string; ciphertext: string };
+    wrappers: Uint8Array[];
+    envelopes: Array<{
+      canonicalCbor: Uint8Array;
+      signature: Uint8Array;
+    }>;
+    ownerEpochKey: { wrapperId: Uint8Array; ciphertext: Uint8Array };
   },
   signal?: AbortSignal,
 ): Promise<VaultShareMutation> {
-  return vaultMutation(
+  return vaultBinaryMutation(
     `/api/vault/shares/${encodeURIComponent(shareId)}/epochs/${epoch}/publish`,
     csrfToken,
-    payload,
+    encodePublishEpochPublication({
+      ...payload,
+      fenceSnapshotHash: fromBase64Url(payload.fenceSnapshotHash),
+    }),
     signal,
   );
 }
@@ -440,6 +458,23 @@ async function vaultMutation<T>(
       "X-CSRF-Token": csrfToken,
     },
     body: JSON.stringify(payload),
+    signal,
+  });
+}
+
+async function vaultBinaryMutation<T>(
+  url: string,
+  csrfToken: string,
+  payload: Uint8Array,
+  signal?: AbortSignal,
+): Promise<T> {
+  return vaultRequest(url, {
+    method: "POST",
+    headers: {
+      "Content-Type": VAULT_PUBLICATION_CONTENT_TYPE,
+      "X-CSRF-Token": csrfToken,
+    },
+    body: toArrayBuffer(payload),
     signal,
   });
 }

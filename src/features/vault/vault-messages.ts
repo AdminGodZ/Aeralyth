@@ -139,9 +139,9 @@ export type VaultShareDirectoryInput = {
 };
 
 export type VaultShareDirectoryResult = {
-  directoryCbor: string;
-  directorySignature: string;
-  wrappers: string[];
+  directoryCbor: Uint8Array;
+  directorySignature: Uint8Array;
+  wrappers: Uint8Array[];
 };
 
 export type VaultOpenPlanResult = {
@@ -196,9 +196,9 @@ export type VaultShareRotationInput = {
 };
 
 export type VaultShareMaterialResult = {
-  wrappers: string[];
-  envelopes: Array<{ canonicalCbor: string; signature: string }>;
-  ownerEpochKey: { wrapperId: string; ciphertext: string };
+  wrappers: Uint8Array[];
+  envelopes: Array<{ canonicalCbor: Uint8Array; signature: Uint8Array }>;
+  ownerEpochKey: { wrapperId: Uint8Array; ciphertext: Uint8Array };
 };
 
 export type VaultWorkerResult =

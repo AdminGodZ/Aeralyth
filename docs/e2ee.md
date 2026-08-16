@@ -105,6 +105,34 @@ objects plus legacy and encrypted uploads in progress. Migration receives credit
 for the plaintext object being replaced so temporary ciphertext does not create
 a false quota failure.
 
+## Vault publication wire format
+
+The first-party browser sends large node and share publications as
+`application/vnd.aeralyth.vault-publication`. Authentication, CSRF validation,
+the 8 MiB request limit, and bounded validation admission are applied before the
+payload is trusted. JSON/base64 remains a compatibility reader for older clients;
+new browser publications do not select it.
+
+Wire version 1 is length-delimited and network-byte-order encoded. Every message
+starts with the eight-byte header `AVLT`, version `1`, a one-byte message kind,
+and two zero reserved bytes. Kinds `1` through `4` represent node publication,
+share-directory publication, share creation, and epoch publication. Byte strings,
+UTF-8 strings, and array counts use unsigned 32-bit length prefixes; unsigned
+64-bit values are big-endian. Optional byte strings use `0xffffffff` for null.
+Decoders reject unknown headers, invalid UTF-8, oversized counts or fields,
+truncated data, and trailing bytes.
+
+The browser encoder measures the complete message and allocates one output
+buffer. The API collects one bounded request buffer and exposes cryptographic
+fields as shared `Bytes` slices into it, so validation does not first expand or
+copy them through base64 strings. Binary parsing and compatibility JSON
+deserialization/base64 conversion, Ed25519 verification, deterministic-CBOR
+decoding, hashing, sorting, and large JSON response encoding run through the
+bounded vault-validation service rather than Actix's async workers. Request
+database leases are returned before that CPU work or S3 URL signing begins;
+subtree snapshot rows retain deterministic traversal order in PostgreSQL so no
+large in-handler sort extends a transaction.
+
 ## Railway S3 setup
 
 Use a private Railway Storage Bucket in development and production. Configure

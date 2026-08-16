@@ -531,7 +531,7 @@ mod tests {
             ("files", include_str!("routes/files.rs"), 6),
             ("repositories", include_str!("routes/repositories.rs"), 3),
             ("share links", include_str!("routes/share_links.rs"), 1),
-            ("vault", include_str!("routes/vault.rs"), 13),
+            ("vault", include_str!("routes/vault.rs"), 8),
         ] {
             assert!(
                 !source.contains("web::Json<"),
@@ -543,6 +543,12 @@ mod tests {
                 "{name} JSON route coverage changed; authenticate before parsing any new body"
             );
         }
+        let vault = include_str!("routes/vault.rs");
+        assert_eq!(
+            vault.matches("serde_json::from_slice::<").count(),
+            5,
+            "large compatibility publications must deserialize only inside bounded CPU work"
+        );
     }
 
     #[test]

@@ -248,7 +248,11 @@ mod tests {
         assert_eq!(repositories.matches("walk_subtree(").count(), 1);
         assert!(repositories.contains(".isolation_level(IsolationLevel::RepeatableRead)"));
         let vault = include_str!("vault.rs");
-        assert_eq!(vault.matches("subtree_snapshot(&transaction").count(), 5);
+        assert_eq!(
+            vault.matches("subtree_snapshot(&transaction").count(),
+            6,
+            "vault publications must retain their bounded read plus optimistic revalidation walks"
+        );
         assert!(
             vault
                 .matches(".isolation_level(IsolationLevel::RepeatableRead)")

@@ -1,5 +1,9 @@
 use std::fmt;
 
+#[cfg(test)]
+use std::cell::Cell;
+
+use bytes::Bytes;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use sha2::{Digest, Sha256};
 
@@ -22,6 +26,21 @@ pub const fn uses_vault_multipart_upload(ciphertext_bytes: u64) -> bool {
 
 const MAX_WRAPPERS_PER_RECORD: usize = 4_096;
 const MAX_SHARE_WRAPPERS: usize = 8_192;
+
+#[cfg(test)]
+thread_local! {
+    static WRAPPER_DECODE_CALLS: Cell<usize> = const { Cell::new(0) };
+}
+
+#[cfg(test)]
+pub(crate) fn reset_wrapper_decode_calls() {
+    WRAPPER_DECODE_CALLS.with(|calls| calls.set(0));
+}
+
+#[cfg(test)]
+pub(crate) fn wrapper_decode_calls() -> usize {
+    WRAPPER_DECODE_CALLS.with(Cell::get)
+}
 
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct BootstrapRecord {
@@ -55,6 +74,13 @@ pub struct WrapperRecord {
     pub record_version: u64,
     pub ciphertext: Vec<u8>,
     pub aad_schema_id: u64,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+pub struct DecodedWrapper {
+    pub canonical: Bytes,
+    pub record: WrapperRecord,
+    pub hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -245,6 +271,8 @@ pub fn decode_share_directory(input: &[u8]) -> Result<ShareDirectoryRecord, Prot
 }
 
 pub fn decode_wrapper(input: &[u8]) -> Result<WrapperRecord, ProtocolError> {
+    #[cfg(test)]
+    WRAPPER_DECODE_CALLS.with(|calls| calls.set(calls.get() + 1));
     let mut reader = CborReader::new(input);
     reader.expect_map_len(11)?;
     reader.expect_key(1)?;
@@ -323,6 +351,16 @@ pub fn decode_wrapper(input: &[u8]) -> Result<WrapperRecord, ProtocolError> {
         record_version,
         ciphertext,
         aad_schema_id,
+    })
+}
+
+pub fn decode_wrapper_material(canonical: Bytes) -> Result<DecodedWrapper, ProtocolError> {
+    let record = decode_wrapper(&canonical)?;
+    let hash = sha256(&canonical);
+    Ok(DecodedWrapper {
+        canonical,
+        record,
+        hash,
     })
 }
 
@@ -444,14 +482,33 @@ pub fn verify_share_envelope(
     Ok((envelope, sha256(&signed_record)))
 }
 
+#[cfg(test)]
 pub fn verify_node_record(
     bootstrap_cbor: &[u8],
     signature: &[u8],
     encrypted_manifest: &[u8],
-    wrappers: &[Vec<u8>],
+    wrappers: &[DecodedWrapper],
     ed25519_public_key: &[u8],
 ) -> Result<VerifiedNodeRecord, ProtocolError> {
     let bootstrap = decode_bootstrap(bootstrap_cbor)?;
+    verify_decoded_node_record(
+        bootstrap_cbor,
+        bootstrap,
+        signature,
+        encrypted_manifest,
+        wrappers,
+        ed25519_public_key,
+    )
+}
+
+pub fn verify_decoded_node_record(
+    bootstrap_cbor: &[u8],
+    bootstrap: BootstrapRecord,
+    signature: &[u8],
+    encrypted_manifest: &[u8],
+    wrappers: &[DecodedWrapper],
+    ed25519_public_key: &[u8],
+) -> Result<VerifiedNodeRecord, ProtocolError> {
     if encrypted_manifest.len() < 16 || encrypted_manifest.len() > 1_048_576 {
         return Err(ProtocolError::new("encrypted manifest length is invalid"));
     }
@@ -464,14 +521,11 @@ pub fn verify_node_record(
         return Err(ProtocolError::new("wrapper commitment count mismatch"));
     }
 
-    for (index, canonical_wrapper) in wrappers.iter().enumerate() {
-        let wrapper = decode_wrapper(canonical_wrapper)?;
-        let wrapper_hash = sha256(canonical_wrapper);
-
-        if wrapper.wrapper_id != bootstrap.wrapper_ids[index]
-            || wrapper_hash != bootstrap.wrapper_hashes[index]
-            || wrapper.node_id != bootstrap.node_id
-            || wrapper.record_version != bootstrap.record_version
+    for (index, wrapper) in wrappers.iter().enumerate() {
+        if wrapper.record.wrapper_id != bootstrap.wrapper_ids[index]
+            || wrapper.hash != bootstrap.wrapper_hashes[index]
+            || wrapper.record.node_id != bootstrap.node_id
+            || wrapper.record.record_version != bootstrap.record_version
         {
             return Err(ProtocolError::new("wrapper commitment mismatch"));
         }
@@ -952,23 +1006,26 @@ mod tests {
 
     #[test]
     fn verifies_signature_and_commitments() {
+        reset_wrapper_decode_calls();
         let wrapper = encode_wrapper_for_test();
         let wrapper_hash = sha256(&wrapper);
         let manifest = b"encrypted-manifest-with-tag";
         let signing_key = SigningKey::from_bytes(&[7_u8; 32]);
         let bootstrap = encode_bootstrap_for_test(sha256(manifest), wrapper_hash);
         let signature = signing_key.sign(&bootstrap).to_bytes();
+        let decoded_wrapper = decode_wrapper_material(Bytes::from(wrapper)).unwrap();
         let verified = verify_node_record(
             &bootstrap,
             &signature,
             manifest,
-            &[wrapper],
+            std::slice::from_ref(&decoded_wrapper),
             &signing_key.verifying_key().to_bytes(),
         )
         .unwrap();
 
         assert_eq!(verified.bootstrap.node_id, "fil_test");
         assert_eq!(verified.bootstrap.record_version, 1);
+        assert_eq!(wrapper_decode_calls(), 1);
 
         let mut tampered_manifest = manifest.to_vec();
         tampered_manifest[0] ^= 1;
@@ -976,11 +1033,12 @@ mod tests {
             &bootstrap,
             &signature,
             &tampered_manifest,
-            &[encode_wrapper_for_test()],
+            std::slice::from_ref(&decoded_wrapper),
             &signing_key.verifying_key().to_bytes(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("manifest commitment"));
+        assert_eq!(wrapper_decode_calls(), 1);
 
         let mut tampered_signature = signature;
         tampered_signature[0] ^= 1;
@@ -988,11 +1046,12 @@ mod tests {
             &bootstrap,
             &tampered_signature,
             manifest,
-            &[encode_wrapper_for_test()],
+            std::slice::from_ref(&decoded_wrapper),
             &signing_key.verifying_key().to_bytes(),
         )
         .unwrap_err();
         assert!(error.to_string().contains("signature"));
+        assert_eq!(wrapper_decode_calls(), 1);
     }
 
     #[test]

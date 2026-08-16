@@ -6,11 +6,152 @@ import {
   WeightedSemaphore,
 } from "@/features/vault/bounded-async";
 import { ExactStreamReader } from "@/features/vault/buffered-bytes";
+import {
+  encodeCreateSharePublication,
+  encodeNodePublication,
+} from "@/features/vault/vault-wire";
 
 const NETWORK_CHUNK_BYTES = 64 * 1024;
 const CRYPTO_CHUNK_BYTES = 4 * 1024 * 1024;
 
 describe("vault performance regression budgets", () => {
+  it("keeps publication wire bytes raw and cheaper than base64 JSON", () => {
+    const manifest = new Uint8Array(1024 * 1024).fill(5);
+    const wrappers = Array.from({ length: 64 }, (_, index) =>
+      new Uint8Array(8 * 1024).fill(index),
+    );
+    const record = {
+      bootstrapCbor: new Uint8Array(8 * 1024).fill(3),
+      bootstrapSignature: new Uint8Array(64).fill(4),
+      encryptedManifest: manifest,
+      wrappers,
+    };
+    let binary: Uint8Array = new Uint8Array();
+    let json = "";
+    const samples = 7;
+    const timings = compareMedianDurations(
+      samples,
+      () => {
+        binary = encodeNodePublication([], record);
+      },
+      () => {
+        json = JSON.stringify({
+          parts: [],
+          bootstrapCbor: Buffer.from(record.bootstrapCbor).toString(
+            "base64url",
+          ),
+          bootstrapSignature: Buffer.from(record.bootstrapSignature).toString(
+            "base64url",
+          ),
+          encryptedManifest: Buffer.from(record.encryptedManifest).toString(
+            "base64url",
+          ),
+          wrappers: record.wrappers.map((wrapper) =>
+            Buffer.from(wrapper).toString("base64url"),
+          ),
+        });
+      },
+    );
+    const jsonBytes = new TextEncoder().encode(json).byteLength;
+
+    expect(jsonBytes / binary.byteLength).toBeGreaterThan(1.32);
+    expect(timings.binaryMedianMs).toBeLessThan(timings.jsonMedianMs);
+    reportMetric("vault_binary_publication_budget", {
+      rawMaterialBytes:
+        record.bootstrapCbor.byteLength +
+        record.bootstrapSignature.byteLength +
+        record.encryptedManifest.byteLength +
+        wrappers.reduce((total, wrapper) => total + wrapper.byteLength, 0),
+      binaryBytes: binary.byteLength,
+      base64JsonBytes: jsonBytes,
+      wireRatio: jsonBytes / binary.byteLength,
+      samples,
+      binaryMedianEncodeMs: timings.binaryMedianMs,
+      base64JsonMedianEncodeMs: timings.jsonMedianMs,
+    });
+  });
+
+  it("keeps representative share publications raw with one exact output buffer", () => {
+    const wrappers = Array.from({ length: 1024 }, (_, index) =>
+      new Uint8Array(4 * 1024).fill(index & 0xff),
+    );
+    const envelopes = Array.from({ length: 128 }, (_, index) => ({
+      canonicalCbor: new Uint8Array(512).fill(index),
+      signature: new Uint8Array(64).fill(index),
+    }));
+    const publication = {
+      shareId: "shr_representative",
+      rootNodeId: "fil_representative",
+      recipientId: "usr_representative",
+      recipientKeyVersion: 7,
+      wrappers,
+      envelopes,
+      ownerEpochKey: {
+        wrapperId: new Uint8Array(16).fill(3),
+        ciphertext: new Uint8Array(48).fill(4),
+      },
+    };
+    let binary: Uint8Array = new Uint8Array();
+    let json = "";
+    const samples = 7;
+    const timings = compareMedianDurations(
+      samples,
+      () => {
+        binary = encodeCreateSharePublication(publication);
+      },
+      () => {
+        json = JSON.stringify({
+          ...publication,
+          wrappers: wrappers.map((wrapper) =>
+            Buffer.from(wrapper).toString("base64url"),
+          ),
+          envelopes: envelopes.map((envelope) => ({
+            canonicalCbor: Buffer.from(envelope.canonicalCbor).toString(
+              "base64url",
+            ),
+            signature: Buffer.from(envelope.signature).toString("base64url"),
+          })),
+          ownerEpochKey: {
+            wrapperId: Buffer.from(
+              publication.ownerEpochKey.wrapperId,
+            ).toString("base64url"),
+            ciphertext: Buffer.from(
+              publication.ownerEpochKey.ciphertext,
+            ).toString("base64url"),
+          },
+        });
+      },
+    );
+    const jsonBytes = new TextEncoder().encode(json).byteLength;
+    const rawMaterialBytes =
+      wrappers.reduce((total, wrapper) => total + wrapper.byteLength, 0) +
+      envelopes.reduce(
+        (total, envelope) =>
+          total +
+          envelope.canonicalCbor.byteLength +
+          envelope.signature.byteLength,
+        0,
+      ) +
+      publication.ownerEpochKey.wrapperId.byteLength +
+      publication.ownerEpochKey.ciphertext.byteLength;
+
+    const ownsExactOutputBuffer =
+      binary.byteOffset === 0 && binary.byteLength === binary.buffer.byteLength;
+    expect(ownsExactOutputBuffer).toBe(true);
+    expect(jsonBytes / binary.byteLength).toBeGreaterThan(1.32);
+    expect(timings.binaryMedianMs).toBeLessThan(timings.jsonMedianMs);
+    reportMetric("vault_binary_share_publication_budget", {
+      rawMaterialBytes,
+      binaryBytes: binary.byteLength,
+      base64JsonBytes: jsonBytes,
+      wireRatio: jsonBytes / binary.byteLength,
+      ownsExactOutputBuffer,
+      samples,
+      binaryMedianEncodeMs: timings.binaryMedianMs,
+      base64JsonMedianEncodeMs: timings.jsonMedianMs,
+    });
+  });
+
   it("copies fragmented downloads into one exact crypto buffer", async () => {
     let allocatedBytes = 0;
     let allocations = 0;
@@ -156,4 +297,35 @@ describe("vault performance regression budgets", () => {
 
 function reportMetric(name: string, values: Record<string, unknown>): void {
   console.info(JSON.stringify({ metric: name, ...values }));
+}
+
+function compareMedianDurations(
+  samples: number,
+  encodeBinary: () => void,
+  encodeJson: () => void,
+): { binaryMedianMs: number; jsonMedianMs: number } {
+  encodeBinary();
+  encodeJson();
+  const binary = new Array<number>(samples);
+  const json = new Array<number>(samples);
+  const measure = (operation: () => void): number => {
+    const started = performance.now();
+    operation();
+    return performance.now() - started;
+  };
+  for (let index = 0; index < samples; index += 1) {
+    if (index % 2 === 0) {
+      binary[index] = measure(encodeBinary);
+      json[index] = measure(encodeJson);
+    } else {
+      json[index] = measure(encodeJson);
+      binary[index] = measure(encodeBinary);
+    }
+  }
+  binary.sort((left, right) => left - right);
+  json.sort((left, right) => left - right);
+  return {
+    binaryMedianMs: binary[Math.floor(samples / 2)] ?? Number.POSITIVE_INFINITY,
+    jsonMedianMs: json[Math.floor(samples / 2)] ?? Number.POSITIVE_INFINITY,
+  };
 }

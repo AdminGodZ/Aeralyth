@@ -451,6 +451,7 @@ mod tests {
     };
     use crate::config::Config;
     use crate::observability::Metrics;
+    use crate::state::VaultValidationService;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
@@ -561,5 +562,66 @@ mod tests {
         assert!(maintenance.ping().await.is_err());
 
         drop(held_maintenance);
+    }
+
+    #[actix_web::test]
+    async fn released_request_lease_keeps_health_available_during_validation_saturation() {
+        if std::env::var("AERALYTH_DATABASE_INTEGRATION_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+
+        let config = Config::from_env().expect("database integration configuration should load");
+        let request = Database::create(
+            &config.database_url,
+            DatabasePoolSettings {
+                role: PoolRole::Request,
+                max_size: 1,
+                min_size: 1,
+                checkout_queue_capacity: 1,
+                wait_timeout: Duration::from_millis(100),
+                max_lifetime: Duration::from_secs(30 * 60),
+                lifetime_jitter: Duration::from_secs(10 * 60),
+            },
+            Metrics::new(&config),
+        )
+        .await
+        .expect("request pool should connect");
+        let route_lease = request
+            .get()
+            .await
+            .expect("the simulated route should acquire its read lease");
+        drop(route_lease);
+
+        let validation = VaultValidationService::new(2, 2, 2, 2);
+        let active = Arc::new(AtomicUsize::new(0));
+        let mut tasks = Vec::new();
+        for _ in 0..2 {
+            let validation = validation.clone();
+            let active = Arc::clone(&active);
+            tasks.push(actix_web::rt::spawn(async move {
+                validation
+                    .run("user-a", move || {
+                        active.fetch_add(1, Ordering::SeqCst);
+                        std::thread::sleep(Duration::from_millis(250));
+                        active.fetch_sub(1, Ordering::SeqCst);
+                    })
+                    .await
+            }));
+        }
+        tokio::time::timeout(Duration::from_millis(250), async {
+            while active.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("validation workers should be saturated");
+
+        tokio::time::timeout(Duration::from_millis(100), request.ping())
+            .await
+            .expect("health ping waited for a lease retained by validation")
+            .expect("health ping should remain available");
+        for task in tasks {
+            task.await.unwrap().unwrap();
+        }
     }
 }

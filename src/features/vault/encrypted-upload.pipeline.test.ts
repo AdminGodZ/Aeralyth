@@ -19,9 +19,9 @@ vi.mock("@/features/vault/vault-api", async (importOriginal) => ({
 import { uploadEncryptedSelections } from "@/features/vault/encrypted-upload";
 
 const emptyRecord = {
-  bootstrapCbor: "bootstrap",
-  bootstrapSignature: "signature",
-  encryptedManifest: "manifest",
+  bootstrapCbor: new Uint8Array(),
+  bootstrapSignature: new Uint8Array(),
+  encryptedManifest: new Uint8Array(),
   wrappers: [],
 };
 

@@ -241,6 +241,7 @@ dependencies = [
  "aws-types",
  "base64 0.22.1",
  "bcrypt",
+ "bytes",
  "deadpool-postgres",
  "dotenvy",
  "ed25519-dalek",

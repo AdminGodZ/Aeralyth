@@ -786,6 +786,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-046 [P1] Canonical wrappers are decoded multiple times during one publication
 
+**Status:** Complete — implemented and verified on 2026-08-16.
+
+**Verification:** Node and share publications now decode every canonical wrapper exactly once into `DecodedWrapper { canonical: Bytes, record, hash }`, then pass borrowed decoded records through owner/share validation, commitment checks, and database insertion. `DecodedWrapper` is intentionally not cloneable, source guards reject a return to deep wrapper clones or insertion-time decoding, and a route-pipeline regression executes through the production `VaultValidationService::run` boundary and asserts exactly one decode per wrapper.
+
 **Confidence:** Confirmed
 
 **Evidence:** Node/share validation decodes wrappers for record verification, owner/share validation, committed-set checks, and database insertion helpers.
@@ -798,6 +802,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-047 [P1] Large signature/CBOR validation runs synchronously on Actix async workers
 
+**Status:** Complete — implemented and verified on 2026-08-16.
+
+**Verification:** A bounded vault validation service now moves binary and legacy-JSON publication parsing, base64 conversion, CBOR decoding, Ed25519 verification, hashes, canonical sorts, and large JSON response encoding onto `spawn_blocking`, with separate global and per-user admission and worker limits. Authentication, CSRF validation, content-type checks, and bounded body reads remain ahead of CPU admission. Read transactions are committed and request-scoped leases are released before validation, object-store signing, or response work; mutations reopen a short write transaction and optimistically revalidate the exact snapshot before commit. Subtree order is produced deterministically by PostgreSQL with `WITH ORDINALITY`, avoiding a handler-side million-node sort while a transaction is held. Concurrent fairness, async-heartbeat, decode-boundary, lease-release, response-path, and source-contract regressions protect these properties.
+
 **Confidence:** Confirmed
 
 **Evidence:** Vault routes perform many Ed25519 verifications, CBOR parses, hash computations, sorts, and base64 transformations directly in async handlers.
@@ -809,6 +817,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Under concurrent large share publication, `/health/live` and small metadata routes should retain stable latency.
 
 ## PERF-048 [P1] Base64 JSON adds wire bloat and allocation layers to binary cryptographic data
+
+**Status:** Complete — implemented and verified on 2026-08-16.
+
+**Verification:** First-party node, share-directory, create-share, and epoch-publication requests now use the versioned `AVLT` length-delimited binary wire format with strict kind, count, field-length, total-size, and trailing-byte rejection. The browser writes one exact `Uint8Array` and transfers its buffer; Actix retains the request as `Bytes` and exposes binary fields as zero-copy slices. Legacy JSON remains an authenticated compatibility fallback and is decoded in bounded CPU work. Cross-language fixtures lock browser/server parity. Seven-sample representative regressions measured node publication at 1,581,404 binary bytes versus 2,108,466 legacy-JSON bytes, and share publication at 4,273,314 versus 5,699,487 bytes; frontend binary encoding medians were 0.106 ms and 0.290 ms versus 0.581 ms and 2.043 ms for legacy JSON. Backend parsing medians were 20 us versus 14,368 us for the node fixture and 289 us versus 39,666 us for the share fixture, with zero copied binary field bytes asserted from actual slice ownership.
 
 **Confidence:** Confirmed
 

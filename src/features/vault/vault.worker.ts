@@ -227,23 +227,38 @@ async function dispatch(
         transfer: [encrypted.ciphertext],
       };
     }
-    case "finalizeEncryption":
+    case "finalizeEncryption": {
+      const complete = await finalizeEncryption(request.sessionId);
       return {
         result: {
           type: "finalizeEncryption",
-          result: await finalizeEncryption(request.sessionId),
+          result: complete,
         },
+        transfer: transferableBuffers([
+          complete.record.bootstrapCbor,
+          complete.record.bootstrapSignature,
+          complete.record.encryptedManifest,
+          ...complete.record.wrappers,
+        ]),
       };
+    }
     case "abortEncryption":
       abortEncryption(request.sessionId, request.nodeId);
       return { result: { type: "abortEncryption" } };
-    case "createShareDirectory":
+    case "createShareDirectory": {
+      const directory = await createShareDirectory(request.input);
       return {
         result: {
           type: "createShareDirectory",
-          result: await createShareDirectory(request.input),
+          result: directory,
         },
+        transfer: transferableBuffers([
+          directory.directoryCbor,
+          directory.directorySignature,
+          ...directory.wrappers,
+        ]),
       };
+    }
     case "startDecryption":
       return {
         result: {
@@ -265,21 +280,45 @@ async function dispatch(
     case "finalizeDecryption":
       await finalizeDecryption(request.sessionId);
       return { result: { type: "finalizeDecryption" } };
-    case "createShareMaterial":
+    case "createShareMaterial": {
+      const material = await createShareMaterial(request.input);
       return {
         result: {
           type: "createShareMaterial",
-          result: await createShareMaterial(request.input),
+          result: material,
         },
+        transfer: shareMaterialTransferables(material),
       };
-    case "rotateShareMaterial":
+    }
+    case "rotateShareMaterial": {
+      const material = await rotateShareMaterial(request.input);
       return {
         result: {
           type: "rotateShareMaterial",
-          result: await rotateShareMaterial(request.input),
+          result: material,
         },
+        transfer: shareMaterialTransferables(material),
       };
+    }
   }
+}
+
+function shareMaterialTransferables(
+  material: VaultShareMaterialResult,
+): Transferable[] {
+  return transferableBuffers([
+    ...material.wrappers,
+    ...material.envelopes.flatMap((envelope) => [
+      envelope.canonicalCbor,
+      envelope.signature,
+    ]),
+    material.ownerEpochKey.wrapperId,
+    material.ownerEpochKey.ciphertext,
+  ]);
+}
+
+function transferableBuffers(values: Uint8Array[]): Transferable[] {
+  return [...new Set(values.map((value) => value.buffer as ArrayBuffer))];
 }
 
 async function preflightArgon2id(): Promise<void> {
@@ -1001,23 +1040,15 @@ async function finalizeEncryption(
     ciphertextLength: session.ciphertextLength,
     chunkCount: session.chunkCount,
     record: {
-      bootstrapCbor: toBase64Url(bootstrapCbor),
-      bootstrapSignature: toBase64Url(signature),
-      encryptedManifest: toBase64Url(encryptedManifest),
-      wrappers: canonicalWrappers.map(toBase64Url),
+      bootstrapCbor,
+      bootstrapSignature: signature,
+      encryptedManifest,
+      wrappers: canonicalWrappers,
     },
   };
   nodeKeys.set(session.nodeId, session.nodeKey);
   encryptionSessions.delete(sessionId);
-  wipe(
-    manifestPlaintext,
-    manifestAad,
-    encryptedManifest,
-    ...wrapperHashes,
-    bootstrapCbor,
-    signature,
-    ...session.leaves,
-  );
+  wipe(manifestPlaintext, manifestAad, ...wrapperHashes, ...session.leaves);
   return complete;
 }
 
@@ -1123,19 +1154,11 @@ async function createShareDirectory(
     activeIdentity.ed25519PrivateKey,
   );
   const result = {
-    directoryCbor: toBase64Url(canonical),
-    directorySignature: toBase64Url(signature),
-    wrappers: wrappers.map(toBase64Url),
+    directoryCbor: canonical,
+    directorySignature: signature,
+    wrappers,
   };
-  wipe(
-    generationId,
-    recordHash,
-    wrapperRoot,
-    canonical,
-    signature,
-    ...wrapperHashes,
-    ...wrappers,
-  );
+  wipe(generationId, recordHash, wrapperRoot, ...wrapperHashes);
   return result;
 }
 
@@ -1554,11 +1577,11 @@ async function buildShareMaterial(input: {
       epochMaterial,
     );
     return {
-      wrappers: wrappers.map(toBase64Url),
+      wrappers,
       envelopes,
       ownerEpochKey: {
-        wrapperId: toBase64Url(wrapperId),
-        ciphertext: toBase64Url(ownerCiphertext),
+        wrapperId: wrapperId.slice(),
+        ciphertext: ownerCiphertext,
       },
     };
   } finally {
@@ -1678,7 +1701,7 @@ async function createHpkeEnvelope(input: {
   wrapperSetRoot: Uint8Array;
   wrapperCount: number;
   epochMaterial: Uint8Array;
-}): Promise<{ canonicalCbor: string; signature: string }> {
+}): Promise<{ canonicalCbor: Uint8Array; signature: Uint8Array }> {
   const activeIdentity = requireIdentity();
   const envelopeId = randomBytes(16);
   const [recipientPublic, senderPrivate] = await Promise.all([
@@ -1745,8 +1768,8 @@ async function createHpkeEnvelope(input: {
   );
   wipe(envelopeId, info, aad, encapsulatedKey, ciphertext);
   return {
-    canonicalCbor: toBase64Url(canonical),
-    signature: toBase64Url(signature),
+    canonicalCbor: canonical,
+    signature,
   };
 }
 
