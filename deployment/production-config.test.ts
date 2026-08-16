@@ -15,6 +15,17 @@ describe("Railway production deployment", () => {
     expect(dockerfile).toContain("postgresql-client");
     expect(dockerfile).toContain("USER aeralyth");
 
+    const cacheMounts = dockerfile.match(/--mount=type=cache,[^\s\\]+/g) ?? [];
+    expect(cacheMounts).toHaveLength(4);
+    const cacheIds = cacheMounts.map((mount) =>
+      mount
+        .split(",")
+        .find((option) => option.startsWith("id="))
+        ?.slice(3),
+    );
+    expect(cacheIds.every(Boolean)).toBe(true);
+    expect(new Set(cacheIds).size).toBe(cacheIds.length);
+
     const startup = read("scripts/start-production.sh");
     expect(startup).toContain("/app/bin/aeralyth-api");
     expect(startup).toContain("node /app/frontend/server.js");

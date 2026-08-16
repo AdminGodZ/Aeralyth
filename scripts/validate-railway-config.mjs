@@ -4,6 +4,10 @@ import { readFile } from "node:fs/promises";
 const config = JSON.parse(
   await readFile(new URL("../railway.json", import.meta.url), "utf8"),
 );
+const dockerfile = await readFile(
+  new URL("../Dockerfile", import.meta.url),
+  "utf8",
+);
 
 assert.equal(
   config.$schema,
@@ -34,5 +38,23 @@ for (const [name, value] of [
     `deploy.${name} must be a non-negative integer`,
   );
 }
+
+const cacheMounts = dockerfile.match(/--mount=type=cache,[^\s\\]+/g) ?? [];
+assert.ok(cacheMounts.length > 0, "Dockerfile must retain its build caches");
+
+const cacheIds = cacheMounts.map((mount) => {
+  const id = mount
+    .split(",")
+    .find((option) => option.startsWith("id="))
+    ?.slice(3);
+  assert.ok(id, `Railway requires an explicit id for cache mount: ${mount}`);
+  return id;
+});
+
+assert.equal(
+  new Set(cacheIds).size,
+  cacheIds.length,
+  "Dockerfile cache mounts must use unique ids",
+);
 
 console.log("Railway deployment config contract is valid.");

@@ -3,18 +3,18 @@
 FROM node:22-bookworm-slim AS frontend-build
 WORKDIR /workspace
 COPY package.json package-lock.json ./
-RUN --mount=type=cache,target=/root/.npm \
+RUN --mount=type=cache,id=aeralyth-npm,target=/root/.npm \
     npm ci --no-audit --no-fund
 COPY . .
-RUN --mount=type=cache,target=/workspace/.next/cache \
+RUN --mount=type=cache,id=aeralyth-next,target=/workspace/.next/cache \
     npm run build
 
 FROM rust:1.97-bookworm AS backend-build
 WORKDIR /workspace/backend
 COPY backend/Cargo.toml backend/Cargo.lock ./
 COPY backend/src ./src
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/workspace/backend/target \
+RUN --mount=type=cache,id=aeralyth-cargo-registry,target=/usr/local/cargo/registry \
+    --mount=type=cache,id=aeralyth-cargo-target,target=/workspace/backend/target \
     cargo build --release --locked && \
     cp target/release/aeralyth-api /tmp/aeralyth-api
 
