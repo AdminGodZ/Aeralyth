@@ -62,6 +62,17 @@ describe("Railway production deployment", () => {
     expect(caddyfile).not.toContain("reverse_proxy 127.0.0.1:8080");
   });
 
+  it("forces browser workers to revalidate after every deployment", () => {
+    const caddyfile = read("deployment/Caddyfile");
+    expect(caddyfile).toContain(
+      "@workers path /vault.worker.js /folder-zip.worker.js",
+    );
+    expect(caddyfile).toContain(
+      'Cache-Control "private, no-cache, max-age=0, must-revalidate"',
+    );
+    expect(caddyfile).toContain('CDN-Cache-Control "no-store"');
+  });
+
   it("blocks activation unless migrations and health checks succeed", () => {
     const config = JSON.parse(read("railway.json")) as {
       build: { builder: string; dockerfilePath: string };

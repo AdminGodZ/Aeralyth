@@ -6,6 +6,12 @@
 :{$PORT:8080} {
 	encode zstd gzip
 
+	@workers path /vault.worker.js /folder-zip.worker.js
+	header @workers {
+		Cache-Control "private, no-cache, max-age=0, must-revalidate"
+		CDN-Cache-Control "no-store"
+	}
+
 	@api path /api/* /health /metrics
 	handle @api {
 		reverse_proxy 127.0.0.1:{$AERALYTH_API_PORT:8081}
