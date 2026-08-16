@@ -32,6 +32,7 @@ import {
   encodeVaultRewrapProof,
   encryptedLength,
   equalBytes,
+  fillRandomBytes,
   fromBase64Url,
   merkleRootFromLeaves,
   padmeLength,
@@ -939,7 +940,7 @@ async function encryptChunk(
   const padded = new Uint8Array(expectedPaddedLength);
   padded.set(plaintext);
   if (expectedSourceLength < expectedPaddedLength) {
-    crypto.getRandomValues(padded.subarray(expectedSourceLength));
+    fillRandomBytes(padded.subarray(expectedSourceLength));
   }
   const aad = encodeChunkAad({
     nodeId: session.nodeId,

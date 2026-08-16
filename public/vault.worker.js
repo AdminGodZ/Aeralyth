@@ -6466,15 +6466,22 @@ var ARGON2ID_PROFILE = Object.freeze({
   memoryBytes: 256 * 1024 * 1024,
   outputBytes: 32
 });
+var WEB_CRYPTO_RANDOM_BYTES_LIMIT = 65536;
 function assertArgon2idProfile(kdf) {
   if (kdf.algorithm !== ARGON2ID_PROFILE.algorithm || kdf.operations !== ARGON2ID_PROFILE.operations || kdf.memoryBytes !== ARGON2ID_PROFILE.memoryBytes || kdf.outputBytes !== ARGON2ID_PROFILE.outputBytes) {
     throw new Error("The server returned an unsupported vault KDF profile.");
   }
 }
-function randomBytes(length) {
-  const output = new Uint8Array(length);
-  crypto.getRandomValues(output);
+function fillRandomBytes(output) {
+  for (let offset = 0; offset < output.length; offset += WEB_CRYPTO_RANDOM_BYTES_LIMIT) {
+    crypto.getRandomValues(
+      output.subarray(offset, offset + WEB_CRYPTO_RANDOM_BYTES_LIMIT)
+    );
+  }
   return output;
+}
+function randomBytes(length) {
+  return fillRandomBytes(new Uint8Array(length));
 }
 function randomPrefixedId(prefix) {
   return `${prefix}${toBase64Url(randomBytes(18))}`;
@@ -7958,7 +7965,7 @@ async function encryptChunk(sessionId, chunkIndex, plaintext) {
   const padded = new Uint8Array(expectedPaddedLength);
   padded.set(plaintext);
   if (expectedSourceLength < expectedPaddedLength) {
-    crypto.getRandomValues(padded.subarray(expectedSourceLength));
+    fillRandomBytes(padded.subarray(expectedSourceLength));
   }
   const aad = encodeChunkAad({
     nodeId: session.nodeId,

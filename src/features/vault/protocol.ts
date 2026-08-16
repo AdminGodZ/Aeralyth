@@ -246,6 +246,8 @@ export type VaultShareContextMaterial = {
   epochKey: Uint8Array;
 };
 
+const WEB_CRYPTO_RANDOM_BYTES_LIMIT = 65_536;
+
 export function assertArgon2idProfile(kdf: VaultKdf): void {
   if (
     kdf.algorithm !== ARGON2ID_PROFILE.algorithm ||
@@ -257,10 +259,21 @@ export function assertArgon2idProfile(kdf: VaultKdf): void {
   }
 }
 
-export function randomBytes(length: number): Uint8Array {
-  const output = new Uint8Array(length);
-  crypto.getRandomValues(output);
+export function fillRandomBytes(output: Uint8Array): Uint8Array {
+  for (
+    let offset = 0;
+    offset < output.length;
+    offset += WEB_CRYPTO_RANDOM_BYTES_LIMIT
+  ) {
+    crypto.getRandomValues(
+      output.subarray(offset, offset + WEB_CRYPTO_RANDOM_BYTES_LIMIT),
+    );
+  }
   return output;
+}
+
+export function randomBytes(length: number): Uint8Array {
+  return fillRandomBytes(new Uint8Array(length));
 }
 
 export function randomPrefixedId(prefix: string): string {

@@ -18,6 +18,7 @@ import {
   encodeVaultRewrapProof,
   encryptedLength,
   equalBytes,
+  fillRandomBytes,
   merkleRootFromLeaves,
   padmeLength,
   toArrayBuffer,
@@ -32,6 +33,13 @@ import {
 } from "@/features/vault/protocol";
 
 describe("vault protocol", () => {
+  it("fills random padding beyond Web Crypto's per-call quota", () => {
+    const output = new Uint8Array(65_536 * 2 + 7);
+
+    expect(fillRandomBytes(output)).toBe(output);
+    expect(output.some((value) => value !== 0)).toBe(true);
+  });
+
   it("reuses owned ArrayBuffers and only copies partial ranges", () => {
     const whole = Uint8Array.from([1, 2, 3, 4]);
     const parent = Uint8Array.from([9, 8, 7, 6]);
