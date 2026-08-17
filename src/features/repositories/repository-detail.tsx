@@ -17,12 +17,17 @@ import { useMemo } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
 import { RepositoryCodeMenu } from "@/features/repositories/repository-code-menu";
 import { RepositoryDescription } from "@/features/repositories/repository-description";
 import { getRepositoryFilePresentation } from "@/features/repositories/repository-file-types";
 import { RepositoryFileViewer } from "@/features/repositories/repository-file-viewer";
 import { RepositoryLanguageStats } from "@/features/repositories/repository-language-stats";
-import { useResolvedVaultNames } from "@/features/repositories/use-resolved-vault-names";
+import {
+  type RepositoryNamedNode,
+  useResolvedVaultNames,
+} from "@/features/repositories/use-resolved-vault-names";
+import type { VaultNamePresentation } from "@/features/vault/vault-name-presentation";
 import type {
   RepositoryDetailData,
   RepositoryDetailState,
@@ -81,11 +86,18 @@ function ReadyRepositoryDetail({
     [data],
   );
   const names = useResolvedVaultNames(nodes);
-  const repositoryName = names.nameFor(data.repository.root);
-  const resolvedEntries = data.entries.map((entry) => ({
-    ...entry,
-    resolvedName: names.nameFor(entry),
-  }));
+  const repositoryNamePresentation = names.presentationFor(
+    data.repository.root,
+  );
+  const repositoryName = repositoryNamePresentation.name ?? "";
+  const resolvedEntries = data.entries.map((entry) => {
+    const namePresentation = names.presentationFor(entry);
+    return {
+      ...entry,
+      namePresentation,
+      resolvedName: namePresentation.name ?? "",
+    };
+  });
   const selectedFile = resolvedEntries.find(
     (entry) => entry.entryType === "file" && entry.id === selectedFileId,
   );
@@ -103,12 +115,29 @@ function ReadyRepositoryDetail({
               {data.repository.ownerUsername}
             </span>
             <span className="text-lg text-muted-foreground">/</span>
-            <Link
-              href={`/repositories/${encodeURIComponent(data.repository.id)}`}
-              className="min-w-0 truncate font-display text-lg font-semibold text-primary hover:underline"
-            >
-              {repositoryName}
-            </Link>
+            {repositoryNamePresentation.status === "pending" ? (
+              <div
+                className="min-w-0 truncate font-display text-lg font-semibold"
+                aria-busy="true"
+              >
+                <VaultNameLabel
+                  presentation={repositoryNamePresentation}
+                  skeletonClassName="h-5 w-36"
+                  loadingLabel="Decrypting repository name"
+                />
+              </div>
+            ) : (
+              <Link
+                href={`/repositories/${encodeURIComponent(data.repository.id)}`}
+                className="min-w-0 truncate font-display text-lg font-semibold text-primary hover:underline"
+              >
+                <VaultNameLabel
+                  presentation={repositoryNamePresentation}
+                  skeletonClassName="h-5 w-36"
+                  loadingLabel="Decrypting repository name"
+                />
+              </Link>
+            )}
             <Badge variant="outline">
               <LockKeyhole className="size-3" aria-hidden="true" />
               Private
@@ -148,10 +177,17 @@ function ReadyRepositoryDetail({
                 <History className="size-4" aria-hidden="true" />
                 Imported {formatRepositoryDate(data.repository.createdAt)}
               </span>
-              <RepositoryCodeMenu
-                repository={data.repository}
-                repositoryName={repositoryName}
-              />
+              {repositoryNamePresentation.status === "pending" ? (
+                <Button type="button" disabled className="rounded-md">
+                  <Code2 className="size-4" aria-hidden="true" />
+                  Code
+                </Button>
+              ) : (
+                <RepositoryCodeMenu
+                  repository={data.repository}
+                  repositoryName={repositoryName || "Repository"}
+                />
+              )}
             </div>
           </div>
 
@@ -160,9 +196,9 @@ function ReadyRepositoryDetail({
               <div className="mb-3 overflow-hidden rounded-md border">
                 <RepositoryPath
                   data={data}
-                  repositoryName={repositoryName}
-                  nameFor={names.nameFor}
-                  selectedFileName={selectedFile.resolvedName}
+                  repositoryName={repositoryNamePresentation}
+                  presentationFor={names.presentationFor}
+                  selectedFileName={selectedFile.namePresentation}
                 />
               </div>
               <RepositoryFileViewer
@@ -174,8 +210,8 @@ function ReadyRepositoryDetail({
             <section className="overflow-hidden rounded-md border">
               <RepositoryPath
                 data={data}
-                repositoryName={repositoryName}
-                nameFor={names.nameFor}
+                repositoryName={repositoryNamePresentation}
+                presentationFor={names.presentationFor}
               />
 
               <div className="flex items-center justify-between gap-4 border-b bg-muted/25 px-4 py-3 text-sm">
@@ -301,18 +337,13 @@ function ReadyRepositoryDetail({
 function RepositoryPath({
   data,
   repositoryName,
-  nameFor,
+  presentationFor,
   selectedFileName,
 }: {
   data: RepositoryDetailData;
-  repositoryName: string;
-  nameFor(node: {
-    id: string;
-    name: string;
-    e2eeState: "legacy" | "staged" | "encrypted";
-    entryType?: "file" | "folder";
-  }): string;
-  selectedFileName?: string;
+  repositoryName: VaultNamePresentation;
+  presentationFor(node: RepositoryNamedNode): VaultNamePresentation;
+  selectedFileName?: VaultNamePresentation;
 }) {
   if (data.breadcrumbs.length === 0 && !selectedFileName) {
     return null;
@@ -323,24 +354,51 @@ function RepositoryPath({
       aria-label="Repository path"
       className="flex min-h-11 items-center gap-1 overflow-x-auto border-b px-4 text-sm"
     >
-      <Link
-        href={`/repositories/${encodeURIComponent(data.repository.id)}`}
-        className="shrink-0 font-semibold text-primary hover:underline"
-      >
-        {repositoryName}
-      </Link>
+      {repositoryName.status === "pending" ? (
+        <div className="shrink-0 font-semibold" aria-busy="true">
+          <VaultNameLabel
+            presentation={repositoryName}
+            skeletonClassName="h-4 w-28"
+            loadingLabel="Decrypting repository name"
+          />
+        </div>
+      ) : (
+        <Link
+          href={`/repositories/${encodeURIComponent(data.repository.id)}`}
+          className="shrink-0 font-semibold text-primary hover:underline"
+        >
+          <VaultNameLabel
+            presentation={repositoryName}
+            skeletonClassName="h-4 w-28"
+            loadingLabel="Decrypting repository name"
+          />
+        </Link>
+      )}
       {data.breadcrumbs.map((breadcrumb, index) => {
         const current =
           index === data.breadcrumbs.length - 1 && !selectedFileName;
-        const name = nameFor({ ...breadcrumb, entryType: "folder" });
+        const presentation = presentationFor({
+          ...breadcrumb,
+          entryType: "folder",
+        });
         return (
-          <span key={breadcrumb.id} className="flex min-w-0 items-center gap-1">
+          <div
+            key={breadcrumb.id}
+            className="flex min-w-0 items-center gap-1"
+            aria-busy={presentation.status === "pending" || undefined}
+          >
             <ChevronRight
               className="size-4 shrink-0 text-muted-foreground"
               aria-hidden="true"
             />
-            {current ? (
-              <span className="max-w-52 truncate font-semibold">{name}</span>
+            {current || presentation.status === "pending" ? (
+              <div className="max-w-52 truncate font-semibold">
+                <VaultNameLabel
+                  presentation={presentation}
+                  skeletonClassName="h-4 w-24"
+                  loadingLabel="Decrypting folder name"
+                />
+              </div>
             ) : (
               <Link
                 href={{
@@ -349,22 +407,30 @@ function RepositoryPath({
                 }}
                 className="max-w-52 truncate text-primary hover:underline"
               >
-                {name}
+                <VaultNameLabel
+                  presentation={presentation}
+                  skeletonClassName="h-4 w-24"
+                  loadingLabel="Decrypting folder name"
+                />
               </Link>
             )}
-          </span>
+          </div>
         );
       })}
       {selectedFileName ? (
-        <span className="flex min-w-0 items-center gap-1" aria-current="page">
+        <div className="flex min-w-0 items-center gap-1" aria-current="page">
           <ChevronRight
             className="size-4 shrink-0 text-muted-foreground"
             aria-hidden="true"
           />
-          <span className="max-w-80 truncate font-semibold">
-            {selectedFileName}
-          </span>
-        </span>
+          <div className="max-w-80 truncate font-semibold">
+            <VaultNameLabel
+              presentation={selectedFileName}
+              skeletonClassName="h-4 w-32"
+              loadingLabel="Decrypting file name"
+            />
+          </div>
+        </div>
       ) : null}
     </nav>
   );
@@ -375,7 +441,10 @@ function RepositoryEntryRow({
   repositoryId,
   currentFolderId,
 }: {
-  entry: RepositoryEntry & { resolvedName: string };
+  entry: RepositoryEntry & {
+    resolvedName: string;
+    namePresentation: VaultNamePresentation;
+  };
   repositoryId: string;
   currentFolderId: string;
 }) {
@@ -392,16 +461,32 @@ function RepositoryEntryRow({
       <FileText className="size-4" aria-hidden="true" />
     );
   const content = (
-    <span className="flex min-w-0 items-center gap-3">
+    <div className="flex min-w-0 items-center gap-3">
       <span className="shrink-0 text-muted-foreground">{icon}</span>
-      <span className="truncate">{entry.resolvedName}</span>
-    </span>
+      <div className="min-w-0 truncate">
+        <VaultNameLabel
+          presentation={entry.namePresentation}
+          skeletonClassName="h-4 w-40"
+          loadingLabel="Decrypting item name"
+        />
+      </div>
+    </div>
   );
 
   return (
-    <tr className="h-11 text-sm hover:bg-muted/30">
+    <tr
+      className={
+        entry.namePresentation.status === "pending"
+          ? "h-11 text-sm"
+          : "h-11 text-sm hover:bg-muted/30"
+      }
+    >
       <td className="min-w-0 px-4 py-2">
-        {entry.entryType === "folder" ? (
+        {entry.namePresentation.status === "pending" ? (
+          <div className="font-medium text-muted-foreground" aria-busy="true">
+            {content}
+          </div>
+        ) : entry.entryType === "folder" ? (
           <Link
             href={{
               pathname: `/repositories/${repositoryId}`,
@@ -427,6 +512,25 @@ function RepositoryEntryRow({
         {formatRepositoryDate(entry.updatedAt)}
       </td>
     </tr>
+  );
+}
+
+function VaultNameLabel({
+  presentation,
+  skeletonClassName,
+  loadingLabel,
+}: {
+  presentation: VaultNamePresentation;
+  skeletonClassName: string;
+  loadingLabel: string;
+}) {
+  if (presentation.status !== "pending") return presentation.name;
+
+  return (
+    <>
+      <Skeleton className={skeletonClassName} aria-hidden="true" />
+      <span className="sr-only">{loadingLabel}</span>
+    </>
   );
 }
 

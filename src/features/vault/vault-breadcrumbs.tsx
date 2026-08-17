@@ -5,8 +5,18 @@ import Link from "next/link";
 import { useEffect, useState } from "react";
 
 import { Button } from "@/components/ui/button";
+import { Skeleton } from "@/components/ui/skeleton";
+import {
+  getVaultNamePresentation,
+  type VaultNameResolution,
+} from "@/features/vault/vault-name-presentation";
 import { useVault } from "@/features/vault/vault-provider";
 import type { FileSort, FileSortDirection, FolderBreadcrumb } from "@/lib/api";
+
+type BreadcrumbResolutionState = {
+  source: FolderBreadcrumb[] | null;
+  values: Record<string, VaultNameResolution>;
+};
 
 export function VaultBreadcrumbs({
   breadcrumbs,
@@ -20,26 +30,37 @@ export function VaultBreadcrumbs({
   basePath?: "/files" | "/shared";
 }) {
   const vault = useVault();
-  const [names, setNames] = useState<Record<string, string>>({});
+  const [resolutionState, setResolutionState] =
+    useState<BreadcrumbResolutionState>({ source: null, values: {} });
+  const names =
+    resolutionState.source === breadcrumbs ? resolutionState.values : {};
 
   useEffect(() => {
-    if (vault.state !== "unlocked") return;
+    if (vault.state !== "unlocked") {
+      setResolutionState((current) =>
+        current.source === breadcrumbs &&
+        Object.keys(current.values).length === 0
+          ? current
+          : { source: breadcrumbs, values: {} },
+      );
+      return;
+    }
     let canceled = false;
-    void (async () => {
-      const resolved: Record<string, string> = {};
-      for (const breadcrumb of breadcrumbs) {
-        if (breadcrumb.e2eeState !== "encrypted") continue;
-        // Breadcrumbs are ordered parents first so each decrypted key seeds the next.
-        // react-doctor-disable-next-line react-doctor/async-await-in-loop
-        const manifest = await vault.openNode(breadcrumb.id);
-        resolved[breadcrumb.id] = manifest.name;
-      }
-      if (!canceled) setNames(resolved);
-    })().catch(() => undefined);
+    void resolveBreadcrumbNames({
+      breadcrumbs,
+      openNode: vault.openNode,
+      canceled: () => canceled,
+      onProgress(values) {
+        if (canceled) return;
+        // The exact breadcrumbs array owns this snapshot; render ignores
+        // results from any superseded source before this state is applied.
+        setResolutionState({ source: breadcrumbs, values });
+      },
+    });
     return () => {
       canceled = true;
     };
-  }, [breadcrumbs, vault]);
+  }, [breadcrumbs, vault.openNode, vault.state]);
 
   const query = sort
     ? { sort, ...(direction ? { direction } : {}) }
@@ -54,19 +75,34 @@ export function VaultBreadcrumbs({
         </Link>
       </Button>
       {breadcrumbs.map((breadcrumb, index) => {
-        const name =
-          breadcrumb.e2eeState === "encrypted"
-            ? (names[breadcrumb.id] ?? "Encrypted folder")
-            : breadcrumb.name;
+        const resolution = names[breadcrumb.id];
+        const presentation = getVaultNamePresentation({
+          node: { ...breadcrumb, entryType: "folder" },
+          unlocked: vault.state === "unlocked",
+          resolution,
+        });
+        const label =
+          presentation.status === "pending" ? (
+            <>
+              <Skeleton className="h-4 w-24" aria-hidden="true" />
+              <span className="sr-only">Decrypting folder name</span>
+            </>
+          ) : (
+            presentation.name
+          );
         const current = index === breadcrumbs.length - 1;
         return (
-          <span key={breadcrumb.id} className="flex min-w-0 items-center gap-1">
+          <div
+            key={breadcrumb.id}
+            className="flex min-w-0 items-center gap-1"
+            aria-busy={presentation.status === "pending" || undefined}
+          >
             <ChevronRight
               className="size-4 shrink-0 text-muted-foreground"
               aria-hidden="true"
             />
-            {current ? (
-              <span className="max-w-52 truncate font-medium">{name}</span>
+            {current || presentation.status === "pending" ? (
+              <div className="max-w-52 truncate font-medium">{label}</div>
             ) : (
               <Link
                 href={{
@@ -75,12 +111,43 @@ export function VaultBreadcrumbs({
                 }}
                 className="max-w-52 truncate text-muted-foreground transition-colors hover:text-foreground"
               >
-                {name}
+                {label}
               </Link>
             )}
-          </span>
+          </div>
         );
       })}
     </nav>
   );
+}
+
+async function resolveBreadcrumbNames({
+  breadcrumbs,
+  openNode,
+  canceled,
+  onProgress,
+}: {
+  breadcrumbs: FolderBreadcrumb[];
+  openNode(nodeId: string): Promise<{ name: string }>;
+  canceled(): boolean;
+  onProgress(values: Record<string, VaultNameResolution>): void;
+}): Promise<void> {
+  const resolved: Record<string, VaultNameResolution> = {};
+  for (const breadcrumb of breadcrumbs) {
+    if (canceled()) return;
+    if (breadcrumb.e2eeState !== "encrypted") continue;
+    try {
+      // Breadcrumbs are ordered parents first so each decrypted key seeds the next.
+      // react-doctor-disable-next-line react-doctor/async-await-in-loop
+      const manifest = await openNode(breadcrumb.id);
+      resolved[breadcrumb.id] = {
+        status: "ready",
+        name: manifest.name,
+      };
+    } catch {
+      resolved[breadcrumb.id] = { status: "unavailable" };
+    }
+    if (!canceled()) onProgress({ ...resolved });
+  }
+  if (!canceled()) onProgress(resolved);
 }

@@ -314,7 +314,9 @@ function RepositoryFileLoading({
       <header className="flex min-h-14 items-center gap-3 border-b px-4">
         <LoaderCircle className="size-5 animate-spin text-primary" />
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm font-semibold">Loading {name}</p>
+          <p className="truncate text-sm font-semibold">
+            Loading {name || "file"}
+          </p>
           <p className="text-xs text-muted-foreground">
             {progress === null
               ? "Reading file contents…"

@@ -31,25 +31,40 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { Skeleton } from "@/components/ui/skeleton";
 import { ShareLinkDialog } from "@/features/sharing/share-link-dialog";
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
+import { removeEncryptedSelections } from "@/features/vault/vault-list-selection";
+import {
+  getVaultNamePresentation,
+  type VaultNamePresentation,
+  type VaultNameResolution,
+} from "@/features/vault/vault-name-presentation";
 import { useVault } from "@/features/vault/vault-provider";
 import { VaultShareDialog } from "@/features/vault/vault-share-dialog";
 import type { FileEntry, FileSort, FileSortDirection } from "@/lib/api";
 
 type ResolvedEntry = FileEntry & {
   resolved: boolean;
+  metadataStatus: VaultNamePresentation["status"];
 };
 
-type ResolvedMetadata = Pick<
-  ResolvedEntry,
-  "name" | "kind" | "sizeBytes" | "resolved"
->;
+type ResolvedMetadata =
+  | {
+      status: "ready";
+      name: string;
+      kind: string;
+      sizeBytes: number;
+      sourceUpdatedAt: string;
+    }
+  | { status: "unavailable"; sourceUpdatedAt: string };
 
 type FavoriteResponse = {
   favorite: boolean;
 };
+
+const METADATA_PROGRESS_BATCH_SIZE = 24;
 
 const fileDateFormatter = new Intl.DateTimeFormat("en", {
   dateStyle: "medium",
@@ -106,44 +121,60 @@ export function VaultFileList({
   }, [entries]);
 
   useEffect(() => {
-    if (vault.state !== "unlocked") return;
+    if (vault.state !== "unlocked") {
+      setResolved((current) =>
+        Object.keys(current).length === 0 ? current : {},
+      );
+      setShareEntry((current) =>
+        current?.e2eeState === "encrypted" ? null : current,
+      );
+      setSelectedIds((current) => removeEncryptedSelections(current, entries));
+      return;
+    }
     let canceled = false;
     void (async () => {
       const next: Record<string, ResolvedMetadata> = {};
+      let progressBatch: Record<string, ResolvedMetadata> = {};
+      let encryptedProcessed = 0;
+      const publishProgress = () => {
+        if (canceled || Object.keys(progressBatch).length === 0) return;
+        const updates = progressBatch;
+        progressBatch = {};
+        setResolved((current) => ({ ...current, ...updates }));
+      };
       for (const entry of entries) {
-        if (entry.e2eeState !== "encrypted") {
-          next[entry.id] = {
-            name: entry.name,
-            kind: entry.kind,
-            sizeBytes: entry.sizeBytes,
-            resolved: true,
-          };
-          continue;
-        }
+        if (canceled) return;
+        if (entry.e2eeState !== "encrypted") continue;
+        let metadata: ResolvedMetadata;
         try {
           // Entries share one worker/key cache and may require parent keys;
           // keep this bounded instead of fanning out an unbounded request set.
           // react-doctor-disable-next-line react-doctor/async-await-in-loop
           const manifest = await vault.openNode(entry.id);
-          next[entry.id] = {
+          metadata = {
+            status: "ready",
             name: manifest.name,
             kind:
               manifest.entryType === "folder"
                 ? "Folder"
                 : fileKind(manifest.name, manifest.mimeType),
             sizeBytes: manifest.plaintextBytes,
-            resolved: true,
+            sourceUpdatedAt: entry.updatedAt,
           };
         } catch {
-          next[entry.id] = {
-            name:
-              entry.entryType === "folder"
-                ? "Encrypted folder"
-                : "Encrypted file",
-            kind: entry.entryType === "folder" ? "Folder" : "Encrypted",
-            sizeBytes: entry.sizeBytes,
-            resolved: false,
+          metadata = {
+            status: "unavailable",
+            sourceUpdatedAt: entry.updatedAt,
           };
+        }
+        next[entry.id] = metadata;
+        progressBatch[entry.id] = metadata;
+        encryptedProcessed += 1;
+        if (
+          encryptedProcessed === 1 ||
+          encryptedProcessed % METADATA_PROGRESS_BATCH_SIZE === 0
+        ) {
+          publishProgress();
         }
       }
       if (!canceled) setResolved(next);
@@ -151,43 +182,85 @@ export function VaultFileList({
     return () => {
       canceled = true;
     };
-  }, [entries, vault]);
+  }, [entries, vault.openNode, vault.state]);
 
   const displayed = useMemo(() => {
     const values = localEntries.map((entry) => {
-      const metadata = resolved[entry.id] ?? {
+      if (entry.e2eeState !== "encrypted") {
+        return {
+          ...entry,
+          resolved: true,
+          metadataStatus: "ready" as const,
+        };
+      }
+
+      const storedMetadata = resolved[entry.id];
+      const currentMetadata =
+        storedMetadata?.sourceUpdatedAt === entry.updatedAt
+          ? storedMetadata
+          : undefined;
+      const resolution: VaultNameResolution | undefined =
+        currentMetadata?.status === "ready"
+          ? { status: "ready", name: currentMetadata.name }
+          : currentMetadata?.status === "unavailable"
+            ? { status: "unavailable" }
+            : undefined;
+      const presentation = getVaultNamePresentation({
+        node: entry,
+        unlocked: vault.state === "unlocked",
+        resolution,
+      });
+
+      return {
         ...entry,
-        name:
-          entry.e2eeState === "encrypted"
-            ? entry.entryType === "folder"
-              ? "Encrypted folder"
-              : "Encrypted file"
-            : entry.name,
+        name: presentation.name ?? "",
         kind:
-          entry.e2eeState === "encrypted"
-            ? entry.entryType === "folder"
+          currentMetadata?.status === "ready"
+            ? currentMetadata.kind
+            : entry.entryType === "folder"
               ? "Folder"
-              : "Encrypted"
-            : entry.kind,
-        resolved: entry.e2eeState !== "encrypted",
+              : presentation.status === "locked"
+                ? "Locked"
+                : presentation.status === "unavailable"
+                  ? "Unavailable"
+                  : "",
+        sizeBytes:
+          currentMetadata?.status === "ready"
+            ? currentMetadata.sizeBytes
+            : entry.sizeBytes,
+        resolved: presentation.status === "ready",
+        metadataStatus: presentation.status,
       };
-      return { ...entry, ...metadata };
     });
     return values.sort((left, right) => {
       if (left.entryType !== right.entryType)
         return left.entryType === "folder" ? -1 : 1;
+      if (
+        (sort === "name" || sort === "size") &&
+        left.resolved !== right.resolved
+      ) {
+        return left.resolved ? -1 : 1;
+      }
       let comparison = 0;
-      if (sort === "name")
-        comparison = left.name.localeCompare(right.name, undefined, {
-          sensitivity: "base",
-        });
-      if (sort === "size") comparison = left.sizeBytes - right.sizeBytes;
+      if (sort === "name") {
+        comparison =
+          left.resolved && right.resolved
+            ? left.name.localeCompare(right.name, undefined, {
+                sensitivity: "base",
+              })
+            : left.id.localeCompare(right.id);
+      }
+      if (sort === "size")
+        comparison =
+          left.resolved && right.resolved
+            ? left.sizeBytes - right.sizeBytes
+            : left.id.localeCompare(right.id);
       if (sort === "updated")
         comparison = Date.parse(left.updatedAt) - Date.parse(right.updatedAt);
       if (comparison === 0) comparison = left.id.localeCompare(right.id);
       return direction === "asc" ? comparison : -comparison;
     });
-  }, [direction, localEntries, resolved, sort]);
+  }, [direction, localEntries, resolved, sort, vault.state]);
 
   function changeSort(field: FileSort): void {
     if (sort === field) {
@@ -211,7 +284,7 @@ export function VaultFileList({
     setSelectedIds((current) => {
       const next = new Set(current);
       for (const entry of displayed) {
-        if (selected) next.add(entry.id);
+        if (selected && entry.resolved) next.add(entry.id);
         else next.delete(entry.id);
       }
       return next;
@@ -393,17 +466,23 @@ function VaultFileListView({
   shareEntry: ResolvedEntry | null;
   currentUserId: string;
 }) {
-  const selectedCount = displayed.reduce(
-    (count, entry) => count + Number(selectedIds.has(entry.id)),
-    0,
-  );
-  const selectedEntries = displayed.filter((entry) =>
-    selectedIds.has(entry.id),
-  );
+  const selectedEntries: ResolvedEntry[] = [];
+  let selectableCount = 0;
+  let pendingCount = 0;
+  let unavailableCount = 0;
+  for (const entry of displayed) {
+    if (entry.resolved) {
+      selectableCount += 1;
+      if (selectedIds.has(entry.id)) selectedEntries.push(entry);
+    }
+    if (entry.metadataStatus === "pending") pendingCount += 1;
+    if (entry.metadataStatus === "unavailable") unavailableCount += 1;
+  }
+  const selectedCount = selectedEntries.length;
   const singleSelectedEntry =
     selectedEntries.length === 1 ? selectedEntries[0] : null;
   const allDisplayedSelected =
-    displayed.length > 0 && selectedCount === displayed.length;
+    selectableCount > 0 && selectedCount === selectableCount;
   const selectAllState = allDisplayedSelected
     ? true
     : selectedCount > 0
@@ -419,6 +498,7 @@ function VaultFileListView({
         <span className="flex items-center justify-center">
           <Checkbox
             checked={selectAllState}
+            disabled={selectableCount === 0}
             onCheckedChange={(checked) =>
               onAllDisplayedSelectedChange(checked === true)
             }
@@ -532,6 +612,20 @@ function VaultFileListView({
           {deleteError}
         </p>
       ) : null}
+      {pendingCount > 0 ? (
+        <p role="status" className="sr-only">
+          Decrypting details for {pendingCount}{" "}
+          {pendingCount === 1 ? "item" : "items"}.
+        </p>
+      ) : null}
+      {unavailableCount > 0 ? (
+        <p role="alert" className="border-b px-4 py-2 text-sm text-destructive">
+          {unavailableCount === 1
+            ? "One encrypted item could not be revealed."
+            : `${unavailableCount} encrypted items could not be revealed.`}{" "}
+          Reload and unlock the vault to try again.
+        </p>
+      ) : null}
       <div className="min-h-0 flex-1 divide-y overflow-auto">
         {displayed.map((entry) => (
           <VaultFileRow
@@ -540,7 +634,7 @@ function VaultFileListView({
             sectionKey={sectionKey}
             csrfToken={csrfToken}
             downloading={downloadId === entry.id}
-            selected={selectedIds.has(entry.id)}
+            selected={entry.resolved && selectedIds.has(entry.id)}
             onDownload={() => void onDownload(entry)}
             onDelete={() => void onMoveToTrash([entry])}
             onFavorite={() => void onFavorite(entry)}
@@ -552,16 +646,18 @@ function VaultFileListView({
         ))}
       </div>
       {shareEntry?.e2eeState === "encrypted" ? (
-        <VaultShareDialog
-          open
-          onOpenChange={(open) => {
-            if (!open) onShareEntryChange(null);
-          }}
-          nodeId={shareEntry.id}
-          nodeName={shareEntry.name}
-          currentUserId={currentUserId}
-          csrfToken={csrfToken}
-        />
+        vault.state === "unlocked" ? (
+          <VaultShareDialog
+            open
+            onOpenChange={(open) => {
+              if (!open) onShareEntryChange(null);
+            }}
+            nodeId={shareEntry.id}
+            nodeName={shareEntry.name}
+            currentUserId={currentUserId}
+            csrfToken={csrfToken}
+          />
+        ) : null
       ) : shareEntry ? (
         <ShareLinkDialog
           open
@@ -638,6 +734,7 @@ function VaultFileRow({
   const isTrash = sectionKey === "trash";
   const isShared = sectionKey === "shared";
   const isFolder = entry.entryType === "folder";
+  const pending = entry.metadataStatus === "pending";
   const Icon = getIcon(entry);
   const rowDate =
     isTrash && entry.trashedAt
@@ -649,16 +746,23 @@ function VaultFileRow({
   return (
     <div
       data-selected={selected || undefined}
+      data-metadata-status={entry.metadataStatus}
+      aria-busy={pending || undefined}
       className="grid gap-3 px-4 py-3 text-sm transition-colors data-[selected=true]:bg-primary/5 md:min-h-16 md:grid-cols-[2rem_minmax(12rem,1fr)_7rem_7rem_9rem_6rem] md:items-center"
     >
       <span className="flex items-center justify-center">
         <Checkbox
           checked={selected}
+          disabled={!entry.resolved}
           onCheckedChange={(checked) => onSelectedChange(checked === true)}
-          aria-label={`${selected ? "Deselect" : "Select"} ${entry.name}`}
+          aria-label={
+            entry.resolved
+              ? `${selected ? "Deselect" : "Select"} ${entry.name}`
+              : "Item selection unavailable until its name is revealed"
+          }
         />
       </span>
-      {isFolder && !isTrash ? (
+      {isFolder && !isTrash && entry.resolved ? (
         <Link
           href={{
             pathname: sectionKey === "shared" ? "/shared" : "/files",
@@ -673,8 +777,15 @@ function VaultFileRow({
         <div className="flex min-w-0 items-center gap-3">
           <Icon className="size-5 shrink-0 text-primary" aria-hidden="true" />
           <div className="min-w-0">
-            <p className="truncate font-medium">{entry.name}</p>
-            {isShared && entry.ownerUsername ? (
+            {pending ? (
+              <>
+                <Skeleton className="h-4 w-40 max-w-full" aria-hidden="true" />
+                <span className="sr-only">Decrypting item details</span>
+              </>
+            ) : (
+              <p className="truncate font-medium">{entry.name}</p>
+            )}
+            {!isFolder && isShared && entry.ownerUsername ? (
               <p className="truncate text-xs text-muted-foreground">
                 Shared by {entry.ownerUsername}
               </p>
@@ -682,10 +793,24 @@ function VaultFileRow({
           </div>
         </div>
       )}
-      <span className="text-muted-foreground">{entry.kind}</span>
-      <span className="hidden text-muted-foreground md:block">
-        {isFolder ? "-" : formatBytes(entry.sizeBytes)}
-      </span>
+      <div className="text-muted-foreground">
+        {pending ? (
+          <Skeleton className="h-4 w-14" aria-hidden="true" />
+        ) : (
+          entry.kind
+        )}
+      </div>
+      <div className="hidden text-muted-foreground md:block">
+        {isFolder ? (
+          "-"
+        ) : pending ? (
+          <Skeleton className="h-4 w-12" aria-hidden="true" />
+        ) : entry.resolved ? (
+          formatBytes(entry.sizeBytes)
+        ) : (
+          "-"
+        )}
+      </div>
       <span className="hidden text-muted-foreground md:block">
         {formatDate(rowDate)}
       </span>
@@ -696,8 +821,18 @@ function VaultFileRow({
               type="button"
               variant="secondary"
               size="icon"
-              aria-label={`Actions for ${entry.name}`}
-              title={`Actions for ${entry.name}`}
+              data-vault-row-actions="true"
+              disabled={pending}
+              aria-label={
+                pending
+                  ? "Actions unavailable until item details are revealed"
+                  : `Actions for ${entry.name}`
+              }
+              title={
+                pending
+                  ? "Actions unavailable until item details are revealed"
+                  : `Actions for ${entry.name}`
+              }
             >
               <Ellipsis className="size-4" aria-hidden="true" />
             </Button>

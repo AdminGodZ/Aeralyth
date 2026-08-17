@@ -14,6 +14,7 @@ import { useMemo, useState } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { Skeleton } from "@/components/ui/skeleton";
 import { UploadPanel } from "@/features/dashboard/upload-panel";
 import { NewRepositoryDialog } from "@/features/repositories/new-repository-dialog";
 import { useResolvedVaultNames } from "@/features/repositories/use-resolved-vault-names";
@@ -48,8 +49,9 @@ export function RepositoryOverview({
     if (!normalizedQuery) {
       return true;
     }
-    const repositoryName = names.nameFor(repository.root);
-    return `${repository.ownerUsername}/${repositoryName}`
+    const presentation = names.presentationFor(repository.root);
+    if (presentation.status !== "ready") return true;
+    return `${repository.ownerUsername}/${presentation.name}`
       .toLocaleLowerCase()
       .includes(normalizedQuery);
   });
@@ -118,7 +120,7 @@ export function RepositoryOverview({
             <>
               <ul className="divide-y" aria-label="Repositories">
                 {visibleRepositories.map((repository) => {
-                  const repositoryName = names.nameFor(repository.root);
+                  const presentation = names.presentationFor(repository.root);
                   return (
                     <li key={repository.id} className="px-4 py-5 sm:px-6">
                       <div className="flex items-start gap-3">
@@ -128,12 +130,28 @@ export function RepositoryOverview({
                         />
                         <div className="min-w-0 flex-1">
                           <div className="flex min-w-0 flex-wrap items-center gap-2">
-                            <Link
-                              href={`/repositories/${encodeURIComponent(repository.id)}`}
-                              className="min-w-0 truncate font-display text-base font-semibold text-primary hover:underline"
-                            >
-                              {repository.ownerUsername}/{repositoryName}
-                            </Link>
+                            {presentation.status === "pending" ? (
+                              <div
+                                className="flex min-w-0 items-center gap-1.5 font-display text-base font-semibold"
+                                aria-busy="true"
+                              >
+                                <span>{repository.ownerUsername}/</span>
+                                <Skeleton
+                                  className="h-4 w-32"
+                                  aria-hidden="true"
+                                />
+                                <span className="sr-only">
+                                  Decrypting repository name
+                                </span>
+                              </div>
+                            ) : (
+                              <Link
+                                href={`/repositories/${encodeURIComponent(repository.id)}`}
+                                className="min-w-0 truncate font-display text-base font-semibold text-primary hover:underline"
+                              >
+                                {`${repository.ownerUsername}/${presentation.name}`}
+                              </Link>
+                            )}
                             <Badge variant="outline" className="h-5">
                               <LockKeyhole
                                 className="size-3"
