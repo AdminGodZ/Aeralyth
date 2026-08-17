@@ -14,6 +14,7 @@ export type FolderZipWorkerRequest =
   | {
       type: "compress";
       sources: FolderZipSource[];
+      maxOutputBytes?: number;
     }
   | {
       type: "cancel";

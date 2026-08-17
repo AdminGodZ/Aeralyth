@@ -80,6 +80,11 @@ export type VaultWorkerRequest =
     }
   | {
       id: number;
+      type: "abortDecryption";
+      sessionId: string;
+    }
+  | {
+      id: number;
       type: "createShareMaterial";
       input: VaultShareMaterialInput;
     }
@@ -216,6 +221,7 @@ export type VaultWorkerResult =
   | { type: "startDecryption"; result: VaultDecryptionStart }
   | { type: "decryptChunk"; result: VaultDecryptedChunk }
   | { type: "finalizeDecryption" }
+  | { type: "abortDecryption" }
   | { type: "createShareMaterial"; result: VaultShareMaterialResult }
   | { type: "rotateShareMaterial"; result: VaultShareMaterialResult };
 

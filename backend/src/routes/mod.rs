@@ -125,6 +125,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
                     web::get().to(files::upload_status),
                 )
                 .route("/files/uploads/{id}", web::delete().to(files::abort_upload))
+                .route(
+                    "/files/{id}/archive-manifest",
+                    web::get().to(files::folder_archive_manifest),
+                )
                 .route("/files/{id}/download", web::get().to(files::download))
                 .route("/files/{id}/share", web::post().to(files::share))
                 .route("/files/{id}/unshare", web::post().to(files::unshare))

@@ -1,17 +1,31 @@
-import type {
-  FolderZipSource,
-  FolderZipWorkerResponse,
-} from "@/features/dashboard/folder-zip-messages";
+import {
+  claimArchivePath,
+  createBrowserZip,
+  normalizeArchiveSegment,
+  parseArchiveTimestamp,
+  triggerBlobDownload,
+} from "@/features/archive/browser-archive";
+import type { FolderZipSource } from "@/features/dashboard/folder-zip-messages";
+import { mapWithConcurrency } from "@/features/vault/bounded-async";
 import { readEncryptedFileBlob } from "@/features/vault/encrypted-download";
-import type { VaultManifest } from "@/features/vault/protocol";
+import {
+  toBase64Url,
+  type VaultDownloadPlan,
+  type VaultManifest,
+} from "@/features/vault/protocol";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
-import { FOLDER_ZIP_WORKER_URL } from "@/generated/worker-assets";
 import type {
+  RepositoryArchiveEntry,
   RepositoryArchiveManifest,
   RepositoryEntry,
   RepositorySummary,
 } from "@/lib/api";
+
+const FILE_DOWNLOAD_CONCURRENCY = 4;
+const MAX_REPOSITORY_ARCHIVE_ENTRIES = 50_000;
+const MAX_REPOSITORY_ARCHIVE_BYTES = 128 * 1024 * 1024;
+const MAX_REPOSITORY_ARCHIVE_OUTPUT_BYTES = 160 * 1024 * 1024;
 
 export type RepositoryArchiveProgress = {
   label: string;
@@ -22,7 +36,12 @@ type VaultArchiveAccess = {
   state: string;
   client: VaultCryptoClient | null;
   requestUnlock(): void;
-  openNode(nodeId: string): Promise<VaultManifest>;
+  openNode(
+    nodeId: string,
+    plan?: VaultDownloadPlan,
+    signal?: AbortSignal,
+  ): Promise<VaultManifest>;
+  isUnlocked(): boolean;
 };
 
 export async function downloadRepositoryArchive({
@@ -38,6 +57,7 @@ export async function downloadRepositoryArchive({
   signal?: AbortSignal;
   onProgress?(progress: RepositoryArchiveProgress): void;
 }): Promise<void> {
+  throwIfAborted(signal);
   onProgress?.({ label: "Reading repository tree…", percentage: null });
   const manifest = await requestRepositoryArchiveManifest(
     repository.id,
@@ -49,16 +69,59 @@ export async function downloadRepositoryArchive({
   const namesById = new Map<string, string>([
     [repository.root.id, repositoryName],
   ]);
-  const encryptedManifests = new Map<string, VaultManifest>();
+  const downloadedFiles = new Map<string, File>();
+  let encryptedDownloadBatch: Array<{
+    entry: RepositoryArchiveEntry;
+    manifest: VaultManifest;
+    plan: VaultDownloadPlan;
+  }> = [];
   const encryptedEntries = manifest.entries.filter(
     (entry) => entry.e2eeState === "encrypted",
   );
+  const needsVault = encryptedEntries.length > 0;
+  let completedFiles = 0;
+  const totalFiles = manifest.entries.filter(
+    (entry) => entry.entryType === "file",
+  ).length;
+  let decryptedNames = 0;
+  const flushEncryptedDownloads = async () => {
+    if (encryptedDownloadBatch.length === 0) return;
+    const batch = encryptedDownloadBatch;
+    encryptedDownloadBatch = [];
+    await mapWithConcurrency(
+      batch,
+      FILE_DOWNLOAD_CONCURRENCY,
+      async ({ entry, manifest: vaultManifest, plan }) => {
+        throwIfAborted(signal);
+        onProgress?.({
+          label: `Downloading ${vaultManifest.name}…`,
+          percentage: encryptedEntries.length
+            ? (decryptedNames / encryptedEntries.length) * 20
+            : 20,
+        });
+        const file = await readEncryptedArchiveFile({
+          entry,
+          manifest: vaultManifest,
+          plan,
+          client: vault.client,
+          signal,
+        });
+        if (file.size !== vaultManifest.plaintextBytes) {
+          throw new Error(
+            `The downloaded size of ${vaultManifest.name} changed.`,
+          );
+        }
+        downloadedFiles.set(entry.id, file);
+        completedFiles += 1;
+      },
+    );
+  };
 
-  if (encryptedEntries.length > 0 && vault.state !== "unlocked") {
+  if (needsVault && vault.state !== "unlocked") {
     vault.requestUnlock();
     throw new Error("Unlock the vault, then choose Download ZIP again.");
   }
-  if (encryptedEntries.length > 0 && !vault.client) {
+  if (needsVault && !vault.client) {
     throw new Error("The encrypted vault is not ready yet.");
   }
 
@@ -68,33 +131,49 @@ export async function downloadRepositoryArchive({
     }
   }
   for (const [index, entry] of encryptedEntries.entries()) {
+    throwIfAborted(signal);
     // Repository nodes share one vault worker and parent-key cache. Children
     // can require a parent key, so this resolution is intentionally ordered.
     // react-doctor-disable-next-line react-doctor/async-await-in-loop
-    const vaultManifest = await vault.openNode(entry.id);
-    if (vaultManifest.entryType !== entry.entryType) {
+    const plan = await getVaultDownloadPlan(entry.id, signal);
+    const vaultManifest = await vault.openNode(entry.id, plan, signal);
+    throwIfAborted(signal);
+    if (
+      vaultManifest.entryType !== entry.entryType ||
+      vaultManifest.parentId !== entry.parentId
+    ) {
       throw new Error("The encrypted repository metadata is inconsistent.");
     }
-    encryptedManifests.set(entry.id, vaultManifest);
     namesById.set(entry.id, vaultManifest.name);
+    decryptedNames = index + 1;
     onProgress?.({
       label: `Decrypting ${index + 1} of ${encryptedEntries.length} names…`,
       percentage: encryptedEntries.length
         ? ((index + 1) / encryptedEntries.length) * 20
         : 20,
     });
+    if (entry.entryType === "file") {
+      encryptedDownloadBatch.push({ entry, manifest: vaultManifest, plan });
+      if (encryptedDownloadBatch.length >= FILE_DOWNLOAD_CONCURRENCY) {
+        // Keep plan/wrapper metadata bounded while preserving four-way file I/O.
+        // react-doctor-disable-next-line react-doctor/async-await-in-loop
+        await flushEncryptedDownloads();
+      }
+    }
   }
+  await flushEncryptedDownloads();
 
   const archiveRoot = `${normalizeArchiveSegment(repositoryName)}-${normalizeArchiveSegment(repository.defaultBranch)}`;
   const sources: FolderZipSource[] = [
     {
       directory: true,
-      lastModified: parseTimestamp(repository.updatedAt),
+      lastModified: parseArchiveTimestamp(repository.updatedAt),
       path: archiveRoot,
     },
   ];
-  const files: Array<{ entry: RepositoryEntry; path: string }> = [];
-  let completedFiles = 0;
+  const claimedPaths = new Set<string>();
+  claimArchivePath(claimedPaths, archiveRoot);
+  const files: Array<{ entry: RepositoryArchiveEntry; path: string }> = [];
 
   for (const entry of manifest.entries) {
     const path = buildArchivePath({
@@ -104,10 +183,11 @@ export async function downloadRepositoryArchive({
       rootFolderId: repository.root.id,
       archiveRoot,
     });
+    claimArchivePath(claimedPaths, path);
     if (entry.entryType === "folder") {
       sources.push({
         directory: true,
-        lastModified: parseTimestamp(entry.updatedAt),
+        lastModified: parseArchiveTimestamp(entry.updatedAt),
         path,
       });
       continue;
@@ -115,48 +195,69 @@ export async function downloadRepositoryArchive({
     files.push({ entry, path });
   }
 
-  const fileSources = await mapWithConcurrency(
-    files,
-    4,
-    async ({ entry, path }) => {
+  await mapWithConcurrency(
+    files.filter(({ entry }) => entry.e2eeState !== "encrypted"),
+    FILE_DOWNLOAD_CONCURRENCY,
+    async ({ entry }) => {
+      throwIfAborted(signal);
       onProgress?.({
         label: `Downloading ${namesById.get(entry.id) ?? "repository file"}…`,
-        percentage: files.length
-          ? 20 + (completedFiles / files.length) * 55
-          : 75,
+        percentage: totalFiles ? 20 + (completedFiles / totalFiles) * 55 : 75,
       });
-      const file =
-        entry.e2eeState === "encrypted"
-          ? await readEncryptedArchiveFile({
-              entry,
-              manifest: encryptedManifests.get(entry.id),
-              client: vault.client,
-              signal,
-            })
-          : await readLegacyArchiveFile(entry, namesById.get(entry.id), signal);
+      const file = await readLegacyArchiveFile(
+        entry,
+        namesById.get(entry.id),
+        signal,
+      );
+      if (file.size !== entry.sizeBytes) {
+        throw new Error(
+          `The downloaded size of ${namesById.get(entry.id) ?? "a repository file"} changed.`,
+        );
+      }
+      downloadedFiles.set(entry.id, file);
       completedFiles += 1;
       onProgress?.({
-        label: `Downloaded ${completedFiles} of ${files.length} files…`,
-        percentage: files.length
-          ? 20 + (completedFiles / files.length) * 55
-          : 75,
+        label: `Downloaded ${completedFiles} of ${totalFiles} files…`,
+        percentage: totalFiles ? 20 + (completedFiles / totalFiles) * 55 : 75,
       });
-      return { file, path } satisfies FolderZipSource;
     },
   );
-  sources.push(...fileSources);
+  for (const { entry, path } of files) {
+    const file = downloadedFiles.get(entry.id);
+    if (!file) throw new Error("A repository file was not downloaded.");
+    sources.push({ file, path });
+  }
+  downloadedFiles.clear();
 
-  const archive = await createArchive(sources, signal, (progress) => {
-    const compressionPercentage = progress.totalBytes
-      ? (progress.processedBytes / progress.totalBytes) * 25
-      : 25;
-    onProgress?.({
-      label: progress.currentPath
-        ? `Compressing ${progress.currentPath}`
-        : "Compressing repository…",
-      percentage: Math.min(99, 75 + compressionPercentage),
-    });
+  throwIfAborted(signal);
+  const archive = await createBrowserZip({
+    sources,
+    signal,
+    workerName: "aeralyth-repository-zip",
+    errorMessage: "The repository ZIP archive could not be created.",
+    maxOutputBytes: MAX_REPOSITORY_ARCHIVE_OUTPUT_BYTES,
+    onProgress: (progress) => {
+      const compressionPercentage = progress.totalBytes
+        ? (progress.processedBytes / progress.totalBytes) * 25
+        : 25;
+      onProgress?.({
+        label: progress.currentPath
+          ? `Compressing ${progress.currentPath}`
+          : "Compressing repository…",
+        percentage: Math.min(99, 75 + compressionPercentage),
+      });
+    },
   });
+  throwIfAborted(signal);
+  if (archive.size > MAX_REPOSITORY_ARCHIVE_OUTPUT_BYTES) {
+    throw new Error("The ZIP archive exceeds the 160 MB browser safety limit.");
+  }
+  if (needsVault && !vault.isUnlocked()) {
+    throw new DOMException(
+      "The vault locked before the ZIP download completed.",
+      "AbortError",
+    );
+  }
   triggerBlobDownload(archive, `${archiveRoot}.zip`);
   onProgress?.({ label: "ZIP download ready", percentage: 100 });
 }
@@ -180,8 +281,16 @@ export async function requestRepositoryArchiveManifest(
     !value.repository ||
     value.repository.id !== repositoryId ||
     !Array.isArray(value.entries) ||
-    !value.entries.every(isRepositoryEntry) ||
-    typeof value.totalBytes !== "number"
+    value.entries.length > MAX_REPOSITORY_ARCHIVE_ENTRIES ||
+    !value.entries.every(isRepositoryArchiveEntry) ||
+    new Set(value.entries.map((entry) => entry.id)).size !==
+      value.entries.length ||
+    !Number.isSafeInteger(value.totalBytes) ||
+    (value.totalBytes ?? -1) < 0 ||
+    (value.totalBytes ?? 0) > MAX_REPOSITORY_ARCHIVE_BYTES ||
+    value.entries
+      .filter((entry) => entry.entryType === "file")
+      .reduce((total, entry) => total + entry.sizeBytes, 0) !== value.totalBytes
   ) {
     throw new Error("The repository archive manifest is invalid.");
   }
@@ -189,12 +298,12 @@ export async function requestRepositoryArchiveManifest(
 }
 
 async function readLegacyArchiveFile(
-  entry: RepositoryEntry,
+  entry: RepositoryArchiveEntry,
   resolvedName: string | undefined,
   signal?: AbortSignal,
 ): Promise<File> {
   const response = await fetch(
-    `/api/files/${encodeURIComponent(entry.id)}/download`,
+    `/api/files/${encodeURIComponent(entry.id)}/download?version=${encodeURIComponent(entry.contentVersion)}`,
     { signal, cache: "no-store" },
   );
   if (!response.ok) {
@@ -205,25 +314,34 @@ async function readLegacyArchiveFile(
   const blob = await response.blob();
   return new File([blob], normalizeArchiveSegment(resolvedName ?? entry.name), {
     type: blob.type || entry.mimeType || "application/octet-stream",
-    lastModified: parseTimestamp(entry.updatedAt),
+    lastModified: parseArchiveTimestamp(entry.updatedAt),
   });
 }
 
 async function readEncryptedArchiveFile({
   entry,
   manifest,
+  plan,
   client,
   signal,
 }: {
-  entry: RepositoryEntry;
+  entry: RepositoryArchiveEntry;
   manifest: VaultManifest | undefined;
+  plan: VaultDownloadPlan | undefined;
   client: VaultCryptoClient | null;
   signal?: AbortSignal;
 }): Promise<File> {
-  if (!manifest || !client) {
+  if (!manifest || !plan || !client) {
     throw new Error("The encrypted repository is not unlocked.");
   }
-  const plan = await getVaultDownloadPlan(entry.id, signal);
+  if (
+    plan.nodeId !== entry.id ||
+    plan.generationId !== toBase64Url(manifest.generationId) ||
+    plan.generationId !== entry.vaultGenerationId ||
+    plan.recordHash !== entry.vaultRecordHash
+  ) {
+    throw new Error("The encrypted repository changed during ZIP preparation.");
+  }
   const blob = await readEncryptedFileBlob({
     plan,
     manifest,
@@ -234,86 +352,6 @@ async function readEncryptedArchiveFile({
     type: manifest.mimeType ?? "application/octet-stream",
     lastModified: manifest.lastModified,
   });
-}
-
-function createArchive(
-  sources: FolderZipSource[],
-  signal: AbortSignal | undefined,
-  onProgress: (
-    progress: Extract<FolderZipWorkerResponse, { type: "progress" }>,
-  ) => void,
-): Promise<Blob> {
-  if (typeof Worker === "undefined") {
-    return Promise.reject(
-      new Error("This browser cannot create ZIP archives in the background."),
-    );
-  }
-
-  return new Promise((resolve, reject) => {
-    const worker = new Worker(FOLDER_ZIP_WORKER_URL, {
-      type: "module",
-      name: "aeralyth-repository-zip",
-    });
-    const cleanup = () => {
-      signal?.removeEventListener("abort", abort);
-      worker.terminate();
-    };
-    const abort = () => {
-      worker.postMessage({ type: "cancel" });
-      cleanup();
-      reject(new DOMException("The ZIP download was canceled.", "AbortError"));
-    };
-    signal?.addEventListener("abort", abort, { once: true });
-    worker.addEventListener(
-      "message",
-      (event: MessageEvent<FolderZipWorkerResponse>) => {
-        if (event.data.type === "progress") {
-          onProgress(event.data);
-          return;
-        }
-        cleanup();
-        if (event.data.type === "complete") {
-          resolve(event.data.archive);
-        } else if (event.data.type === "canceled") {
-          reject(
-            new DOMException("The ZIP download was canceled.", "AbortError"),
-          );
-        } else {
-          reject(new Error(event.data.message));
-        }
-      },
-    );
-    worker.addEventListener("error", () => {
-      cleanup();
-      reject(new Error("The repository ZIP archive could not be created."));
-    });
-    worker.postMessage({ type: "compress", sources });
-  });
-}
-
-async function mapWithConcurrency<Input, Output>(
-  values: Input[],
-  concurrency: number,
-  transform: (value: Input, index: number) => Promise<Output>,
-): Promise<Output[]> {
-  const output = new Array<Output>(values.length);
-  let nextIndex = 0;
-
-  async function runNext(): Promise<void> {
-    const index = nextIndex;
-    nextIndex += 1;
-    if (index >= values.length) return;
-    output[index] = await transform(values[index], index);
-    return runNext();
-  }
-
-  await Promise.all(
-    Array.from(
-      { length: Math.min(Math.max(1, concurrency), values.length) },
-      () => runNext(),
-    ),
-  );
-  return output;
 }
 
 export function buildArchivePath({
@@ -353,51 +391,45 @@ export function buildArchivePath({
   throw new Error("A repository entry is outside the repository root.");
 }
 
-export function normalizeArchiveSegment(value: string): string {
-  const forbidden = new Set(["<", ">", ":", '"', "/", "\\", "|", "?", "*"]);
-  const normalized = Array.from(value, (character) => {
-    const code = character.charCodeAt(0);
-    return code < 32 || code === 127 || forbidden.has(character)
-      ? "_"
-      : character;
-  })
-    .join("")
-    .trim()
-    .replace(/[. ]+$/u, "")
-    .slice(0, 180);
-  return normalized && normalized !== "." && normalized !== ".."
-    ? normalized
-    : "unnamed";
-}
+export { normalizeArchiveSegment } from "@/features/archive/browser-archive";
 
-function isRepositoryEntry(value: unknown): value is RepositoryEntry {
+function isRepositoryArchiveEntry(
+  value: unknown,
+): value is RepositoryArchiveEntry {
   if (!value || typeof value !== "object") return false;
-  const entry = value as Partial<RepositoryEntry>;
+  const entry = value as Partial<RepositoryArchiveEntry>;
   return (
     typeof entry.id === "string" &&
     typeof entry.name === "string" &&
     (typeof entry.mimeType === "string" || entry.mimeType === null) &&
     (entry.entryType === "file" || entry.entryType === "folder") &&
     (typeof entry.parentId === "string" || entry.parentId === null) &&
-    typeof entry.sizeBytes === "number" &&
+    Number.isSafeInteger(entry.sizeBytes) &&
+    (entry.sizeBytes ?? -1) >= 0 &&
     (entry.e2eeState === "legacy" ||
       entry.e2eeState === "staged" ||
       entry.e2eeState === "encrypted") &&
-    typeof entry.updatedAt === "string"
+    typeof entry.updatedAt === "string" &&
+    typeof entry.contentVersion === "string" &&
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{6}Z$/u.test(
+      entry.contentVersion,
+    ) &&
+    (typeof entry.vaultGenerationId === "string" ||
+      entry.vaultGenerationId === null) &&
+    (typeof entry.vaultRecordHash === "string" ||
+      entry.vaultRecordHash === null) &&
+    (entry.e2eeState !== "encrypted" ||
+      (typeof entry.vaultGenerationId === "string" &&
+        entry.vaultGenerationId.length > 0 &&
+        typeof entry.vaultRecordHash === "string" &&
+        entry.vaultRecordHash.length > 0))
   );
 }
 
-function parseTimestamp(value: string): number {
-  const timestamp = Date.parse(value);
-  return Number.isFinite(timestamp) ? timestamp : Date.now();
-}
-
-function triggerBlobDownload(blob: Blob, fileName: string): void {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = fileName;
-  anchor.rel = "noopener";
-  anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+function throwIfAborted(signal: AbortSignal | undefined): void {
+  if (!signal?.aborted) return;
+  throw (
+    signal.reason ??
+    new DOMException("The repository download was canceled.", "AbortError")
+  );
 }

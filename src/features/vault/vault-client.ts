@@ -197,6 +197,13 @@ export class VaultCryptoClient {
     );
   }
 
+  async abortDecryption(sessionId: string): Promise<void> {
+    expectResult(
+      await this.send({ type: "abortDecryption", sessionId }),
+      "abortDecryption",
+    );
+  }
+
   async createShareMaterial(
     input: VaultShareMaterialInput,
   ): Promise<VaultShareMaterialResult> {

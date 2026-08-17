@@ -7378,6 +7378,9 @@ async function dispatch(request) {
     case "finalizeDecryption":
       await finalizeDecryption(request.sessionId);
       return { result: { type: "finalizeDecryption" } };
+    case "abortDecryption":
+      abortDecryption(request.sessionId);
+      return { result: { type: "abortDecryption" } };
     case "createShareMaterial": {
       const material = await createShareMaterial(request.input);
       return {
@@ -7802,7 +7805,9 @@ function lockVault() {
   rootKey = null;
   nodeKeys.clear();
   encryptionSessions.clear();
-  decryptionSessions.clear();
+  for (const sessionId of decryptionSessions.keys()) {
+    abortDecryption(sessionId);
+  }
 }
 async function decryptShareContexts(contexts) {
   const root = requireRootKey();
@@ -8248,7 +8253,7 @@ async function decryptChunk(sessionId, chunkIndex, ciphertext) {
     session.decryptedChunks += 1;
     return { plaintext: plaintext.buffer, plaintextBytes: plaintext.length };
   } catch (error) {
-    decryptionSessions.delete(sessionId);
+    abortDecryption(sessionId);
     throw vaultError(
       "AUTHENTICATION_FAILED",
       "Encrypted file authentication failed.",
@@ -8264,15 +8269,22 @@ async function finalizeDecryption(sessionId) {
     throw new Error("Not all ciphertext chunks were decrypted.");
   }
   const actualRoot = await merkleRootFromLeaves(session.leaves);
-  decryptionSessions.delete(sessionId);
   if (!equalBytes(actualRoot, session.expectedMerkleRoot)) {
-    wipe(actualRoot, session.expectedMerkleRoot, ...session.leaves);
+    wipe(actualRoot);
+    abortDecryption(sessionId);
     throw vaultError(
       "AUTHENTICATION_FAILED",
       "The encrypted file Merkle root is invalid."
     );
   }
-  wipe(actualRoot, session.expectedMerkleRoot, ...session.leaves);
+  wipe(actualRoot);
+  abortDecryption(sessionId);
+}
+function abortDecryption(sessionId) {
+  const session = decryptionSessions.get(sessionId);
+  if (!session) return;
+  decryptionSessions.delete(sessionId);
+  wipe(session.generationId, session.expectedMerkleRoot, ...session.leaves);
 }
 async function openAndVerifyPlan(plan) {
   requireRootKey();

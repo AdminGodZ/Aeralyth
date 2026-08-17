@@ -39,19 +39,38 @@ describe("worker asset fingerprints", () => {
       resolve(root, "src/features/dashboard/upload-panel.tsx"),
       "utf8",
     );
-    const repositoryArchive = readFileSync(
-      resolve(root, "src/features/repositories/repository-archive.ts"),
+    const browserArchive = readFileSync(
+      resolve(root, "src/features/archive/browser-archive.ts"),
       "utf8",
     );
 
     expect(vaultClient).toContain("new Worker(VAULT_WORKER_URL");
     expect(uploadPanel).toContain("new Worker(FOLDER_ZIP_WORKER_URL");
-    expect(repositoryArchive).toContain("new Worker(FOLDER_ZIP_WORKER_URL");
+    expect(browserArchive).toContain("new Worker(FOLDER_ZIP_WORKER_URL");
     const allSource = sourceFiles(resolve(root, "src"))
       .map((path) => readFileSync(path, "utf8"))
       .join("\n");
     expect(allSource).not.toMatch(
       /new Worker\(["']\/(?:vault|folder-zip)\.worker\.js/,
     );
+  });
+
+  it("keeps decryption cancellation wired through the client and worker", () => {
+    const vaultClient = readFileSync(
+      resolve(root, "src/features/vault/vault-client.ts"),
+      "utf8",
+    );
+    const vaultWorker = readFileSync(
+      resolve(root, "src/features/vault/vault.worker.ts"),
+      "utf8",
+    );
+
+    expect(vaultClient).toContain("async abortDecryption(");
+    expect(vaultClient).toContain('type: "abortDecryption"');
+    expect(vaultWorker).toContain('case "abortDecryption"');
+    expect(vaultWorker).toContain(
+      "for (const sessionId of decryptionSessions.keys())",
+    );
+    expect(vaultWorker).toContain("abortDecryption(sessionId);");
   });
 });

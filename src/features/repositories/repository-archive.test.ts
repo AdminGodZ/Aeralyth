@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -67,5 +69,27 @@ describe("repository archive paths", () => {
       ".._bad_name_______",
     );
     expect(normalizeArchiveSegment("..")).toBe("unnamed");
+  });
+
+  it("cancels encrypted archive work synchronously when the vault locks", () => {
+    const menuSource = readFileSync(
+      resolve(import.meta.dirname, "repository-code-menu.tsx"),
+      "utf8",
+    );
+    const archiveSource = readFileSync(
+      resolve(import.meta.dirname, "repository-archive.ts"),
+      "utf8",
+    );
+
+    expect(menuSource).toContain("VAULT_LOCKING_EVENT");
+    expect(menuSource).toContain("archiveAbortRef.current?.abort(");
+    expect(menuSource).toContain('vaultStateRef.current = "locked"');
+    expect(menuSource).toContain("isUnlocked:");
+    expect(archiveSource).toContain("if (needsVault && !vault.isUnlocked())");
+    expect(archiveSource).toContain("encryptedDownloadBatch");
+    expect(archiveSource).toContain(
+      "plan.recordHash !== entry.vaultRecordHash",
+    );
+    expect(archiveSource).not.toContain("new Map<string, VaultDownloadPlan>");
   });
 });

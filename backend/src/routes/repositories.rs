@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::{IsolationLevel, Row};
 
@@ -13,10 +14,22 @@ use crate::timestamps;
 const MAX_REPOSITORY_ENTRIES: i64 = 500;
 const REPOSITORY_LIST_PAGE_SIZE: usize = 100;
 const MAX_REPOSITORY_ARCHIVE_ENTRIES: i64 = 50_000;
-const MAX_REPOSITORY_ARCHIVE_BYTES: i64 = 2 * 1024 * 1024 * 1024;
+const MAX_REPOSITORY_ARCHIVE_BYTES: i64 = 128 * 1024 * 1024;
 const MAX_REPOSITORY_DESCRIPTION_CHARS: usize = 350;
 const MAX_REPOSITORY_NAME_CHARS: usize = 100;
 const REPOSITORY_JSON_LIMIT: usize = 16 * 1024;
+const REPOSITORY_ARCHIVE_ENTRIES_QUERY: &str = r#"
+    SELECT files.id, files.original_name, files.mime_type,
+           files.entry_type, files.parent_id, files.size_bytes,
+           files.e2ee_state, files.updated_at,
+           files.current_generation_id AS vault_generation_id,
+           heads.record_hash AS vault_record_hash
+    FROM files
+    LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
+    WHERE files.owner_id = $2
+      AND files.state = 'active'
+      AND files.id = ANY($1::text[])
+"#;
 const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
     WITH RECURSIVE repository AS MATERIALIZED (
       SELECT
@@ -257,8 +270,18 @@ struct RepositoryDetailResponse {
 #[serde(rename_all = "camelCase")]
 struct RepositoryArchiveManifestResponse {
     repository: RepositorySummary,
-    entries: Vec<RepositoryEntry>,
+    entries: Vec<RepositoryArchiveEntry>,
     total_bytes: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryArchiveEntry {
+    #[serde(flatten)]
+    entry: RepositoryEntry,
+    content_version: String,
+    vault_generation_id: Option<String>,
+    vault_record_hash: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -781,21 +804,18 @@ pub async fn archive_manifest(
     let mut ordered_entries = Vec::with_capacity(descendant_ids.len());
     for ids in descendant_ids.chunks(TREE_MUTATION_BATCH_SIZE) {
         let rows = transaction
-            .query(
-                "
-                    SELECT id, original_name, mime_type, entry_type, parent_id,
-                           size_bytes, e2ee_state, updated_at
-                    FROM files
-                    WHERE owner_id = $2
-                      AND state = 'active'
-                      AND id = ANY($1::text[])
-                ",
-                &[&ids, &owner.id],
-            )
+            .query(REPOSITORY_ARCHIVE_ENTRIES_QUERY, &[&ids, &owner.id])
             .await
             .map_err(error::ErrorInternalServerError)?;
         for row in rows {
             let id: String = row.get("id");
+            let content_version = timestamps::cursor(row.get("updated_at"));
+            let vault_generation_id = row
+                .get::<_, Option<Vec<u8>>>("vault_generation_id")
+                .map(|value| URL_SAFE_NO_PAD.encode(value));
+            let vault_record_hash = row
+                .get::<_, Option<Vec<u8>>>("vault_record_hash")
+                .map(|value| URL_SAFE_NO_PAD.encode(value));
             let entry = repository_entry_from_row(row);
             let rank = i32::from(entry.entry_type != "folder");
             ordered_entries.push((
@@ -803,7 +823,12 @@ pub async fn archive_manifest(
                 rank,
                 entry.name.to_lowercase(),
                 id,
-                entry,
+                RepositoryArchiveEntry {
+                    entry,
+                    content_version,
+                    vault_generation_id,
+                    vault_record_hash,
+                },
             ));
         }
     }
@@ -820,12 +845,12 @@ pub async fn archive_manifest(
         .collect::<Vec<_>>();
     let total_bytes = entries
         .iter()
-        .filter(|entry| entry.entry_type == "file")
-        .map(|entry| entry.size_bytes.max(0))
+        .filter(|entry| entry.entry.entry_type == "file")
+        .map(|entry| entry.entry.size_bytes.max(0))
         .fold(0_i64, i64::saturating_add);
     if total_bytes > MAX_REPOSITORY_ARCHIVE_BYTES {
         return Ok(HttpResponse::PayloadTooLarge()
-            .body("This repository is larger than the 2 GB ZIP download limit."));
+            .body("This repository is larger than the 128 MB browser ZIP safety limit."));
     }
 
     Ok(HttpResponse::Ok().json(RepositoryArchiveManifestResponse {
@@ -1067,9 +1092,18 @@ async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        REFRESH_REPOSITORY_TOTALS_QUERY, REPOSITORY_DETAIL_CONTEXT_QUERY, normalize_description,
+        MAX_REPOSITORY_ARCHIVE_BYTES, REFRESH_REPOSITORY_TOTALS_QUERY,
+        REPOSITORY_ARCHIVE_ENTRIES_QUERY, REPOSITORY_DETAIL_CONTEXT_QUERY, normalize_description,
         normalize_repository_name,
     };
+
+    #[test]
+    fn browser_repository_archive_fallback_is_memory_bounded() {
+        assert_eq!(MAX_REPOSITORY_ARCHIVE_BYTES, 128 * 1024 * 1024);
+        assert!(include_str!("repositories.rs").contains("128 MB browser ZIP safety limit"));
+        assert!(REPOSITORY_ARCHIVE_ENTRIES_QUERY.contains("current_generation_id"));
+        assert!(REPOSITORY_ARCHIVE_ENTRIES_QUERY.contains("heads.record_hash"));
+    }
 
     #[test]
     fn detail_authorizes_and_builds_breadcrumbs_with_one_upward_walk() {
@@ -1117,9 +1151,10 @@ mod tests {
         });
 
         for query in [
-            super::REPOSITORY_DETAIL_CONTEXT_QUERY,
+            REPOSITORY_ARCHIVE_ENTRIES_QUERY,
+            REPOSITORY_DETAIL_CONTEXT_QUERY,
             super::REPOSITORY_CHILDREN_QUERY,
-            super::REFRESH_REPOSITORY_TOTALS_QUERY,
+            REFRESH_REPOSITORY_TOTALS_QUERY,
         ] {
             client
                 .prepare(query)

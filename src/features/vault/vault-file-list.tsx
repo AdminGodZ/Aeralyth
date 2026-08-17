@@ -32,6 +32,8 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
+import type { FolderArchiveProgress } from "@/features/files/folder-archive";
+import { FolderDownloadProgressPanel } from "@/features/files/folder-download-progress-panel";
 import { ShareLinkDialog } from "@/features/sharing/share-link-dialog";
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
@@ -41,7 +43,7 @@ import {
   type VaultNamePresentation,
   type VaultNameResolution,
 } from "@/features/vault/vault-name-presentation";
-import { useVault } from "@/features/vault/vault-provider";
+import { useVault, VAULT_LOCKING_EVENT } from "@/features/vault/vault-provider";
 import { VaultShareDialog } from "@/features/vault/vault-share-dialog";
 import type { FileEntry, FileSort, FileSortDirection } from "@/lib/api";
 
@@ -62,6 +64,12 @@ type ResolvedMetadata =
 
 type FavoriteResponse = {
   favorite: boolean;
+};
+
+type FolderDownloadSession = {
+  folderId: string;
+  folderName: string;
+  progress: FolderArchiveProgress;
 };
 
 const METADATA_PROGRESS_BATCH_SIZE = 24;
@@ -97,6 +105,11 @@ export function VaultFileList({
   );
   const [downloadId, setDownloadId] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
+  const [folderDownloadSession, setFolderDownloadSession] =
+    useState<FolderDownloadSession | null>(null);
+  const folderDownloadAbortRef = useRef<AbortController | null>(null);
+  const activeDownloadIdRef = useRef<string | null>(null);
+  const vaultStateRef = useRef(vault.state);
   const [favoriteError, setFavoriteError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const favoritePendingIdsRef = useRef<Set<string> | null>(null);
@@ -119,6 +132,31 @@ export function VaultFileList({
       return next.size === current.size ? current : next;
     });
   }, [entries]);
+
+  useEffect(
+    () => () => {
+      folderDownloadAbortRef.current?.abort();
+      folderDownloadAbortRef.current = null;
+    },
+    [],
+  );
+
+  useEffect(() => {
+    const cancelForLock = () => {
+      vaultStateRef.current = "locked";
+      folderDownloadAbortRef.current?.abort();
+      setFolderDownloadSession(null);
+    };
+    window.addEventListener(VAULT_LOCKING_EVENT, cancelForLock);
+    return () => window.removeEventListener(VAULT_LOCKING_EVENT, cancelForLock);
+  }, []);
+
+  useEffect(() => {
+    vaultStateRef.current = vault.state;
+    if (vault.state === "unlocked") return;
+    folderDownloadAbortRef.current?.abort();
+    setFolderDownloadSession(null);
+  }, [vault.state]);
 
   useEffect(() => {
     if (vault.state !== "unlocked") {
@@ -376,48 +414,148 @@ export function VaultFileList({
   }
 
   async function download(entry: ResolvedEntry): Promise<void> {
-    if (!vault.client || entry.e2eeState !== "encrypted") return;
+    if (entry.entryType === "folder") {
+      if (!entry.resolved || !beginDownload(entry.id)) return;
+      const controller = new AbortController();
+      folderDownloadAbortRef.current = controller;
+      setDownloadError(null);
+      setFolderDownloadSession({
+        folderId: entry.id,
+        folderName: entry.name,
+        progress: { label: "Reading folder tree…", percentage: null },
+      });
+      try {
+        const { downloadFolderArchive } = await import(
+          "@/features/files/folder-archive"
+        );
+        await downloadFolderArchive({
+          folder: {
+            id: entry.id,
+            name: entry.name,
+            entryType: "folder",
+            e2eeState: entry.e2eeState,
+            updatedAt: entry.updatedAt,
+          },
+          vault: {
+            ...vault,
+            isUnlocked: () => vaultStateRef.current === "unlocked",
+          },
+          signal: controller.signal,
+          onProgress: (progress) => {
+            if (folderDownloadAbortRef.current !== controller) return;
+            setFolderDownloadSession({
+              folderId: entry.id,
+              folderName: entry.name,
+              progress,
+            });
+          },
+        });
+      } catch (failure) {
+        if (!isAbortError(failure)) {
+          setDownloadError(
+            failure instanceof Error
+              ? failure.message
+              : "The folder download failed.",
+          );
+        }
+      } finally {
+        if (folderDownloadAbortRef.current === controller) {
+          folderDownloadAbortRef.current = null;
+          setFolderDownloadSession(null);
+        }
+        finishDownload(entry.id);
+      }
+      return;
+    }
+    if (
+      !vault.client ||
+      entry.e2eeState !== "encrypted" ||
+      !beginDownload(entry.id)
+    )
+      return;
+    const controller = new AbortController();
+    folderDownloadAbortRef.current = controller;
     setDownloadError(null);
-    setDownloadId(entry.id);
     try {
       const manifest = await vault.openNode(entry.id);
-      const plan = await getVaultDownloadPlan(entry.id);
-      await downloadEncryptedFile({ plan, manifest, client: vault.client });
+      const plan = await getVaultDownloadPlan(entry.id, controller.signal);
+      await downloadEncryptedFile({
+        plan,
+        manifest,
+        client: vault.client,
+        signal: controller.signal,
+      });
     } catch (failure) {
-      setDownloadError(
-        failure instanceof Error
-          ? failure.message
-          : "The encrypted download failed.",
-      );
+      if (!isAbortError(failure)) {
+        setDownloadError(
+          failure instanceof Error
+            ? failure.message
+            : "The encrypted download failed.",
+        );
+      }
     } finally {
-      setDownloadId(null);
+      if (folderDownloadAbortRef.current === controller) {
+        folderDownloadAbortRef.current = null;
+      }
+      finishDownload(entry.id);
     }
   }
 
+  function cancelFolderDownload(): void {
+    folderDownloadAbortRef.current?.abort();
+    setFolderDownloadSession(null);
+  }
+
+  function beginDownload(entryId: string): boolean {
+    if (activeDownloadIdRef.current) return false;
+    activeDownloadIdRef.current = entryId;
+    setDownloadId(entryId);
+    return true;
+  }
+
+  function finishDownload(entryId: string): void {
+    if (activeDownloadIdRef.current !== entryId) return;
+    activeDownloadIdRef.current = null;
+    setDownloadId(null);
+  }
+
   return (
-    <VaultFileListView
-      onAllDisplayedSelectedChange={setAllDisplayedSelected}
-      sort={sort}
-      direction={direction}
-      onSortChange={changeSort}
-      onShareEntryChange={setShareEntry}
-      onMoveToTrash={moveToTrash}
-      onClearSelection={() => setSelectedIds(new Set())}
-      vault={vault}
-      downloadError={downloadError}
-      favoriteError={favoriteError}
-      deleteError={deleteError}
-      displayed={displayed}
-      sectionKey={sectionKey}
-      csrfToken={csrfToken}
-      downloadId={downloadId}
-      selectedIds={selectedIds}
-      onDownload={download}
-      onFavorite={toggleFavorite}
-      onEntrySelectedChange={setEntrySelected}
-      shareEntry={shareEntry}
-      currentUserId={currentUserId}
-    />
+    <>
+      <VaultFileListView
+        onAllDisplayedSelectedChange={setAllDisplayedSelected}
+        sort={sort}
+        direction={direction}
+        onSortChange={changeSort}
+        onShareEntryChange={setShareEntry}
+        onMoveToTrash={moveToTrash}
+        onClearSelection={() => setSelectedIds(new Set())}
+        vault={vault}
+        downloadError={downloadError}
+        favoriteError={favoriteError}
+        deleteError={deleteError}
+        displayed={displayed}
+        sectionKey={sectionKey}
+        csrfToken={csrfToken}
+        downloadId={downloadId}
+        selectedIds={selectedIds}
+        onDownload={download}
+        onFavorite={toggleFavorite}
+        onEntrySelectedChange={setEntrySelected}
+        shareEntry={shareEntry}
+        currentUserId={currentUserId}
+      />
+      {folderDownloadSession ? (
+        <div className="pointer-events-none fixed inset-x-4 bottom-4 z-40 flex justify-end sm:right-6 sm:bottom-6 sm:left-auto">
+          <div className="pointer-events-auto">
+            <FolderDownloadProgressPanel
+              folderName={folderDownloadSession.folderName}
+              progress={folderDownloadSession.progress}
+              onCancel={cancelFolderDownload}
+            />
+          </div>
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -633,6 +771,7 @@ function VaultFileListView({
             entry={entry}
             sectionKey={sectionKey}
             csrfToken={csrfToken}
+            downloadBusy={downloadId !== null}
             downloading={downloadId === entry.id}
             selected={entry.resolved && selectedIds.has(entry.id)}
             onDownload={() => void onDownload(entry)}
@@ -712,6 +851,7 @@ function VaultFileRow({
   entry,
   sectionKey,
   csrfToken,
+  downloadBusy,
   downloading,
   selected,
   onDownload,
@@ -723,6 +863,7 @@ function VaultFileRow({
   entry: ResolvedEntry;
   sectionKey: string;
   csrfToken: string;
+  downloadBusy: boolean;
   downloading: boolean;
   selected: boolean;
   onDownload(): void;
@@ -859,24 +1000,37 @@ function VaultFileRow({
               </>
             ) : (
               <>
-                {!isFolder ? (
-                  entry.e2eeState === "encrypted" ? (
-                    <DropdownMenuItem
-                      disabled={downloading || !entry.resolved}
-                      onSelect={onDownload}
+                {isFolder ? (
+                  <DropdownMenuItem
+                    disabled={downloadBusy || !entry.resolved}
+                    onSelect={onDownload}
+                  >
+                    <Download className="size-4" aria-hidden="true" />
+                    {downloading ? "Preparing ZIP…" : "Download ZIP"}
+                  </DropdownMenuItem>
+                ) : entry.e2eeState === "encrypted" ? (
+                  <DropdownMenuItem
+                    disabled={downloadBusy || !entry.resolved}
+                    onSelect={onDownload}
+                  >
+                    <Download className="size-4" aria-hidden="true" />
+                    {downloading ? "Decrypting..." : "Download"}
+                  </DropdownMenuItem>
+                ) : (
+                  <DropdownMenuItem asChild disabled={downloadBusy}>
+                    <a
+                      href={
+                        downloadBusy
+                          ? undefined
+                          : `/api/files/${entry.id}/download`
+                      }
+                      aria-disabled={downloadBusy || undefined}
                     >
                       <Download className="size-4" aria-hidden="true" />
-                      {downloading ? "Decrypting..." : "Download"}
-                    </DropdownMenuItem>
-                  ) : (
-                    <DropdownMenuItem asChild>
-                      <a href={`/api/files/${entry.id}/download`}>
-                        <Download className="size-4" aria-hidden="true" />
-                        Download
-                      </a>
-                    </DropdownMenuItem>
-                  )
-                ) : null}
+                      Download
+                    </a>
+                  </DropdownMenuItem>
+                )}
                 {!isShared ? (
                   <>
                     <DropdownMenuItem
@@ -909,7 +1063,7 @@ function VaultFileRow({
                   </>
                 ) : (
                   <>
-                    {!isFolder ? <DropdownMenuSeparator /> : null}
+                    <DropdownMenuSeparator />
                     <ActionMenuForm
                       action={`/api/files/${entry.id}/unshare`}
                       csrfToken={csrfToken}
@@ -926,6 +1080,10 @@ function VaultFileRow({
       </div>
     </div>
   );
+}
+
+function isAbortError(value: unknown): boolean {
+  return value instanceof DOMException && value.name === "AbortError";
 }
 
 function ActionMenuForm({

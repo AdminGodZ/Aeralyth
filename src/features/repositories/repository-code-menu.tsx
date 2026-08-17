@@ -18,7 +18,7 @@ import {
   PopoverTrigger,
 } from "@/components/ui/popover";
 import type { RepositoryArchiveProgress } from "@/features/repositories/repository-archive";
-import { useVault } from "@/features/vault/vault-provider";
+import { useVault, VAULT_LOCKING_EVENT } from "@/features/vault/vault-provider";
 import type { RepositorySummary } from "@/lib/api";
 
 export function RepositoryCodeMenu({
@@ -38,6 +38,30 @@ export function RepositoryCodeMenu({
   const [error, setError] = useState<string | null>(null);
   const archiveAbortRef = useRef<AbortController | null>(null);
   const copiedTimerRef = useRef<number | null>(null);
+  const vaultStateRef = useRef(vault.state);
+
+  useEffect(() => {
+    vaultStateRef.current = vault.state;
+    if (vault.state !== "unlocked" && archiveAbortRef.current) {
+      archiveAbortRef.current.abort(
+        new DOMException("The vault locked during the download.", "AbortError"),
+      );
+      setArchiveProgress(null);
+    }
+  }, [vault.state]);
+
+  useEffect(() => {
+    const abortForVaultLock = () => {
+      vaultStateRef.current = "locked";
+      archiveAbortRef.current?.abort(
+        new DOMException("The vault locked during the download.", "AbortError"),
+      );
+      setArchiveProgress(null);
+    };
+    window.addEventListener(VAULT_LOCKING_EVENT, abortForVaultLock);
+    return () =>
+      window.removeEventListener(VAULT_LOCKING_EVENT, abortForVaultLock);
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -75,7 +99,7 @@ export function RepositoryCodeMenu({
   }
 
   async function downloadZip() {
-    if (archiveProgress) return;
+    if (archiveAbortRef.current) return;
     setError(null);
     const controller = new AbortController();
     archiveAbortRef.current = controller;
@@ -90,7 +114,13 @@ export function RepositoryCodeMenu({
       await downloadRepositoryArchive({
         repository,
         repositoryName,
-        vault,
+        vault: {
+          state: vault.state,
+          client: vault.client,
+          requestUnlock: vault.requestUnlock,
+          openNode: vault.openNode,
+          isUnlocked: () => vaultStateRef.current === "unlocked",
+        },
         signal: controller.signal,
         onProgress: setArchiveProgress,
       });
@@ -105,8 +135,10 @@ export function RepositoryCodeMenu({
           : "The repository ZIP download failed.",
       );
     } finally {
-      archiveAbortRef.current = null;
-      setArchiveProgress(null);
+      if (archiveAbortRef.current === controller) {
+        archiveAbortRef.current = null;
+        setArchiveProgress(null);
+      }
     }
   }
 

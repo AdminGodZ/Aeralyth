@@ -26,7 +26,10 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { isVaultNodeId } from "@/features/vault/node-id";
-import type { VaultManifest } from "@/features/vault/protocol";
+import type {
+  VaultDownloadPlan,
+  VaultManifest,
+} from "@/features/vault/protocol";
 import { enqueueShareDirectorySync } from "@/features/vault/share-directory-sync";
 import {
   getUnlockMaterial,
@@ -59,8 +62,14 @@ type VaultContextValue = {
   client: VaultCryptoClient | null;
   requestUnlock(): void;
   lock(): Promise<void>;
-  openNode(nodeId: string): Promise<VaultManifest>;
+  openNode(
+    nodeId: string,
+    plan?: VaultDownloadPlan,
+    signal?: AbortSignal,
+  ): Promise<VaultManifest>;
 };
+
+export const VAULT_LOCKING_EVENT = "aeralyth:vault-locking";
 
 const VaultContext = createContext<VaultContextValue | null>(null);
 export function VaultProvider({
@@ -105,28 +114,26 @@ export function VaultProvider({
     return clientRef.current;
   }, []);
 
+  const lock = useCallback(async () => {
+    if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
+    if (enabled) {
+      window.dispatchEvent(new Event(VAULT_LOCKING_EVENT));
+      setState(configured ? "locked" : "setup");
+      setMode(configured ? "unlock" : "setup");
+    }
+    await clientRef.current?.lock();
+  }, [configured, enabled]);
+
   const scheduleLock = useCallback(() => {
     if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
     if (state !== "unlocked") return;
     lockTimerRef.current = setTimeout(
       () => {
-        void clientRef.current?.lock().finally(() => {
-          setState("locked");
-          setMode("unlock");
-        });
+        void lock();
       },
       activeAutoLockMinutes * 60 * 1000,
     );
-  }, [activeAutoLockMinutes, state]);
-
-  const lock = useCallback(async () => {
-    if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
-    await clientRef.current?.lock();
-    if (enabled) {
-      setState(configured ? "locked" : "setup");
-      setMode(configured ? "unlock" : "setup");
-    }
-  }, [configured, enabled]);
+  }, [activeAutoLockMinutes, lock, state]);
 
   useEffect(() => {
     setActiveAutoLockMinutes(normalizeVaultAutoLockMinutes(autoLockMinutes));
@@ -177,20 +184,24 @@ export function VaultProvider({
   }, [configured, enabled, state]);
 
   const openNode = useCallback(
-    async (nodeId: string): Promise<VaultManifest> => {
+    async (
+      nodeId: string,
+      plan?: VaultDownloadPlan,
+      signal?: AbortSignal,
+    ): Promise<VaultManifest> => {
       if (state !== "unlocked") {
         requestUnlock();
         throw new VaultWorkerError("Unlock the vault first.", "VAULT_LOCKED");
       }
       const client = getClient();
-      const plan = await getVaultDownloadPlan(nodeId);
+      const nodePlan = plan ?? (await getVaultDownloadPlan(nodeId, signal));
       try {
-        return (await client.openPlan(plan)).manifest;
+        return (await client.openPlan(nodePlan)).manifest;
       } catch (failure) {
         const parentId = getRequiredParentId(failure);
         if (!parentId) throw failure;
-        await openNode(parentId);
-        return (await client.openPlan(plan)).manifest;
+        await openNode(parentId, undefined, signal);
+        return (await client.openPlan(nodePlan)).manifest;
       }
     },
     [getClient, requestUnlock, state],

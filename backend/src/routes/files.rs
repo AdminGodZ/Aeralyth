@@ -34,6 +34,8 @@ use crate::upload_completion::{
 };
 
 const MAX_UPLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_FOLDER_ARCHIVE_ENTRIES: usize = 50_000;
+const MAX_FOLDER_ARCHIVE_BYTES: i64 = 128 * 1024 * 1024;
 const UPLOAD_LENGTH_HEADER: &str = "x-aeralyth-upload-length";
 const UPLOAD_OFFSET_HEADER: &str = "x-aeralyth-upload-offset";
 const DEFAULT_PAGE_SIZE: usize = 50;
@@ -96,6 +98,11 @@ pub(crate) struct FilesQuery {
     direction: Option<String>,
     cursor: Option<String>,
     limit: Option<usize>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct DownloadQuery {
+    version: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -292,6 +299,30 @@ pub struct FileEntry {
     updated_at: String,
     trashed_at: Option<String>,
     e2ee_state: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderArchiveManifestResponse {
+    root_id: String,
+    entries: Vec<FolderArchiveEntry>,
+    total_bytes: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FolderArchiveEntry {
+    id: String,
+    name: String,
+    mime_type: Option<String>,
+    entry_type: String,
+    parent_id: Option<String>,
+    size_bytes: i64,
+    e2ee_state: String,
+    updated_at: String,
+    content_version: String,
+    vault_generation_id: Option<String>,
+    vault_record_hash: Option<String>,
 }
 
 #[derive(Clone, Serialize)]
@@ -1598,6 +1629,202 @@ fn upload_complete_response(upload: &FileUploadRecord, status: &str) -> UploadCo
     }
 }
 
+pub(crate) const FOLDER_ARCHIVE_ACCESS_QUERY: &str = r#"
+    WITH RECURSIVE ancestors AS (
+      SELECT id, parent_id, owner_id,
+             ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
+      FROM files
+      WHERE id = $1
+        AND entry_type = 'folder'
+        AND state = 'active'
+
+      UNION ALL
+
+      SELECT parent.id, parent.parent_id, parent.owner_id,
+             child.visited_ids || parent.id, child.depth + 1
+      FROM files AS parent
+      INNER JOIN ancestors AS child ON child.parent_id = parent.id
+      WHERE parent.owner_id = child.owner_id
+        AND parent.state = 'active'
+        AND child.depth < 100
+        AND NOT parent.id = ANY(child.visited_ids)
+    )
+    SELECT selected_folder.owner_id
+    FROM ancestors AS selected_folder
+    INNER JOIN users AS owners ON owners.id = selected_folder.owner_id
+    WHERE selected_folder.id = $1
+      AND (
+        selected_folder.owner_id = $2
+        OR (
+          owners.status = 'active'
+          AND (
+            EXISTS (
+              SELECT 1
+              FROM ancestors
+              INNER JOIN file_shares AS shares
+                ON shares.file_id = ancestors.id
+               AND shares.owner_id = ancestors.owner_id
+              WHERE shares.recipient_id = $2
+            )
+            OR EXISTS (
+              SELECT 1
+              FROM ancestors
+              INNER JOIN vault_shares AS shares
+                ON shares.root_node_id = ancestors.id
+               AND shares.owner_id = ancestors.owner_id
+               AND shares.status = 'active'
+              INNER JOIN vault_share_recipients AS recipients
+                ON recipients.share_id = shares.id
+               AND recipients.recipient_id = $2
+               AND recipients.status = 'active'
+            )
+          )
+        )
+      )
+    LIMIT 1
+"#;
+
+pub(crate) const FOLDER_ARCHIVE_ENTRIES_QUERY: &str = r#"
+    SELECT files.id, files.original_name, files.mime_type,
+           files.entry_type, files.parent_id, files.size_bytes,
+           files.e2ee_state, files.updated_at,
+           files.current_generation_id AS vault_generation_id,
+           heads.record_hash AS vault_record_hash
+    FROM files
+    LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
+    WHERE files.owner_id = $2
+      AND files.state = 'active'
+      AND files.id = ANY($1::text[])
+"#;
+
+pub async fn folder_archive_manifest(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    path: web::Path<String>,
+) -> Result<HttpResponse> {
+    let user = require_principal(&state, &request).await?;
+    let root_id = path.into_inner();
+    let mut client = state
+        .db
+        .get()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let transaction = client
+        .build_transaction()
+        .isolation_level(IsolationLevel::RepeatableRead)
+        .read_only(true)
+        .start()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let Some(access) = transaction
+        .query_opt(FOLDER_ARCHIVE_ACCESS_QUERY, &[&root_id, &user.id])
+        .await
+        .map_err(error::ErrorInternalServerError)?
+    else {
+        return Ok(HttpResponse::NotFound().finish());
+    };
+    let owner_id: String = access.get("owner_id");
+    let Some(tree) = walk_subtree(
+        &transaction,
+        TreeWalkScope {
+            owner_id: &owner_id,
+            root_id: &root_id,
+            root_state: Some("active"),
+            child_state: Some("active"),
+            e2ee_state: None,
+            max_nodes: MAX_FOLDER_ARCHIVE_ENTRIES.saturating_add(1),
+        },
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    else {
+        return Ok(HttpResponse::NotFound().finish());
+    };
+    if tree.truncated {
+        return Ok(HttpResponse::PayloadTooLarge()
+            .body("This folder has too many entries to download as one ZIP archive."));
+    }
+
+    let depths = tree
+        .nodes
+        .iter()
+        .map(|node| (node.id.as_str(), node.depth))
+        .collect::<HashMap<_, _>>();
+    let descendant_ids = tree
+        .nodes
+        .iter()
+        .skip(1)
+        .map(|node| node.id.as_str())
+        .collect::<Vec<_>>();
+    let mut ordered_entries = Vec::with_capacity(descendant_ids.len());
+    let mut total_bytes = 0_i64;
+    for ids in descendant_ids.chunks(TREE_MUTATION_BATCH_SIZE) {
+        let rows = transaction
+            .query(FOLDER_ARCHIVE_ENTRIES_QUERY, &[&ids, &owner_id])
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        for row in rows {
+            let id: String = row.get("id");
+            let updated_at: time::OffsetDateTime = row.get("updated_at");
+            let entry = FolderArchiveEntry {
+                id: id.clone(),
+                name: row.get("original_name"),
+                mime_type: row.get("mime_type"),
+                entry_type: row.get("entry_type"),
+                parent_id: row.get("parent_id"),
+                size_bytes: row.get("size_bytes"),
+                e2ee_state: row.get("e2ee_state"),
+                updated_at: timestamps::api(updated_at),
+                content_version: timestamps::cursor(updated_at),
+                vault_generation_id: row
+                    .get::<_, Option<Vec<u8>>>("vault_generation_id")
+                    .map(|value| URL_SAFE_NO_PAD.encode(value)),
+                vault_record_hash: row
+                    .get::<_, Option<Vec<u8>>>("vault_record_hash")
+                    .map(|value| URL_SAFE_NO_PAD.encode(value)),
+            };
+            if entry.entry_type == "file" {
+                total_bytes = total_bytes.saturating_add(entry.size_bytes.max(0));
+                if total_bytes > MAX_FOLDER_ARCHIVE_BYTES {
+                    return Ok(HttpResponse::PayloadTooLarge()
+                        .body("This folder is larger than the 128 MB browser ZIP safety limit."));
+                }
+            }
+            let rank = i32::from(entry.entry_type != "folder");
+            ordered_entries.push((
+                depths.get(id.as_str()).copied().unwrap_or_default(),
+                rank,
+                entry.name.to_lowercase(),
+                id,
+                entry,
+            ));
+        }
+    }
+    if ordered_entries.len() != descendant_ids.len() {
+        return Err(error::ErrorInternalServerError(
+            "folder archive tree changed during preparation",
+        ));
+    }
+    transaction
+        .commit()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    ordered_entries.sort_unstable_by(|left, right| {
+        (&left.0, &left.1, &left.2, &left.3).cmp(&(&right.0, &right.1, &right.2, &right.3))
+    });
+    let entries = ordered_entries
+        .into_iter()
+        .map(|(_, _, _, _, entry)| entry)
+        .collect::<Vec<_>>();
+
+    Ok(HttpResponse::Ok().json(FolderArchiveManifestResponse {
+        root_id,
+        entries,
+        total_bytes,
+    }))
+}
+
 pub async fn abort_upload(
     state: web::Data<AppState>,
     request: HttpRequest,
@@ -1631,9 +1858,16 @@ pub async fn download(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<String>,
+    query: web::Query<DownloadQuery>,
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
-    let Some(file) = get_download_file(&state, &user, &path.into_inner()).await? else {
+    let expected_version = query
+        .version
+        .as_deref()
+        .map(parse_download_version)
+        .transpose()?;
+    let Some(file) = get_download_file(&state, &user, &path.into_inner(), expected_version).await?
+    else {
         return Ok(HttpResponse::NotFound().finish());
     };
     state.db.release_request_connection().await;
@@ -2790,59 +3024,63 @@ async fn get_summary(state: &AppState, user: &SessionPrincipal) -> Result<FilesS
     })
 }
 
+pub(crate) const DOWNLOAD_FILE_QUERY: &str = r#"
+    WITH RECURSIVE ancestors AS (
+      SELECT id, parent_id, owner_id,
+             ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
+      FROM files
+      WHERE id = $1
+
+      UNION ALL
+
+      SELECT parent.id, parent.parent_id, parent.owner_id,
+             child.visited_ids || parent.id, child.depth + 1
+      FROM files AS parent
+      INNER JOIN ancestors AS child ON child.parent_id = parent.id
+      WHERE parent.owner_id = child.owner_id
+        AND child.depth < 100
+        AND NOT parent.id = ANY(child.visited_ids)
+    )
+    SELECT
+      files.owner_id,
+      files.original_name,
+      files.storage_name,
+      files.mime_type
+    FROM files
+    INNER JOIN users AS owners ON owners.id = files.owner_id
+    WHERE files.id = $1
+      AND files.state = 'active'
+      AND files.entry_type = 'file'
+      AND files.e2ee_state IN ('legacy', 'staged')
+      AND ($3::timestamptz IS NULL OR files.updated_at = $3)
+      AND (
+        files.owner_id = $2
+        OR (
+          owners.status = 'active'
+          AND EXISTS (
+            SELECT 1
+            FROM ancestors
+            INNER JOIN file_shares
+              ON file_shares.file_id = ancestors.id
+             AND file_shares.owner_id = ancestors.owner_id
+            WHERE file_shares.recipient_id = $2
+          )
+        )
+      )
+    LIMIT 1
+"#;
+
 async fn get_download_file(
     state: &AppState,
     user: &SessionPrincipal,
     file_id: &str,
+    expected_version: Option<time::OffsetDateTime>,
 ) -> Result<Option<StoredFile>> {
     let row = state
         .db
         .query_opt(
-            "
-                WITH RECURSIVE ancestors AS (
-                  SELECT id, parent_id, owner_id,
-                         ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
-                  FROM files
-                  WHERE id = $1
-
-                  UNION ALL
-
-                  SELECT parent.id, parent.parent_id, parent.owner_id,
-                         child.visited_ids || parent.id, child.depth + 1
-                  FROM files AS parent
-                  INNER JOIN ancestors AS child ON child.parent_id = parent.id
-                  WHERE parent.owner_id = child.owner_id
-                    AND child.depth < 100
-                    AND NOT parent.id = ANY(child.visited_ids)
-                )
-                SELECT
-                  files.owner_id,
-                  files.original_name,
-                  files.storage_name,
-                  files.mime_type
-                FROM files
-                INNER JOIN users AS owners ON owners.id = files.owner_id
-                WHERE files.id = $1
-                  AND files.state = 'active'
-                  AND files.entry_type = 'file'
-                  AND files.e2ee_state IN ('legacy', 'staged')
-                  AND (
-                    files.owner_id = $2
-                    OR (
-                      owners.status = 'active'
-                      AND EXISTS (
-                        SELECT 1
-                        FROM ancestors
-                        INNER JOIN file_shares
-                          ON file_shares.file_id = ancestors.id
-                         AND file_shares.owner_id = ancestors.owner_id
-                        WHERE file_shares.recipient_id = $2
-                      )
-                    )
-                  )
-                LIMIT 1
-            ",
-            &[&file_id, &user.id],
+            DOWNLOAD_FILE_QUERY,
+            &[&file_id, &user.id, &expected_version],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -2853,6 +3091,37 @@ async fn get_download_file(
         storage_name: row.get("storage_name"),
         mime_type: row.get("mime_type"),
     }))
+}
+
+fn parse_download_version(value: &str) -> Result<time::OffsetDateTime> {
+    let bytes = value.as_bytes();
+    let has_wire_shape = bytes.len() == 27
+        && [4, 7, 10, 13, 16, 19, 26]
+            .into_iter()
+            .zip(*b"--T::.Z")
+            .all(|(index, expected)| bytes[index] == expected)
+        && bytes.iter().enumerate().all(|(index, byte)| {
+            [4, 7, 10, 13, 16, 19, 26].contains(&index) || byte.is_ascii_digit()
+        });
+    if !has_wire_shape {
+        return Err(error::ErrorBadRequest("invalid file version"));
+    }
+
+    let number = |start: usize, end: usize| value[start..end].parse::<u32>().ok();
+    let parsed = (|| {
+        let year = i32::try_from(number(0, 4)?).ok()?;
+        let month = time::Month::try_from(u8::try_from(number(5, 7)?).ok()?).ok()?;
+        let day = u8::try_from(number(8, 10)?).ok()?;
+        let hour = u8::try_from(number(11, 13)?).ok()?;
+        let minute = u8::try_from(number(14, 16)?).ok()?;
+        let second = u8::try_from(number(17, 19)?).ok()?;
+        let microsecond = number(20, 26)?;
+        let date = time::Date::from_calendar_date(year, month, day).ok()?;
+        let time = time::Time::from_hms_micro(hour, minute, second, microsecond).ok()?;
+        Some(time::PrimitiveDateTime::new(date, time).assume_utc())
+    })();
+
+    parsed.ok_or_else(|| error::ErrorBadRequest("invalid file version"))
 }
 
 async fn get_upload(
@@ -3214,10 +3483,304 @@ mod tests {
     use actix_web::test::TestRequest;
 
     use super::{
-        OWNED_FOLDER_CONTEXT_QUERY, PlannedFolder, SHARED_FOLDER_CONTEXT_QUERY,
-        UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER, local_upload_chunk, plan_folder_manifest,
-        sanitize_upload_path,
+        DOWNLOAD_FILE_QUERY, FOLDER_ARCHIVE_ACCESS_QUERY, FOLDER_ARCHIVE_ENTRIES_QUERY,
+        MAX_FOLDER_ARCHIVE_BYTES, MAX_FOLDER_ARCHIVE_ENTRIES, OWNED_FOLDER_CONTEXT_QUERY,
+        PlannedFolder, SHARED_FOLDER_CONTEXT_QUERY, UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER,
+        local_upload_chunk, parse_download_version, plan_folder_manifest, sanitize_upload_path,
     };
+
+    #[test]
+    fn folder_archive_authorizes_the_selected_subtree_for_owner_or_active_share() {
+        assert!(FOLDER_ARCHIVE_ACCESS_QUERY.contains("entry_type = 'folder'"));
+        assert!(FOLDER_ARCHIVE_ACCESS_QUERY.contains("state = 'active'"));
+        assert!(FOLDER_ARCHIVE_ACCESS_QUERY.contains("selected_folder.owner_id = $2"));
+        assert!(FOLDER_ARCHIVE_ACCESS_QUERY.contains("file_shares AS shares"));
+        assert!(FOLDER_ARCHIVE_ACCESS_QUERY.contains("vault_shares AS shares"));
+        assert!(FOLDER_ARCHIVE_ACCESS_QUERY.contains("shares.status = 'active'"));
+        assert!(FOLDER_ARCHIVE_ACCESS_QUERY.contains("vault_share_recipients AS recipients"));
+        assert!(FOLDER_ARCHIVE_ACCESS_QUERY.contains("recipients.status = 'active'"));
+        assert!(FOLDER_ARCHIVE_ACCESS_QUERY.contains("owners.status = 'active'"));
+        assert!(FOLDER_ARCHIVE_ACCESS_QUERY.contains("visited_ids"));
+        assert!(FOLDER_ARCHIVE_ACCESS_QUERY.contains("depth < 100"));
+    }
+
+    #[test]
+    fn folder_archive_stays_bounded_and_uses_the_batched_tree_walker() {
+        assert_eq!(MAX_FOLDER_ARCHIVE_ENTRIES, 50_000);
+        assert_eq!(MAX_FOLDER_ARCHIVE_BYTES, 128 * 1024 * 1024);
+        let source = include_str!("files.rs");
+        let handler = source
+            .split_once("pub async fn folder_archive_manifest")
+            .and_then(|(_, tail)| tail.split_once("pub async fn abort_upload"))
+            .map(|(handler, _)| handler)
+            .expect("folder archive handler source should remain inspectable");
+
+        assert!(handler.contains("IsolationLevel::RepeatableRead"));
+        assert!(handler.contains(".read_only(true)"));
+        assert!(handler.contains("walk_subtree("));
+        assert!(handler.contains("TREE_MUTATION_BATCH_SIZE"));
+        assert!(handler.contains("MAX_FOLDER_ARCHIVE_ENTRIES.saturating_add(1)"));
+        assert!(handler.contains("MAX_FOLDER_ARCHIVE_BYTES"));
+        assert!(handler.contains("child_state: Some(\"active\")"));
+        assert!(FOLDER_ARCHIVE_ENTRIES_QUERY.contains("current_generation_id"));
+        assert!(FOLDER_ARCHIVE_ENTRIES_QUERY.contains("heads.record_hash"));
+    }
+
+    #[test]
+    fn folder_archive_download_versions_are_exact_and_unambiguous() {
+        let version = parse_download_version("2026-08-17T12:34:56.123456Z")
+            .expect("manifest version should parse");
+        assert_eq!(
+            crate::timestamps::cursor(version),
+            "2026-08-17T12:34:56.123456Z"
+        );
+        for invalid in [
+            "2026-08-17T12:34:56Z",
+            "2026-02-30T12:34:56.123456Z",
+            "2026-08-17T25:34:56.123456Z",
+            "2026-08-17T12:34:56.12345Z",
+            "2026-08-17T12:34:56.123456+00:00",
+        ] {
+            assert!(parse_download_version(invalid).is_err(), "{invalid}");
+        }
+        assert!(DOWNLOAD_FILE_QUERY.contains("files.updated_at = $3"));
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_query_contracts_prepare() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (client, connection) = tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+            .await
+            .expect("connect to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            connection
+                .await
+                .expect("PostgreSQL connection stays healthy");
+        });
+
+        for query in [
+            FOLDER_ARCHIVE_ACCESS_QUERY,
+            FOLDER_ARCHIVE_ENTRIES_QUERY,
+            DOWNLOAD_FILE_QUERY,
+        ] {
+            client
+                .prepare(query)
+                .await
+                .expect("folder archive query prepares");
+        }
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_optimized_queries_execute() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (mut client, connection) =
+            tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+                .await
+                .expect("connect to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            connection
+                .await
+                .expect("PostgreSQL connection stays healthy");
+        });
+        let transaction = client
+            .transaction()
+            .await
+            .expect("test transaction should start");
+        transaction
+            .batch_execute(
+                "INSERT INTO users (id, username, password_hash, role, status)
+                   VALUES
+                     ('usr_archive_owner', 'archive_owner', 'not-a-login-hash', 'user', 'active'),
+                     ('usr_archive_legacy', 'archive_legacy', 'not-a-login-hash', 'user', 'active'),
+                     ('usr_archive_vault', 'archive_vault', 'not-a-login-hash', 'user', 'active'),
+                     ('usr_archive_outside', 'archive_outside', 'not-a-login-hash', 'user', 'active');
+                 INSERT INTO files (
+                   id, owner_id, original_name, storage_name, size_bytes, state,
+                   entry_type, parent_id, e2ee_state, updated_at
+                 ) VALUES
+                   ('fil_archive_root', 'usr_archive_owner', 'root', 'tests/archive-root', 0,
+                    'active', 'folder', NULL, 'legacy', '2026-08-17 12:34:56.123456+00'),
+                   ('fil_archive_child', 'usr_archive_owner', 'child', 'tests/archive-child', 0,
+                    'active', 'folder', 'fil_archive_root', 'legacy', now()),
+                   ('fil_archive_file', 'usr_archive_owner', 'file.txt', 'tests/archive-file', 4,
+                    'active', 'file', 'fil_archive_child', 'legacy', '2026-08-17 12:34:56.123456+00'),
+                   ('fil_archive_trashed', 'usr_archive_owner', 'trashed', 'tests/archive-trashed', 0,
+                    'trashed', 'folder', 'fil_archive_root', 'legacy', now()),
+                   ('fil_archive_outside', 'usr_archive_owner', 'outside', 'tests/archive-outside', 0,
+                    'active', 'folder', NULL, 'legacy', now());
+                 INSERT INTO vault_identity_keys (
+                   user_id, key_version, x25519_public_key, ed25519_public_key,
+                   fingerprint_sha256, status
+                 ) VALUES (
+                   'usr_archive_vault', 1, decode(repeat('71', 32), 'hex'),
+                   decode(repeat('72', 32), 'hex'), decode(repeat('73', 32), 'hex'), 'active'
+                 );",
+            )
+            .await
+            .expect("folder archive fixtures should insert");
+
+        let owner = transaction
+            .query_opt(
+                FOLDER_ARCHIVE_ACCESS_QUERY,
+                &[&"fil_archive_child", &"usr_archive_owner"],
+            )
+            .await
+            .expect("owner access query should execute");
+        assert_eq!(
+            owner.map(|row| row.get::<_, String>("owner_id")),
+            Some("usr_archive_owner".into())
+        );
+        assert!(
+            transaction
+                .query_opt(
+                    FOLDER_ARCHIVE_ACCESS_QUERY,
+                    &[&"fil_archive_child", &"usr_archive_outside"],
+                )
+                .await
+                .expect("unshared access query should execute")
+                .is_none()
+        );
+        assert!(
+            transaction
+                .query_opt(
+                    FOLDER_ARCHIVE_ACCESS_QUERY,
+                    &[&"fil_archive_trashed", &"usr_archive_owner"],
+                )
+                .await
+                .expect("trashed access query should execute")
+                .is_none()
+        );
+
+        transaction
+            .execute(
+                "INSERT INTO file_shares (id, file_id, owner_id, recipient_id)
+                 VALUES ('fsh_archive', 'fil_archive_root', 'usr_archive_owner', 'usr_archive_legacy')",
+                &[],
+            )
+            .await
+            .expect("legacy share should insert");
+        assert!(
+            transaction
+                .query_opt(
+                    FOLDER_ARCHIVE_ACCESS_QUERY,
+                    &[&"fil_archive_child", &"usr_archive_legacy"],
+                )
+                .await
+                .expect("ancestor legacy share should execute")
+                .is_some()
+        );
+        transaction
+            .execute("DELETE FROM file_shares WHERE id = 'fsh_archive'", &[])
+            .await
+            .expect("legacy share should delete");
+        assert!(
+            transaction
+                .query_opt(
+                    FOLDER_ARCHIVE_ACCESS_QUERY,
+                    &[&"fil_archive_child", &"usr_archive_legacy"],
+                )
+                .await
+                .expect("revoked legacy share should execute")
+                .is_none()
+        );
+
+        transaction
+            .batch_execute(
+                "INSERT INTO vault_shares (id, owner_id, root_node_id, status)
+                   VALUES ('shr_archive', 'usr_archive_owner', 'fil_archive_root', 'active');
+                 INSERT INTO vault_share_recipients (
+                   share_id, recipient_id, recipient_key_version, status
+                 ) VALUES ('shr_archive', 'usr_archive_vault', 1, 'active');",
+            )
+            .await
+            .expect("vault share should insert");
+        assert!(
+            transaction
+                .query_opt(
+                    FOLDER_ARCHIVE_ACCESS_QUERY,
+                    &[&"fil_archive_child", &"usr_archive_vault"],
+                )
+                .await
+                .expect("active vault share should execute")
+                .is_some()
+        );
+        transaction
+            .execute(
+                "UPDATE vault_share_recipients SET status = 'revoked'
+                 WHERE share_id = 'shr_archive' AND recipient_id = 'usr_archive_vault'",
+                &[],
+            )
+            .await
+            .expect("recipient should revoke");
+        assert!(
+            transaction
+                .query_opt(
+                    FOLDER_ARCHIVE_ACCESS_QUERY,
+                    &[&"fil_archive_child", &"usr_archive_vault"],
+                )
+                .await
+                .expect("revoked recipient query should execute")
+                .is_none()
+        );
+        transaction
+            .batch_execute(
+                "UPDATE vault_share_recipients SET status = 'active', revoked_at = NULL
+                   WHERE share_id = 'shr_archive' AND recipient_id = 'usr_archive_vault';
+                 UPDATE vault_shares SET status = 'revoked', revoked_at = now()
+                   WHERE id = 'shr_archive';",
+            )
+            .await
+            .expect("share should revoke");
+        assert!(
+            transaction
+                .query_opt(
+                    FOLDER_ARCHIVE_ACCESS_QUERY,
+                    &[&"fil_archive_child", &"usr_archive_vault"],
+                )
+                .await
+                .expect("revoked share query should execute")
+                .is_none()
+        );
+
+        let matching_version = parse_download_version("2026-08-17T12:34:56.123456Z")
+            .expect("matching version should parse");
+        assert!(
+            transaction
+                .query_opt(
+                    DOWNLOAD_FILE_QUERY,
+                    &[
+                        &"fil_archive_file",
+                        &"usr_archive_owner",
+                        &Some(matching_version),
+                    ],
+                )
+                .await
+                .expect("versioned download query should execute")
+                .is_some()
+        );
+        let stale_version = parse_download_version("2026-08-17T12:34:56.123455Z")
+            .expect("stale version should parse");
+        assert!(
+            transaction
+                .query_opt(
+                    DOWNLOAD_FILE_QUERY,
+                    &[
+                        &"fil_archive_file",
+                        &"usr_archive_owner",
+                        &Some(stale_version),
+                    ],
+                )
+                .await
+                .expect("stale download query should execute")
+                .is_none()
+        );
+        transaction
+            .rollback()
+            .await
+            .expect("fixtures should roll back");
+    }
 
     #[test]
     fn listing_resolves_folder_access_and_breadcrumbs_in_one_query() {

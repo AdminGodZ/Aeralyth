@@ -37,6 +37,7 @@ Aeralyth already has several good architectural choices: file bytes normally mov
 4. Browser encryption and download assembly repeatedly copy large buffers.
 5. Recursive tree summaries and authorization are recomputed from the entire subtree on ordinary navigation.
 6. Share metadata grows with both recipient count and subtree size.
+7. Encrypted listings hydrate every visible row through a separate, serial full-node download plan.
 
 The highest-return redesign is to make each logical operation set-based and pipeline-oriented:
 
@@ -48,6 +49,7 @@ The highest-return redesign is to make each logical operation set-based and pipe
 - Replace repeated wrapper-hash arrays with a Merkle-root commitment.
 - Keep maintenance outside the request pool and process object work concurrently in bounded batches.
 - Maintain tree and usage summaries incrementally instead of rescanning.
+- Fetch encrypted listing metadata in bounded batches and decrypt independent siblings concurrently.
 
 ## Static cost model
 
@@ -63,6 +65,7 @@ These numbers are derived from the current source and illustrate why the top fin
 | Assemble one 4 MiB download chunk from 64 KiB network chunks | Roughly 130 MiB of cumulative copying plus 126 MiB of zeroing before later copies |
 | 4,096 wrapper hashes in one envelope | 128 KiB raw, roughly 171 KiB after base64, per recipient, before the rest of the envelope |
 | 50 recipients with that hash list | More than 8 MiB for hashes alone, exceeding the global JSON body limit before wrappers and signatures |
+| Listing N encrypted files or folders | N serialized full download-plan HTTP requests, with repeated node and wrapper queries even when only metadata is needed |
 
 Browser network chunk sizes vary, so the download-copy figure is an example rather than a constant. The quadratic accumulator pattern itself is confirmed.
 
@@ -1188,13 +1191,13 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 **Validation:** Record render count and main-thread time during a high-speed upload/ZIP.
 
-## PERF-077 [P1] Repository ZIP download retains all source files and the final archive
+## PERF-077 [P1] Browser folder and repository ZIP downloads retain all source files and the final archive
 
 **Confidence:** Confirmed
 
-**Evidence:** The client downloads up to four complete files concurrently into `Blob`/`File` objects, retains every source, then `BlobWriter` creates the complete ZIP Blob. The server permits up to 2 GiB total source bytes and 50,000 entries.
+**Evidence:** The folder and repository clients download up to four complete files concurrently into `Blob`/`File` objects, retain every source, then create the complete ZIP Blob. Their in-memory fallback is now defensively capped at 128 MiB of source data and 160 MiB of ZIP output, but peak memory still scales with the full archive.
 
-**Impact:** Peak browser memory can exceed source size plus archive size, making the advertised maximum unrealistic and causing tab termination.
+**Impact:** Peak browser memory can still exceed source size plus archive size near the bounded fallback limit, especially on memory-constrained devices.
 
 **Best solution:** Stream files directly into a streaming ZIP writer whose sink is File System Access or OPFS. Do not retain all source files. For legacy-only repositories, optionally offer a server-side streaming archive; for E2EE content, keep plaintext client-side and stream locally. Lower the in-memory fallback limit drastically.
 
@@ -1202,15 +1205,19 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-078 [P1] Repository archive processing opens encrypted files twice
 
+**Status:** Complete — implemented and verified on 2026-08-17.
+
+**Verification:** Repository ZIP preparation now fetches each encrypted node plan exactly once, passes that same plan into `openNode`, and reuses it for content decryption. The archive manifest carries the generation ID and record hash captured by its repeatable-read tree snapshot, so a replaced plan is rejected instead of mixing versions. Regression tests assert one plan/open per encrypted node, plaintext-size validation, snapshot binding, and no decrypted ZIP release after the vault locks.
+
 **Confidence:** Confirmed
 
-**Evidence:** The archive flow first calls `vault.openNode` for encrypted entries to resolve names/manifests. Later each encrypted file fetches another download plan and `readEncryptedFileBlob` verifies/opens it again.
+**Original evidence (resolved):** The archive flow first called `vault.openNode` for encrypted entries to resolve names/manifests. Later each encrypted file fetched another download plan and `readEncryptedFileBlob` verified/opened it again.
 
-**Impact:** This duplicates API calls, signatures, CBOR parsing, wrapper hashing, and manifest decryption for every encrypted file.
+**Resolved impact:** The duplicate API call, signature verification, CBOR parsing, wrapper hashing, and manifest decryption are removed from every encrypted file in an archive.
 
-**Best solution:** Fetch each plan once and return a reusable verified/opened handle from the vault client. Use the same handle for name resolution and decryption session start. Cache by immutable `(nodeId, recordHash)` for the duration of the archive.
+**Implemented solution:** Fetch each plan once, bind it to the archive snapshot by immutable `(nodeId, generationId, recordHash)`, use it for metadata opening, and consume file plans in batches of at most four so content decryption starts from the same verified plan without retaining full plan/wrapper metadata for the entire tree.
 
-**Validation:** API and plan-verification counts should be one per encrypted node.
+**Validation:** Automated encrypted-repository archive tests enforce one plan/open per encrypted node and reject a plan that differs from the repeatable-read archive snapshot.
 
 ## PERF-079 [P2] Repository archive path construction repeatedly walks parents and uses `unshift`
 
@@ -1496,6 +1503,22 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 **Validation:** Automated unit, PostgreSQL, migration-contract, and production-route checks assert that a new URL differs, the old URL is rejected, owner reconstruction returns only the current URL, and a legacy writer cannot overwrite a versioned token.
 
+## PERF-102 [P1] Encrypted listings fetch and decrypt one full download plan per row in series
+
+**Confidence:** Confirmed
+
+**Evidence:** `src/features/vault/vault-file-list.tsx` and `src/features/repositories/use-resolved-vault-names.ts` iterate encrypted entries and await `vault.openNode(id)` before continuing to the next independent sibling. `openNode` calls `GET /api/vault/nodes/{id}/download-plan` for every entry. For owner nodes, the backend route performs a node/head/identity query, a wrapper query, publication decoding, and—when file content exists—download URL preparation even when a listing caller only needs the verified manifest name, type, and size. Shared-node assembly and parent-key retries take different paths and can add further work, but the lower bound remains one serialized full-plan request per displayed encrypted entry. The skeleton loading state prevents ciphertext placeholders from leaking into the UI, but it does not reduce this latency waterfall.
+
+**Impact:** Time to reveal a folder or repository listing grows approximately with `N × (network RTT + server plan assembly + client verification/decryption)`. Even modest per-request latency becomes seconds across tens of rows, while the browser, database, and crypto worker remain underutilized between serial stages. Re-entering unchanged views can repeat the same work because decrypted presentation metadata is scoped to the mounted view.
+
+**Best solution:** Add a bounded, set-authorized batch-plan service for the encrypted nodes in the current page. It must perform per-node authorization inside one set-based operation, including mixed owner and shared targets; “batch authorization” must never mean one grant authorizes every ID in the request. Define an explicit `VaultMetadataPlan` as the verified subset of `VaultDownloadPlan`: bootstrap and signature, encrypted manifest, required wrappers, generation number/ID, ciphertext length, crypto chunk size/count, ciphertext Merkle root, record hash/version, and signer key version/public key, but no download URL. Shared plans additionally require the authorized share ID, epoch, recipient/key version, envelope hash, wrapper inclusion proofs, and an authorization-version/context hash. Provide distinct typed metadata and share-preparation projections so PERF-054 can reuse the transport and scheduler without forcing ordinary listings to receive sharing-only material.
+
+Open the required ancestor chain in order, then decrypt independent siblings with a maximum concurrency of four under the same global crypto-work budget used by transfers. Keep a session-memory LRU capped at 1,024 verified manifests and 16 MiB of accounted manifest/canonical-plan data, sharing eviction and ancestor pinning rules with PERF-051's node-key cache. Owner entries may be keyed by `(nodeId, recordHash)`. Shared entries must additionally key by `(shareId, epoch, recipientId, recipientKeyVersion, envelopeHash, authorizationVersion)` and cannot be reused across navigation until the server has revalidated the current grant; a PERF-097 `304` may reuse immutable bytes but must not bypass that grant check. Invalidate affected entries on record, share, epoch, recipient-key, envelope, or authorization-version changes, abort obsolete batches on navigation, and clear plaintext manifests plus associated keys synchronously when the vault locks.
+
+**Validation:** Instrument browser request count, backend SQL statement count, response bytes, time-to-first-name, and time-to-complete for 1, 10, 50, and 500 encrypted rows under controlled latency. Use at most 100 requested targets and 8 MiB of encoded response per batch, returning a continuation before either bound; the request-count gate is exactly `ceil(N / 100)` when the authorized ancestor closure fits those response bounds. Allow one in-flight metadata batch request and at most four sibling decryptions in flight per mounted listing. After the one request-session lookup, plan-data SQL must use at most three set-based statements per batch, independent of N; per-row result decoding/crypto work may remain O(N). Metadata hydration must issue no S3 object request or download URL. The combined manifest/node-key caches must remain at or below 1,024 entries and 16 MiB after opening 10,000 nodes.
+
+Add revocation tests that rotate or revoke a shared grant while the vault remains unlocked and prove stale plaintext is not rendered from either the PERF-102 LRU or a PERF-097 conditional response. Navigation must abort obsolete network and crypto work, transfer workloads must retain their scheduler capacity, and locking must synchronously remove all decrypted presentation state, cached manifests, and evictable keys. Add route/source regression tests that fail if ordinary listings return to one awaited full download-plan request per row, plus real-browser checks proving progressive names, stable UI, and no plaintext or ciphertext-placeholder exposure during slow batches.
+
 
 ---
 
@@ -1560,6 +1583,8 @@ This is the largest long-term protocol improvement in the audit.
 - Incremental checksum in the crypto/hash worker
 - Bounded encryption, presign, and PUT stages
 - Fixed-buffer/deque download assembly
+- Metadata batches capped at 100 targets/8 MiB with one request and four sibling decryptions in flight
+- A shared 1,024-entry/16 MiB manifest and node-key budget, with grant-scoped shared cache keys and synchronous lock clearing
 - Explicit session cancellation and bounded key caches
 - Streaming ZIP output to File System Access or OPFS
 - Global memory/network scheduler across all selected files
@@ -1579,14 +1604,15 @@ This is the largest long-term protocol improvement in the audit.
 
 ## Phase 1: low-risk, high-return latency changes
 
-1. Add slim request-scoped session/CSRF authentication.
-2. Add global partial expiry indexes and the envelope lookup index.
-3. Return completion metadata and remove normal-path HEAD.
-4. Make upload status database-only.
-5. Split liveness/readiness.
-6. Move login bcrypt and session cleanup off the request database path.
-7. Route `/api` directly to Rust where deployment permits.
-8. Add tracing, pool metrics, S3 metrics, and `pg_stat_statements`.
+1. Batch encrypted listing metadata plans and decrypt independent siblings with bounded concurrency.
+2. Add slim request-scoped session/CSRF authentication.
+3. Add global partial expiry indexes and the envelope lookup index.
+4. Return completion metadata and remove normal-path HEAD.
+5. Make upload status database-only.
+6. Split liveness/readiness.
+7. Move login bcrypt and session cleanup off the request database path.
+8. Route `/api` directly to Rust where deployment permits.
+9. Add tracing, pool metrics, S3 metrics, and `pg_stat_statements`.
 
 ## Phase 2: upload pipeline
 
@@ -1729,6 +1755,7 @@ Browser:
 Targets must be adjusted to deployment geography and hardware, but useful first gates are:
 
 - No full-table or full-subtree scan in ordinary file/repository navigation.
+- Encrypted listing metadata uses at most `ceil(N / 100)` set-authorized batch requests when each ancestor closure fits the 8 MiB response bound, with at most four sibling decryptions in flight and no file-content URL or object bytes.
 - One session query per authenticated request, zero separate CSRF query.
 - One database checkout for ordinary multi-query handlers.
 - One batch-presign request per 8 to 32 parts.
@@ -1751,6 +1778,7 @@ Do not begin with Rust compiler flags, hand-written base64 loops, tiny string al
 
 - O(recipients × wrappers) share metadata
 - one API/auth/database sequence per multipart part
+- one full vault download-plan sequence per encrypted listing row
 - row-at-a-time SQL
 - repeated whole-buffer copying
 - full-tree recursive work on navigation
@@ -1768,6 +1796,6 @@ The five changes most likely to transform Aeralyth's real performance are:
 2. **Replace browser buffer concatenation with a bounded zero-copy pipeline.**
 3. **Replace row-at-a-time vault SQL and row-level triggers with COPY/set-based validation and statement-level deltas.**
 4. **Move share commitments to a single wrapper-set Merkle root and decouple share wrappers from owner node records.**
-5. **Remove full-tree work from ordinary navigation and stream large repository/archive operations.**
+5. **Eliminate per-node encrypted-metadata waterfalls and full-tree work from ordinary navigation, then stream large repository/archive operations.**
 
 After those, Aeralyth's throughput should be governed mainly by client cryptography and S3 bandwidth, which is the correct shape for an end-to-end encrypted storage system.

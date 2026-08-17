@@ -1,5 +1,6 @@
 import { BlobReader, BlobWriter, ZipWriter } from "@zip.js/zip.js";
 
+import { BoundedBlobWriter } from "@/features/dashboard/bounded-blob-writer";
 import type {
   FolderZipWorkerRequest,
   FolderZipWorkerResponse,
@@ -23,12 +24,13 @@ workerScope.onmessage = (event) => {
     return;
   }
 
-  void createArchive(event.data.sources);
+  void createArchive(event.data);
 };
 
 async function createArchive(
-  sources: Extract<FolderZipWorkerRequest, { type: "compress" }>["sources"],
+  request: Extract<FolderZipWorkerRequest, { type: "compress" }>,
 ) {
+  const { sources, maxOutputBytes } = request;
   const controller = new AbortController();
   activeController = controller;
   const totalBytes = sources.reduce(
@@ -38,7 +40,16 @@ async function createArchive(
   let completedBytes = 0;
 
   try {
-    const blobWriter = new BlobWriter("application/zip");
+    if (
+      maxOutputBytes !== undefined &&
+      (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0)
+    ) {
+      throw new Error("The ZIP archive output limit is invalid.");
+    }
+    const blobWriter =
+      maxOutputBytes === undefined
+        ? new BlobWriter("application/zip")
+        : new BoundedBlobWriter(maxOutputBytes);
     const zipWriter = new ZipWriter(blobWriter, {
       level: 6,
       signal: controller.signal,

@@ -287,7 +287,23 @@ export type RepositoryDetailData = {
 
 export type RepositoryArchiveManifest = {
   repository: RepositorySummary;
-  entries: RepositoryEntry[];
+  entries: RepositoryArchiveEntry[];
+  totalBytes: number;
+};
+
+export type RepositoryArchiveEntry = RepositoryEntry & {
+  contentVersion: string;
+  vaultGenerationId: string | null;
+  vaultRecordHash: string | null;
+};
+
+export type FolderArchiveEntry = RepositoryArchiveEntry & {
+  contentVersion: string;
+};
+
+export type FolderArchiveManifest = {
+  rootId: string;
+  entries: FolderArchiveEntry[];
   totalBytes: number;
 };
 

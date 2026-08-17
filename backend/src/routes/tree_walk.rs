@@ -233,8 +233,11 @@ mod tests {
         let database = include_str!("../db.rs");
         assert!(database.contains("statement_timeout=10000"));
 
-        let files = include_str!("files.rs");
-        assert_eq!(files.matches("walk_subtree(").count(), 3);
+        let files = include_str!("files.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("files production source should remain inspectable");
+        assert_eq!(files.matches("walk_subtree(").count(), 4);
         assert!(
             files
                 .matches(".isolation_level(IsolationLevel::RepeatableRead)")

@@ -5,6 +5,7 @@ import {
   type VaultManifest,
 } from "@/features/vault/protocol";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
+import type { VaultDecryptionStart } from "@/features/vault/vault-messages";
 
 type SaveFilePicker = (options: {
   suggestedName: string;
@@ -121,23 +122,49 @@ async function decryptEncryptedFile({
   if (!plan.downloadUrl || manifest.entryType !== "file") {
     throw new Error("This vault node does not contain downloadable file data.");
   }
-  const [started, response] = await Promise.all([
-    client.startDecryption(plan),
-    fetch(plan.downloadUrl, {
-      signal,
-      cache: "no-store",
-    }),
-  ]);
-  if (!response.ok || !response.body) {
-    throw new Error(
-      `Encrypted download failed with status ${response.status}.`,
-    );
-  }
-  const reader = new ExactStreamReader(response.body.getReader());
+  const network = new AbortController();
+  const abortNetwork = () => network.abort(signal?.reason);
+  if (signal?.aborted) abortNetwork();
+  else signal?.addEventListener("abort", abortNetwork, { once: true });
+
+  const startedPromise = client.startDecryption(plan);
+  const responsePromise = fetch(plan.downloadUrl, {
+    signal: network.signal,
+    cache: "no-store",
+  });
+  let sessionId: string | null = null;
+  let response: Response | null = null;
+  let reader: ExactStreamReader | null = null;
   let chunkIndex = 0;
   let received = 0;
 
   try {
+    let started: VaultDecryptionStart;
+    try {
+      [started, response] = await Promise.all([
+        startedPromise,
+        responsePromise,
+      ]);
+    } catch (error) {
+      network.abort(error);
+      const lateResponse = await responsePromise.catch(() => null);
+      await lateResponse?.body?.cancel(error).catch(() => undefined);
+      const lateSession = await startedPromise.catch(() => null);
+      if (lateSession) {
+        await client
+          .abortDecryption(lateSession.sessionId)
+          .catch(() => undefined);
+      }
+      throw error;
+    }
+    sessionId = started.sessionId;
+    if (!response.ok || !response.body) {
+      throw new Error(
+        `Encrypted download failed with status ${response.status}.`,
+      );
+    }
+    reader = new ExactStreamReader(response.body.getReader());
+
     while (chunkIndex < plan.chunkCount) {
       const expected = ciphertextChunkLength(
         plan.ciphertextLength,
@@ -152,7 +179,7 @@ async function decryptEncryptedFile({
       }
       received += ciphertext.length;
       const decrypted = await client.decryptChunk(
-        started.sessionId,
+        sessionId,
         chunkIndex,
         ciphertext.buffer,
       );
@@ -166,10 +193,20 @@ async function decryptEncryptedFile({
         "The encrypted download contains unexpected trailing data.",
       );
     }
-    await client.finalizeDecryption(started.sessionId);
+    await client.finalizeDecryption(sessionId);
+    sessionId = null;
     onProgress?.(100);
+  } catch (error) {
+    network.abort(error);
+    if (sessionId) {
+      await client.abortDecryption(sessionId).catch(() => undefined);
+      sessionId = null;
+    }
+    throw error;
   } finally {
-    await reader.cancel();
+    signal?.removeEventListener("abort", abortNetwork);
+    network.abort();
+    await reader?.cancel().catch(() => undefined);
   }
 }
 
