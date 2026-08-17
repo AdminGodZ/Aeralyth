@@ -6122,7 +6122,7 @@ async fn load_shared_plan(
             Some(response) if encode_response => {
                 encode_json_response(&response).map(SharedDownloadCpuResponse::Json)
             }
-            Some(response) => Ok(SharedDownloadCpuResponse::Plan(response)),
+            Some(response) => Ok(SharedDownloadCpuResponse::Plan(Box::new(response))),
             None => Ok(SharedDownloadCpuResponse::Conflict),
         }
     })
@@ -6131,7 +6131,7 @@ async fn load_shared_plan(
 }
 
 enum SharedDownloadCpuResponse {
-    Plan(DownloadPlanResponse),
+    Plan(Box<DownloadPlanResponse>),
     Json(Bytes),
     Conflict,
     NotFound,
@@ -6162,7 +6162,7 @@ async fn load_shared_metadata_plan(
     node_id: &str,
 ) -> Result<Option<MetadataPlanResponse>> {
     match load_shared_plan(state, user, node_id, false, false).await? {
-        SharedDownloadCpuResponse::Plan(plan) => Ok(Some(plan.into())),
+        SharedDownloadCpuResponse::Plan(plan) => Ok(Some((*plan).into())),
         SharedDownloadCpuResponse::Conflict | SharedDownloadCpuResponse::NotFound => Ok(None),
         SharedDownloadCpuResponse::Json(_) => Err(error::ErrorInternalServerError(
             "shared metadata plan was unexpectedly encoded",

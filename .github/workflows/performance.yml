@@ -121,10 +121,18 @@ jobs:
       - run: npm run perf:auth-database-isolation
       - name: Show API log on failure
         if: failure()
-        run: cat backend-performance.log
+        run: |
+          if test -f backend-performance.log; then
+            cat backend-performance.log
+          else
+            echo "API log is unavailable because the API start step did not run."
+          fi
       - name: Stop API
         if: always()
-        run: kill "$(cat backend-performance.pid)" 2>/dev/null || true
+        run: |
+          if test -f backend-performance.pid; then
+            kill "$(cat backend-performance.pid)" 2>/dev/null || true
+          fi
 
   production-image:
     name: Railway production image smoke test
