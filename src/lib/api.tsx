@@ -178,12 +178,18 @@ export type FileEntry = {
   updatedAt: string;
   trashedAt: string | null;
   e2eeState: "legacy" | "staged" | "encrypted";
+  vaultGenerationId: string | null;
+  vaultRecordVersion: number | null;
+  vaultRecordHash: string | null;
 };
 
 export type FolderBreadcrumb = {
   id: string;
   name: string;
   e2eeState: "legacy" | "staged" | "encrypted";
+  vaultGenerationId: string | null;
+  vaultRecordVersion: number | null;
+  vaultRecordHash: string | null;
 };
 
 export type StorageStats = {
@@ -788,7 +794,13 @@ function isFilesData(data: Partial<FilesData>): data is FilesData {
         typeof breadcrumb.name === "string" &&
         (breadcrumb.e2eeState === "legacy" ||
           breadcrumb.e2eeState === "staged" ||
-          breadcrumb.e2eeState === "encrypted"),
+          breadcrumb.e2eeState === "encrypted") &&
+        (typeof breadcrumb.vaultGenerationId === "string" ||
+          breadcrumb.vaultGenerationId === null) &&
+        (typeof breadcrumb.vaultRecordVersion === "number" ||
+          breadcrumb.vaultRecordVersion === null) &&
+        (typeof breadcrumb.vaultRecordHash === "string" ||
+          breadcrumb.vaultRecordHash === null),
     ) &&
     data.summary !== undefined &&
     typeof data.summary.totalFiles === "number" &&
@@ -824,6 +836,12 @@ function isFileEntry(entry: unknown): entry is FileEntry {
     typeof fileEntry.favorite === "boolean" &&
     typeof fileEntry.shared === "boolean" &&
     typeof fileEntry.hasActiveShareLink === "boolean" &&
+    (typeof fileEntry.vaultGenerationId === "string" ||
+      fileEntry.vaultGenerationId === null) &&
+    (typeof fileEntry.vaultRecordVersion === "number" ||
+      fileEntry.vaultRecordVersion === null) &&
+    (typeof fileEntry.vaultRecordHash === "string" ||
+      fileEntry.vaultRecordHash === null) &&
     (fileEntry.e2eeState === "legacy" ||
       fileEntry.e2eeState === "staged" ||
       fileEntry.e2eeState === "encrypted")

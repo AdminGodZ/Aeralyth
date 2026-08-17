@@ -463,6 +463,7 @@ function FileContent({
               sectionKey={section.key}
               csrfToken={csrfToken}
               currentUserId={currentUserId}
+              currentFolderId={currentFolderId}
               initialSort={fileSort}
               initialDirection={fileSortDirection}
             />

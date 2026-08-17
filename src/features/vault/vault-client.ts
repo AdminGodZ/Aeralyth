@@ -1,14 +1,18 @@
 import type {
   VaultDownloadPlan,
+  VaultMetadataPlan,
+  VaultMetadataReference,
   VaultUnlockMaterial,
 } from "@/features/vault/protocol";
 import type {
+  VaultCachedMetadataResult,
   VaultDecryptedChunk,
   VaultDecryptionStart,
   VaultEncryptedChunk,
   VaultEncryptionComplete,
   VaultEncryptionInput,
   VaultEncryptionStart,
+  VaultMetadataOpenResult,
   VaultOpenPlanResult,
   VaultRecoveryResult,
   VaultSetupResult,
@@ -18,6 +22,7 @@ import type {
   VaultShareMaterialResult,
   VaultShareRotationInput,
   VaultUnlockResult,
+  VaultWorkerProgress,
   VaultWorkerRequest,
   VaultWorkerResponse,
   VaultWorkerResult,
@@ -33,6 +38,9 @@ type WorkerCommand = VaultWorkerRequest extends infer Request
 type PendingRequest = {
   resolve(value: VaultWorkerResult): void;
   reject(reason: unknown): void;
+  onProgress?(progress: VaultWorkerProgress): void;
+  signal?: AbortSignal;
+  abort?: () => void;
 };
 
 export class VaultWorkerError extends Error {
@@ -62,7 +70,14 @@ export class VaultCryptoClient {
         const response = event.data;
         const pending = this.pending.get(response.id);
         if (!pending) return;
+        if (response.ok && "progress" in response) {
+          pending.onProgress?.(response.progress);
+          return;
+        }
         this.pending.delete(response.id);
+        if (pending.abort) {
+          pending.signal?.removeEventListener("abort", pending.abort);
+        }
         if (response.ok) {
           pending.resolve(response.result);
         } else {
@@ -114,9 +129,52 @@ export class VaultCryptoClient {
     if (!this.closed) expectResult(await this.send({ type: "lock" }), "lock");
   }
 
-  async openPlan(plan: VaultDownloadPlan): Promise<VaultOpenPlanResult> {
+  async openPlan(plan: VaultMetadataPlan): Promise<VaultOpenPlanResult> {
     return expectResult(await this.send({ type: "openPlan", plan }), "openPlan")
       .result;
+  }
+
+  async getCachedMetadata(
+    references: VaultMetadataReference[],
+    signal?: AbortSignal,
+  ): Promise<VaultCachedMetadataResult[]> {
+    return expectResult(
+      await this.send({ type: "getCachedMetadata", references }, [], {
+        signal,
+      }),
+      "getCachedMetadata",
+    ).results;
+  }
+
+  async openMetadataPlans(
+    plans: VaultMetadataPlan[],
+    {
+      concurrency,
+      priorityCount,
+      signal,
+      onPriority,
+    }: {
+      concurrency: number;
+      priorityCount: number;
+      signal?: AbortSignal;
+      onPriority?(results: VaultMetadataOpenResult[]): void;
+    },
+  ): Promise<VaultMetadataOpenResult[]> {
+    return expectResult(
+      await this.send(
+        { type: "openMetadataPlans", plans, concurrency, priorityCount },
+        [],
+        {
+          signal,
+          onProgress(progress) {
+            if (progress.type === "openMetadataPlans") {
+              onPriority?.(progress.results);
+            }
+          },
+        },
+      ),
+      "openMetadataPlans",
+    ).results;
   }
 
   async startEncryption(
@@ -233,6 +291,10 @@ export class VaultCryptoClient {
   private send(
     command: WorkerCommand,
     transfer: Transferable[] = [],
+    options: {
+      signal?: AbortSignal;
+      onProgress?(progress: VaultWorkerProgress): void;
+    } = {},
   ): Promise<VaultWorkerResult> {
     if (this.closed) {
       return Promise.reject(new Error("The vault worker is closed."));
@@ -240,16 +302,44 @@ export class VaultCryptoClient {
     const id = this.nextId;
     this.nextId += 1;
     const request = { ...command, id } as VaultWorkerRequest;
+    if (options.signal?.aborted) {
+      return Promise.reject(abortReason(options.signal));
+    }
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const pending: PendingRequest = {
+        resolve,
+        reject,
+        onProgress: options.onProgress,
+        signal: options.signal,
+      };
+      if (options.signal) {
+        pending.abort = () => {
+          if (!this.pending.delete(id)) return;
+          reject(abortReason(options.signal as AbortSignal));
+        };
+        options.signal.addEventListener("abort", pending.abort, { once: true });
+      }
+      this.pending.set(id, pending);
       this.worker.postMessage(request, transfer);
     });
   }
 
   private failPending(error: Error): void {
-    for (const pending of this.pending.values()) pending.reject(error);
+    for (const pending of this.pending.values()) {
+      if (pending.abort) {
+        pending.signal?.removeEventListener("abort", pending.abort);
+      }
+      pending.reject(error);
+    }
     this.pending.clear();
   }
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return (
+    signal.reason ??
+    new DOMException("The operation was aborted.", "AbortError")
+  );
 }
 
 function expectResult<Type extends VaultWorkerResult["type"]>(

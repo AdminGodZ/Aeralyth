@@ -167,6 +167,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
                             web::post().to(vault::publish_upload),
                         )
                         .route("/uploads/{id}", web::delete().to(vault::abort_upload))
+                        .route(
+                            "/nodes/metadata-plans",
+                            web::post().to(vault::metadata_plans),
+                        )
                         .route("/nodes/{id}/records", web::post().to(vault::publish_record))
                         .route(
                             "/nodes/{id}/download-plan",

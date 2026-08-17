@@ -3,6 +3,8 @@ import type {
   VaultDownloadPlan,
   VaultEntryType,
   VaultManifest,
+  VaultMetadataPlan,
+  VaultMetadataReference,
   VaultNodeRecord,
   VaultPublicIdentity,
   VaultRewrapPayload,
@@ -31,7 +33,19 @@ export type VaultWorkerRequest =
   | {
       id: number;
       type: "openPlan";
-      plan: VaultDownloadPlan;
+      plan: VaultMetadataPlan;
+    }
+  | {
+      id: number;
+      type: "getCachedMetadata";
+      references: VaultMetadataReference[];
+    }
+  | {
+      id: number;
+      type: "openMetadataPlans";
+      plans: VaultMetadataPlan[];
+      concurrency: number;
+      priorityCount: number;
     }
   | {
       id: number;
@@ -153,6 +167,31 @@ export type VaultOpenPlanResult = {
   manifest: VaultManifest;
 };
 
+export type VaultMetadataOpenResult =
+  | {
+      status: "ready";
+      nodeId: string;
+      recordHash: string;
+      manifest: VaultManifest;
+    }
+  | {
+      status: "unavailable";
+      nodeId: string;
+      recordHash: string;
+      error: string;
+      code?: string;
+    };
+
+export type VaultCachedMetadataResult = Extract<
+  VaultMetadataOpenResult,
+  { status: "ready" }
+>;
+
+export type VaultWorkerProgress = {
+  type: "openMetadataPlans";
+  results: VaultMetadataOpenResult[];
+};
+
 export type VaultDecryptionStart = VaultOpenPlanResult & {
   sessionId: string;
 };
@@ -213,6 +252,8 @@ export type VaultWorkerResult =
   | { type: "recover"; result: VaultRecoveryResult }
   | { type: "lock" }
   | { type: "openPlan"; result: VaultOpenPlanResult }
+  | { type: "getCachedMetadata"; results: VaultCachedMetadataResult[] }
+  | { type: "openMetadataPlans"; results: VaultMetadataOpenResult[] }
   | { type: "startEncryption"; result: VaultEncryptionStart }
   | { type: "encryptChunk"; result: VaultEncryptedChunk }
   | { type: "finalizeEncryption"; result: VaultEncryptionComplete }
@@ -227,4 +268,5 @@ export type VaultWorkerResult =
 
 export type VaultWorkerResponse =
   | { id: number; ok: true; result: VaultWorkerResult }
+  | { id: number; ok: true; progress: VaultWorkerProgress }
   | { id: number; ok: false; error: string; code?: string };

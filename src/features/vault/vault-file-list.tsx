@@ -39,6 +39,11 @@ import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import { removeEncryptedSelections } from "@/features/vault/vault-list-selection";
 import {
+  markVaultFolderClick,
+  recordVaultMetadataPerformance,
+  vaultPerformanceNow,
+} from "@/features/vault/vault-metadata-performance";
+import {
   getVaultNamePresentation,
   type VaultNamePresentation,
   type VaultNameResolution,
@@ -58,9 +63,9 @@ type ResolvedMetadata =
       name: string;
       kind: string;
       sizeBytes: number;
-      sourceUpdatedAt: string;
+      sourceRecordHash: string;
     }
-  | { status: "unavailable"; sourceUpdatedAt: string };
+  | { status: "unavailable"; sourceRecordHash: string };
 
 type FavoriteResponse = {
   favorite: boolean;
@@ -72,8 +77,6 @@ type FolderDownloadSession = {
   progress: FolderArchiveProgress;
 };
 
-const METADATA_PROGRESS_BATCH_SIZE = 24;
-
 const fileDateFormatter = new Intl.DateTimeFormat("en", {
   dateStyle: "medium",
   timeZone: "UTC",
@@ -84,6 +87,7 @@ export function VaultFileList({
   sectionKey,
   csrfToken,
   currentUserId,
+  currentFolderId,
   initialSort,
   initialDirection,
 }: {
@@ -91,6 +95,7 @@ export function VaultFileList({
   sectionKey: string;
   csrfToken: string;
   currentUserId: string;
+  currentFolderId: string | null;
   initialSort?: FileSort;
   initialDirection?: FileSortDirection;
 }) {
@@ -109,6 +114,7 @@ export function VaultFileList({
     useState<FolderDownloadSession | null>(null);
   const folderDownloadAbortRef = useRef<AbortController | null>(null);
   const activeDownloadIdRef = useRef<string | null>(null);
+  const metadataCommitStartedAtRef = useRef<number | null>(null);
   const vaultStateRef = useRef(vault.state);
   const [favoriteError, setFavoriteError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
@@ -159,6 +165,15 @@ export function VaultFileList({
   }, [vault.state]);
 
   useEffect(() => {
+    const startedAt = metadataCommitStartedAtRef.current;
+    if (startedAt === null) return;
+    metadataCommitStartedAtRef.current = null;
+    recordVaultMetadataPerformance("react_commit", startedAt, {
+      readyCount: Object.keys(resolved).length,
+    });
+  }, [resolved]);
+
+  useEffect(() => {
     if (vault.state !== "unlocked") {
       setResolved((current) =>
         Object.keys(current).length === 0 ? current : {},
@@ -169,58 +184,114 @@ export function VaultFileList({
       setSelectedIds((current) => removeEncryptedSelections(current, entries));
       return;
     }
+    const controller = new AbortController();
     let canceled = false;
     void (async () => {
       const next: Record<string, ResolvedMetadata> = {};
-      let progressBatch: Record<string, ResolvedMetadata> = {};
-      let encryptedProcessed = 0;
-      const publishProgress = () => {
-        if (canceled || Object.keys(progressBatch).length === 0) return;
-        const updates = progressBatch;
-        progressBatch = {};
-        setResolved((current) => ({ ...current, ...updates }));
-      };
-      for (const entry of entries) {
-        if (canceled) return;
-        if (entry.e2eeState !== "encrypted") continue;
-        let metadata: ResolvedMetadata;
-        try {
-          // Entries share one worker/key cache and may require parent keys;
-          // keep this bounded instead of fanning out an unbounded request set.
-          // react-doctor-disable-next-line react-doctor/async-await-in-loop
-          const manifest = await vault.openNode(entry.id);
-          metadata = {
-            status: "ready",
-            name: manifest.name,
-            kind:
-              manifest.entryType === "folder"
-                ? "Folder"
-                : fileKind(manifest.name, manifest.mimeType),
-            sizeBytes: manifest.plaintextBytes,
-            sourceUpdatedAt: entry.updatedAt,
-          };
-        } catch {
-          metadata = {
-            status: "unavailable",
-            sourceUpdatedAt: entry.updatedAt,
-          };
-        }
-        next[entry.id] = metadata;
-        progressBatch[entry.id] = metadata;
-        encryptedProcessed += 1;
+      const references = entries.flatMap((entry) => {
+        if (entry.e2eeState !== "encrypted") return [];
         if (
-          encryptedProcessed === 1 ||
-          encryptedProcessed % METADATA_PROGRESS_BATCH_SIZE === 0
+          entry.vaultRecordHash === null ||
+          entry.vaultRecordVersion === null ||
+          entry.vaultGenerationId === null
         ) {
-          publishProgress();
+          next[entry.id] = {
+            status: "unavailable",
+            sourceRecordHash: entry.vaultRecordHash ?? "missing",
+          };
+          return [];
+        }
+        return [
+          {
+            nodeId: entry.id,
+            parentId: entry.parentId,
+            recordVersion: entry.vaultRecordVersion,
+            recordHash: entry.vaultRecordHash,
+            generationId: entry.vaultGenerationId,
+          },
+        ];
+      });
+      const entriesById = new Map(entries.map((entry) => [entry.id, entry]));
+      const metadataFromResults = (
+        results: Awaited<ReturnType<typeof vault.resolveMetadata>>,
+      ): Record<string, ResolvedMetadata> =>
+        Object.fromEntries(
+          results.flatMap((result) => {
+            const entry = entriesById.get(result.nodeId);
+            if (!entry || result.recordHash !== entry.vaultRecordHash)
+              return [];
+            const metadata: ResolvedMetadata =
+              result.status === "ready"
+                ? {
+                    status: "ready",
+                    name: result.manifest.name,
+                    kind:
+                      result.manifest.entryType === "folder"
+                        ? "Folder"
+                        : fileKind(
+                            result.manifest.name,
+                            result.manifest.mimeType,
+                          ),
+                    sizeBytes: result.manifest.plaintextBytes,
+                    sourceRecordHash: result.recordHash,
+                  }
+                : {
+                    status: "unavailable",
+                    sourceRecordHash: result.recordHash,
+                  };
+            return [[result.nodeId, metadata]];
+          }),
+        );
+      try {
+        if (sectionKey === "files" || sectionKey === "shared") {
+          vault.rememberFolderMetadata(currentFolderId, sectionKey, references);
+        }
+        const results = await vault.resolveMetadata(references, {
+          signal: controller.signal,
+          onCached(cached) {
+            if (canceled) return;
+            metadataCommitStartedAtRef.current ??= vaultPerformanceNow();
+            setResolved((current) => ({
+              ...current,
+              ...metadataFromResults(cached),
+            }));
+          },
+          onPriority(priority) {
+            if (canceled) return;
+            metadataCommitStartedAtRef.current ??= vaultPerformanceNow();
+            setResolved((current) => ({
+              ...current,
+              ...metadataFromResults(priority),
+            }));
+          },
+        });
+        Object.assign(next, metadataFromResults(results));
+      } catch {
+        if (controller.signal.aborted) return;
+        for (const reference of references) {
+          next[reference.nodeId] = {
+            status: "unavailable",
+            sourceRecordHash: reference.recordHash,
+          };
         }
       }
-      if (!canceled) setResolved(next);
+      if (!canceled) {
+        metadataCommitStartedAtRef.current ??= vaultPerformanceNow();
+        setResolved(next);
+      }
     })();
     return () => {
       canceled = true;
+      controller.abort();
     };
-  }, [entries, vault.openNode, vault.state]);
+  }, [
+    currentFolderId,
+    entries,
+    sectionKey,
+    vault.rememberFolderMetadata,
+    vault.resolveMetadata,
+    vault.state,
+  ]);
 
   const displayed = useMemo(() => {
     const values = localEntries.map((entry) => {
@@ -234,7 +305,8 @@ export function VaultFileList({
 
       const storedMetadata = resolved[entry.id];
       const currentMetadata =
-        storedMetadata?.sourceUpdatedAt === entry.updatedAt
+        entry.vaultRecordHash !== null &&
+        storedMetadata?.sourceRecordHash === entry.vaultRecordHash
           ? storedMetadata
           : undefined;
       const resolution: VaultNameResolution | undefined =
@@ -477,8 +549,8 @@ export function VaultFileList({
     folderDownloadAbortRef.current = controller;
     setDownloadError(null);
     try {
-      const manifest = await vault.openNode(entry.id);
       const plan = await getVaultDownloadPlan(entry.id, controller.signal);
+      const manifest = await vault.openNode(entry.id, plan, controller.signal);
       await downloadEncryptedFile({
         plan,
         manifest,
@@ -777,6 +849,12 @@ function VaultFileListView({
             onDownload={() => void onDownload(entry)}
             onDelete={() => void onMoveToTrash([entry])}
             onFavorite={() => void onFavorite(entry)}
+            onPrefetchFolder={() =>
+              void vault.prefetchFolderMetadata(
+                entry.id,
+                sectionKey === "shared" ? "shared" : "files",
+              )
+            }
             onSelectedChange={(selected) =>
               onEntrySelectedChange(entry.id, selected)
             }
@@ -857,6 +935,7 @@ function VaultFileRow({
   onDownload,
   onDelete,
   onFavorite,
+  onPrefetchFolder,
   onSelectedChange,
   onShare,
 }: {
@@ -869,6 +948,7 @@ function VaultFileRow({
   onDownload(): void;
   onDelete(): void;
   onFavorite(): void;
+  onPrefetchFolder(): void;
   onSelectedChange(selected: boolean): void;
   onShare(): void;
 }) {
@@ -910,6 +990,10 @@ function VaultFileRow({
             query: { folder: entry.id },
           }}
           className="flex min-w-0 items-center gap-3"
+          onPointerEnter={onPrefetchFolder}
+          onPointerDown={onPrefetchFolder}
+          onFocus={onPrefetchFolder}
+          onClick={markVaultFolderClick}
         >
           <Icon className="size-5 shrink-0 text-primary" aria-hidden="true" />
           <span className="truncate font-medium">{entry.name}</span>

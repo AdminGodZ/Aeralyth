@@ -29,6 +29,7 @@ import { isVaultNodeId } from "@/features/vault/node-id";
 import type {
   VaultDownloadPlan,
   VaultManifest,
+  VaultMetadataReference,
 } from "@/features/vault/protocol";
 import { enqueueShareDirectorySync } from "@/features/vault/share-directory-sync";
 import {
@@ -41,6 +42,11 @@ import {
   VaultCryptoClient,
   VaultWorkerError,
 } from "@/features/vault/vault-client";
+import type { VaultMetadataOpenResult } from "@/features/vault/vault-messages";
+import {
+  type VaultMetadataResolutionOptions,
+  VaultMetadataResolver,
+} from "@/features/vault/vault-metadata-resolver";
 import {
   normalizeVaultAutoLockMinutes,
   VAULT_AUTO_LOCK_CHANGE_EVENT,
@@ -67,6 +73,19 @@ type VaultContextValue = {
     plan?: VaultDownloadPlan,
     signal?: AbortSignal,
   ): Promise<VaultManifest>;
+  resolveMetadata(
+    references: VaultMetadataReference[],
+    options?: VaultMetadataResolutionOptions,
+  ): Promise<VaultMetadataOpenResult[]>;
+  prefetchFolderMetadata(
+    folderId: string,
+    view: "files" | "shared",
+  ): Promise<void>;
+  rememberFolderMetadata(
+    folderId: string | null,
+    view: "files" | "shared",
+    references: VaultMetadataReference[],
+  ): void;
 };
 
 export const VAULT_LOCKING_EVENT = "aeralyth:vault-locking";
@@ -87,6 +106,8 @@ export function VaultProvider({
 }) {
   const enabled = e2eeMode !== "off";
   const clientRef = useRef<VaultCryptoClient | null>(null);
+  const nodeOpenFlightsRef = useRef(new Map<string, Promise<VaultManifest>>());
+  const [metadataResolver] = useState(() => new VaultMetadataResolver());
   const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const [state, setState] = useState<VaultState>(
     enabled ? (vaultConfigured ? "locked" : "setup") : "off",
@@ -121,8 +142,10 @@ export function VaultProvider({
       setState(configured ? "locked" : "setup");
       setMode(configured ? "unlock" : "setup");
     }
+    metadataResolver.clear();
+    nodeOpenFlightsRef.current.clear();
     await clientRef.current?.lock();
-  }, [configured, enabled]);
+  }, [configured, enabled, metadataResolver]);
 
   const scheduleLock = useCallback(() => {
     if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
@@ -184,27 +207,99 @@ export function VaultProvider({
   }, [configured, enabled, state]);
 
   const openNode = useCallback(
-    async (
+    (
       nodeId: string,
       plan?: VaultDownloadPlan,
       signal?: AbortSignal,
     ): Promise<VaultManifest> => {
+      const flightKey = plan
+        ? metadataCacheKey(nodeId, plan.recordHash)
+        : nodeId;
+      const existing = nodeOpenFlightsRef.current.get(flightKey);
+      if (existing) return waitForVaultOperation(existing, signal);
+
+      const operation = (async () => {
+        if (state !== "unlocked") {
+          requestUnlock();
+          throw new VaultWorkerError("Unlock the vault first.", "VAULT_LOCKED");
+        }
+        const client = getClient();
+        const nodePlan = plan ?? (await getVaultDownloadPlan(nodeId));
+        let manifest: VaultManifest;
+        try {
+          manifest = (await client.openPlan(nodePlan)).manifest;
+        } catch (failure) {
+          const parentId = getRequiredParentId(failure);
+          if (!parentId) throw failure;
+          await openNode(parentId);
+          manifest = (await client.openPlan(nodePlan)).manifest;
+        }
+        metadataResolver.remember({
+          status: "ready",
+          nodeId,
+          recordHash: nodePlan.recordHash,
+          manifest,
+        });
+        return manifest;
+      })();
+      nodeOpenFlightsRef.current.set(flightKey, operation);
+      const clearFlight = () => {
+        if (nodeOpenFlightsRef.current.get(flightKey) === operation) {
+          nodeOpenFlightsRef.current.delete(flightKey);
+        }
+      };
+      void operation.then(clearFlight, clearFlight);
+      return waitForVaultOperation(operation, signal);
+    },
+    [getClient, metadataResolver, requestUnlock, state],
+  );
+
+  const resolveMetadata = useCallback(
+    async (
+      references: VaultMetadataReference[],
+      options: VaultMetadataResolutionOptions = {},
+    ): Promise<VaultMetadataOpenResult[]> => {
       if (state !== "unlocked") {
         requestUnlock();
         throw new VaultWorkerError("Unlock the vault first.", "VAULT_LOCKED");
       }
-      const client = getClient();
-      const nodePlan = plan ?? (await getVaultDownloadPlan(nodeId, signal));
-      try {
-        return (await client.openPlan(nodePlan)).manifest;
-      } catch (failure) {
-        const parentId = getRequiredParentId(failure);
-        if (!parentId) throw failure;
-        await openNode(parentId, undefined, signal);
-        return (await client.openPlan(nodePlan)).manifest;
-      }
+      return metadataResolver.resolve(
+        references,
+        {
+          csrfToken,
+          client: getClient(),
+          openNode,
+        },
+        options,
+      );
     },
-    [getClient, requestUnlock, state],
+    [csrfToken, getClient, metadataResolver, openNode, requestUnlock, state],
+  );
+
+  const prefetchFolderMetadata = useCallback(
+    (folderId: string, view: "files" | "shared"): Promise<void> => {
+      if (state !== "unlocked" || !isVaultNodeId(folderId)) {
+        return Promise.resolve();
+      }
+      return metadataResolver.prefetchFolder(folderId, view, {
+        csrfToken,
+        client: getClient(),
+        openNode,
+      });
+    },
+    [csrfToken, getClient, metadataResolver, openNode, state],
+  );
+
+  const rememberFolderMetadata = useCallback(
+    (
+      folderId: string | null,
+      view: "files" | "shared",
+      references: VaultMetadataReference[],
+    ): void => {
+      if (state !== "unlocked") return;
+      metadataResolver.rememberFolder(folderId, view, references);
+    },
+    [metadataResolver, state],
   );
 
   async function submit(): Promise<void> {
@@ -281,8 +376,20 @@ export function VaultProvider({
       requestUnlock,
       lock,
       openNode,
+      resolveMetadata,
+      prefetchFolderMetadata,
+      rememberFolderMetadata,
     }),
-    [enabled, lock, openNode, requestUnlock, state],
+    [
+      enabled,
+      lock,
+      openNode,
+      prefetchFolderMetadata,
+      rememberFolderMetadata,
+      requestUnlock,
+      resolveMetadata,
+      state,
+    ],
   );
 
   return (
@@ -554,6 +661,39 @@ function getRequiredParentId(error: unknown): string | null {
   const separator = error.message.lastIndexOf(":");
   const parentId = separator >= 0 ? error.message.slice(separator + 1) : "";
   return isVaultNodeId(parentId) ? parentId : null;
+}
+
+function metadataCacheKey(nodeId: string, recordHash: string): string {
+  return `${nodeId}:${recordHash}`;
+}
+
+function waitForVaultOperation<Value>(
+  operation: Promise<Value>,
+  signal?: AbortSignal,
+): Promise<Value> {
+  if (!signal) return operation;
+  if (signal.aborted) return Promise.reject(vaultAbortReason(signal));
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(vaultAbortReason(signal));
+    signal.addEventListener("abort", abort, { once: true });
+    operation.then(
+      (value) => {
+        signal.removeEventListener("abort", abort);
+        resolve(value);
+      },
+      (failure: unknown) => {
+        signal.removeEventListener("abort", abort);
+        reject(failure);
+      },
+    );
+  });
+}
+
+function vaultAbortReason(signal: AbortSignal): unknown {
+  return (
+    signal.reason ??
+    new DOMException("The operation was aborted.", "AbortError")
+  );
 }
 
 export function useVault(): VaultContextValue {

@@ -140,16 +140,11 @@ export type VaultNodeRecord = {
   wrappers: Uint8Array[];
 };
 
-export type VaultDownloadPlan = {
+export type VaultMetadataPlan = {
   nodeId: string;
   entryType: VaultEntryType;
   generationNumber: number;
   generationId: string;
-  ciphertextLength: number;
-  cryptoChunkBytes: number;
-  chunkCount: number;
-  ciphertextMerkleRoot: string;
-  downloadUrl: string | null;
   bootstrapCbor: string;
   bootstrapSignature: string;
   encryptedManifest: string;
@@ -159,6 +154,22 @@ export type VaultDownloadPlan = {
   recordVersion: number;
   recordHash: string;
   share: VaultShareDownloadMaterial | null;
+};
+
+export type VaultDownloadPlan = VaultMetadataPlan & {
+  ciphertextLength: number;
+  cryptoChunkBytes: number;
+  chunkCount: number;
+  ciphertextMerkleRoot: string;
+  downloadUrl: string | null;
+};
+
+export type VaultMetadataReference = {
+  nodeId: string;
+  parentId: string | null;
+  recordVersion: number;
+  recordHash: string;
+  generationId: string;
 };
 
 export type VaultShareDownloadMaterial = {

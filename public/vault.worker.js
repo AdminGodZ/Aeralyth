@@ -7246,13 +7246,24 @@ function isVaultNodeId(value) {
 var scope = globalThis;
 var rootKey = null;
 var identity = null;
+var vaultSessionGeneration = 0;
 var nodeKeys = /* @__PURE__ */ new Map();
+var nodeOpenFlights = /* @__PURE__ */ new Map();
+var metadataMemoryCache = /* @__PURE__ */ new Map();
+var metadataCacheKey = null;
+var metadataCacheNamespace = null;
 var encryptionSessions = /* @__PURE__ */ new Map();
 var decryptionSessions = /* @__PURE__ */ new Map();
 var SHARE_WRAPPER_CRYPTO_CONCURRENCY = detectedCryptoConcurrency(16);
 var SHARE_HASH_CRYPTO_CONCURRENCY = detectedCryptoConcurrency(16);
 var SHARE_ENVELOPE_CRYPTO_CONCURRENCY = detectedCryptoConcurrency(8, 2);
 var SHARE_SIDECAR_CRYPTO_CONCURRENCY = SHARE_WRAPPER_CRYPTO_CONCURRENCY;
+var MAX_METADATA_DECRYPTION_CONCURRENCY = 30;
+var MAX_METADATA_MEMORY_ENTRIES = 1e3;
+var METADATA_CACHE_DATABASE = "aeralyth-vault-metadata-v1";
+var METADATA_CACHE_DATABASE_VERSION = 2;
+var METADATA_CACHE_STORE = "metadata";
+var metadataDatabasePromise = null;
 var hpkeSuite = new CipherSuite({
   kem: new DhkemX25519HkdfSha2562(),
   kdf: new HkdfSha256(),
@@ -7306,6 +7317,31 @@ async function dispatch(request) {
     case "openPlan":
       return {
         result: { type: "openPlan", result: await openPlan(request.plan) }
+      };
+    case "getCachedMetadata":
+      return {
+        result: {
+          type: "getCachedMetadata",
+          results: await getCachedMetadata(request.references)
+        }
+      };
+    case "openMetadataPlans":
+      return {
+        result: {
+          type: "openMetadataPlans",
+          results: await openMetadataPlans(
+            request.plans,
+            request.concurrency,
+            request.priorityCount,
+            (results) => {
+              scope.postMessage({
+                id: request.id,
+                ok: true,
+                progress: { type: "openMetadataPlans", results }
+              });
+            }
+          )
+        }
       };
     case "startEncryption":
       return {
@@ -7780,7 +7816,15 @@ async function installUnlockedMaterial(rootMaterial, material) {
     );
     wipe(accountStateId, accountState);
   }
+  const cacheKey = await deriveAesKey(
+    importedRoot,
+    utf8("aeralyth/metadata-cache/salt/v1"),
+    "aeralyth/metadata-cache/key/v1"
+  );
   rootKey = importedRoot;
+  metadataCacheKey = cacheKey;
+  metadataCacheNamespace = toBase64Url(fingerprint);
+  vaultSessionGeneration += 1;
   identity = {
     keyVersion: material.identity.keyVersion,
     x25519PublicKey,
@@ -7792,6 +7836,7 @@ async function installUnlockedMaterial(rootMaterial, material) {
   wipe(privateBytes, privateRecordId, expectedFingerprint);
 }
 function lockVault() {
+  vaultSessionGeneration += 1;
   if (identity) {
     wipe(
       identity.x25519PublicKey,
@@ -7803,7 +7848,11 @@ function lockVault() {
   }
   identity = null;
   rootKey = null;
+  metadataCacheKey = null;
+  metadataCacheNamespace = null;
   nodeKeys.clear();
+  nodeOpenFlights.clear();
+  metadataMemoryCache.clear();
   encryptionSessions.clear();
   for (const sessionId of decryptionSessions.keys()) {
     abortDecryption(sessionId);
@@ -8176,11 +8225,414 @@ async function createShareDirectory(input) {
   return result;
 }
 async function openPlan(plan) {
-  const { manifest } = await openAndVerifyPlan(plan);
+  const { manifest } = await openAndVerifyPlanSingleFlight(plan);
+  const cached = {
+    status: "ready",
+    nodeId: plan.nodeId,
+    recordHash: plan.recordHash,
+    manifest
+  };
+  rememberMetadata(cached);
+  void writePersistentMetadata([cached]).catch(() => void 0);
   return { manifest };
 }
+async function getCachedMetadata(references) {
+  requireRootKey();
+  const sessionGeneration = vaultSessionGeneration;
+  const unique = /* @__PURE__ */ new Map();
+  for (const reference of references) {
+    assertMetadataReference(reference);
+    unique.set(
+      metadataCacheEntryKey(reference.nodeId, reference.recordHash),
+      reference
+    );
+  }
+  const resolved = /* @__PURE__ */ new Map();
+  const persistentMisses = [];
+  for (const [key, reference] of unique) {
+    const cached = metadataMemoryCache.get(key);
+    if (cached && toBase64Url(cached.manifest.generationId) === reference.generationId) {
+      metadataMemoryCache.delete(key);
+      metadataMemoryCache.set(key, cached);
+      resolved.set(key, cached);
+    } else {
+      persistentMisses.push(reference);
+    }
+  }
+  if (persistentMisses.length > 0) {
+    const persisted = await readPersistentMetadata(persistentMisses).catch(
+      () => []
+    );
+    assertVaultSession(sessionGeneration);
+    for (const cached of persisted) {
+      rememberMetadata(cached);
+      resolved.set(
+        metadataCacheEntryKey(cached.nodeId, cached.recordHash),
+        cached
+      );
+    }
+  }
+  assertVaultSession(sessionGeneration);
+  return references.flatMap((reference) => {
+    const cached = resolved.get(
+      metadataCacheEntryKey(reference.nodeId, reference.recordHash)
+    );
+    return cached ? [cached] : [];
+  });
+}
+async function openMetadataPlans(plans, concurrency, priorityCount, onPriority) {
+  requireRootKey();
+  const sessionGeneration = vaultSessionGeneration;
+  if (!Number.isSafeInteger(concurrency) || concurrency < 1 || concurrency > MAX_METADATA_DECRYPTION_CONCURRENCY) {
+    throw new Error("Metadata decryption concurrency is out of range.");
+  }
+  if (!Number.isSafeInteger(priorityCount) || priorityCount < 0) {
+    throw new Error("Metadata priority count is invalid.");
+  }
+  const uniquePlanKeys = /* @__PURE__ */ new Set();
+  for (const plan of plans) {
+    const key = metadataCacheEntryKey(plan.nodeId, plan.recordHash);
+    if (uniquePlanKeys.has(key)) {
+      throw new Error("The metadata batch contains a duplicate node revision.");
+    }
+    uniquePlanKeys.add(key);
+  }
+  const priorityBoundary = Math.min(priorityCount, plans.length);
+  const priorityResults = await openMetadataPlanSet(
+    plans.slice(0, priorityBoundary),
+    concurrency
+  );
+  const priorityReady = readyMetadataResults(priorityResults);
+  for (const result of priorityReady) rememberMetadata(result);
+  if (priorityResults.length > 0) onPriority(priorityResults);
+  void writePersistentMetadata(priorityReady).catch(() => void 0);
+  const remainingResults = await openMetadataPlanSet(
+    plans.slice(priorityBoundary),
+    concurrency
+  );
+  const remainingReady = readyMetadataResults(remainingResults);
+  for (const result of remainingReady) rememberMetadata(result);
+  void writePersistentMetadata(remainingReady).catch(() => void 0);
+  assertVaultSession(sessionGeneration);
+  return [...priorityResults, ...remainingResults];
+}
+async function openMetadataPlanSet(plans, concurrency) {
+  if (plans.length === 0) return [];
+  const results = new Array(plans.length);
+  let pending = plans.map((plan, index) => ({ plan, index }));
+  while (pending.length > 0) {
+    const round = await mapWithConcurrency(
+      pending,
+      concurrency,
+      async ({ plan, index }) => {
+        try {
+          const { manifest } = await openAndVerifyPlanSingleFlight(plan);
+          return {
+            index,
+            result: {
+              status: "ready",
+              nodeId: plan.nodeId,
+              recordHash: plan.recordHash,
+              manifest
+            },
+            parentRequired: false
+          };
+        } catch (failure) {
+          const normalized = normalizeError(failure);
+          return {
+            index,
+            result: {
+              status: "unavailable",
+              nodeId: plan.nodeId,
+              recordHash: plan.recordHash,
+              error: normalized.message,
+              ...normalized.code ? { code: normalized.code } : {}
+            },
+            parentRequired: normalized.code === "PARENT_KEY_REQUIRED"
+          };
+        }
+      }
+    );
+    const madeProgress = round.some(({ result }) => result.status === "ready");
+    const retry = [];
+    for (let offset = 0; offset < round.length; offset += 1) {
+      const outcome = round[offset];
+      if (outcome.parentRequired && madeProgress) {
+        retry.push(pending[offset]);
+      } else {
+        results[outcome.index] = outcome.result;
+      }
+    }
+    if (retry.length === pending.length) {
+      for (let offset = 0; offset < round.length; offset += 1) {
+        results[round[offset].index] = round[offset].result;
+      }
+      break;
+    }
+    pending = retry;
+  }
+  return results;
+}
+function readyMetadataResults(results) {
+  return results.filter(
+    (result) => result.status === "ready"
+  );
+}
+function rememberMetadata(result) {
+  const key = metadataCacheEntryKey(result.nodeId, result.recordHash);
+  for (const existingKey of metadataMemoryCache.keys()) {
+    if (existingKey !== key && existingKey.startsWith(`${result.nodeId}:`)) {
+      metadataMemoryCache.delete(existingKey);
+    }
+  }
+  metadataMemoryCache.delete(key);
+  metadataMemoryCache.set(key, result);
+  while (metadataMemoryCache.size > MAX_METADATA_MEMORY_ENTRIES) {
+    const oldest = metadataMemoryCache.keys().next().value;
+    if (typeof oldest !== "string") break;
+    metadataMemoryCache.delete(oldest);
+  }
+}
+function assertMetadataReference(reference) {
+  if (!isVaultNodeId(reference.nodeId) || !Number.isSafeInteger(reference.recordVersion) || reference.recordVersion < 1 || fromBase64Url(reference.recordHash).length !== 32 || fromBase64Url(reference.generationId).length !== 16) {
+    throw new Error("The metadata cache reference is invalid.");
+  }
+}
+function metadataCacheEntryKey(nodeId, recordHash) {
+  return `${nodeId}:${recordHash}`;
+}
+async function readPersistentMetadata(references) {
+  if (typeof indexedDB === "undefined" || references.length === 0) return [];
+  const { key, namespace } = requireMetadataCacheMaterial();
+  const database = await openMetadataDatabase();
+  const transaction = database.transaction(METADATA_CACHE_STORE, "readonly");
+  const store = transaction.objectStore(METADATA_CACHE_STORE);
+  const stored = await Promise.all(
+    references.map(
+      (reference) => requestResult(
+        store.get(persistentMetadataKey(namespace, reference))
+      )
+    )
+  );
+  await transactionComplete(transaction);
+  const cached = await mapWithConcurrency(
+    references.map((reference, index) => ({
+      reference,
+      stored: stored[index]
+    })),
+    Math.min(MAX_METADATA_DECRYPTION_CONCURRENCY, 16),
+    async ({ reference, stored: record }) => {
+      if (!record || record.namespace !== namespace || record.nodeId !== reference.nodeId || record.recordHash !== reference.recordHash) {
+        return null;
+      }
+      const aad = metadataCacheAad(
+        namespace,
+        reference.nodeId,
+        reference.recordHash
+      );
+      try {
+        const plaintext = new Uint8Array(
+          await crypto.subtle.decrypt(
+            {
+              name: "AES-GCM",
+              iv: record.iv,
+              additionalData: asBufferSource(aad),
+              tagLength: 128
+            },
+            key,
+            record.ciphertext
+          )
+        );
+        try {
+          const manifest = deserializeCachedManifest(plaintext);
+          if (toBase64Url(manifest.generationId) !== reference.generationId) {
+            wipe(manifest.generationId);
+            return null;
+          }
+          return {
+            status: "ready",
+            nodeId: reference.nodeId,
+            recordHash: reference.recordHash,
+            manifest
+          };
+        } finally {
+          wipe(plaintext);
+        }
+      } catch {
+        return null;
+      } finally {
+        wipe(aad);
+      }
+    }
+  );
+  return cached.filter(
+    (result) => result !== null
+  );
+}
+async function writePersistentMetadata(results) {
+  if (typeof indexedDB === "undefined" || results.length === 0) return;
+  const { key, namespace } = requireMetadataCacheMaterial();
+  const databasePromise = openMetadataDatabase();
+  const records = await mapWithConcurrency(
+    results,
+    Math.min(MAX_METADATA_DECRYPTION_CONCURRENCY, 16),
+    async (result) => {
+      const iv = randomBytes(12);
+      const aad = metadataCacheAad(namespace, result.nodeId, result.recordHash);
+      const plaintext = utf8(
+        JSON.stringify(serializeCachedManifest(result.manifest))
+      );
+      try {
+        const ciphertext = await crypto.subtle.encrypt(
+          {
+            name: "AES-GCM",
+            iv: asBufferSource(iv),
+            additionalData: asBufferSource(aad),
+            tagLength: 128
+          },
+          key,
+          asBufferSource(plaintext)
+        );
+        return {
+          key: persistentMetadataKey(namespace, result),
+          namespace,
+          nodeId: result.nodeId,
+          recordHash: result.recordHash,
+          iv: toArrayBuffer2(iv),
+          ciphertext
+        };
+      } finally {
+        wipe(iv, aad, plaintext);
+      }
+    }
+  );
+  const database = await databasePromise;
+  const transaction = database.transaction(METADATA_CACHE_STORE, "readwrite");
+  const store = transaction.objectStore(METADATA_CACHE_STORE);
+  for (const record of records) store.put(record);
+  await transactionComplete(transaction);
+}
+function requireMetadataCacheMaterial() {
+  if (!metadataCacheKey || !metadataCacheNamespace) {
+    throw new Error(
+      "The encrypted metadata cache is unavailable while locked."
+    );
+  }
+  return { key: metadataCacheKey, namespace: metadataCacheNamespace };
+}
+function persistentMetadataKey(namespace, reference) {
+  return `${namespace}:${reference.nodeId}`;
+}
+function metadataCacheAad(namespace, nodeId, recordHash) {
+  return utf8(
+    `aeralyth/metadata-cache/record/v1/${namespace}/${nodeId}/${recordHash}`
+  );
+}
+function serializeCachedManifest(manifest) {
+  return {
+    ...manifest,
+    generationId: toBase64Url(manifest.generationId)
+  };
+}
+function deserializeCachedManifest(plaintext) {
+  const value = JSON.parse(new TextDecoder().decode(plaintext));
+  const generationId = typeof value.generationId === "string" ? fromBase64Url(value.generationId) : new Uint8Array();
+  if (typeof value.name !== "string" || !(typeof value.mimeType === "string" || value.mimeType === null) || value.entryType !== "file" && value.entryType !== "folder" || typeof value.plaintextBytes !== "number" || typeof value.paddedBytes !== "number" || typeof value.lastModified !== "number" || !(typeof value.parentId === "string" || value.parentId === null) || typeof value.chunkCount !== "number" || typeof value.createdAt !== "number" || generationId.length !== 16) {
+    wipe(generationId);
+    throw new Error("The encrypted metadata cache record is invalid.");
+  }
+  return {
+    name: value.name,
+    mimeType: value.mimeType,
+    entryType: value.entryType,
+    plaintextBytes: value.plaintextBytes,
+    paddedBytes: value.paddedBytes,
+    lastModified: value.lastModified,
+    parentId: value.parentId,
+    chunkCount: value.chunkCount,
+    generationId,
+    createdAt: value.createdAt
+  };
+}
+function openMetadataDatabase() {
+  if (metadataDatabasePromise) return metadataDatabasePromise;
+  const opening = new Promise((resolve, reject) => {
+    const request = indexedDB.open(
+      METADATA_CACHE_DATABASE,
+      METADATA_CACHE_DATABASE_VERSION
+    );
+    request.addEventListener("upgradeneeded", (event) => {
+      if (!request.result.objectStoreNames.contains(METADATA_CACHE_STORE)) {
+        const store = request.result.createObjectStore(METADATA_CACHE_STORE, {
+          keyPath: "key"
+        });
+        store.createIndex("namespace-node", ["namespace", "nodeId"]);
+      } else if (event.oldVersion < 2) {
+        request.transaction?.objectStore(METADATA_CACHE_STORE).clear();
+      }
+    });
+    request.addEventListener(
+      "success",
+      () => {
+        const database = request.result;
+        database.addEventListener("versionchange", () => {
+          database.close();
+          metadataDatabasePromise = null;
+        });
+        resolve(database);
+      },
+      { once: true }
+    );
+    request.addEventListener(
+      "error",
+      () => reject(request.error ?? new Error("Metadata cache open failed.")),
+      { once: true }
+    );
+    request.addEventListener(
+      "blocked",
+      () => reject(new Error("Metadata cache upgrade is blocked.")),
+      { once: true }
+    );
+  });
+  metadataDatabasePromise = opening;
+  void opening.catch(() => {
+    if (metadataDatabasePromise === opening) metadataDatabasePromise = null;
+  });
+  return opening;
+}
+function requestResult(request) {
+  return new Promise((resolve, reject) => {
+    request.addEventListener("success", () => resolve(request.result), {
+      once: true
+    });
+    request.addEventListener(
+      "error",
+      () => reject(request.error ?? new Error("Metadata cache request failed.")),
+      { once: true }
+    );
+  });
+}
+function transactionComplete(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.addEventListener("complete", () => resolve(), { once: true });
+    transaction.addEventListener(
+      "error",
+      () => reject(
+        transaction.error ?? new Error("Metadata cache transaction failed.")
+      ),
+      { once: true }
+    );
+    transaction.addEventListener(
+      "abort",
+      () => reject(
+        transaction.error ?? new Error("Metadata cache transaction aborted.")
+      ),
+      { once: true }
+    );
+  });
+}
 async function startDecryption(plan) {
-  const opened = await openAndVerifyPlan(plan);
+  const opened = await openAndVerifyPlanSingleFlight(plan);
   if (opened.manifest.entryType !== "file") {
     throw new Error("Folders do not have encrypted content streams.");
   }
@@ -8286,8 +8738,25 @@ function abortDecryption(sessionId) {
   decryptionSessions.delete(sessionId);
   wipe(session.generationId, session.expectedMerkleRoot, ...session.leaves);
 }
+function openAndVerifyPlanSingleFlight(plan) {
+  const key = metadataCacheEntryKey(plan.nodeId, plan.recordHash);
+  const existing = nodeOpenFlights.get(key);
+  if (existing) return existing;
+  const operation = openAndVerifyPlan(plan);
+  nodeOpenFlights.set(key, operation);
+  const clearFlight = () => {
+    if (nodeOpenFlights.get(key) === operation) nodeOpenFlights.delete(key);
+  };
+  void operation.then(clearFlight, clearFlight);
+  return operation;
+}
+function isDownloadPlan(plan) {
+  return "downloadUrl" in plan;
+}
 async function openAndVerifyPlan(plan) {
   requireRootKey();
+  const sessionGeneration = vaultSessionGeneration;
+  const downloadPlan = isDownloadPlan(plan) ? plan : null;
   const bootstrapBytes = fromBase64Url(plan.bootstrapCbor);
   const signature = fromBase64Url(plan.bootstrapSignature);
   const bootstrap = decodeBootstrap(bootstrapBytes);
@@ -8299,10 +8768,10 @@ async function openAndVerifyPlan(plan) {
     );
   }
   const signedHash = await sha2564(concatBytes(bootstrapBytes, signature));
-  if (bootstrap.formatVersion !== VAULT_FORMAT_VERSION || bootstrap.suiteId !== VAULT_SUITE_ID || bootstrap.aadSchemaId !== VAULT_AAD_SCHEMA_ID || bootstrap.nodeId !== plan.nodeId || bootstrap.generationNumber !== plan.generationNumber || bootstrap.recordVersion !== plan.recordVersion || bootstrap.ciphertextLength !== plan.ciphertextLength || bootstrap.signerKeyVersion !== plan.signerKeyVersion || plan.cryptoChunkBytes !== VAULT_CRYPTO_CHUNK_BYTES || bootstrap.recordVersion === 1 !== (bootstrap.previousRecordHash === null) || !equalBytes(bootstrap.manifestIv, zeroNonce()) || !equalBytes(bootstrap.generationId, fromBase64Url(plan.generationId)) || !equalBytes(
+  if (bootstrap.formatVersion !== VAULT_FORMAT_VERSION || bootstrap.suiteId !== VAULT_SUITE_ID || bootstrap.aadSchemaId !== VAULT_AAD_SCHEMA_ID || bootstrap.nodeId !== plan.nodeId || bootstrap.generationNumber !== plan.generationNumber || bootstrap.recordVersion !== plan.recordVersion || bootstrap.signerKeyVersion !== plan.signerKeyVersion || bootstrap.recordVersion === 1 !== (bootstrap.previousRecordHash === null) || !equalBytes(bootstrap.manifestIv, zeroNonce()) || !equalBytes(bootstrap.generationId, fromBase64Url(plan.generationId)) || downloadPlan !== null && (bootstrap.ciphertextLength !== downloadPlan.ciphertextLength || downloadPlan.cryptoChunkBytes !== VAULT_CRYPTO_CHUNK_BYTES || !equalBytes(
     bootstrap.ciphertextMerkleRoot,
-    fromBase64Url(plan.ciphertextMerkleRoot)
-  ) || !equalBytes(signedHash, fromBase64Url(plan.recordHash))) {
+    fromBase64Url(downloadPlan.ciphertextMerkleRoot)
+  )) || !equalBytes(signedHash, fromBase64Url(plan.recordHash))) {
     throw vaultError(
       "AUTHENTICATION_FAILED",
       "The node record head is inconsistent."
@@ -8384,6 +8853,7 @@ async function openAndVerifyPlan(plan) {
       if (raw.length !== 32)
         throw new Error("The node key has an invalid length.");
       nodeKey = await importHkdf(raw);
+      assertVaultSession(sessionGeneration);
       nodeKeys.set(plan.nodeId, nodeKey);
     } finally {
       wipe(raw);
@@ -8425,8 +8895,8 @@ async function openAndVerifyPlan(plan) {
     );
   }
   const manifest = decodeManifest(manifestPlaintext);
-  const validManifestLayout = manifest.entryType === "folder" ? manifest.plaintextBytes === 0 && manifest.paddedBytes === 0 && manifest.chunkCount === 0 && plan.ciphertextLength === 0 : validFileManifestLayout(manifest, plan.ciphertextLength);
-  if (manifest.entryType !== plan.entryType || manifest.chunkCount !== plan.chunkCount || !validManifestLayout || !equalBytes(manifest.generationId, bootstrap.generationId)) {
+  const validManifestLayout = manifest.entryType === "folder" ? manifest.plaintextBytes === 0 && manifest.paddedBytes === 0 && manifest.chunkCount === 0 && bootstrap.ciphertextLength === 0 : validFileManifestLayout(manifest, bootstrap.ciphertextLength);
+  if (manifest.entryType !== plan.entryType || downloadPlan !== null && manifest.chunkCount !== downloadPlan.chunkCount || !validManifestLayout || !equalBytes(manifest.generationId, bootstrap.generationId)) {
     throw vaultError(
       "AUTHENTICATION_FAILED",
       "The manifest does not match the node head."
@@ -8442,6 +8912,7 @@ async function openAndVerifyPlan(plan) {
     manifestPlaintext,
     ...wrapperBytes
   );
+  assertVaultSession(sessionGeneration);
   return { manifest, nodeKey, contentKey };
 }
 async function createShareMaterial(input) {
@@ -8737,39 +9208,57 @@ async function openSharedKeys(plan, wrappers, wrapperBytes) {
       );
     }
   }
-  const seenWrapperHashes = /* @__PURE__ */ new Set();
   const receivedWrapperHashes = await mapWithConcurrency(
     wrapperBytes,
     SHARE_HASH_CRYPTO_CONCURRENCY,
     sha2564
   );
-  for (let index = 0; index < receivedWrapperHashes.length; index += 1) {
-    const hashBytes = receivedWrapperHashes[index];
-    const hash = toBase64Url(hashBytes);
-    let committed = bootstrapCommitments.has(hash);
-    if (!committed && envelope.formatVersion === VAULT_FORMAT_VERSION) {
-      committed = legacyCommitments.has(hash);
+  const commitments = await mapWithConcurrency(
+    receivedWrapperHashes,
+    SHARE_HASH_CRYPTO_CONCURRENCY,
+    async (hashBytes, index) => {
+      const hash = toBase64Url(hashBytes);
+      let committed = bootstrapCommitments.has(hash);
+      if (!committed && envelope.formatVersion === VAULT_FORMAT_VERSION) {
+        committed = legacyCommitments.has(hash);
+      }
+      if (!committed && envelope.formatVersion === VAULT_SHARE_ENVELOPE_VERSION) {
+        const proof = wrapperProofs[index];
+        if (proof !== null) {
+          const proofBytes = fromBase64Url(proof.proof);
+          try {
+            committed = await verifyWrapperSetProof({
+              wrapperHash: hashBytes,
+              leafIndex: proof.leafIndex,
+              proof: proofBytes,
+              wrapperCount: envelope.wrapperCount,
+              expectedRoot: envelope.wrapperSetRoot
+            });
+          } finally {
+            wipe(proofBytes);
+          }
+        }
+      }
+      if (!committed && directory && directoryMaterial) {
+        const proof = directoryMaterial.wrapperProofs[index];
+        const proofBytes = fromBase64Url(proof.proof);
+        try {
+          committed = await verifyWrapperSetProof({
+            wrapperHash: hashBytes,
+            leafIndex: proof.leafIndex,
+            proof: proofBytes,
+            wrapperCount: directory.wrapperCount,
+            expectedRoot: directory.wrapperSetRoot
+          });
+        } finally {
+          wipe(proofBytes);
+        }
+      }
+      return { committed, hash };
     }
-    if (!committed && envelope.formatVersion === VAULT_SHARE_ENVELOPE_VERSION) {
-      const proof = wrapperProofs[index];
-      committed = proof !== null && await verifyWrapperSetProof({
-        wrapperHash: hashBytes,
-        leafIndex: proof.leafIndex,
-        proof: fromBase64Url(proof.proof),
-        wrapperCount: envelope.wrapperCount,
-        expectedRoot: envelope.wrapperSetRoot
-      });
-    }
-    if (!committed && directory && directoryMaterial) {
-      const proof = directoryMaterial.wrapperProofs[index];
-      committed = await verifyWrapperSetProof({
-        wrapperHash: hashBytes,
-        leafIndex: proof.leafIndex,
-        proof: fromBase64Url(proof.proof),
-        wrapperCount: directory.wrapperCount,
-        expectedRoot: directory.wrapperSetRoot
-      });
-    }
+  );
+  const seenWrapperHashes = /* @__PURE__ */ new Set();
+  for (const { committed, hash } of commitments) {
     if (!committed || seenWrapperHashes.has(hash)) {
       throw vaultError(
         "AUTHENTICATION_FAILED",
@@ -9071,6 +9560,14 @@ function assertUnlockMaterial(material) {
 function requireRootKey() {
   if (!rootKey) throw vaultError("VAULT_LOCKED", "Unlock the vault first.");
   return rootKey;
+}
+function assertVaultSession(generation) {
+  if (generation !== vaultSessionGeneration || !rootKey) {
+    throw vaultError(
+      "VAULT_LOCKED",
+      "The vault was locked during this operation."
+    );
+  }
 }
 function requireIdentity() {
   if (!identity) throw vaultError("VAULT_LOCKED", "Unlock the vault first.");

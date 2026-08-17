@@ -1,6 +1,8 @@
 import type {
   VaultActiveShareContext,
   VaultDownloadPlan,
+  VaultMetadataPlan,
+  VaultMetadataReference,
   VaultNodeRecord,
   VaultPublicIdentity,
   VaultRewrapPayload,
@@ -309,6 +311,62 @@ export function getVaultDownloadPlan(
     `/api/vault/nodes/${encodeURIComponent(nodeId)}/download-plan`,
     { signal },
   );
+}
+
+export function getVaultMetadataPlans(
+  csrfToken: string,
+  nodeIds: readonly string[],
+  signal?: AbortSignal,
+): Promise<{ plans: VaultMetadataPlan[] }> {
+  return vaultMutation(
+    "/api/vault/nodes/metadata-plans",
+    csrfToken,
+    { nodeIds },
+    signal,
+  );
+}
+
+export async function getVaultFolderMetadataReferences(
+  folderId: string,
+  view: "files" | "shared",
+  signal?: AbortSignal,
+): Promise<VaultMetadataReference[]> {
+  const response = await vaultRequest<{ entries?: unknown }>(
+    `/api/files?${new URLSearchParams({
+      view,
+      folder: folderId,
+      sort: "name",
+      direction: "asc",
+      limit: "100",
+    })}`,
+    { signal },
+  );
+  if (!Array.isArray(response.entries)) {
+    throw new Error("The folder metadata prefetch response is invalid.");
+  }
+  return response.entries.flatMap((value) => {
+    if (!value || typeof value !== "object") return [];
+    const entry = value as Record<string, unknown>;
+    if (
+      entry.e2eeState !== "encrypted" ||
+      typeof entry.id !== "string" ||
+      !(typeof entry.parentId === "string" || entry.parentId === null) ||
+      typeof entry.vaultRecordVersion !== "number" ||
+      typeof entry.vaultRecordHash !== "string" ||
+      typeof entry.vaultGenerationId !== "string"
+    ) {
+      return [];
+    }
+    return [
+      {
+        nodeId: entry.id,
+        parentId: entry.parentId,
+        recordVersion: entry.vaultRecordVersion,
+        recordHash: entry.vaultRecordHash,
+        generationId: entry.vaultGenerationId,
+      },
+    ];
+  });
 }
 
 export function getVaultIdentity(

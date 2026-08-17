@@ -18,4 +18,49 @@ describe("vault lock lifecycle", () => {
     expect(autoLock).toContain("void lock();");
     expect(autoLock).not.toContain("clientRef.current?.lock()");
   });
+
+  it("checks the worker session before restoring persistent plaintext metadata", () => {
+    const source = readFileSync(
+      resolve(import.meta.dirname, "vault.worker.ts"),
+      "utf8",
+    );
+    const cachedMetadata = source
+      .split("async function getCachedMetadata(")[1]
+      ?.split("async function openMetadataPlans(")[0];
+    expect(cachedMetadata).toBeTruthy();
+
+    const persistentRead = cachedMetadata?.indexOf(
+      "await readPersistentMetadata(persistentMisses)",
+    );
+    const sessionGuard = cachedMetadata?.indexOf(
+      "assertVaultSession(sessionGeneration)",
+      persistentRead,
+    );
+    const memoryWrite = cachedMetadata?.indexOf(
+      "rememberMetadata(cached)",
+      persistentRead,
+    );
+
+    expect(persistentRead).toBeGreaterThanOrEqual(0);
+    expect(sessionGuard).toBeGreaterThan(persistentRead ?? -1);
+    expect(memoryWrite).toBeGreaterThan(sessionGuard ?? -1);
+  });
+
+  it("keeps encrypted persistent-cache writes off metadata return paths", () => {
+    const source = readFileSync(
+      resolve(import.meta.dirname, "vault.worker.ts"),
+      "utf8",
+    );
+    const openPlan = source
+      .split("async function openPlan(")[1]
+      ?.split("async function getCachedMetadata(")[0];
+    const openBatch = source
+      .split("async function openMetadataPlans(")[1]
+      ?.split("async function openMetadataPlanSet(")[0];
+
+    expect(openPlan).toContain("void writePersistentMetadata([cached])");
+    expect(openPlan).not.toContain("await writePersistentMetadata");
+    expect(openBatch?.match(/void writePersistentMetadata/g)).toHaveLength(2);
+    expect(openBatch).not.toContain("await writePersistentMetadata");
+  });
 });

@@ -43,7 +43,67 @@ const MAX_PRESIGN_PARTS: usize = 32;
 const VAULT_CONTROL_JSON_LIMIT: usize = 64 * 1024;
 const VAULT_ACCOUNT_JSON_LIMIT: usize = 6 * 1024 * 1024;
 const VAULT_PUBLISH_JSON_LIMIT: usize = 8 * 1024 * 1024;
+const MAX_METADATA_PLAN_REQUEST_NODES: usize = 100;
+const MAX_METADATA_PLAN_EXPANDED_NODES: usize = 512;
+const SHARED_METADATA_PLAN_CONCURRENCY: usize = 8;
 const VAULT_PUBLICATION_CONTENT_TYPE: &str = "application/vnd.aeralyth.vault-publication";
+const OWNED_METADATA_PLANS_QUERY: &str = "
+    WITH RECURSIVE requested AS (
+      SELECT node_id, ordinality::bigint AS ordinal
+      FROM unnest($1::text[]) WITH ORDINALITY AS input(node_id, ordinality)
+    ), owned_tree AS (
+      SELECT files.id, files.parent_id, requested.ordinal,
+             0::integer AS depth, ARRAY[files.id]::text[] AS visited_ids
+      FROM requested
+      INNER JOIN files ON files.id = requested.node_id
+      WHERE files.owner_id = $2
+        AND files.state = 'active'
+        AND files.e2ee_state = 'encrypted'
+
+      UNION ALL
+
+      SELECT parent.id, parent.parent_id, child.ordinal,
+             child.depth + 1, child.visited_ids || parent.id
+      FROM owned_tree AS child
+      INNER JOIN files AS parent ON parent.id = child.parent_id
+      WHERE parent.owner_id = $2
+        AND parent.state = 'active'
+        AND parent.e2ee_state = 'encrypted'
+        AND child.depth < 100
+        AND NOT parent.id = ANY(child.visited_ids)
+    ), candidates AS (
+      SELECT id, min(ordinal) AS ordinal, max(depth) AS depth
+      FROM owned_tree
+      GROUP BY id
+    )
+    SELECT candidates.depth, candidates.ordinal,
+           files.id, files.entry_type, files.current_generation_number,
+           files.current_generation_id,
+           records.bootstrap_cbor, records.bootstrap_signature,
+           records.encrypted_manifest, records.signer_key_version,
+           heads.record_version, heads.record_hash,
+           identity.ed25519_public_key
+    FROM candidates
+    INNER JOIN files ON files.id = candidates.id
+    INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
+    INNER JOIN vault_node_records AS records
+      ON records.node_id = heads.node_id
+     AND records.record_version = heads.record_version
+    INNER JOIN vault_identity_keys AS identity
+      ON identity.user_id = records.owner_id
+     AND identity.key_version = records.signer_key_version
+    ORDER BY candidates.depth DESC, candidates.ordinal, files.id
+";
+const OWNED_METADATA_WRAPPERS_QUERY: &str = "
+    SELECT wrappers.node_id, wrappers.record_version,
+           array_agg(wrappers.canonical_cbor ORDER BY wrappers.wrapper_id) AS wrapper_cbors
+    FROM vault_wrappers AS wrappers
+    INNER JOIN vault_node_heads AS heads
+      ON heads.node_id = wrappers.node_id
+     AND heads.record_version = wrappers.record_version
+    WHERE wrappers.node_id = ANY($1)
+    GROUP BY wrappers.node_id, wrappers.record_version
+";
 const SHARED_DOWNLOAD_SNAPSHOT_QUERY: &str = "
     WITH RECURSIVE ancestors AS (
       SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
@@ -541,6 +601,55 @@ struct DownloadPlanResponse {
     record_version: i64,
     record_hash: String,
     share: Option<ShareDownloadMaterial>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct MetadataPlanResponse {
+    node_id: String,
+    entry_type: String,
+    generation_number: i64,
+    generation_id: String,
+    bootstrap_cbor: String,
+    bootstrap_signature: String,
+    encrypted_manifest: String,
+    wrappers: Vec<String>,
+    signer_key_version: i64,
+    signer_ed25519_public_key: String,
+    record_version: i64,
+    record_hash: String,
+    share: Option<ShareDownloadMaterial>,
+}
+
+impl From<DownloadPlanResponse> for MetadataPlanResponse {
+    fn from(plan: DownloadPlanResponse) -> Self {
+        Self {
+            node_id: plan.node_id,
+            entry_type: plan.entry_type,
+            generation_number: plan.generation_number,
+            generation_id: plan.generation_id,
+            bootstrap_cbor: plan.bootstrap_cbor,
+            bootstrap_signature: plan.bootstrap_signature,
+            encrypted_manifest: plan.encrypted_manifest,
+            wrappers: plan.wrappers,
+            signer_key_version: plan.signer_key_version,
+            signer_ed25519_public_key: plan.signer_ed25519_public_key,
+            record_version: plan.record_version,
+            record_hash: plan.record_hash,
+            share: plan.share,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct MetadataPlansRequest {
+    node_ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct MetadataPlansResponse {
+    plans: Vec<MetadataPlanResponse>,
 }
 
 #[derive(Serialize)]
@@ -2082,6 +2191,130 @@ pub async fn publish_record(
         record_hash: encode_bytes(decoded.verified.record_hash),
         share_sync_required,
     }))
+}
+
+pub async fn metadata_plans(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    body: web::Payload,
+) -> Result<HttpResponse> {
+    require_vault_enabled(&state)?;
+    let user = require_principal(&state, &request).await?;
+    require_configured_vault(&state, &user).await?;
+    require_header_csrf(&state, &request).await?;
+    let body =
+        parse_json_body::<MetadataPlansRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT).await?;
+    if body.node_ids.is_empty() || body.node_ids.len() > MAX_METADATA_PLAN_REQUEST_NODES {
+        return Err(error::ErrorBadRequest(
+            "metadata plan request must contain between 1 and 100 node ids",
+        ));
+    }
+    let mut unique_ids = HashSet::with_capacity(body.node_ids.len());
+    for node_id in &body.node_ids {
+        validate_node_id(node_id)?;
+        if !unique_ids.insert(node_id.as_str()) {
+            return Err(error::ErrorBadRequest(
+                "metadata plan request contains duplicate node ids",
+            ));
+        }
+    }
+
+    let owned_rows = state
+        .db
+        .query(OWNED_METADATA_PLANS_QUERY, &[&body.node_ids, &user.id])
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    if owned_rows.len() > MAX_METADATA_PLAN_EXPANDED_NODES {
+        return Err(error::ErrorPayloadTooLarge(
+            "metadata plan ancestry exceeds the bounded batch limit",
+        ));
+    }
+    let owned_node_ids = owned_rows
+        .iter()
+        .map(|row| row.get::<_, String>("id"))
+        .collect::<HashSet<_>>();
+    let wrapper_node_ids = owned_node_ids.iter().cloned().collect::<Vec<_>>();
+    let wrapper_rows = if wrapper_node_ids.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .db
+            .query(OWNED_METADATA_WRAPPERS_QUERY, &[&wrapper_node_ids])
+            .await
+            .map_err(error::ErrorInternalServerError)?
+    };
+    state.db.release_request_connection().await;
+
+    let mut wrappers = HashMap::with_capacity(wrapper_rows.len());
+    for row in wrapper_rows {
+        wrappers.insert(
+            (
+                row.get::<_, String>("node_id"),
+                row.get::<_, i64>("record_version"),
+            ),
+            row.get::<_, Vec<Vec<u8>>>("wrapper_cbors"),
+        );
+    }
+    let mut plans = run_publication_decode(&state, &user.id, move || {
+        Ok::<_, (u16, String)>(
+            owned_rows
+                .into_iter()
+                .map(|row| {
+                    let key = (
+                        row.get::<_, String>("id"),
+                        row.get::<_, i64>("record_version"),
+                    );
+                    owned_metadata_plan_from_row(row, wrappers.remove(&key).unwrap_or_default())
+                })
+                .collect::<Vec<_>>(),
+        )
+    })
+    .await?;
+
+    let shared_node_ids = body
+        .node_ids
+        .iter()
+        .filter(|node_id| !owned_node_ids.contains(node_id.as_str()))
+        .cloned()
+        .collect::<Vec<_>>();
+    for chunk in shared_node_ids.chunks(SHARED_METADATA_PLAN_CONCURRENCY) {
+        let loaded = try_join_all(
+            chunk
+                .iter()
+                .map(|node_id| load_shared_metadata_plan(&state, &user, node_id)),
+        )
+        .await?;
+        plans.extend(loaded.into_iter().flatten());
+    }
+
+    let response = MetadataPlansResponse { plans };
+    let body =
+        run_publication_decode(&state, &user.id, move || encode_json_response(&response)).await?;
+    Ok(HttpResponse::Ok()
+        .content_type("application/json")
+        .body(body))
+}
+
+fn owned_metadata_plan_from_row(
+    row: tokio_postgres::Row,
+    wrapper_cbors: Vec<Vec<u8>>,
+) -> MetadataPlanResponse {
+    let bootstrap_cbor: Vec<u8> = row.get("bootstrap_cbor");
+    MetadataPlanResponse {
+        node_id: row.get("id"),
+        entry_type: row.get("entry_type"),
+        generation_number: row.get("current_generation_number"),
+        generation_id: encode_bytes(row.get::<_, Vec<u8>>("current_generation_id")),
+        bootstrap_cbor: encode_bytes(bootstrap_cbor),
+        bootstrap_signature: encode_bytes(row.get::<_, Vec<u8>>("bootstrap_signature")),
+        encrypted_manifest: encode_bytes(row.get::<_, Vec<u8>>("encrypted_manifest")),
+        wrappers: wrapper_cbors.into_iter().map(encode_bytes).collect(),
+        signer_key_version: row.get("signer_key_version"),
+        signer_ed25519_public_key: encode_bytes(row.get::<_, Vec<u8>>("ed25519_public_key")),
+        record_version: row.get("record_version"),
+        record_hash: encode_bytes(row.get::<_, Vec<u8>>("record_hash")),
+        share: None,
+    }
 }
 
 pub async fn download_plan(
@@ -5597,11 +5830,13 @@ async fn current_publish_response(
     }))
 }
 
-async fn shared_download_plan(
+async fn load_shared_plan(
     state: &AppState,
     user: &SessionPrincipal,
     node_id: &str,
-) -> Result<HttpResponse> {
+    include_download_url: bool,
+    encode_response: bool,
+) -> Result<SharedDownloadCpuResponse> {
     let mut client = state
         .db
         .get()
@@ -5623,16 +5858,20 @@ async fn shared_download_plan(
         .await
         .map_err(error::ErrorInternalServerError)?;
     let Some(row) = row else {
-        return Ok(HttpResponse::NotFound().finish());
+        return Ok(SharedDownloadCpuResponse::NotFound);
     };
     let object_key: Option<String> = row.get("object_key");
     drop(client);
-    let download_url = if let Some(object_key) = object_key.as_deref() {
-        state
-            .storage
-            .download_url(object_key, "aeralyth-ciphertext.bin")
-            .await
-            .map_err(error::ErrorBadGateway)?
+    let download_url = if include_download_url {
+        if let Some(object_key) = object_key.as_deref() {
+            state
+                .storage
+                .download_url(object_key, "aeralyth-ciphertext.bin")
+                .await
+                .map_err(error::ErrorBadGateway)?
+        } else {
+            None
+        }
     } else {
         None
     };
@@ -5880,25 +6119,55 @@ async fn shared_download_plan(
             Ok(Some(response))
         })();
         match prepared.map_err(portable_publication_error)? {
-            Some(response) => encode_json_response(&response).map(SharedDownloadCpuResponse::Json),
+            Some(response) if encode_response => {
+                encode_json_response(&response).map(SharedDownloadCpuResponse::Json)
+            }
+            Some(response) => Ok(SharedDownloadCpuResponse::Plan(response)),
             None => Ok(SharedDownloadCpuResponse::Conflict),
         }
     })
     .await?;
+    Ok(response)
+}
 
-    match response {
+enum SharedDownloadCpuResponse {
+    Plan(DownloadPlanResponse),
+    Json(Bytes),
+    Conflict,
+    NotFound,
+}
+
+async fn shared_download_plan(
+    state: &AppState,
+    user: &SessionPrincipal,
+    node_id: &str,
+) -> Result<HttpResponse> {
+    match load_shared_plan(state, user, node_id, true, true).await? {
         SharedDownloadCpuResponse::Json(body) => Ok(HttpResponse::Ok()
             .content_type("application/json")
             .body(body)),
         SharedDownloadCpuResponse::Conflict => {
             Ok(HttpResponse::Conflict().body("share material is still synchronizing"))
         }
+        SharedDownloadCpuResponse::NotFound => Ok(HttpResponse::NotFound().finish()),
+        SharedDownloadCpuResponse::Plan(_) => Err(error::ErrorInternalServerError(
+            "shared download plan response was not encoded",
+        )),
     }
 }
 
-enum SharedDownloadCpuResponse {
-    Json(Bytes),
-    Conflict,
+async fn load_shared_metadata_plan(
+    state: &AppState,
+    user: &SessionPrincipal,
+    node_id: &str,
+) -> Result<Option<MetadataPlanResponse>> {
+    match load_shared_plan(state, user, node_id, false, false).await? {
+        SharedDownloadCpuResponse::Plan(plan) => Ok(Some(plan.into())),
+        SharedDownloadCpuResponse::Conflict | SharedDownloadCpuResponse::NotFound => Ok(None),
+        SharedDownloadCpuResponse::Json(_) => Err(error::ErrorInternalServerError(
+            "shared metadata plan was unexpectedly encoded",
+        )),
+    }
 }
 
 fn shared_download_snapshot_from_row(row: tokio_postgres::Row) -> Result<SharedDownloadSnapshot> {
@@ -6807,6 +7076,33 @@ mod tests {
     }
 
     #[test]
+    fn metadata_plan_batches_are_bounded_ancestor_first_and_storage_free() {
+        assert!(OWNED_METADATA_PLANS_QUERY.contains("unnest($1::text[]) WITH ORDINALITY"));
+        assert!(OWNED_METADATA_PLANS_QUERY.contains("WITH RECURSIVE requested"));
+        assert!(OWNED_METADATA_PLANS_QUERY.contains("candidates.depth DESC"));
+        assert!(OWNED_METADATA_WRAPPERS_QUERY.contains("wrappers.node_id = ANY($1)"));
+        assert!(!OWNED_METADATA_PLANS_QUERY.contains("object_key"));
+        assert!(!OWNED_METADATA_PLANS_QUERY.contains("vault_object_generations"));
+
+        let source = include_str!("vault.rs");
+        let production = source.split("#[cfg(test)]").next().unwrap_or(source);
+        let handler = source_between(
+            production,
+            "pub async fn metadata_plans(",
+            "fn owned_metadata_plan_from_row(",
+        );
+        assert!(handler.contains("MAX_METADATA_PLAN_REQUEST_NODES"));
+        assert!(handler.contains("SHARED_METADATA_PLAN_CONCURRENCY"));
+        assert!(handler.contains("load_shared_metadata_plan"));
+        let shared_metadata = source_between(
+            production,
+            "async fn load_shared_metadata_plan(",
+            "fn shared_download_snapshot_from_row(",
+        );
+        assert!(shared_metadata.contains("load_shared_plan(state, user, node_id, false, false)"));
+    }
+
+    #[test]
     fn publication_pipeline_stays_decode_once_bounded_and_binary_first() {
         let source = include_str!("vault.rs");
         let production = source.split("#[cfg(test)]").next().unwrap_or(source);
@@ -7071,7 +7367,7 @@ mod tests {
 
         let shared = source_between(
             production,
-            "async fn shared_download_plan(",
+            "async fn load_shared_plan(",
             "enum SharedDownloadCpuResponse",
         );
         assert_markers_in_order(
@@ -7408,8 +7704,8 @@ mod tests {
 
         let source = include_str!("vault.rs");
         let handler = source
-            .split_once("async fn shared_download_plan(")
-            .and_then(|(_, tail)| tail.split_once("async fn get_upload("))
+            .split_once("async fn load_shared_plan(")
+            .and_then(|(_, tail)| tail.split_once("enum SharedDownloadCpuResponse"))
             .map(|(handler, _)| handler)
             .expect("shared download handler should remain inspectable");
         assert_eq!(handler.matches(".query_opt(").count(), 1);
@@ -7451,6 +7747,14 @@ mod tests {
             .prepare(SHARED_DOWNLOAD_SNAPSHOT_QUERY)
             .await
             .expect("shared download snapshot query should prepare");
+        client
+            .prepare(OWNED_METADATA_PLANS_QUERY)
+            .await
+            .expect("owned metadata batch query should prepare");
+        client
+            .prepare(OWNED_METADATA_WRAPPERS_QUERY)
+            .await
+            .expect("owned metadata wrapper batch query should prepare");
     }
 
     #[actix_web::test]

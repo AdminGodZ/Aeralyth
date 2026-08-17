@@ -15,6 +15,9 @@ vi.mock("@/features/vault/vault-provider", () => ({
     requestUnlock: vi.fn(),
     lock: vi.fn(),
     openNode: vi.fn(() => new Promise(() => undefined)),
+    resolveMetadata: vi.fn(() => new Promise(() => undefined)),
+    prefetchFolderMetadata: vi.fn(async () => undefined),
+    rememberFolderMetadata: vi.fn(),
   }),
 }));
 
@@ -39,6 +42,9 @@ const encryptedFolder: FileEntry = {
   updatedAt: "2026-08-17T12:00:00.000Z",
   trashedAt: null,
   e2eeState: "encrypted",
+  vaultGenerationId: "AAAAAAAAAAAAAAAAAAAAAA",
+  vaultRecordVersion: 1,
+  vaultRecordHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
 };
 
 describe("VaultFileList metadata loading", () => {
@@ -49,6 +55,7 @@ describe("VaultFileList metadata loading", () => {
         sectionKey="files"
         csrfToken="test-csrf"
         currentUserId="usr_test"
+        currentFolderId={null}
       />,
     );
 
@@ -81,6 +88,7 @@ describe("VaultFileList metadata loading", () => {
         sectionKey="files"
         csrfToken="test-csrf"
         currentUserId="usr_test"
+        currentFolderId={null}
       />,
     );
 

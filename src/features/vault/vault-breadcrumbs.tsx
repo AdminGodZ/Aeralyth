@@ -45,22 +45,63 @@ export function VaultBreadcrumbs({
       );
       return;
     }
+    const controller = new AbortController();
     let canceled = false;
-    void resolveBreadcrumbNames({
-      breadcrumbs,
-      openNode: vault.openNode,
-      canceled: () => canceled,
-      onProgress(values) {
-        if (canceled) return;
-        // The exact breadcrumbs array owns this snapshot; render ignores
-        // results from any superseded source before this state is applied.
-        setResolutionState({ source: breadcrumbs, values });
-      },
+    const values: Record<string, VaultNameResolution> = {};
+    const references = breadcrumbs.flatMap((breadcrumb, index) => {
+      if (breadcrumb.e2eeState !== "encrypted") return [];
+      if (
+        breadcrumb.vaultRecordHash === null ||
+        breadcrumb.vaultRecordVersion === null ||
+        breadcrumb.vaultGenerationId === null
+      ) {
+        values[breadcrumb.id] = { status: "unavailable" };
+        return [];
+      }
+      return [
+        {
+          nodeId: breadcrumb.id,
+          parentId: index > 0 ? breadcrumbs[index - 1].id : null,
+          recordVersion: breadcrumb.vaultRecordVersion,
+          recordHash: breadcrumb.vaultRecordHash,
+          generationId: breadcrumb.vaultGenerationId,
+        },
+      ];
     });
+    const publish = (
+      results: Awaited<ReturnType<typeof vault.resolveMetadata>>,
+    ) => {
+      for (const result of results) {
+        values[result.nodeId] =
+          result.status === "ready"
+            ? { status: "ready", name: result.manifest.name }
+            : { status: "unavailable" };
+      }
+      if (!canceled) {
+        setResolutionState({ source: breadcrumbs, values: { ...values } });
+      }
+    };
+    void vault
+      .resolveMetadata(references, {
+        signal: controller.signal,
+        onCached: publish,
+        onPriority: publish,
+      })
+      .then(publish)
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        for (const reference of references) {
+          values[reference.nodeId] = { status: "unavailable" };
+        }
+        if (!canceled) {
+          setResolutionState({ source: breadcrumbs, values: { ...values } });
+        }
+      });
     return () => {
       canceled = true;
+      controller.abort();
     };
-  }, [breadcrumbs, vault.openNode, vault.state]);
+  }, [breadcrumbs, vault.resolveMetadata, vault.state]);
 
   const query = sort
     ? { sort, ...(direction ? { direction } : {}) }
@@ -119,35 +160,4 @@ export function VaultBreadcrumbs({
       })}
     </nav>
   );
-}
-
-async function resolveBreadcrumbNames({
-  breadcrumbs,
-  openNode,
-  canceled,
-  onProgress,
-}: {
-  breadcrumbs: FolderBreadcrumb[];
-  openNode(nodeId: string): Promise<{ name: string }>;
-  canceled(): boolean;
-  onProgress(values: Record<string, VaultNameResolution>): void;
-}): Promise<void> {
-  const resolved: Record<string, VaultNameResolution> = {};
-  for (const breadcrumb of breadcrumbs) {
-    if (canceled()) return;
-    if (breadcrumb.e2eeState !== "encrypted") continue;
-    try {
-      // Breadcrumbs are ordered parents first so each decrypted key seeds the next.
-      // react-doctor-disable-next-line react-doctor/async-await-in-loop
-      const manifest = await openNode(breadcrumb.id);
-      resolved[breadcrumb.id] = {
-        status: "ready",
-        name: manifest.name,
-      };
-    } catch {
-      resolved[breadcrumb.id] = { status: "unavailable" };
-    }
-    if (!canceled()) onProgress({ ...resolved });
-  }
-  if (!canceled()) onProgress(resolved);
 }

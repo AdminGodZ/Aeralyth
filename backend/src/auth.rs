@@ -532,7 +532,7 @@ mod tests {
             ("repositories", include_str!("routes/repositories.rs"), 3),
             ("share links", include_str!("routes/share_links.rs"), 1),
             ("profile", include_str!("routes/profile.rs"), 2),
-            ("vault", include_str!("routes/vault.rs"), 8),
+            ("vault", include_str!("routes/vault.rs"), 9),
         ] {
             assert!(
                 !source.contains("web::Json<"),

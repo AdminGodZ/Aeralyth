@@ -278,6 +278,9 @@ pub struct FolderBreadcrumb {
     id: String,
     name: String,
     e2ee_state: String,
+    vault_generation_id: Option<String>,
+    vault_record_version: Option<i64>,
+    vault_record_hash: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -299,6 +302,9 @@ pub struct FileEntry {
     updated_at: String,
     trashed_at: Option<String>,
     e2ee_state: String,
+    vault_generation_id: Option<String>,
+    vault_record_version: Option<i64>,
+    vault_record_hash: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -2323,7 +2329,7 @@ async fn validate_folder(
 
 const OWNED_FOLDER_CONTEXT_QUERY: &str = "
     WITH RECURSIVE ancestors AS (
-      SELECT id, original_name, parent_id, e2ee_state,
+      SELECT id, original_name, parent_id, e2ee_state, current_generation_id,
              ARRAY[id]::text[] AS visited_ids, 0 AS depth
       FROM files
       WHERE id = $1
@@ -2334,15 +2340,20 @@ const OWNED_FOLDER_CONTEXT_QUERY: &str = "
       UNION ALL
 
       SELECT parent.id, parent.original_name, parent.parent_id,
-             parent.e2ee_state, child.visited_ids || parent.id, child.depth + 1
+             parent.e2ee_state, parent.current_generation_id,
+             child.visited_ids || parent.id, child.depth + 1
       FROM files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
       WHERE parent.owner_id = $2
         AND child.depth < 100
         AND NOT parent.id = ANY(child.visited_ids)
     )
-    SELECT id, original_name, e2ee_state
+    SELECT ancestors.id, ancestors.original_name, ancestors.e2ee_state,
+           ancestors.current_generation_id AS vault_generation_id,
+           heads.record_version AS vault_record_version,
+           heads.record_hash AS vault_record_hash
     FROM ancestors
+    LEFT JOIN vault_node_heads AS heads ON heads.node_id = ancestors.id
     ORDER BY depth DESC
 ";
 
@@ -2375,6 +2386,7 @@ async fn resolve_owned_folder_context(
 const SHARED_FOLDER_CONTEXT_QUERY: &str = "
     WITH RECURSIVE ancestors AS (
       SELECT id, original_name, parent_id, owner_id, e2ee_state,
+             current_generation_id,
              ARRAY[id]::text[] AS visited_ids, 0 AS depth
       FROM files
       WHERE id = $1 AND entry_type = 'folder' AND state = 'active'
@@ -2383,6 +2395,7 @@ const SHARED_FOLDER_CONTEXT_QUERY: &str = "
 
       SELECT parent.id, parent.original_name, parent.parent_id,
              parent.owner_id, parent.e2ee_state,
+             parent.current_generation_id,
              child.visited_ids || parent.id, child.depth + 1
       FROM files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
@@ -2417,9 +2430,13 @@ const SHARED_FOLDER_CONTEXT_QUERY: &str = "
       ORDER BY candidates.root_depth
       LIMIT 1
     )
-    SELECT ancestors.id, ancestors.original_name, ancestors.e2ee_state
+    SELECT ancestors.id, ancestors.original_name, ancestors.e2ee_state,
+           ancestors.current_generation_id AS vault_generation_id,
+           heads.record_version AS vault_record_version,
+           heads.record_hash AS vault_record_hash
     FROM ancestors
     CROSS JOIN access
+    LEFT JOIN vault_node_heads AS heads ON heads.node_id = ancestors.id
     WHERE ancestors.depth <= access.root_depth
     ORDER BY ancestors.depth DESC
 ";
@@ -2456,6 +2473,13 @@ fn folder_breadcrumbs_from_rows(rows: Vec<tokio_postgres::Row>) -> Vec<FolderBre
             id: row.get("id"),
             name: row.get("original_name"),
             e2ee_state: row.get("e2ee_state"),
+            vault_generation_id: row
+                .get::<_, Option<Vec<u8>>>("vault_generation_id")
+                .map(|value| URL_SAFE_NO_PAD.encode(value)),
+            vault_record_version: row.get("vault_record_version"),
+            vault_record_hash: row
+                .get::<_, Option<Vec<u8>>>("vault_record_hash")
+                .map(|value| URL_SAFE_NO_PAD.encode(value)),
         })
         .collect()
 }
@@ -2602,10 +2626,14 @@ async fn list_entries(
               files.created_at,
               files.updated_at,
               files.trashed_at,
+              files.current_generation_id AS vault_generation_id,
+              heads.record_version AS vault_record_version,
+              heads.record_hash AS vault_record_hash,
               {rank}::integer AS cursor_rank,
               {name} AS cursor_name,
               {date} AS cursor_date
             FROM files
+            LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
             WHERE files.owner_id = $1
               AND ($2::text IS NULL OR $2::text IS NOT NULL)
               AND ($4::text IS NULL OR $4::text IS NOT NULL)
@@ -2711,12 +2739,16 @@ async fn list_shared_entries(
               files.created_at,
               files.updated_at,
               files.trashed_at,
+              files.current_generation_id AS vault_generation_id,
+              heads.record_version AS vault_record_version,
+              heads.record_hash AS vault_record_hash,
               1::integer AS cursor_rank,
               {name} AS cursor_name,
               {date} AS cursor_date
             FROM file_shares
             INNER JOIN files ON files.id = file_shares.file_id
             INNER JOIN users AS owners ON owners.id = files.owner_id
+            LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
             WHERE file_shares.recipient_id = $1
               AND ($3::text IS NULL OR $3::text IS NOT NULL)
               AND ($4::bigint IS NULL OR $4::bigint IS NOT NULL)
@@ -2839,13 +2871,18 @@ async fn list_shared_folder_entries(
                    access.created_at AS shared_at,
                    files.created_at,
                    files.updated_at,
-                   NULL::timestamptz AS trashed_at, {rank}::integer AS cursor_rank,
+                   NULL::timestamptz AS trashed_at,
+                   files.current_generation_id AS vault_generation_id,
+                   heads.record_version AS vault_record_version,
+                   heads.record_hash AS vault_record_hash,
+                   {rank}::integer AS cursor_rank,
                    {name} AS cursor_name,
                    {date} AS cursor_date
             FROM access
             INNER JOIN files ON files.owner_id = access.owner_id
               AND files.parent_id = $2 AND files.state = 'active'
             INNER JOIN users AS owners ON owners.id = files.owner_id
+            LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
             WHERE ($4::text IS NULL OR $4::text IS NOT NULL)
               AND ($5::bigint IS NULL OR $5::bigint IS NOT NULL)
               AND ($6::text IS NULL OR $6::text IS NOT NULL)
@@ -2906,6 +2943,13 @@ fn listed_file_from_row(row: tokio_postgres::Row) -> ListedFile {
             updated_at: timestamps::api(row.get("updated_at")),
             trashed_at: timestamps::optional_api(row.get("trashed_at")),
             e2ee_state: row.get("e2ee_state"),
+            vault_generation_id: row
+                .get::<_, Option<Vec<u8>>>("vault_generation_id")
+                .map(|value| URL_SAFE_NO_PAD.encode(value)),
+            vault_record_version: row.get("vault_record_version"),
+            vault_record_hash: row
+                .get::<_, Option<Vec<u8>>>("vault_record_hash")
+                .map(|value| URL_SAFE_NO_PAD.encode(value)),
         },
     }
 }
@@ -3787,11 +3831,30 @@ mod tests {
         assert!(OWNED_FOLDER_CONTEXT_QUERY.contains("entry_type = 'folder'"));
         assert!(OWNED_FOLDER_CONTEXT_QUERY.contains("state = 'active'"));
         assert!(OWNED_FOLDER_CONTEXT_QUERY.contains("ORDER BY depth DESC"));
+        assert!(OWNED_FOLDER_CONTEXT_QUERY.contains("heads.record_version"));
+        assert!(OWNED_FOLDER_CONTEXT_QUERY.contains("heads.record_hash"));
 
         assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("entry_type = 'folder'"));
         assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("legacy_access AS"));
         assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("vault_access AS"));
         assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("ORDER BY ancestors.depth DESC"));
+        assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("heads.record_version"));
+        assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("heads.record_hash"));
+    }
+
+    #[test]
+    fn file_listing_exposes_cryptographic_revision_validators() {
+        let source = include_str!("files.rs");
+        let listing = source
+            .split_once("async fn list_entries(")
+            .and_then(|(_, tail)| tail.split_once("fn listed_file_from_row"))
+            .map(|(listing, _)| listing)
+            .expect("file listing source should remain inspectable");
+
+        assert!(listing.contains("vault_generation_id"));
+        assert!(listing.contains("vault_record_version"));
+        assert!(listing.contains("vault_record_hash"));
+        assert!(listing.contains("LEFT JOIN vault_node_heads"));
     }
 
     #[test]
