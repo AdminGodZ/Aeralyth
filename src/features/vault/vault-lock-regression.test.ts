@@ -13,10 +13,48 @@ describe("vault lock lifecycle", () => {
       "window.dispatchEvent(new Event(VAULT_LOCKING_EVENT))",
     );
     const autoLock = source
-      .split("const scheduleLock = useCallback(")[1]
-      ?.split("useEffect(() => {")[0];
+      .split("const scheduleLock = (resetExpiredDeadline = false) => {")[1]
+      ?.split("const activity = () => scheduleLock();")[0];
     expect(autoLock).toContain("void lock();");
     expect(autoLock).not.toContain("clientRef.current?.lock()");
+  });
+
+  it("resumes a still-active tab session across refresh instead of locking on pagehide", () => {
+    const source = readFileSync(
+      resolve(import.meta.dirname, "vault-provider.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("readVaultResumeMarker(storage)");
+    expect(source).toContain("await client.resume(");
+    expect(source).toContain("extendSession(");
+    expect(source).not.toContain('addEventListener("pagehide"');
+  });
+
+  it("binds the expiring resume record to the server session and a non-extractable root key", () => {
+    const source = readFileSync(
+      resolve(import.meta.dirname, "vault.worker.ts"),
+      "utf8",
+    );
+
+    const storedSession = source
+      .split("type StoredVaultResumeSession = {")[1]
+      ?.split("};")[0];
+    const resumeValidation = source
+      .split("async function resumeVaultSession(")[1]
+      ?.split("async function persistVaultResumeSession(")[0];
+
+    expect(storedSession).toContain("sessionBindingHash: string");
+    expect(storedSession).toContain("identityFingerprint: string");
+    expect(storedSession).toContain("rootKey: CryptoKey");
+    expect(storedSession).not.toContain("password");
+    expect(resumeValidation).toContain("stored.expiresAt <= now");
+    expect(resumeValidation).toContain(
+      "stored.sessionBindingHash !== sessionBindingHash",
+    );
+    expect(resumeValidation).toContain(
+      "stored.identityFingerprint !== material.identity.fingerprintSha256",
+    );
   });
 
   it("checks the worker session before restoring persistent plaintext metadata", () => {

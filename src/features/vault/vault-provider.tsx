@@ -7,7 +7,6 @@ import {
   useCallback,
   useContext,
   useEffect,
-  useEffectEvent,
   useMemo,
   useRef,
   useState,
@@ -51,6 +50,13 @@ import {
   normalizeVaultAutoLockMinutes,
   VAULT_AUTO_LOCK_CHANGE_EVENT,
 } from "@/features/vault/vault-preferences";
+import {
+  clearVaultResumeMarker,
+  createVaultResumeMarker,
+  readVaultResumeMarker,
+  type VaultResumeMarker,
+  writeVaultResumeMarker,
+} from "@/features/vault/vault-session";
 
 type VaultState =
   | "off"
@@ -90,7 +96,20 @@ type VaultContextValue = {
 
 export const VAULT_LOCKING_EVENT = "aeralyth:vault-locking";
 
+const VAULT_RESUME_RECORD_GRACE_MS = 5_000;
+const VAULT_RESUME_PERSIST_INTERVAL_MS = 1_000;
+
 const VaultContext = createContext<VaultContextValue | null>(null);
+
+function vaultSessionStorage(): Storage | null {
+  if (typeof window === "undefined") return null;
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+}
+
 export function VaultProvider({
   children,
   csrfToken,
@@ -109,8 +128,11 @@ export function VaultProvider({
   const nodeOpenFlightsRef = useRef(new Map<string, Promise<VaultManifest>>());
   const [metadataResolver] = useState(() => new VaultMetadataResolver());
   const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lockDeadlineRef = useRef(0);
+  const resumeSessionIdRef = useRef<string | null>(null);
+  const persistedResumeExpirationRef = useRef(0);
   const [state, setState] = useState<VaultState>(
-    enabled ? (vaultConfigured ? "locked" : "setup") : "off",
+    enabled ? (vaultConfigured ? "unlocking" : "setup") : "off",
   );
   // Setup can transition this value locally before server props refresh.
   // react-doctor-disable-next-line react-doctor/no-derived-useState
@@ -118,7 +140,7 @@ export function VaultProvider({
   const [activeAutoLockMinutes, setActiveAutoLockMinutes] = useState(() =>
     normalizeVaultAutoLockMinutes(autoLockMinutes),
   );
-  const [dialogOpen, setDialogOpen] = useState(enabled);
+  const [dialogOpen, setDialogOpen] = useState(enabled && !vaultConfigured);
   const [mode, setMode] = useState<VaultDialogMode>(
     vaultConfigured ? "unlock" : "setup",
   );
@@ -135,8 +157,41 @@ export function VaultProvider({
     return clientRef.current;
   }, []);
 
+  const beginVaultResumeSession = useCallback(
+    async (client: VaultCryptoClient, vaultVersion: number): Promise<void> => {
+      const storage = vaultSessionStorage();
+      if (!storage) return;
+      const expiresAt = Date.now() + activeAutoLockMinutes * 60 * 1_000;
+      const marker = createVaultResumeMarker(expiresAt);
+      if (!writeVaultResumeMarker(storage, marker)) return;
+
+      try {
+        await client.persistSession(
+          marker.sessionId,
+          csrfToken,
+          expiresAt + VAULT_RESUME_RECORD_GRACE_MS,
+          vaultVersion,
+        );
+        resumeSessionIdRef.current = marker.sessionId;
+        persistedResumeExpirationRef.current = expiresAt;
+        lockDeadlineRef.current = expiresAt;
+      } catch {
+        clearVaultResumeMarker(storage);
+      }
+    },
+    [activeAutoLockMinutes, csrfToken],
+  );
+
   const lock = useCallback(async () => {
-    if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
+    if (lockTimerRef.current) {
+      clearTimeout(lockTimerRef.current);
+      lockTimerRef.current = null;
+    }
+    lockDeadlineRef.current = 0;
+    resumeSessionIdRef.current = null;
+    persistedResumeExpirationRef.current = 0;
+    const storage = vaultSessionStorage();
+    if (storage) clearVaultResumeMarker(storage);
     if (enabled) {
       window.dispatchEvent(new Event(VAULT_LOCKING_EVENT));
       setState(configured ? "locked" : "setup");
@@ -146,17 +201,6 @@ export function VaultProvider({
     nodeOpenFlightsRef.current.clear();
     await clientRef.current?.lock();
   }, [configured, enabled, metadataResolver]);
-
-  const scheduleLock = useCallback(() => {
-    if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
-    if (state !== "unlocked") return;
-    lockTimerRef.current = setTimeout(
-      () => {
-        void lock();
-      },
-      activeAutoLockMinutes * 60 * 1000,
-    );
-  }, [activeAutoLockMinutes, lock, state]);
 
   useEffect(() => {
     setActiveAutoLockMinutes(normalizeVaultAutoLockMinutes(autoLockMinutes));
@@ -172,26 +216,129 @@ export function VaultProvider({
       window.removeEventListener(VAULT_AUTO_LOCK_CHANGE_EVENT, updateAutoLock);
   }, []);
 
-  const scheduleLockForActivity = useEffectEvent(() => scheduleLock());
-  const lockForLifecycle = useEffectEvent(() => {
-    void lock();
-  });
+  useEffect(() => {
+    if (!enabled || !vaultConfigured) return;
+    const storage = vaultSessionStorage();
+    const marker = storage ? readVaultResumeMarker(storage) : null;
+    if (!marker) {
+      setState("locked");
+      setDialogOpen(true);
+      return;
+    }
 
+    let cancelled = false;
+    const restore = async () => {
+      try {
+        const client = getClient();
+        const material = await getUnlockMaterial();
+        const resumed = await client.resume(
+          marker.sessionId,
+          csrfToken,
+          material,
+        );
+        if (cancelled) return;
+        if (!resumed.resumed) {
+          if (storage) clearVaultResumeMarker(storage);
+          setState("locked");
+          setDialogOpen(true);
+          return;
+        }
+
+        resumeSessionIdRef.current = marker.sessionId;
+        persistedResumeExpirationRef.current = Math.min(
+          marker.expiresAt,
+          resumed.expiresAt,
+        );
+        lockDeadlineRef.current = marker.expiresAt;
+        setState("unlocked");
+        setDialogOpen(false);
+        enqueueShareDirectorySync({ csrfToken, client });
+      } catch {
+        if (cancelled) return;
+        if (storage) clearVaultResumeMarker(storage);
+        setState("locked");
+        setDialogOpen(true);
+      }
+    };
+    void restore();
+    return () => {
+      cancelled = true;
+    };
+  }, [csrfToken, enabled, getClient, vaultConfigured]);
+
+  // The returned cleanup directly removes both listeners and clears the one
+  // timeout that the activity callback is allowed to replace.
+  // react-doctor-disable-next-line react-doctor/effect-needs-cleanup
   useEffect(() => {
     if (!enabled) return;
-    const activity = () => scheduleLockForActivity();
-    const lifecycleLock = () => lockForLifecycle();
+    let timer: ReturnType<typeof setTimeout> | null = null;
+    const clearTimer = () => {
+      if (timer) clearTimeout(timer);
+      if (lockTimerRef.current === timer) lockTimerRef.current = null;
+      timer = null;
+    };
+    const scheduleLock = (resetExpiredDeadline = false) => {
+      clearTimer();
+      if (state !== "unlocked") return;
+      const now = Date.now();
+      if (
+        !resetExpiredDeadline &&
+        lockDeadlineRef.current > 0 &&
+        now >= lockDeadlineRef.current
+      ) {
+        void lock();
+        return;
+      }
+
+      const expiresAt = now + activeAutoLockMinutes * 60 * 1_000;
+      lockDeadlineRef.current = expiresAt;
+      const resumeSessionId = resumeSessionIdRef.current;
+      const storage = vaultSessionStorage();
+      if (resumeSessionId && storage) {
+        const marker: VaultResumeMarker = {
+          version: 1,
+          sessionId: resumeSessionId,
+          expiresAt,
+        };
+        writeVaultResumeMarker(storage, marker);
+        if (
+          expiresAt - persistedResumeExpirationRef.current >=
+          VAULT_RESUME_PERSIST_INTERVAL_MS
+        ) {
+          persistedResumeExpirationRef.current = expiresAt;
+          void clientRef.current
+            ?.extendSession(
+              resumeSessionId,
+              expiresAt + VAULT_RESUME_RECORD_GRACE_MS,
+            )
+            .catch(() => {
+              if (resumeSessionIdRef.current === resumeSessionId) {
+                persistedResumeExpirationRef.current = 0;
+              }
+            });
+        }
+      }
+
+      timer = setTimeout(
+        () => {
+          void lock();
+        },
+        Math.max(0, expiresAt - Date.now()),
+      );
+      lockTimerRef.current = timer;
+    };
+    const activity = () => scheduleLock();
     window.addEventListener("pointerdown", activity, { passive: true });
     window.addEventListener("keydown", activity);
-    window.addEventListener("pagehide", lifecycleLock);
-    scheduleLockForActivity();
+    if (state === "unlocked") scheduleLock(true);
     return () => {
       window.removeEventListener("pointerdown", activity);
       window.removeEventListener("keydown", activity);
-      window.removeEventListener("pagehide", lifecycleLock);
-      if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
+      if (timer) clearTimeout(timer);
+      if (lockTimerRef.current === timer) lockTimerRef.current = null;
+      timer = null;
     };
-  }, [enabled]);
+  }, [activeAutoLockMinutes, enabled, lock, state]);
 
   useEffect(() => {
     return () => {
@@ -201,7 +348,7 @@ export function VaultProvider({
   }, []);
 
   const requestUnlock = useCallback(() => {
-    if (!enabled || state === "unlocked") return;
+    if (!enabled || state === "unlocked" || state === "unlocking") return;
     setMode(configured ? "unlock" : "setup");
     setDialogOpen(true);
   }, [configured, enabled, state]);
@@ -313,14 +460,16 @@ export function VaultProvider({
           throw new Error("The vault passwords do not match.");
         }
         const setup = await client.setup(password);
-        await setupVault(csrfToken, setup.payload);
+        const created = await setupVault(csrfToken, setup.payload);
+        await beginVaultResumeSession(client, created.vaultVersion);
         setConfigured(true);
         setNewRecoveryCode(setup.recoveryCode);
         setRecoveryConfirmed(false);
         setState("unlocked");
       } else if (mode === "unlock") {
         const material = await getUnlockMaterial();
-        await client.unlock(password, material);
+        const unlocked = await client.unlock(password, material);
+        await beginVaultResumeSession(client, unlocked.vaultVersion);
         setState("unlocked");
         setDialogOpen(false);
       } else {
@@ -333,7 +482,8 @@ export function VaultProvider({
           password,
           material,
         );
-        await rewrapVault(csrfToken, recovered.payload);
+        const rewrapped = await rewrapVault(csrfToken, recovered.payload);
+        await beginVaultResumeSession(client, rewrapped.vaultVersion);
         setNewRecoveryCode(recovered.recoveryCode);
         setRecoveryConfirmed(false);
         setState("unlocked");

@@ -20,6 +20,7 @@ import {
   primaryDashboardSections,
   systemDashboardSections,
 } from "@/features/dashboard/config";
+import { useVault } from "@/features/vault/vault-provider";
 import { cn } from "@/lib/utils";
 
 const SIDEBAR_COOKIE = "aeralyth_sidebar_collapsed";
@@ -41,6 +42,7 @@ export function DashboardSidebar({
   initialCollapsed: boolean;
 }) {
   const pathname = usePathname();
+  const vault = useVault();
   const pathnameSectionKey =
     getDashboardSection(pathname.split("/")[1] ?? "")?.key ?? "files";
   const [isCollapsed, setIsCollapsed] = useState(initialCollapsed);
@@ -200,6 +202,9 @@ export function DashboardSidebar({
           <form
             action="/api/auth/logout"
             method="post"
+            onSubmit={() => {
+              void vault.lock();
+            }}
             className={cn(
               "absolute left-0 top-0 h-9 min-w-0 transition-[width] duration-200 ease-out",
               isCollapsed ? "w-10" : "w-[calc(100%-2.5rem)]",

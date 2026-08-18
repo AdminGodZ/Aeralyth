@@ -79,6 +79,7 @@ import type {
   VaultMetadataOpenResult,
   VaultOpenPlanResult,
   VaultRecoveryResult,
+  VaultResumeResult,
   VaultSetupResult,
   VaultShareDirectoryInput,
   VaultShareDirectoryResult,
@@ -153,6 +154,15 @@ type StoredMetadataRecord = {
   ciphertext: ArrayBuffer;
 };
 
+type StoredVaultResumeSession = {
+  sessionId: string;
+  sessionBindingHash: string;
+  identityFingerprint: string;
+  vaultVersion: number;
+  expiresAt: number;
+  rootKey: CryptoKey;
+};
+
 type SerializedManifest = Omit<VaultManifest, "generationId"> & {
   generationId: string;
 };
@@ -166,6 +176,7 @@ const nodeOpenFlights = new Map<string, Promise<OpenedPlan>>();
 const metadataMemoryCache = new Map<string, VaultCachedMetadataResult>();
 let metadataCacheKey: CryptoKey | null = null;
 let metadataCacheNamespace: string | null = null;
+let activeResumeSessionId: string | null = null;
 const encryptionSessions = new Map<string, EncryptionSession>();
 const decryptionSessions = new Map<string, DecryptionSession>();
 const SHARE_WRAPPER_CRYPTO_CONCURRENCY = detectedCryptoConcurrency(16);
@@ -175,8 +186,11 @@ const SHARE_SIDECAR_CRYPTO_CONCURRENCY = SHARE_WRAPPER_CRYPTO_CONCURRENCY;
 const MAX_METADATA_DECRYPTION_CONCURRENCY = 30;
 const MAX_METADATA_MEMORY_ENTRIES = 1_000;
 const METADATA_CACHE_DATABASE = "aeralyth-vault-metadata-v1";
-const METADATA_CACHE_DATABASE_VERSION = 2;
+const METADATA_CACHE_DATABASE_VERSION = 3;
 const METADATA_CACHE_STORE = "metadata";
+const VAULT_RESUME_SESSION_STORE = "resume-sessions";
+const VAULT_RESUME_SESSION_ID_PATTERN = /^vrs_[A-Za-z0-9_-]{24}$/u;
+const MAX_VAULT_RESUME_SESSION_MS = 61 * 60_000;
 let metadataDatabasePromise: Promise<IDBDatabase> | null = null;
 const hpkeSuite = new CipherSuite({
   kem: new DhkemX25519HkdfSha256(),
@@ -221,6 +235,28 @@ async function dispatch(
           result: await unlockVault(request.password, request.material),
         },
       };
+    case "resume":
+      return {
+        result: {
+          type: "resume",
+          result: await resumeVaultSession(
+            request.sessionId,
+            request.sessionBinding,
+            request.material,
+          ),
+        },
+      };
+    case "persistSession":
+      await persistVaultResumeSession(
+        request.sessionId,
+        request.sessionBinding,
+        request.expiresAt,
+        request.vaultVersion,
+      );
+      return { result: { type: "persistSession" } };
+    case "extendSession":
+      await extendVaultResumeSession(request.sessionId, request.expiresAt);
+      return { result: { type: "extendSession" } };
     case "recover":
       return {
         result: {
@@ -232,9 +268,14 @@ async function dispatch(
           ),
         },
       };
-    case "lock":
+    case "lock": {
+      const resumeSessionId = activeResumeSessionId;
       lockVault();
+      if (resumeSessionId) {
+        await deleteVaultResumeSession(resumeSessionId).catch(() => undefined);
+      }
       return { result: { type: "lock" } };
+    }
     case "openPlan":
       return {
         result: { type: "openPlan", result: await openPlan(request.plan) },
@@ -567,6 +608,92 @@ async function unlockVault(
   }
 }
 
+async function resumeVaultSession(
+  sessionId: string,
+  sessionBinding: string,
+  material: VaultUnlockMaterial,
+): Promise<VaultResumeResult> {
+  assertUnlockMaterial(material);
+  assertVaultResumeSessionId(sessionId);
+  const now = Date.now();
+  const stored = await readVaultResumeSession(sessionId);
+  const sessionBindingHash = await hashVaultSessionBinding(sessionBinding);
+  if (
+    !stored ||
+    !isStoredVaultResumeSession(stored) ||
+    stored.expiresAt <= now ||
+    stored.expiresAt > now + MAX_VAULT_RESUME_SESSION_MS ||
+    stored.sessionBindingHash !== sessionBindingHash ||
+    stored.identityFingerprint !== material.identity.fingerprintSha256 ||
+    stored.vaultVersion !== material.vaultVersion
+  ) {
+    await deleteVaultResumeSession(sessionId).catch(() => undefined);
+    return { resumed: false };
+  }
+
+  lockVault();
+  try {
+    await installUnlockedRoot(stored.rootKey, material);
+    activeResumeSessionId = sessionId;
+    return { resumed: true, expiresAt: stored.expiresAt };
+  } catch {
+    lockVault();
+    await deleteVaultResumeSession(sessionId).catch(() => undefined);
+    return { resumed: false };
+  }
+}
+
+async function persistVaultResumeSession(
+  sessionId: string,
+  sessionBinding: string,
+  expiresAt: number,
+  vaultVersion: number,
+): Promise<void> {
+  assertVaultResumeSessionId(sessionId);
+  assertVaultResumeExpiration(expiresAt);
+  if (!Number.isSafeInteger(vaultVersion) || vaultVersion < 1) {
+    throw new Error("The vault resume version is invalid.");
+  }
+  const activeRoot = requireRootKey();
+  const activeIdentity = requireIdentity();
+  const stored: StoredVaultResumeSession = {
+    sessionId,
+    sessionBindingHash: await hashVaultSessionBinding(sessionBinding),
+    identityFingerprint: toBase64Url(activeIdentity.fingerprint),
+    vaultVersion,
+    expiresAt,
+    rootKey: activeRoot,
+  };
+  await writeVaultResumeSession(stored);
+  activeResumeSessionId = sessionId;
+}
+
+async function extendVaultResumeSession(
+  sessionId: string,
+  expiresAt: number,
+): Promise<void> {
+  assertVaultResumeSessionId(sessionId);
+  assertVaultResumeExpiration(expiresAt);
+  if (activeResumeSessionId !== sessionId) {
+    throw vaultError("VAULT_LOCKED", "Unlock the vault first.");
+  }
+  const activeRoot = requireRootKey();
+  const activeIdentity = requireIdentity();
+  const stored = await readVaultResumeSession(sessionId);
+  if (
+    !stored ||
+    !isStoredVaultResumeSession(stored) ||
+    stored.identityFingerprint !== toBase64Url(activeIdentity.fingerprint)
+  ) {
+    throw new Error("The vault resume session is unavailable.");
+  }
+  await writeVaultResumeSession({
+    ...stored,
+    expiresAt,
+    rootKey: activeRoot,
+  });
+}
+
 async function recoverVault(
   recoveryCode: string,
   newPassword: string,
@@ -716,6 +843,13 @@ async function installUnlockedMaterial(
   material: VaultUnlockMaterial,
 ): Promise<void> {
   const importedRoot = await importHkdf(rootMaterial);
+  await installUnlockedRoot(importedRoot, material);
+}
+
+async function installUnlockedRoot(
+  importedRoot: CryptoKey,
+  material: VaultUnlockMaterial,
+): Promise<void> {
   const privateRecordId = fromBase64Url(material.identity.privateRecordId);
   const privateBytes = await decryptRootRecord(
     importedRoot,
@@ -813,6 +947,7 @@ function lockVault(): void {
   rootKey = null;
   metadataCacheKey = null;
   metadataCacheNamespace = null;
+  activeResumeSessionId = null;
   nodeKeys.clear();
   nodeOpenFlights.clear();
   metadataMemoryCache.clear();
@@ -1665,6 +1800,13 @@ function openMetadataDatabase(): Promise<IDBDatabase> {
       } else if ((event as IDBVersionChangeEvent).oldVersion < 2) {
         request.transaction?.objectStore(METADATA_CACHE_STORE).clear();
       }
+      if (
+        !request.result.objectStoreNames.contains(VAULT_RESUME_SESSION_STORE)
+      ) {
+        request.result.createObjectStore(VAULT_RESUME_SESSION_STORE, {
+          keyPath: "sessionId",
+        });
+      }
     });
     request.addEventListener(
       "success",
@@ -1694,6 +1836,130 @@ function openMetadataDatabase(): Promise<IDBDatabase> {
     if (metadataDatabasePromise === opening) metadataDatabasePromise = null;
   });
   return opening;
+}
+
+async function readVaultResumeSession(
+  sessionId: string,
+): Promise<StoredVaultResumeSession | null> {
+  if (typeof indexedDB === "undefined") return null;
+  const database = await openMetadataDatabase();
+  const transaction = database.transaction(
+    VAULT_RESUME_SESSION_STORE,
+    "readonly",
+  );
+  const completion = transactionComplete(transaction);
+  const stored = await requestResult<StoredVaultResumeSession | undefined>(
+    transaction.objectStore(VAULT_RESUME_SESSION_STORE).get(sessionId),
+  );
+  await completion;
+  return stored ?? null;
+}
+
+async function writeVaultResumeSession(
+  stored: StoredVaultResumeSession,
+): Promise<void> {
+  if (typeof indexedDB === "undefined") {
+    throw new Error("Vault resume storage is unavailable.");
+  }
+  await pruneExpiredVaultResumeSessions(Date.now());
+  const database = await openMetadataDatabase();
+  const transaction = database.transaction(
+    VAULT_RESUME_SESSION_STORE,
+    "readwrite",
+  );
+  transaction.objectStore(VAULT_RESUME_SESSION_STORE).put(stored);
+  await transactionComplete(transaction);
+}
+
+async function deleteVaultResumeSession(sessionId: string): Promise<void> {
+  if (typeof indexedDB === "undefined") return;
+  const database = await openMetadataDatabase();
+  const transaction = database.transaction(
+    VAULT_RESUME_SESSION_STORE,
+    "readwrite",
+  );
+  transaction.objectStore(VAULT_RESUME_SESSION_STORE).delete(sessionId);
+  await transactionComplete(transaction);
+}
+
+async function pruneExpiredVaultResumeSessions(now: number): Promise<void> {
+  const database = await openMetadataDatabase();
+  const transaction = database.transaction(
+    VAULT_RESUME_SESSION_STORE,
+    "readwrite",
+  );
+  const cursorRequest = transaction
+    .objectStore(VAULT_RESUME_SESSION_STORE)
+    .openCursor();
+  cursorRequest.addEventListener("success", () => {
+    const cursor = cursorRequest.result;
+    if (!cursor) return;
+    const stored = cursor.value;
+    if (
+      !isStoredVaultResumeSession(stored) ||
+      stored.expiresAt <= now ||
+      stored.expiresAt > now + MAX_VAULT_RESUME_SESSION_MS
+    ) {
+      cursor.delete();
+    }
+    cursor.continue();
+  });
+  await transactionComplete(transaction);
+}
+
+function isStoredVaultResumeSession(
+  value: unknown,
+): value is StoredVaultResumeSession {
+  if (!value || typeof value !== "object") return false;
+  const stored = value as Partial<StoredVaultResumeSession>;
+  const rootKey = stored.rootKey as Partial<CryptoKey> | undefined;
+  return (
+    typeof stored.sessionId === "string" &&
+    VAULT_RESUME_SESSION_ID_PATTERN.test(stored.sessionId) &&
+    typeof stored.sessionBindingHash === "string" &&
+    typeof stored.identityFingerprint === "string" &&
+    typeof stored.vaultVersion === "number" &&
+    Number.isSafeInteger(stored.vaultVersion) &&
+    typeof stored.expiresAt === "number" &&
+    Number.isSafeInteger(stored.expiresAt) &&
+    !!rootKey &&
+    rootKey.type === "secret" &&
+    rootKey.extractable === false &&
+    rootKey.algorithm?.name === "HKDF" &&
+    Array.isArray(rootKey.usages) &&
+    rootKey.usages.length === 1 &&
+    rootKey.usages[0] === "deriveBits"
+  );
+}
+
+function assertVaultResumeSessionId(sessionId: string): void {
+  if (!VAULT_RESUME_SESSION_ID_PATTERN.test(sessionId)) {
+    throw new Error("The vault resume session is invalid.");
+  }
+}
+
+function assertVaultResumeExpiration(expiresAt: number): void {
+  const now = Date.now();
+  if (
+    !Number.isSafeInteger(expiresAt) ||
+    expiresAt <= now ||
+    expiresAt > now + MAX_VAULT_RESUME_SESSION_MS
+  ) {
+    throw new Error("The vault resume expiration is invalid.");
+  }
+}
+
+async function hashVaultSessionBinding(binding: string): Promise<string> {
+  if (binding.length < 16 || binding.length > 1_024) {
+    throw new Error("The vault session binding is invalid.");
+  }
+  const bindingBytes = utf8(binding);
+  const digest = await sha256(bindingBytes);
+  try {
+    return toBase64Url(digest);
+  } finally {
+    wipe(bindingBytes, digest);
+  }
 }
 
 function requestResult<T>(request: IDBRequest<T>): Promise<T> {

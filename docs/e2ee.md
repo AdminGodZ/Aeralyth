@@ -67,10 +67,18 @@ separate vault password and receives a one-time recovery key. Losing both makes
 the encrypted data permanently unrecoverable; administrators cannot reset the
 vault.
 
-The unlocked account root and identity private keys live only in the dedicated
-same-origin worker. The worker locks on page lifecycle changes and after the
-configured 5, 15, 30, or 60 minutes of inactivity. Locking drops CryptoKey
-references and best-effort overwrites temporary byte arrays.
+The active account root and identity private keys live in the dedicated
+same-origin worker. While the vault is unlocked, IndexedDB may hold an expiring
+clone of the non-extractable account-root `CryptoKey`; a random marker scoped to
+the current tab and bound to the authenticated server session makes that key
+reachable after a refresh. Identity private-key bytes are decrypted again inside
+the new worker and are never written to browser storage as plaintext.
+
+Activity renews the configured 5, 15, 30, or 60 minute deadline. Refreshing the
+same tab resumes the vault only while that deadline and tab marker remain valid.
+Explicit locking, signing out, an expired deadline, or losing the tab session
+prevents restoration. Locking drops in-memory `CryptoKey` references, deletes
+the active resume record, and best-effort overwrites temporary byte arrays.
 
 ## Sharing and revocation
 

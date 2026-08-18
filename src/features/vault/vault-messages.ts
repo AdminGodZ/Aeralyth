@@ -24,6 +24,27 @@ export type VaultWorkerRequest =
     }
   | {
       id: number;
+      type: "resume";
+      sessionId: string;
+      sessionBinding: string;
+      material: VaultUnlockMaterial;
+    }
+  | {
+      id: number;
+      type: "persistSession";
+      sessionId: string;
+      sessionBinding: string;
+      expiresAt: number;
+      vaultVersion: number;
+    }
+  | {
+      id: number;
+      type: "extendSession";
+      sessionId: string;
+      expiresAt: number;
+    }
+  | {
+      id: number;
       type: "recover";
       recoveryCode: string;
       newPassword: string;
@@ -211,6 +232,10 @@ export type VaultUnlockResult = {
   identityFingerprint: string;
 };
 
+export type VaultResumeResult =
+  | { resumed: true; expiresAt: number }
+  | { resumed: false };
+
 export type VaultRecoveryResult = {
   payload: VaultRewrapPayload;
   recoveryCode: string;
@@ -249,6 +274,9 @@ export type VaultWorkerResult =
   | { type: "preflight"; supported: true }
   | { type: "setup"; result: VaultSetupResult }
   | { type: "unlock"; result: VaultUnlockResult }
+  | { type: "resume"; result: VaultResumeResult }
+  | { type: "persistSession" }
+  | { type: "extendSession" }
   | { type: "recover"; result: VaultRecoveryResult }
   | { type: "lock" }
   | { type: "openPlan"; result: VaultOpenPlanResult }

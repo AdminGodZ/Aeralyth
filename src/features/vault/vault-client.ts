@@ -15,6 +15,7 @@ import type {
   VaultMetadataOpenResult,
   VaultOpenPlanResult,
   VaultRecoveryResult,
+  VaultResumeResult,
   VaultSetupResult,
   VaultShareDirectoryInput,
   VaultShareDirectoryResult,
@@ -107,6 +108,47 @@ export class VaultCryptoClient {
       await this.send({ type: "unlock", password, material }),
       "unlock",
     ).result;
+  }
+
+  async resume(
+    sessionId: string,
+    sessionBinding: string,
+    material: VaultUnlockMaterial,
+  ): Promise<VaultResumeResult> {
+    return expectResult(
+      await this.send({
+        type: "resume",
+        sessionId,
+        sessionBinding,
+        material,
+      }),
+      "resume",
+    ).result;
+  }
+
+  async persistSession(
+    sessionId: string,
+    sessionBinding: string,
+    expiresAt: number,
+    vaultVersion: number,
+  ): Promise<void> {
+    expectResult(
+      await this.send({
+        type: "persistSession",
+        sessionId,
+        sessionBinding,
+        expiresAt,
+        vaultVersion,
+      }),
+      "persistSession",
+    );
+  }
+
+  async extendSession(sessionId: string, expiresAt: number): Promise<void> {
+    expectResult(
+      await this.send({ type: "extendSession", sessionId, expiresAt }),
+      "extendSession",
+    );
   }
 
   async recover(
@@ -282,7 +324,6 @@ export class VaultCryptoClient {
 
   async close(): Promise<void> {
     if (this.closed) return;
-    await this.lock().catch(() => undefined);
     this.closed = true;
     this.worker.terminate();
     this.failPending(new Error("The vault worker was closed."));
