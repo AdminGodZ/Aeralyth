@@ -39,13 +39,13 @@ import {
   type UploadTreeEntry,
 } from "@/features/dashboard/folder-upload-conflicts";
 import type { FolderZipWorkerResponse } from "@/features/dashboard/folder-zip-messages";
-import { GitIgnoreReviewDialog } from "@/features/dashboard/gitignore-review-dialog";
 import {
   type LegacyFolderManifest,
   legacyUploadTarget,
   needsLegacyFolderManifest,
   validateLegacyFolderManifest,
 } from "@/features/dashboard/legacy-folder-manifest";
+import { UploadExclusionReviewDialog } from "@/features/dashboard/upload-exclusion-review-dialog";
 import {
   UploadProgressPanel,
   type UploadProgressSession,
@@ -67,7 +67,7 @@ type UploadSelection = {
   relativePath: string;
 };
 
-type PendingGitIgnoreReview = {
+type PendingUploadExclusionReview = {
   prepared: PreparedFolderUploadSelection<UploadSelection>;
   createRepository: boolean;
 };
@@ -214,8 +214,8 @@ function useUploadPanelController({
   const [uploadSession, setUploadSession] =
     useState<UploadProgressSession | null>(null);
   const [uploadError, setUploadError] = useState<string | null>(null);
-  const [pendingGitIgnoreReview, setPendingGitIgnoreReview] =
-    useState<PendingGitIgnoreReview | null>(null);
+  const [pendingUploadExclusionReview, setPendingUploadExclusionReview] =
+    useState<PendingUploadExclusionReview | null>(null);
   const [pendingFolderUpload, setPendingFolderUpload] =
     useState<PendingFolderUpload | null>(null);
   const [pendingReplacementUpload, setPendingReplacementUpload] =
@@ -843,7 +843,7 @@ function useUploadPanelController({
 
     const createRepository = folderUploadCreatesRepository(surface);
     if (folderSelection) {
-      setPreparingMessage("Reading .gitignore");
+      setPreparingMessage("Checking upload exclusions");
       setIsPreparingSelection(true);
       let prepared: PreparedFolderUploadSelection<UploadSelection>;
       try {
@@ -852,7 +852,7 @@ function useUploadPanelController({
         setUploadError(
           error instanceof Error && error.message
             ? error.message
-            : "The .gitignore rules could not be read.",
+            : "The upload exclusion rules could not be read.",
         );
         return;
       } finally {
@@ -864,8 +864,8 @@ function useUploadPanelController({
         return;
       }
 
-      if (prepared.gitIgnoreItems.length > 0) {
-        setPendingGitIgnoreReview({ prepared, createRepository });
+      if (prepared.reviewItems.length > 0) {
+        setPendingUploadExclusionReview({ prepared, createRepository });
         return;
       }
 
@@ -874,11 +874,7 @@ function useUploadPanelController({
         return;
       }
 
-      queueFolderOrUpload(
-        prepared.files,
-        prepared.gitMetadataFiles,
-        createRepository,
-      );
+      queueFolderOrUpload(prepared.files, 0, createRepository);
       return;
     }
 
@@ -890,20 +886,20 @@ function useUploadPanelController({
     queueFolderOrUpload(files);
   }
 
-  function confirmGitIgnoreReview(selectedIgnoredFiles: UploadSelection[]) {
-    if (!pendingGitIgnoreReview) return;
+  function confirmUploadExclusionReview(selectedFiles: UploadSelection[]) {
+    if (!pendingUploadExclusionReview) return;
 
     const finalized = finalizeFolderUploadSelection(
-      pendingGitIgnoreReview.prepared,
-      selectedIgnoredFiles,
+      pendingUploadExclusionReview.prepared,
+      selectedFiles,
     );
     if (finalized.error) {
       setUploadError(finalized.error);
       return;
     }
 
-    const createRepository = pendingGitIgnoreReview.createRepository;
-    setPendingGitIgnoreReview(null);
+    const createRepository = pendingUploadExclusionReview.createRepository;
+    setPendingUploadExclusionReview(null);
     queueFolderOrUpload(
       finalized.files,
       finalized.ignoredFiles,
@@ -1253,16 +1249,17 @@ function useUploadPanelController({
     fileInputRef,
     folderInputRef,
     handleFileChange,
-    pendingGitIgnoreReview,
+    pendingUploadExclusionReview,
     pendingFolderUpload,
     pendingReplacementUpload,
     compressionError,
     compressionProgress,
-    closePendingGitIgnoreReview: () => setPendingGitIgnoreReview(null),
+    closePendingUploadExclusionReview: () =>
+      setPendingUploadExclusionReview(null),
     closePendingFolderUpload: () => setPendingFolderUpload(null),
     closePendingReplacementUpload: () => setPendingReplacementUpload(null),
     confirmReplacementUpload,
-    confirmGitIgnoreReview,
+    confirmUploadExclusionReview,
     uploadPendingFolder,
     startFolderCompression,
     cancelCompression,
@@ -1281,16 +1278,16 @@ function UploadPanelView({
   fileInputRef,
   folderInputRef,
   handleFileChange,
-  pendingGitIgnoreReview,
+  pendingUploadExclusionReview,
   pendingFolderUpload,
   pendingReplacementUpload,
   compressionError,
   compressionProgress,
-  closePendingGitIgnoreReview,
+  closePendingUploadExclusionReview,
   closePendingFolderUpload,
   closePendingReplacementUpload,
   confirmReplacementUpload,
-  confirmGitIgnoreReview,
+  confirmUploadExclusionReview,
   uploadPendingFolder,
   startFolderCompression,
   cancelCompression,
@@ -1418,16 +1415,15 @@ function UploadPanelView({
         </div>
       ) : null}
 
-      {pendingGitIgnoreReview ? (
-        <GitIgnoreReviewDialog
-          items={pendingGitIgnoreReview.prepared.gitIgnoreItems}
-          autoIncludedFiles={pendingGitIgnoreReview.prepared.files}
+      {pendingUploadExclusionReview ? (
+        <UploadExclusionReviewDialog
+          items={pendingUploadExclusionReview.prepared.reviewItems}
+          autoIncludedFiles={pendingUploadExclusionReview.prepared.files}
           gitIgnoreFileCount={
-            pendingGitIgnoreReview.prepared.gitIgnoreFileCount
+            pendingUploadExclusionReview.prepared.gitIgnoreFileCount
           }
-          gitMetadataFiles={pendingGitIgnoreReview.prepared.gitMetadataFiles}
-          onClose={closePendingGitIgnoreReview}
-          onContinue={confirmGitIgnoreReview}
+          onClose={closePendingUploadExclusionReview}
+          onContinue={confirmUploadExclusionReview}
         />
       ) : null}
 

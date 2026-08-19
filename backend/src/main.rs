@@ -1,4 +1,5 @@
 mod auth;
+mod collection_timestamps;
 mod config;
 mod db;
 mod e2ee;

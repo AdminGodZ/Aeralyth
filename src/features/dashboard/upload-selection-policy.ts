@@ -16,18 +16,18 @@ type UploadSelectionLike = {
 export type PreparedFolderUploadSelection<T extends GitIgnoreSelection> = {
   files: T[];
   uploadableFiles: T[];
-  gitIgnoredFiles: T[];
-  gitIgnoreItems: GitIgnoreReviewItem<T>[];
-  gitMetadataFiles: number;
+  excludedFiles: T[];
+  reviewItems: UploadExclusionReviewItem<T>[];
   gitIgnoreFileCount: number;
   error: string | null;
 };
 
-export type GitIgnoreReviewItem<T extends GitIgnoreSelection> = {
+export type UploadExclusionReviewItem<T extends GitIgnoreSelection> = {
   kind: "file" | "folder";
   path: string;
   files: T[];
   sizeBytes: number;
+  reason: "gitignore" | "hidden-folder";
 };
 
 export function getUploadSelectionCountError(
@@ -50,9 +50,16 @@ export async function prepareFolderUploadSelection<
   T extends GitIgnoreSelection,
 >(selections: readonly T[]): Promise<PreparedFolderUploadSelection<T>> {
   const partition = await partitionGitIgnoredSelections(selections);
+  const excludedSelectionSet = new Set([
+    ...partition.ignoredSelections,
+    ...partition.hiddenDirectorySelections,
+  ]);
+  const excludedFiles = selections.filter((selection) =>
+    excludedSelectionSet.has(selection),
+  );
   const uploadableSelections = new Set([
     ...partition.includedSelections,
-    ...partition.ignoredSelections,
+    ...excludedFiles,
   ]);
   const uploadableFiles = selections.filter((selection) =>
     uploadableSelections.has(selection),
@@ -61,13 +68,13 @@ export async function prepareFolderUploadSelection<
   return {
     files: partition.includedSelections,
     uploadableFiles,
-    gitIgnoredFiles: partition.ignoredSelections,
-    gitIgnoreItems: buildGitIgnoreReviewItems(
+    excludedFiles,
+    reviewItems: buildUploadExclusionReviewItems(
       uploadableFiles,
       partition.includedSelections,
       partition.ignoredSelections,
+      partition.hiddenDirectorySelections,
     ),
-    gitMetadataFiles: partition.gitMetadataSelections.length,
     gitIgnoreFileCount: partition.gitIgnoreFileCount,
     error: getUploadSelectionError(partition.includedSelections, false),
   };
@@ -81,13 +88,13 @@ export function finalizeFolderUploadSelection<T extends GitIgnoreSelection>(
   ignoredFiles: number;
   error: string | null;
 } {
-  const gitIgnoredSelections = new Set(prepared.gitIgnoredFiles);
-  const selectedIgnoredSelections = new Set(
-    selectedFiles.filter((selection) => gitIgnoredSelections.has(selection)),
+  const excludedSelections = new Set(prepared.excludedFiles);
+  const selectedExcludedSelections = new Set(
+    selectedFiles.filter((selection) => excludedSelections.has(selection)),
   );
   const includedSelections = new Set([
     ...prepared.files,
-    ...selectedIgnoredSelections,
+    ...selectedExcludedSelections,
   ]);
   const files = prepared.uploadableFiles.filter((selection) =>
     includedSelections.has(selection),
@@ -96,9 +103,7 @@ export function finalizeFolderUploadSelection<T extends GitIgnoreSelection>(
   return {
     files,
     ignoredFiles:
-      prepared.gitMetadataFiles +
-      prepared.gitIgnoredFiles.length -
-      selectedIgnoredSelections.size,
+      prepared.excludedFiles.length - selectedExcludedSelections.size,
     error:
       files.length === 0
         ? "Choose at least one file to upload."
@@ -106,15 +111,17 @@ export function finalizeFolderUploadSelection<T extends GitIgnoreSelection>(
   };
 }
 
-function buildGitIgnoreReviewItems<T extends GitIgnoreSelection>(
+function buildUploadExclusionReviewItems<T extends GitIgnoreSelection>(
   uploadableFiles: readonly T[],
   includedFiles: readonly T[],
-  ignoredFiles: readonly T[],
-): GitIgnoreReviewItem<T>[] {
+  gitIgnoredFiles: readonly T[],
+  hiddenDirectoryFiles: readonly T[],
+): UploadExclusionReviewItem<T>[] {
   const paths = getRootRelativePaths(uploadableFiles);
   const pathsBySelection = new Map(
     uploadableFiles.map((selection, index) => [selection, paths[index] ?? ""]),
   );
+  const hiddenDirectoryFileSet = new Set(hiddenDirectoryFiles);
   const includedDirectories = new Set<string>();
   for (const selection of includedFiles) {
     const path = pathsBySelection.get(selection);
@@ -125,19 +132,31 @@ function buildGitIgnoreReviewItems<T extends GitIgnoreSelection>(
     }
   }
 
-  const items = new Map<string, GitIgnoreReviewItem<T>>();
-  for (const selection of ignoredFiles) {
+  const items = new Map<string, UploadExclusionReviewItem<T>>();
+  for (const selection of [...gitIgnoredFiles, ...hiddenDirectoryFiles]) {
     const path = pathsBySelection.get(selection);
     if (!path) continue;
     const segments = path.split("/");
-    let kind: GitIgnoreReviewItem<T>["kind"] = "file";
+    let kind: UploadExclusionReviewItem<T>["kind"] = "file";
     let itemPath = path;
-    for (let depth = 1; depth < segments.length; depth += 1) {
-      const directory = segments.slice(0, depth).join("/");
-      if (!includedDirectories.has(directory)) {
+    let reason: UploadExclusionReviewItem<T>["reason"] = "gitignore";
+    if (hiddenDirectoryFileSet.has(selection)) {
+      const hiddenDirectoryIndex = segments
+        .slice(0, -1)
+        .findIndex((segment) => segment.startsWith("."));
+      if (hiddenDirectoryIndex >= 0) {
         kind = "folder";
-        itemPath = directory;
-        break;
+        itemPath = segments.slice(0, hiddenDirectoryIndex + 1).join("/");
+        reason = "hidden-folder";
+      }
+    } else {
+      for (let depth = 1; depth < segments.length; depth += 1) {
+        const directory = segments.slice(0, depth).join("/");
+        if (!includedDirectories.has(directory)) {
+          kind = "folder";
+          itemPath = directory;
+          break;
+        }
       }
     }
 
@@ -146,12 +165,16 @@ function buildGitIgnoreReviewItems<T extends GitIgnoreSelection>(
     if (existing) {
       existing.files.push(selection);
       existing.sizeBytes += selection.file.size;
+      if (reason === "hidden-folder") {
+        existing.reason = reason;
+      }
     } else {
       items.set(key, {
         kind,
         path: itemPath,
         files: [selection],
         sizeBytes: selection.file.size,
+        reason,
       });
     }
   }

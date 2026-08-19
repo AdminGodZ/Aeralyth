@@ -15,31 +15,29 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import {
-  type GitIgnoreReviewItem,
   getUploadSelectionError,
+  type UploadExclusionReviewItem,
 } from "@/features/dashboard/upload-selection-policy";
 
-export type GitIgnoreReviewFile = {
+export type UploadExclusionReviewFile = {
   file: File;
   relativePath: string;
 };
 
 const INITIAL_VISIBLE_ITEMS = 200;
 
-export function GitIgnoreReviewDialog({
+export function UploadExclusionReviewDialog({
   items,
   autoIncludedFiles,
   gitIgnoreFileCount,
-  gitMetadataFiles,
   onClose,
   onContinue,
 }: {
-  items: GitIgnoreReviewItem<GitIgnoreReviewFile>[];
-  autoIncludedFiles: GitIgnoreReviewFile[];
+  items: UploadExclusionReviewItem<UploadExclusionReviewFile>[];
+  autoIncludedFiles: UploadExclusionReviewFile[];
   gitIgnoreFileCount: number;
-  gitMetadataFiles: number;
   onClose: () => void;
-  onContinue: (selectedIgnoredFiles: GitIgnoreReviewFile[]) => void;
+  onContinue: (selectedFiles: UploadExclusionReviewFile[]) => void;
 }) {
   const idPrefix = useId().replaceAll(":", "");
   const [includedItemIndexes, setIncludedItemIndexes] = useState(
@@ -60,7 +58,7 @@ export function GitIgnoreReviewDialog({
     [items, normalizedQuery],
   );
   const visibleItems = matchingItems.slice(0, visibleLimit);
-  const selectedIgnoredFiles = useMemo(
+  const selectedFiles = useMemo(
     () =>
       items.flatMap((item, index) =>
         includedItemIndexes.has(index) ? item.files : [],
@@ -68,19 +66,21 @@ export function GitIgnoreReviewDialog({
     [includedItemIndexes, items],
   );
   const effectiveFiles = useMemo(
-    () => [...autoIncludedFiles, ...selectedIgnoredFiles],
-    [autoIncludedFiles, selectedIgnoredFiles],
+    () => [...autoIncludedFiles, ...selectedFiles],
+    [autoIncludedFiles, selectedFiles],
   );
   const selectionError =
     effectiveFiles.length === 0
-      ? "Choose at least one ignored file or folder to include."
+      ? "Choose at least one excluded file or folder to include."
       : getUploadSelectionError(effectiveFiles, false);
-  const gitIgnoredFileCount = items.reduce(
+  const reviewFileCount = items.reduce(
     (total, item) => total + item.files.length,
     0,
   );
-  const excludedFileCount =
-    gitIgnoredFileCount - selectedIgnoredFiles.length + gitMetadataFiles;
+  const excludedFileCount = reviewFileCount - selectedFiles.length;
+  const hasHiddenFolders = items.some(
+    (item) => item.reason === "hidden-folder",
+  );
 
   function setItemIncluded(index: number, included: boolean) {
     setIncludedItemIndexes((current) => {
@@ -103,15 +103,9 @@ export function GitIgnoreReviewDialog({
     >
       <DialogContent className="max-h-[90dvh] gap-4 overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
-          <DialogTitle>Review .gitignore exclusions</DialogTitle>
+          <DialogTitle>Review upload exclusions</DialogTitle>
           <DialogDescription>
-            This folder contains{" "}
-            {formatCount(
-              gitIgnoreFileCount,
-              ".gitignore file",
-              ".gitignore files",
-            )}
-            . Only files and folders matched by those rules are shown.
+            {formatExclusionDescription(hasHiddenFolders, gitIgnoreFileCount)}
           </DialogDescription>
         </DialogHeader>
 
@@ -123,7 +117,7 @@ export function GitIgnoreReviewDialog({
             className="rounded-md"
             onClick={() => setIncludedItemIndexes(new Set(items.keys()))}
           >
-            Include all ignored
+            Include all
           </Button>
           <Button
             type="button"
@@ -132,7 +126,7 @@ export function GitIgnoreReviewDialog({
             className="rounded-md"
             onClick={() => setIncludedItemIndexes(new Set())}
           >
-            Exclude all ignored
+            Exclude all
           </Button>
         </div>
 
@@ -145,8 +139,8 @@ export function GitIgnoreReviewDialog({
             type="search"
             value={query}
             onChange={(event) => setQuery(event.currentTarget.value)}
-            placeholder="Find an ignored file or folder…"
-            aria-label="Find an ignored file or folder"
+            placeholder="Find an excluded file or folder…"
+            aria-label="Find an excluded file or folder"
             className="h-9 pl-9"
           />
         </div>
@@ -154,27 +148,19 @@ export function GitIgnoreReviewDialog({
         <div className="min-h-0 overflow-hidden rounded-lg border">
           <div className="flex items-center justify-between gap-4 border-b bg-muted/20 px-3 py-2 text-xs text-muted-foreground">
             <span>
-              {formatCount(
-                autoIncludedFiles.length,
-                "normal file",
-                "normal files",
-              )}{" "}
-              included automatically
+              {formatCount(autoIncludedFiles.length, "file", "files")} included
+              automatically
             </span>
             <span>
-              {formatCount(
-                gitIgnoredFileCount,
-                "ignored file",
-                "ignored files",
-              )}
+              {formatCount(reviewFileCount, "excluded file", "excluded files")}
             </span>
           </div>
           <div className="max-h-[min(44dvh,28rem)] overflow-y-auto overscroll-contain">
             {visibleItems.length > 0 ? (
-              <ul className="divide-y" aria-label="Items ignored by .gitignore">
+              <ul className="divide-y" aria-label="Excluded upload items">
                 {visibleItems.map(({ item, index }) => {
                   const included = includedItemIndexes.has(index);
-                  const checkboxId = `${idPrefix}-gitignore-item-${String(index)}`;
+                  const checkboxId = `${idPrefix}-excluded-item-${String(index)}`;
                   const Icon = item.kind === "folder" ? Folder : FileIcon;
 
                   return (
@@ -206,8 +192,10 @@ export function GitIgnoreReviewDialog({
                             {item.kind === "folder"
                               ? `${formatCount(item.files.length, "file", "files")} · `
                               : ""}
-                            {formatFileBytes(item.sizeBytes)} · ignored by
-                            .gitignore
+                            {formatFileBytes(item.sizeBytes)} ·{" "}
+                            {item.reason === "hidden-folder"
+                              ? "hidden folder"
+                              : "ignored by .gitignore"}
                           </span>
                         </span>
                         <span className="shrink-0 text-xs font-medium text-muted-foreground">
@@ -220,7 +208,7 @@ export function GitIgnoreReviewDialog({
               </ul>
             ) : (
               <p className="px-4 py-10 text-center text-sm text-muted-foreground">
-                No ignored items match “{query}”.
+                No excluded items match “{query}”.
               </p>
             )}
 
@@ -236,7 +224,7 @@ export function GitIgnoreReviewDialog({
                     )
                   }
                 >
-                  Show more ignored items
+                  Show more excluded items
                 </Button>
               </div>
             ) : null}
@@ -249,12 +237,9 @@ export function GitIgnoreReviewDialog({
             aria-hidden="true"
           />
           <p className="text-xs leading-5 text-muted-foreground">
-            Files such as .env may contain secrets. Include them only if you
-            intend to store them in Aeralyth. Git metadata is always excluded
-            {gitMetadataFiles > 0
-              ? ` (${formatCount(gitMetadataFiles, "file", "files")})`
-              : ""}
-            .
+            Hidden folders and files such as .env may contain secrets or
+            repository metadata. Include them only if you intend to store them
+            in Aeralyth.
           </p>
         </div>
 
@@ -266,9 +251,9 @@ export function GitIgnoreReviewDialog({
           ) : (
             <p className="text-xs text-muted-foreground">
               {formatCount(
-                selectedIgnoredFiles.length,
-                "ignored file",
-                "ignored files",
+                selectedFiles.length,
+                "excluded file",
+                "excluded files",
               )}{" "}
               added · {formatCount(excludedFileCount, "file", "files")} will
               remain excluded
@@ -289,7 +274,7 @@ export function GitIgnoreReviewDialog({
             type="button"
             className="rounded-md"
             disabled={Boolean(selectionError)}
-            onClick={() => onContinue(selectedIgnoredFiles)}
+            onClick={() => onContinue(selectedFiles)}
           >
             Continue with {effectiveFiles.length.toLocaleString()}{" "}
             {effectiveFiles.length === 1 ? "file" : "files"}
@@ -298,6 +283,27 @@ export function GitIgnoreReviewDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+function formatExclusionDescription(
+  hasHiddenFolders: boolean,
+  gitIgnoreFileCount: number,
+) {
+  if (hasHiddenFolders && gitIgnoreFileCount > 0) {
+    return `Hidden folders and items matched by ${formatCount(
+      gitIgnoreFileCount,
+      ".gitignore file",
+      ".gitignore files",
+    )} are excluded by default.`;
+  }
+  if (hasHiddenFolders) {
+    return "Hidden folders are excluded by default.";
+  }
+  return `Items matched by ${formatCount(
+    gitIgnoreFileCount,
+    ".gitignore file",
+    ".gitignore files",
+  )} are excluded by default.`;
 }
 
 function formatCount(value: number, singular: string, plural: string) {

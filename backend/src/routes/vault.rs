@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use tokio_postgres::IsolationLevel;
 
 use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
+use crate::collection_timestamps::touch_ancestor_collections;
 use crate::config::E2eeMode;
 use crate::db::{query_one_cached, query_opt_cached};
 use crate::e2ee::{
@@ -5382,6 +5383,11 @@ async fn publish_record_transaction(
                     &decoded.verified.bootstrap.ciphertext_merkle_root.as_slice(),
                 ],
             )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+    }
+    if upload.entry_type == "file" && !is_migration {
+        touch_ancestor_collections(&transaction, upload.parent_id.as_deref(), &user.id)
             .await
             .map_err(error::ErrorInternalServerError)?;
     }

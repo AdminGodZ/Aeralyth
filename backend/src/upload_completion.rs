@@ -2,6 +2,7 @@ use std::error::Error as StdError;
 use std::io;
 use std::time::SystemTime;
 
+use crate::collection_timestamps::touch_ancestor_collections;
 use crate::db::Database;
 use crate::storage::ObjectMetadata;
 
@@ -140,12 +141,13 @@ pub(crate) async fn finalize_file_upload_record(
         return Ok(FileUploadFinalizeOutcome::StateChanged);
     }
 
-    if let Some(replacement_file_id) = upload.replacement_file_id.as_deref() {
+    let parent_folder_id = if let Some(replacement_file_id) = upload.replacement_file_id.as_deref()
+    {
         let target = if upload.share_link_id.is_some() {
             transaction
                 .query_opt(
                     "
-                        SELECT storage_name
+                        SELECT storage_name, parent_id
                         FROM files
                         WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
                           AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
@@ -158,7 +160,7 @@ pub(crate) async fn finalize_file_upload_record(
             transaction
                 .query_opt(
                     "
-                        SELECT storage_name
+                        SELECT storage_name, parent_id
                         FROM files
                         WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
                           AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
@@ -226,6 +228,7 @@ pub(crate) async fn finalize_file_upload_record(
                 ],
             )
             .await?;
+        target.get::<_, Option<String>>("parent_id")
     } else {
         transaction
             .execute(
@@ -258,7 +261,9 @@ pub(crate) async fn finalize_file_upload_record(
                 ],
             )
             .await?;
-    }
+        upload.parent_id.clone()
+    };
+    touch_ancestor_collections(&transaction, parent_folder_id.as_deref(), &upload.owner_id).await?;
     transaction
         .execute(
             "
@@ -504,5 +509,24 @@ mod tests {
         assert!(completion_worker.contains("FOR UPDATE SKIP LOCKED"));
         assert!(completion_worker.contains("completion_locked_until"));
         assert!(completion_worker.contains("completion_last_error"));
+    }
+
+    #[test]
+    fn completed_file_uploads_touch_their_parent_collections() {
+        let legacy = include_str!("upload_completion.rs");
+        let legacy_completion = source_between(
+            legacy,
+            "pub(crate) async fn finalize_file_upload_record(",
+            "pub(crate) async fn transition_file_upload_to_cleanup(",
+        );
+        assert!(legacy_completion.contains("touch_ancestor_collections("));
+
+        let vault = include_str!("routes/vault.rs");
+        let encrypted_completion = source_between(
+            vault,
+            "async fn publish_record_transaction(",
+            "async fn decode_and_verify_node_record(",
+        );
+        assert!(encrypted_completion.contains("touch_ancestor_collections("));
     }
 }

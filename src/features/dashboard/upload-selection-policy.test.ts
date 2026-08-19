@@ -45,27 +45,33 @@ describe("upload selection policy", () => {
       "admingod/package.json",
     ]);
     expect(prepared.uploadableFiles).toHaveLength(selections.length);
-    expect(prepared.gitIgnoredFiles).toHaveLength(MAX_SELECTION_FILES + 2);
+    expect(prepared.excludedFiles).toHaveLength(MAX_SELECTION_FILES + 2);
     expect(
-      prepared.gitIgnoreItems.map(({ kind, path, files }) => ({
+      prepared.reviewItems.map(({ kind, path, files, reason }) => ({
         kind,
         path,
         fileCount: files.length,
+        reason,
       })),
     ).toEqual([
-      { kind: "folder", path: "dist", fileCount: 1 },
+      {
+        kind: "folder",
+        path: "dist",
+        fileCount: 1,
+        reason: "gitignore",
+      },
       {
         kind: "folder",
         path: "node_modules",
         fileCount: MAX_SELECTION_FILES + 1,
+        reason: "gitignore",
       },
     ]);
-    expect(prepared.gitMetadataFiles).toBe(0);
     expect(prepared.gitIgnoreFileCount).toBe(1);
     expect(prepared.error).toBeNull();
   });
 
-  it("keeps an explicitly selected .env file while Git metadata stays excluded", async () => {
+  it("offers hidden folders and ignored dotfiles for explicit inclusion", async () => {
     const selections = [
       {
         file: new File([".env\n"], ".gitignore"),
@@ -83,19 +89,112 @@ describe("upload selection policy", () => {
         file: new File(["ref: refs/heads/main"], "HEAD"),
         relativePath: "demo/.git/HEAD",
       },
+      {
+        file: new File(['[remote "origin"]'], "config"),
+        relativePath: "demo/.git/config",
+      },
+      {
+        file: new File(["workflow"], "ci.yml"),
+        relativePath: "demo/.github/workflows/ci.yml",
+      },
+      {
+        file: new File(["cache"], "data.json"),
+        relativePath: "demo/src/.cache/data.json",
+      },
+      {
+        file: new File(["22"], ".nvmrc"),
+        relativePath: "demo/.nvmrc",
+      },
     ];
     const prepared = await prepareFolderUploadSelection(selections);
     const envFile = selections[2];
     if (!envFile) throw new Error("Missing .env test fixture.");
+    const gitItem = prepared.reviewItems.find(({ path }) => path === ".git");
+    if (!gitItem) throw new Error("Missing .git review item.");
 
-    const finalized = finalizeFolderUploadSelection(prepared, [envFile]);
+    expect(prepared.files.map(({ relativePath }) => relativePath)).toEqual([
+      "demo/.gitignore",
+      "demo/package.json",
+      "demo/.nvmrc",
+    ]);
+    expect(
+      prepared.reviewItems.map(({ kind, path, files, reason }) => ({
+        kind,
+        path,
+        fileCount: files.length,
+        reason,
+      })),
+    ).toEqual([
+      { kind: "file", path: ".env", fileCount: 1, reason: "gitignore" },
+      {
+        kind: "folder",
+        path: ".git",
+        fileCount: 2,
+        reason: "hidden-folder",
+      },
+      {
+        kind: "folder",
+        path: ".github",
+        fileCount: 1,
+        reason: "hidden-folder",
+      },
+      {
+        kind: "folder",
+        path: "src/.cache",
+        fileCount: 1,
+        reason: "hidden-folder",
+      },
+    ]);
+
+    const finalized = finalizeFolderUploadSelection(prepared, [
+      envFile,
+      ...gitItem.files,
+    ]);
 
     expect(finalized.files.map(({ relativePath }) => relativePath)).toEqual([
       "demo/.gitignore",
       "demo/package.json",
       "demo/.env",
+      "demo/.git/HEAD",
+      "demo/.git/config",
+      "demo/.nvmrc",
     ]);
-    expect(finalized.ignoredFiles).toBe(1);
+    expect(finalized.ignoredFiles).toBe(2);
+    expect(finalized.error).toBeNull();
+  });
+
+  it("allows .git to be included when the folder has no .gitignore", async () => {
+    const selections = [
+      {
+        file: new File(["{}"], "package.json"),
+        relativePath: "demo/package.json",
+      },
+      {
+        file: new File(["ref: refs/heads/main"], "HEAD"),
+        relativePath: "demo/.git/HEAD",
+      },
+    ];
+
+    const prepared = await prepareFolderUploadSelection(selections);
+
+    expect(prepared.gitIgnoreFileCount).toBe(0);
+    expect(prepared.files).toEqual([selections[0]]);
+    expect(prepared.reviewItems).toEqual([
+      {
+        kind: "folder",
+        path: ".git",
+        files: [selections[1]],
+        sizeBytes: selections[1]?.file.size,
+        reason: "hidden-folder",
+      },
+    ]);
+
+    const finalized = finalizeFolderUploadSelection(
+      prepared,
+      prepared.excludedFiles,
+    );
+    expect(finalized.files).toEqual(selections);
+    expect(finalized.ignoredFiles).toBe(0);
     expect(finalized.error).toBeNull();
   });
 
@@ -126,14 +225,25 @@ describe("upload selection policy", () => {
     const prepared = await prepareFolderUploadSelection(selections);
 
     expect(
-      prepared.gitIgnoreItems.map(({ kind, path, files }) => ({
+      prepared.reviewItems.map(({ kind, path, files, reason }) => ({
         kind,
         path,
         fileCount: files.length,
+        reason,
       })),
     ).toEqual([
-      { kind: "folder", path: "node_modules", fileCount: 2 },
-      { kind: "file", path: "src/types.generated.ts", fileCount: 1 },
+      {
+        kind: "folder",
+        path: "node_modules",
+        fileCount: 2,
+        reason: "gitignore",
+      },
+      {
+        kind: "file",
+        path: "src/types.generated.ts",
+        fileCount: 1,
+        reason: "gitignore",
+      },
     ]);
   });
 
@@ -151,7 +261,7 @@ describe("upload selection policy", () => {
     const prepared = await prepareFolderUploadSelection(selections);
     const finalized = finalizeFolderUploadSelection(
       prepared,
-      prepared.gitIgnoredFiles,
+      prepared.excludedFiles,
     );
 
     expect(finalized.error).toBe("Choose no more than 1,000 files at once.");

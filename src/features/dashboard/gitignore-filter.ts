@@ -18,7 +18,7 @@ type IgnoreMatcher = {
 export type GitIgnoreSelectionPartition<T extends GitIgnoreSelection> = {
   includedSelections: T[];
   ignoredSelections: T[];
-  gitMetadataSelections: T[];
+  hiddenDirectorySelections: T[];
   gitIgnoreFileCount: number;
 };
 
@@ -36,29 +36,27 @@ export async function partitionGitIgnoredSelections<
     return {
       includedSelections: [],
       ignoredSelections: [],
-      gitMetadataSelections: [],
+      hiddenDirectorySelections: [],
       gitIgnoreFileCount: 0,
     };
   }
 
   const normalizedSelections = normalizeSelections(selections);
-  const gitMetadataSelections = normalizedSelections.flatMap(
-    ({ selection, path }) => (isGitMetadataPath(path) ? [selection] : []),
+  const hiddenDirectoryCandidates = normalizedSelections.flatMap(
+    ({ selection, path }) => (isHiddenDirectoryPath(path) ? [selection] : []),
   );
-  const uploadableSelections = normalizedSelections.filter(
-    ({ path }) => !isGitMetadataPath(path),
+  const nonHiddenSelections = normalizedSelections.filter(
+    ({ path }) => !isHiddenDirectoryPath(path),
   );
-  const ignoreFiles = uploadableSelections.filter(
+  const ignoreFiles = nonHiddenSelections.filter(
     ({ path }) => baseName(path) === ".gitignore",
   );
 
   if (ignoreFiles.length === 0) {
     return {
-      includedSelections: uploadableSelections.map(
-        ({ selection }) => selection,
-      ),
+      includedSelections: nonHiddenSelections.map(({ selection }) => selection),
       ignoredSelections: [],
-      gitMetadataSelections,
+      hiddenDirectorySelections: hiddenDirectoryCandidates,
       gitIgnoreFileCount: 0,
     };
   }
@@ -92,9 +90,13 @@ export async function partitionGitIgnoredSelections<
 
   const includedSelections: T[] = [];
   const ignoredSelections: T[] = [];
-  for (const { selection, path } of uploadableSelections) {
+  const hiddenDirectorySelections: T[] = [];
+  const hiddenDirectoryCandidateSet = new Set(hiddenDirectoryCandidates);
+  for (const { selection, path } of normalizedSelections) {
     if (isIgnored(path, false, activeMatchers)) {
       ignoredSelections.push(selection);
+    } else if (hiddenDirectoryCandidateSet.has(selection)) {
+      hiddenDirectorySelections.push(selection);
     } else {
       includedSelections.push(selection);
     }
@@ -103,13 +105,14 @@ export async function partitionGitIgnoredSelections<
   return {
     includedSelections,
     ignoredSelections,
-    gitMetadataSelections,
+    hiddenDirectorySelections,
     gitIgnoreFileCount: ignoreFiles.length,
   };
 }
 
-function isGitMetadataPath(path: string): boolean {
-  return path.split("/").includes(".git");
+function isHiddenDirectoryPath(path: string): boolean {
+  const segments = path.split("/");
+  return segments.slice(0, -1).some((segment) => segment.startsWith("."));
 }
 
 function normalizeSelections<T extends GitIgnoreSelection>(

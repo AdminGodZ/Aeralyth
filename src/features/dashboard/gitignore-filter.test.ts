@@ -78,15 +78,17 @@ describe("gitignore upload filtering", () => {
     expect(paths).toEqual(["demo\\.gitignore", "demo\\src\\index.ts"]);
   });
 
-  it("always excludes Git internals while keeping project Git files", async () => {
+  it("excludes hidden directories from defaults while keeping dotfiles", async () => {
     const files = [
       selection("demo/package.json"),
       selection("demo/src/app.ts"),
       selection("demo/.git/config"),
       selection("demo/.git/objects/pack/project.pack"),
-      selection("demo/packages/tool/.git/index"),
+      selection("demo/packages/tool/.cache/index.json"),
+      selection("demo/.github/workflows/ci.yml"),
       selection("demo/.gitignore"),
       selection("demo/.gitmodules"),
+      selection("demo/.nvmrc"),
     ];
 
     await expect(filteredPaths(files)).resolves.toEqual([
@@ -94,12 +96,29 @@ describe("gitignore upload filtering", () => {
       "demo/src/app.ts",
       "demo/.gitignore",
       "demo/.gitmodules",
+      "demo/.nvmrc",
     ]);
   });
 
-  it("excludes Git internals even when no gitignore exists", async () => {
+  it("excludes hidden directories even when no gitignore exists", async () => {
     const paths = await filteredPaths([
       selection("demo/package.json"),
+      selection("demo/.git/HEAD"),
+      selection("demo/src/.cache/data.json"),
+    ]);
+
+    expect(paths).toEqual(["demo/package.json"]);
+  });
+
+  it("does not read .gitignore files inside hidden directories", async () => {
+    const hiddenGitignore = selection("demo/.git/.gitignore", "*");
+    Object.defineProperty(hiddenGitignore.file, "text", {
+      value: () => Promise.reject(new Error("hidden rules must not be read")),
+    });
+
+    const paths = await filteredPaths([
+      selection("demo/package.json"),
+      hiddenGitignore,
       selection("demo/.git/HEAD"),
     ]);
 
