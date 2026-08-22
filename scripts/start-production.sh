@@ -24,6 +24,35 @@ handle_signal() {
   exit 0
 }
 
+wait_for_service() {
+  local service_name="$1"
+  local service_url="$2"
+  local service_pid="$3"
+
+  for _attempt in $(seq 1 60); do
+    if ! kill -0 "${service_pid}" 2>/dev/null; then
+      echo "${service_name} exited before becoming ready" >&2
+      return 1
+    fi
+    if node -e '
+      fetch(process.argv[1], { signal: AbortSignal.timeout(1000) })
+        .then((response) => {
+          process.exitCode = response.ok ? 0 : 1;
+        })
+        .catch(() => {
+          process.exitCode = 1;
+        });
+    ' "${service_url}"
+    then
+      return 0
+    fi
+    sleep 1
+  done
+
+  echo "${service_name} did not become ready within 60 seconds" >&2
+  return 1
+}
+
 trap handle_signal TERM INT
 
 public_port="${PORT:-8080}"
@@ -59,6 +88,15 @@ api_pid=$!
 
 HOSTNAME=127.0.0.1 PORT="${frontend_port}" node /app/frontend/server.js &
 frontend_pid=$!
+
+if ! wait_for_service "API" "http://127.0.0.1:${api_port}/health" "${api_pid}"; then
+  stop_children
+  exit 1
+fi
+if ! wait_for_service "frontend" "http://127.0.0.1:${frontend_port}/login" "${frontend_pid}"; then
+  stop_children
+  exit 1
+fi
 
 /usr/bin/caddy run --config /etc/caddy/Caddyfile --adapter caddyfile &
 proxy_pid=$!

@@ -32,6 +32,16 @@ describe("Railway production deployment", () => {
     expect(startup).toContain("node /app/frontend/server.js");
     expect(startup).toContain("caddy run");
     expect(startup).toContain("wait -n");
+
+    const apiStart = startup.indexOf("/app/bin/aeralyth-api &");
+    const frontendStart = startup.indexOf("node /app/frontend/server.js &");
+    const apiReady = startup.indexOf('wait_for_service "API"');
+    const frontendReady = startup.indexOf('wait_for_service "frontend"');
+    const proxyStart = startup.indexOf("/usr/bin/caddy run");
+    expect(frontendStart).toBeGreaterThan(apiStart);
+    expect(apiReady).toBeGreaterThan(frontendStart);
+    expect(frontendReady).toBeGreaterThan(apiReady);
+    expect(proxyStart).toBeGreaterThan(frontendReady);
   });
 
   it("routes API traffic directly to Actix and everything else to Next", () => {
