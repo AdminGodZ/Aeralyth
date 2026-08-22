@@ -671,7 +671,7 @@ pub fn verify_wrapper_set_proof(
     leaf_input.extend_from_slice(WRAPPER_LEAF_DOMAIN);
     leaf_input.extend_from_slice(&wrapper_hash);
     let mut node = sha256(&leaf_input);
-    for sibling in proof.chunks_exact(32) {
+    for sibling in proof.as_chunks::<32>().0 {
         let mut input = Vec::with_capacity(WRAPPER_BRANCH_DOMAIN.len() + 64);
         input.extend_from_slice(WRAPPER_BRANCH_DOMAIN);
         if index % 2 == 0 {
@@ -1123,7 +1123,9 @@ mod tests {
     fn decode_hex(value: &str) -> Vec<u8> {
         value
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|pair| {
                 let text = std::str::from_utf8(pair).unwrap();
                 u8::from_str_radix(text, 16).unwrap()

@@ -9,7 +9,7 @@ COPY . .
 RUN --mount=type=cache,id=s/be1490eb-fe3f-4375-9927-54973fbfdd67-/workspace/.next/cache,target=/workspace/.next/cache \
     npm run build
 
-FROM rust:1.97-bookworm AS backend-build
+FROM rust:1.98-bookworm AS backend-build
 WORKDIR /workspace/backend
 COPY backend/Cargo.toml backend/Cargo.lock ./
 COPY backend/src ./src
