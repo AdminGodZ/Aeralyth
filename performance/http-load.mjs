@@ -1,8 +1,11 @@
 import { performance } from "node:perf_hooks";
 
-const target = new URL(
-  process.env.AERALYTH_PERF_URL ?? "http://127.0.0.1:8080/health",
-);
+const targetValue =
+  process.env.AERALYTH_PERF_URL ?? "http://127.0.0.1:8080/health";
+if (!URL.canParse(targetValue)) {
+  throw new Error("AERALYTH_PERF_URL must be a valid absolute URL");
+}
+const target = new URL(targetValue);
 const requestCount = positiveInteger("AERALYTH_PERF_REQUESTS", 250);
 const concurrency = positiveInteger("AERALYTH_PERF_CONCURRENCY", 20);
 const warmupRequests = nonNegativeInteger("AERALYTH_PERF_WARMUP_REQUESTS", 20);
@@ -98,6 +101,8 @@ async function runRequests(count, workerCount) {
         next += 1;
         const started = performance.now();
         try {
+          // Each worker is sequential by design; concurrency comes from the worker pool.
+          // react-doctor-disable-next-line react-doctor/async-await-in-loop
           const response = await fetch(target, {
             cache: "no-store",
             signal: AbortSignal.timeout(timeoutMs),

@@ -110,19 +110,28 @@ function vaultSessionStorage(): Storage | null {
   }
 }
 
-export function VaultProvider({
-  children,
-  csrfToken,
-  e2eeMode,
-  vaultConfigured,
-  autoLockMinutes,
-}: {
+type VaultProviderProps = {
   children: ReactNode;
   csrfToken: string;
   e2eeMode: "off" | "migrate" | "required";
   vaultConfigured: boolean;
   autoLockMinutes: number;
-}) {
+};
+
+export function VaultProvider({
+  children,
+  ...controllerProps
+}: VaultProviderProps) {
+  const controller = useVaultProviderController(controllerProps);
+  return <VaultProviderView {...controller}>{children}</VaultProviderView>;
+}
+
+function useVaultProviderController({
+  csrfToken,
+  e2eeMode,
+  vaultConfigured,
+  autoLockMinutes,
+}: Omit<VaultProviderProps, "children">) {
   const enabled = e2eeMode !== "off";
   const clientRef = useRef<VaultCryptoClient | null>(null);
   const nodeOpenFlightsRef = useRef(new Map<string, Promise<VaultManifest>>());
@@ -542,37 +551,37 @@ export function VaultProvider({
     ],
   );
 
-  return (
-    <VaultProviderView
-      context={context}
-      dialogOpen={dialogOpen && enabled}
-      canClose={state !== "setup" && !newRecoveryCode}
-      newRecoveryCode={newRecoveryCode}
-      recoveryConfirmed={recoveryConfirmed}
-      onRecoveryConfirmedChange={setRecoveryConfirmed}
-      onFinishRecoveryConfirmation={finishRecoveryConfirmation}
-      onDialogOpenChange={(open) => {
-        if (!busy && state !== "setup" && !newRecoveryCode) setDialogOpen(open);
-      }}
-      mode={mode}
-      recoveryCodeInput={recoveryCodeInput}
-      onRecoveryCodeInputChange={setRecoveryCodeInput}
-      password={password}
-      onPasswordChange={setPassword}
-      passwordConfirmation={passwordConfirmation}
-      onPasswordConfirmationChange={setPasswordConfirmation}
-      error={error}
-      configured={configured}
-      busy={busy}
-      onSwitchMode={() => {
-        setError(null);
-        setMode(mode === "recover" ? "unlock" : "recover");
-      }}
-      onSubmit={submit}
-    >
-      {children}
-    </VaultProviderView>
-  );
+  function changeDialogOpen(open: boolean): void {
+    if (!busy && state !== "setup" && !newRecoveryCode) setDialogOpen(open);
+  }
+
+  function switchMode(): void {
+    setError(null);
+    setMode(mode === "recover" ? "unlock" : "recover");
+  }
+
+  return {
+    busy,
+    canClose: state !== "setup" && !newRecoveryCode,
+    configured,
+    context,
+    dialogOpen: dialogOpen && enabled,
+    error,
+    mode,
+    newRecoveryCode,
+    onDialogOpenChange: changeDialogOpen,
+    onFinishRecoveryConfirmation: finishRecoveryConfirmation,
+    onPasswordChange: setPassword,
+    onPasswordConfirmationChange: setPasswordConfirmation,
+    onRecoveryCodeInputChange: setRecoveryCodeInput,
+    onRecoveryConfirmedChange: setRecoveryConfirmed,
+    onSubmit: submit,
+    onSwitchMode: switchMode,
+    password,
+    passwordConfirmation,
+    recoveryCodeInput,
+    recoveryConfirmed,
+  };
 }
 
 function VaultProviderView({

@@ -529,6 +529,7 @@ function ChangePasswordDialog({ csrfToken }: { csrfToken: string }) {
   const currentPasswordId = useId();
   const newPasswordId = useId();
   const confirmPasswordId = useId();
+  const changingRef = useRef(false);
   const [open, setOpen] = useState(false);
   const [isChanging, setIsChanging] = useState(false);
   const [changeError, setChangeError] = useState<string | null>(null);
@@ -545,7 +546,7 @@ function ChangePasswordDialog({ csrfToken }: { csrfToken: string }) {
   async function changePassword(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
 
-    if (isChanging) {
+    if (changingRef.current) {
       return;
     }
 
@@ -565,6 +566,7 @@ function ChangePasswordDialog({ csrfToken }: { csrfToken: string }) {
       return;
     }
 
+    changingRef.current = true;
     setIsChanging(true);
     setChangeError(null);
 
@@ -586,6 +588,7 @@ function ChangePasswordDialog({ csrfToken }: { csrfToken: string }) {
 
       window.location.assign("/login?password=changed");
     } catch (error) {
+      changingRef.current = false;
       setChangeError(
         error instanceof Error
           ? error.message

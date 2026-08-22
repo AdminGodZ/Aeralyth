@@ -18,7 +18,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -113,15 +113,7 @@ const shareDateTimeFormatter = new Intl.DateTimeFormat("en", {
   timeZone: "UTC",
 });
 
-export function ShareLinkDialog({
-  open,
-  onOpenChange,
-  itemId,
-  itemName,
-  itemType,
-  initiallyShared,
-  csrfToken,
-}: {
+type ShareLinkDialogProps = {
   open: boolean;
   onOpenChange(open: boolean): void;
   itemId: string;
@@ -129,7 +121,22 @@ export function ShareLinkDialog({
   itemType: "file" | "folder";
   initiallyShared: boolean;
   csrfToken: string;
-}) {
+};
+
+export function ShareLinkDialog(props: ShareLinkDialogProps) {
+  const controller = useShareLinkDialogController(props);
+  return <ShareLinkDialogView controller={controller} />;
+}
+
+function useShareLinkDialogController({
+  open,
+  onOpenChange,
+  itemId,
+  itemName,
+  itemType,
+  initiallyShared,
+  csrfToken,
+}: ShareLinkDialogProps) {
   const router = useRouter();
   const [accessScope, setAccessScope] = useState<AccessScope>("public");
   const [permission, setPermission] = useState<Permission>("viewer");
@@ -143,7 +150,8 @@ export function ShareLinkDialog({
   const [copied, setCopied] = useState(false);
   const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
   const [links, setLinks] = useState<OwnedShareLink[]>([]);
-  const [linksCursor, setLinksCursor] = useState<string | null>(null);
+  const linksCursorRef = useRef<string | null>(null);
+  const loadMoreControllerRef = useRef<AbortController | null>(null);
   const [hasMoreLinks, setHasMoreLinks] = useState(false);
   const [loadingLinks, setLoadingLinks] = useState(false);
   const [loadingMoreLinks, setLoadingMoreLinks] = useState(false);
@@ -164,7 +172,7 @@ export function ShareLinkDialog({
     void requestOwnedLinks(itemId, controller.signal)
       .then((page) => {
         setLinks(page.links);
-        setLinksCursor(page.nextCursor);
+        linksCursorRef.current = page.nextCursor;
         setHasMoreLinks(page.hasMore);
       })
       .catch((failure: unknown) => {
@@ -180,34 +188,41 @@ export function ShareLinkDialog({
         if (!controller.signal.aborted) setLoadingLinks(false);
       });
 
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      loadMoreControllerRef.current?.abort();
+    };
   }, [itemId, open]);
 
   async function loadMoreLinks(): Promise<void> {
-    if (!linksCursor || loadingMoreLinks) return;
+    const cursor = linksCursorRef.current;
+    if (!cursor || loadMoreControllerRef.current) return;
+    const controller = new AbortController();
+    loadMoreControllerRef.current = controller;
     setLoadingMoreLinks(true);
     setError(null);
     try {
-      const page = await requestOwnedLinks(
-        itemId,
-        new AbortController().signal,
-        linksCursor,
-      );
+      const page = await requestOwnedLinks(itemId, controller.signal, cursor);
       setLinks((current) => [
         ...current,
         ...page.links.filter(
           (link) => !current.some((existing) => existing.id === link.id),
         ),
       ]);
-      setLinksCursor(page.nextCursor);
+      linksCursorRef.current = page.nextCursor;
       setHasMoreLinks(page.hasMore);
     } catch (failure) {
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : "Older links could not be loaded.",
-      );
+      if (!controller.signal.aborted) {
+        setError(
+          failure instanceof Error
+            ? failure.message
+            : "Older links could not be loaded.",
+        );
+      }
     } finally {
+      loadMoreControllerRef.current = null;
+      // The controller ref blocks every newer load-more request until this finally runs.
+      // react-doctor-disable-next-line react-doctor/no-unowned-async-error-clear
       setLoadingMoreLinks(false);
     }
   }
@@ -354,6 +369,90 @@ export function ShareLinkDialog({
   const activeLinks = links.filter((link) => link.status === "active");
   const managingExistingLink =
     activeLinks.length > 0 || (loadingLinks && initiallyShared);
+
+  return {
+    accessScope,
+    activeLinks,
+    busy,
+    close,
+    copied,
+    copiedLinkId,
+    copyCreatedUrl,
+    copyOwnedUrl,
+    createLink,
+    createdLink,
+    createdUrl,
+    customExpiration,
+    error,
+    expiration,
+    hasMoreLinks,
+    itemName,
+    itemType,
+    loadMoreLinks,
+    loadingLinks,
+    loadingMoreLinks,
+    managingExistingLink,
+    open,
+    permission,
+    recipientUsername,
+    revoke,
+    revokingId,
+    rotate,
+    rotatingId,
+    setAccessScope,
+    setCopied,
+    setCreatedLink,
+    setCreatedUrl,
+    setCustomExpiration,
+    setExpiration,
+    setPermission,
+    setRecipientUsername,
+  };
+}
+
+function ShareLinkDialogView({
+  controller,
+}: {
+  controller: ReturnType<typeof useShareLinkDialogController>;
+}) {
+  const {
+    accessScope,
+    activeLinks,
+    busy,
+    close,
+    copied,
+    copiedLinkId,
+    copyCreatedUrl,
+    copyOwnedUrl,
+    createLink,
+    createdLink,
+    createdUrl,
+    customExpiration,
+    error,
+    expiration,
+    hasMoreLinks,
+    itemName,
+    itemType,
+    loadMoreLinks,
+    loadingLinks,
+    loadingMoreLinks,
+    managingExistingLink,
+    open,
+    permission,
+    recipientUsername,
+    revoke,
+    revokingId,
+    rotate,
+    rotatingId,
+    setAccessScope,
+    setCopied,
+    setCreatedLink,
+    setCreatedUrl,
+    setCustomExpiration,
+    setExpiration,
+    setPermission,
+    setRecipientUsername,
+  } = controller;
 
   return (
     <Dialog open={open} onOpenChange={close}>

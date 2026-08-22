@@ -82,15 +82,7 @@ const fileDateFormatter = new Intl.DateTimeFormat("en", {
   timeZone: "UTC",
 });
 
-export function VaultFileList({
-  entries,
-  sectionKey,
-  csrfToken,
-  currentUserId,
-  currentFolderId,
-  initialSort,
-  initialDirection,
-}: {
+type VaultFileListProps = {
   entries: FileEntry[];
   sectionKey: string;
   csrfToken: string;
@@ -98,7 +90,39 @@ export function VaultFileList({
   currentFolderId: string | null;
   initialSort?: FileSort;
   initialDirection?: FileSortDirection;
-}) {
+};
+
+export function VaultFileList(props: VaultFileListProps) {
+  const { cancelFolderDownload, folderDownloadSession, viewProps } =
+    useVaultFileListController(props);
+
+  return (
+    <>
+      <VaultFileListView {...viewProps} />
+      {folderDownloadSession ? (
+        <div className="pointer-events-none fixed inset-x-4 bottom-4 z-40 flex justify-end sm:right-6 sm:bottom-6 sm:left-auto">
+          <div className="pointer-events-auto">
+            <FolderDownloadProgressPanel
+              folderName={folderDownloadSession.folderName}
+              progress={folderDownloadSession.progress}
+              onCancel={cancelFolderDownload}
+            />
+          </div>
+        </div>
+      ) : null}
+    </>
+  );
+}
+
+function useVaultFileListController({
+  entries,
+  sectionKey,
+  csrfToken,
+  currentUserId,
+  currentFolderId,
+  initialSort,
+  initialDirection,
+}: VaultFileListProps) {
   const vault = useVault();
   const [localEntries, setLocalEntries] = useState(entries);
   const [resolved, setResolved] = useState<Record<string, ResolvedMetadata>>(
@@ -591,44 +615,33 @@ export function VaultFileList({
     setDownloadId(null);
   }
 
-  return (
-    <>
-      <VaultFileListView
-        onAllDisplayedSelectedChange={setAllDisplayedSelected}
-        sort={sort}
-        direction={direction}
-        onSortChange={changeSort}
-        onShareEntryChange={setShareEntry}
-        onMoveToTrash={moveToTrash}
-        onClearSelection={() => setSelectedIds(new Set())}
-        vault={vault}
-        downloadError={downloadError}
-        favoriteError={favoriteError}
-        deleteError={deleteError}
-        displayed={displayed}
-        sectionKey={sectionKey}
-        csrfToken={csrfToken}
-        downloadId={downloadId}
-        selectedIds={selectedIds}
-        onDownload={download}
-        onFavorite={toggleFavorite}
-        onEntrySelectedChange={setEntrySelected}
-        shareEntry={shareEntry}
-        currentUserId={currentUserId}
-      />
-      {folderDownloadSession ? (
-        <div className="pointer-events-none fixed inset-x-4 bottom-4 z-40 flex justify-end sm:right-6 sm:bottom-6 sm:left-auto">
-          <div className="pointer-events-auto">
-            <FolderDownloadProgressPanel
-              folderName={folderDownloadSession.folderName}
-              progress={folderDownloadSession.progress}
-              onCancel={cancelFolderDownload}
-            />
-          </div>
-        </div>
-      ) : null}
-    </>
-  );
+  return {
+    cancelFolderDownload,
+    folderDownloadSession,
+    viewProps: {
+      csrfToken,
+      currentUserId,
+      deleteError,
+      direction,
+      displayed,
+      downloadError,
+      downloadId,
+      favoriteError,
+      onAllDisplayedSelectedChange: setAllDisplayedSelected,
+      onClearSelection: () => setSelectedIds(new Set()),
+      onDownload: download,
+      onEntrySelectedChange: setEntrySelected,
+      onFavorite: toggleFavorite,
+      onMoveToTrash: moveToTrash,
+      onShareEntryChange: setShareEntry,
+      onSortChange: changeSort,
+      sectionKey,
+      selectedIds,
+      shareEntry,
+      sort,
+      vault,
+    },
+  };
 }
 
 function VaultFileListView({

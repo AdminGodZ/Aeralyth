@@ -58,6 +58,8 @@ export function VaultMigrationControl({ csrfToken }: { csrfToken: string }) {
       }
       const status = await getVaultStatus(controller.signal);
       setMigration(status.migration);
+      // abortRef permits only this controller to own migration completion state.
+      // react-doctor-disable-next-line react-doctor/no-unowned-async-error-clear
       setCurrentName(null);
       setProgress(100);
       router.refresh();

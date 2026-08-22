@@ -10,6 +10,10 @@
       {
         "files": ["src/features/vault/vault-file-list.tsx"],
         "rules": ["react-doctor/no-adjust-state-on-prop-change"]
+      },
+      {
+        "files": ["performance/vault-pipeline.perf.ts"],
+        "rules": ["deslop/unused-file"]
       }
     ]
   }

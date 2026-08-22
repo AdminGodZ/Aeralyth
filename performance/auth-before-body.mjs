@@ -1,9 +1,12 @@
 import net from "node:net";
 import { performance } from "node:perf_hooks";
 
-const healthUrl = new URL(
-  process.env.AERALYTH_PERF_URL ?? "http://127.0.0.1:8080/health",
-);
+const healthUrlValue =
+  process.env.AERALYTH_PERF_URL ?? "http://127.0.0.1:8080/health";
+if (!URL.canParse(healthUrlValue)) {
+  throw new Error("AERALYTH_PERF_URL must be a valid absolute URL");
+}
+const healthUrl = new URL(healthUrlValue);
 const host = healthUrl.hostname;
 const port = Number(
   healthUrl.port || (healthUrl.protocol === "https:" ? 443 : 80),

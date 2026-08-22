@@ -9,7 +9,7 @@ import {
   ShieldAlert,
   X,
 } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
@@ -73,24 +73,26 @@ function useVaultShareDialogController({
   const [complete, setComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ownedShares, setOwnedShares] = useState<VaultOwnedShare[]>([]);
-  const [sharesCursor, setSharesCursor] = useState<string | null>(null);
+  const sharesCursorRef = useRef<string | null>(null);
+  const loadMoreControllerRef = useRef<AbortController | null>(null);
   const [hasMoreShares, setHasMoreShares] = useState(false);
   const [loadingMoreShares, setLoadingMoreShares] = useState(false);
 
   useEffect(() => {
     if (!open) return;
-    let canceled = false;
-    void getOwnedVaultShares(nodeId)
+    const controller = new AbortController();
+    void getOwnedVaultShares(nodeId, undefined, controller.signal)
       .then((page) => {
-        if (!canceled) {
+        if (!controller.signal.aborted) {
           setOwnedShares(page.shares);
-          setSharesCursor(page.nextCursor);
+          sharesCursorRef.current = page.nextCursor;
           setHasMoreShares(page.hasMore);
         }
       })
       .catch(() => undefined);
     return () => {
-      canceled = true;
+      controller.abort();
+      loadMoreControllerRef.current?.abort();
     };
   }, [nodeId, open]);
 
@@ -263,31 +265,39 @@ function useVaultShareDialogController({
   async function refreshOwnedShares(): Promise<void> {
     const page = await getOwnedVaultShares(nodeId);
     setOwnedShares(page.shares);
-    setSharesCursor(page.nextCursor);
+    sharesCursorRef.current = page.nextCursor;
     setHasMoreShares(page.hasMore);
   }
 
   async function loadMoreShares(): Promise<void> {
-    if (!sharesCursor || loadingMoreShares) return;
+    const cursor = sharesCursorRef.current;
+    if (!cursor || loadMoreControllerRef.current) return;
+    const controller = new AbortController();
+    loadMoreControllerRef.current = controller;
     setLoadingMoreShares(true);
     setError(null);
     try {
-      const page = await getOwnedVaultShares(nodeId, sharesCursor);
+      const page = await getOwnedVaultShares(nodeId, cursor, controller.signal);
       setOwnedShares((current) => [
         ...current,
         ...page.shares.filter(
           (share) => !current.some((entry) => entry.shareId === share.shareId),
         ),
       ]);
-      setSharesCursor(page.nextCursor);
+      sharesCursorRef.current = page.nextCursor;
       setHasMoreShares(page.hasMore);
     } catch (failure) {
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : "More encrypted shares could not be loaded.",
-      );
+      if (!controller.signal.aborted) {
+        setError(
+          failure instanceof Error
+            ? failure.message
+            : "More encrypted shares could not be loaded.",
+        );
+      }
     } finally {
+      loadMoreControllerRef.current = null;
+      // The controller ref blocks every newer load-more request until this finally runs.
+      // react-doctor-disable-next-line react-doctor/no-unowned-async-error-clear
       setLoadingMoreShares(false);
     }
   }

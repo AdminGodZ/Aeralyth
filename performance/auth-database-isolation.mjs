@@ -1,8 +1,11 @@
 import { performance } from "node:perf_hooks";
 
-const healthUrl = new URL(
-  process.env.AERALYTH_PERF_URL ?? "http://127.0.0.1:8080/health",
-);
+const healthUrlValue =
+  process.env.AERALYTH_PERF_URL ?? "http://127.0.0.1:8080/health";
+if (!URL.canParse(healthUrlValue)) {
+  throw new Error("AERALYTH_PERF_URL must be a valid absolute URL");
+}
+const healthUrl = new URL(healthUrlValue);
 const origin = healthUrl.origin;
 const metricsToken = process.env.AERALYTH_METRICS_TOKEN;
 const timeoutMs = Number(
@@ -19,10 +22,13 @@ const maxCheckoutP99BucketSeconds = Number(
   process.env.AERALYTH_AUTH_ISOLATION_MAX_CHECKOUT_P99_BUCKET_SECONDS ?? 0.1,
 );
 const username = process.env.AERALYTH_PERF_USERNAME ?? "admingod";
-const password = process.env.AERALYTH_PERF_PASSWORD ?? "admingod";
+const password = process.env.AERALYTH_PERF_PASSWORD?.trim();
 
 if (!metricsToken) {
   throw new Error("AERALYTH_METRICS_TOKEN is required for the isolation check");
+}
+if (!password) {
+  throw new Error("AERALYTH_PERF_PASSWORD is required for the isolation check");
 }
 if (!Number.isSafeInteger(burstSize) || burstSize < 1) {
   throw new Error("AERALYTH_AUTH_ISOLATION_BURST must be a positive integer");
@@ -40,6 +46,8 @@ assertPoolMetrics(metricsBefore);
 
 const baseline = [];
 for (let index = 0; index < Math.min(controlSamples, 8); index += 1) {
+  // Baseline samples must be sequential so the control latency is not self-contended.
+  // react-doctor-disable-next-line react-doctor/async-await-in-loop
   baseline.push(await controlRequest(cookie));
 }
 
