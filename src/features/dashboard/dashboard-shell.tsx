@@ -83,7 +83,7 @@ export function DashboardFrame({
   return (
     <main
       data-accent-color-scope
-      className="flex min-h-dvh bg-sidebar text-foreground"
+      className="dashboard-frame flex min-h-dvh bg-sidebar text-foreground"
       style={dashboardStyle}
     >
       <UserPreferenceHydrator
@@ -102,7 +102,7 @@ export function DashboardFrame({
           initialCollapsed={initialSidebarCollapsed}
         />
 
-        <section className="dashboard-main-panel flex min-w-0 flex-1 flex-col bg-background lg:mt-4 lg:min-h-[calc(100dvh-1rem)] lg:overflow-hidden lg:rounded-tl-3xl">
+        <section className="dashboard-main-panel flex min-w-0 flex-1 flex-col lg:mt-4 lg:min-h-[calc(100dvh-1rem)] lg:overflow-hidden lg:rounded-tl-3xl">
           {children}
         </section>
       </VaultProvider>
@@ -160,7 +160,7 @@ function TopBar({
   currentUser: CurrentUser;
 }) {
   return (
-    <header className="grid min-h-20 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-3 border-b px-4 py-3 sm:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,34rem)_minmax(0,1fr)] lg:items-center">
+    <header className="dashboard-topbar grid min-h-20 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-3 border-b px-4 py-3 sm:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,34rem)_minmax(0,1fr)] lg:items-center">
       <div className="col-start-1 row-start-1 flex min-w-0 items-center gap-3">
         <AeralythLogo className="size-9 lg:hidden" />
         <div className="min-w-0">

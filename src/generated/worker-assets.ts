@@ -2,4 +2,4 @@
 export const VAULT_WORKER_URL =
   "/vault.worker.js?v=94d8705556d5290aee904bea4a9e81d8a2f669dbbd954ccede2349a567420b23" as const;
 export const FOLDER_ZIP_WORKER_URL =
-  "/folder-zip.worker.js?v=24df5387e135a057d00d4c6a735f3dc0cf23625b2620cdc4c457df7d53dbb7fb" as const;
+  "/folder-zip.worker.js?v=9fc5c4b5cd385dbd9df2cbd8518aad1caafc15b542797ee70435d028e791fce1" as const;
