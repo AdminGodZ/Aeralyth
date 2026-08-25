@@ -29,8 +29,12 @@ export async function resolveLegacyFolderManifest(
       start,
       start + LEGACY_FOLDER_MANIFEST_BATCH_SIZE,
     );
+    // Batches intentionally settle in order because the backend admits one
+    // recursive manifest operation per user. Parallel requests self-shed.
+    // react-doctor-disable-next-line react-doctor/async-await-in-loop
+    const response = await requestBatch(batchRelativePaths);
     const manifest = validateLegacyFolderManifest(
-      await requestBatch(batchRelativePaths),
+      response,
       batchRelativePaths.length,
     );
     parentIds.push(...manifest.parentIds);

@@ -1,3 +1,4 @@
+import { WeightedSemaphore } from "@/features/vault/bounded-async";
 import type {
   VaultAccountStateManifest,
   VaultActiveShareContext,
@@ -150,10 +151,89 @@ export class VaultApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
+    readonly retryAfter: string | null = null,
   ) {
     super(message);
     this.name = "VaultApiError";
   }
+}
+
+const VAULT_RECURSIVE_MUTATION_ATTEMPTS = 4;
+const VAULT_RECURSIVE_MUTATION_RETRY_BASE_MS = 250;
+const vaultRecursiveMutationSlots = new WeightedSemaphore(1);
+
+async function runVaultRecursiveMutation<T>(
+  operation: () => Promise<T>,
+  signal?: AbortSignal,
+): Promise<T> {
+  const release = await vaultRecursiveMutationSlots.acquire(1, signal);
+  try {
+    let lastError: unknown;
+    for (
+      let attempt = 0;
+      attempt < VAULT_RECURSIVE_MUTATION_ATTEMPTS;
+      attempt += 1
+    ) {
+      try {
+        return await operation();
+      } catch (error) {
+        lastError = error;
+        if (
+          signal?.aborted ||
+          !(error instanceof VaultApiError) ||
+          ![429, 503].includes(error.status) ||
+          attempt + 1 >= VAULT_RECURSIVE_MUTATION_ATTEMPTS
+        ) {
+          throw error;
+        }
+        await waitForVaultCapacity(
+          vaultCapacityRetryDelay(error, attempt),
+          signal,
+        );
+      }
+    }
+    throw lastError;
+  } finally {
+    release();
+  }
+}
+
+function vaultCapacityRetryDelay(error: VaultApiError, attempt: number) {
+  const retryAfter = error.retryAfter?.trim();
+  if (retryAfter) {
+    const seconds = Number(retryAfter);
+    if (Number.isFinite(seconds) && seconds >= 0) {
+      return Math.ceil(seconds * 1_000);
+    }
+    const retryAt = Date.parse(retryAfter);
+    if (Number.isFinite(retryAt)) {
+      return Math.max(0, retryAt - Date.now());
+    }
+  }
+  return Math.min(2_000, VAULT_RECURSIVE_MUTATION_RETRY_BASE_MS * 2 ** attempt);
+}
+
+function waitForVaultCapacity(
+  milliseconds: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(signal.reason);
+      return;
+    }
+    const cleanup = () => signal?.removeEventListener("abort", abort);
+    const timeout = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, milliseconds);
+    const abort = () => {
+      clearTimeout(timeout);
+      cleanup();
+      reject(signal?.reason);
+    };
+    signal?.addEventListener("abort", abort, { once: true });
+  });
 }
 
 export function getVaultStatus(signal?: AbortSignal): Promise<VaultStatus> {
@@ -285,10 +365,15 @@ export function publishVaultUpload(
   record: VaultNodeRecord,
   signal?: AbortSignal,
 ): Promise<VaultPublishResponse> {
-  return vaultBinaryMutation(
-    `/api/vault/uploads/${encodeURIComponent(uploadId)}/publish`,
-    csrfToken,
-    encodeNodePublication(parts, record),
+  const payload = encodeNodePublication(parts, record);
+  return runVaultRecursiveMutation(
+    () =>
+      vaultBinaryMutation(
+        `/api/vault/uploads/${encodeURIComponent(uploadId)}/publish`,
+        csrfToken,
+        payload,
+        signal,
+      ),
     signal,
   );
 }
@@ -299,22 +384,24 @@ export async function publishVaultFoldersBatch(
   signal?: AbortSignal,
 ): Promise<{ folders: VaultPublishResponse[] }> {
   const payload = encodeFolderBatchPublication(records);
-  try {
-    return await vaultBinaryMutation(
-      "/api/vault/folders/batch",
-      csrfToken,
-      payload,
-      signal,
-    );
-  } catch (error) {
-    if (signal?.aborted || error instanceof VaultApiError) throw error;
-    return vaultBinaryMutation(
-      "/api/vault/folders/batch",
-      csrfToken,
-      payload,
-      signal,
-    );
-  }
+  return runVaultRecursiveMutation(async () => {
+    try {
+      return await vaultBinaryMutation(
+        "/api/vault/folders/batch",
+        csrfToken,
+        payload,
+        signal,
+      );
+    } catch (error) {
+      if (signal?.aborted || error instanceof VaultApiError) throw error;
+      return vaultBinaryMutation(
+        "/api/vault/folders/batch",
+        csrfToken,
+        payload,
+        signal,
+      );
+    }
+  }, signal);
 }
 
 export function getShareSyncJobs(
@@ -333,10 +420,15 @@ export async function publishShareDirectory(
   } | null,
   signal?: AbortSignal,
 ): Promise<void> {
-  await vaultBinaryMutation(
-    `/api/vault/share-sync-jobs/${encodeURIComponent(job.nodeId)}`,
-    csrfToken,
-    encodeShareDirectoryPublication(payload),
+  const publication = encodeShareDirectoryPublication(payload);
+  await runVaultRecursiveMutation(
+    () =>
+      vaultBinaryMutation(
+        `/api/vault/share-sync-jobs/${encodeURIComponent(job.nodeId)}`,
+        csrfToken,
+        publication,
+        signal,
+      ),
     signal,
   );
 }
@@ -645,6 +737,7 @@ async function vaultRequest<T>(
     throw new VaultApiError(
       message || `Vault request failed with status ${response.status}.`,
       response.status,
+      response.headers.get("Retry-After"),
     );
   }
   if (allowEmpty || response.status === 204) {

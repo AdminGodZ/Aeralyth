@@ -1,6 +1,10 @@
-import { mapWithConcurrency } from "@/features/vault/bounded-async";
+import {
+  mapWithConcurrency,
+  WeightedSemaphore,
+} from "@/features/vault/bounded-async";
 
 export const UPLOAD_PATH_LOOKUP_CONCURRENCY = 4;
+export const UPLOAD_TREE_REQUEST_CONCURRENCY = 1;
 
 export type UploadTreeEntry = {
   id: string;
@@ -61,12 +65,24 @@ export async function resolveFolderUploadConflicts({
     string,
     Promise<Map<string, UploadTreeEntry[]>>
   >();
+  // Keep local path matching parallel, but align recursive API calls with the
+  // backend's default per-user admission boundary so sibling lookups cannot
+  // shed one another with 503 responses.
+  const treeRequestSlots = new WeightedSemaphore(
+    UPLOAD_TREE_REQUEST_CONCURRENCY,
+  );
 
   const childrenFor = async (parentId: string | null) => {
     const cacheKey = parentId ?? "__root__";
     let pending = childrenByParent.get(cacheKey);
     if (!pending) {
-      pending = loadChildren(parentId).then(indexChildren);
+      pending = treeRequestSlots.acquire().then(async (release) => {
+        try {
+          return indexChildren(await loadChildren(parentId));
+        } finally {
+          release();
+        }
+      });
       childrenByParent.set(cacheKey, pending);
     }
     return pending;

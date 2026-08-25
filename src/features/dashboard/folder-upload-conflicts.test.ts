@@ -4,6 +4,7 @@ import {
   folderUploadCreatesRepository,
   resolveFolderUploadConflicts,
   UPLOAD_PATH_LOOKUP_CONCURRENCY,
+  UPLOAD_TREE_REQUEST_CONCURRENCY,
   type UploadTreeEntry,
 } from "@/features/dashboard/folder-upload-conflicts";
 
@@ -107,7 +108,7 @@ describe("resolveFolderUploadConflicts", () => {
     ).rejects.toThrow("More than one existing item matches");
   });
 
-  it("bounds lookups for large existing folder trees", async () => {
+  it("serializes lookups for large existing folder trees", async () => {
     const projectCount = UPLOAD_PATH_LOOKUP_CONCURRENCY * 3;
     const projects = Array.from({ length: projectCount }, (_, index) =>
       entry(`project-${String(index)}`, `project-${String(index)}`, "folder"),
@@ -135,10 +136,7 @@ describe("resolveFolderUploadConflicts", () => {
     });
 
     expect(resolution.existingFolders.size).toBe(projectCount * 2);
-    expect(maximumActiveLoads).toBeGreaterThan(1);
-    expect(maximumActiveLoads).toBeLessThanOrEqual(
-      UPLOAD_PATH_LOOKUP_CONCURRENCY,
-    );
+    expect(maximumActiveLoads).toBe(UPLOAD_TREE_REQUEST_CONCURRENCY);
   });
 });
 
