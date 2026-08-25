@@ -9,7 +9,7 @@ use crate::auth::{
     SESSION_COOKIE, authenticate_password, current_user, hash_session_token, require_csrf,
     require_principal,
 };
-use crate::state::AppState;
+use crate::state::{AppState, LoadShedError};
 
 const DEFAULT_SESSION_SECONDS: i64 = 24 * 60 * 60;
 const REMEMBER_SESSION_SECONDS: i64 = 30 * 24 * 60 * 60;
@@ -55,7 +55,7 @@ pub async fn login(
         .map(|address| address.ip())
         .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     if !state.login_rate_limiter.allow(address, username) {
-        return Ok(redirect(login_error_location(form.next.as_deref())));
+        return Err(LoadShedError::too_many_requests("login rate limit exceeded").into());
     }
 
     let user = authenticate_password(&state, username, &form.password).await?;

@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   VaultManifest,
   VaultMetadataPlan,
+  VaultShareNodeSnapshot,
+  VaultSharePreparationPlan,
 } from "@/features/vault/protocol";
 import { VaultCryptoClient } from "@/features/vault/vault-client";
 import type {
@@ -28,6 +30,10 @@ const plan: VaultMetadataPlan = {
   entryType: "file",
   generationNumber: 1,
   generationId: "AAAAAAAAAAAAAAAAAAAAAA",
+  ciphertextLength: 4_112,
+  cryptoChunkBytes: 4 * 1024 * 1024,
+  chunkCount: 1,
+  ciphertextMerkleRoot: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
   bootstrapCbor: "bootstrap",
   bootstrapSignature: "signature",
   encryptedManifest: "manifest",
@@ -41,6 +47,7 @@ const plan: VaultMetadataPlan = {
 
 class FakeWorker {
   static instances: FakeWorker[] = [];
+  static respondToMetadata = true;
 
   readonly requests: VaultWorkerRequest[] = [];
   private readonly listeners = new Map<
@@ -63,7 +70,58 @@ class FakeWorker {
 
   postMessage(request: VaultWorkerRequest): void {
     this.requests.push(request);
+    if (request.type === "createShareMaterial") {
+      const folder = request.input.nodes.find(
+        (node) => node.entryType === "folder",
+      );
+      const file = request.input.nodes.find(
+        (node) => node.entryType === "file",
+      );
+      if (!folder || !file)
+        throw new Error("The test share nodes are invalid.");
+      queueMicrotask(() => {
+        this.emit({
+          id: request.id,
+          ok: true,
+          progress: {
+            type: "shareMaterial",
+            nodeId: file.nodeId,
+            wrappers: [Uint8Array.of(2), Uint8Array.of(3)],
+            completedNodes: 1,
+            totalNodes: 2,
+          },
+        });
+        this.emit({
+          id: request.id,
+          ok: true,
+          progress: {
+            type: "shareMaterial",
+            nodeId: folder.nodeId,
+            wrappers: [Uint8Array.of(1)],
+            completedNodes: 2,
+            totalNodes: 2,
+          },
+        });
+        this.emit({
+          id: request.id,
+          ok: true,
+          result: {
+            type: "createShareMaterial",
+            result: {
+              wrappers: [],
+              envelopes: [],
+              ownerEpochKey: {
+                wrapperId: new Uint8Array(16),
+                ciphertext: new Uint8Array(32),
+              },
+            },
+          },
+        });
+      });
+      return;
+    }
     if (request.type !== "openMetadataPlans") return;
+    if (!FakeWorker.respondToMetadata) return;
     const results = request.plans.map((metadataPlan) => ({
       status: "ready" as const,
       nodeId: metadataPlan.nodeId,
@@ -96,6 +154,7 @@ class FakeWorker {
 describe("vault metadata worker client", () => {
   beforeEach(() => {
     FakeWorker.instances = [];
+    FakeWorker.respondToMetadata = true;
     vi.stubGlobal("Worker", FakeWorker);
   });
 
@@ -127,6 +186,91 @@ describe("vault metadata worker client", () => {
         nodeId: plan.nodeId,
         recordHash: plan.recordHash,
       }),
+    ]);
+  });
+
+  it("propagates navigation cancellation into the worker operation", async () => {
+    FakeWorker.respondToMetadata = false;
+    const client = new VaultCryptoClient();
+    const controller = new AbortController();
+
+    const pending = client.openMetadataPlans([plan], {
+      concurrency: 4,
+      priorityCount: 1,
+      signal: controller.signal,
+    });
+    const worker = FakeWorker.instances[0];
+    const operation = worker.requests[0];
+    expect(operation.type).toBe("openMetadataPlans");
+
+    controller.abort();
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(worker.requests[1]).toMatchObject({
+      type: "cancelMetadataOperation",
+      operationId: operation.id,
+    });
+  });
+
+  it("assembles progressively transferred share wrappers deterministically", async () => {
+    const client = new VaultCryptoClient();
+    const onProgress = vi.fn();
+    const nodes: VaultShareNodeSnapshot[] = [
+      {
+        nodeId: "dir_z",
+        parentId: null,
+        depth: 0,
+        entryType: "folder",
+        generationNumber: 1,
+        generationId: plan.generationId,
+        recordVersion: 1,
+        recordHash: plan.recordHash,
+      },
+      {
+        nodeId: "fil_a",
+        parentId: "dir_z",
+        depth: 1,
+        entryType: "file",
+        generationNumber: 1,
+        generationId: plan.generationId,
+        recordVersion: 1,
+        recordHash: plan.recordHash,
+      },
+    ];
+    const plans: VaultSharePreparationPlan[] = nodes.map((snapshot) => ({
+      snapshot,
+      metadata: {
+        ...plan,
+        nodeId: snapshot.nodeId,
+        entryType: snapshot.entryType,
+        generationId: snapshot.generationId ?? plan.generationId,
+      },
+    }));
+
+    const material = await client.createShareMaterial(
+      {
+        shareId: "shr_progress",
+        rootNodeId: "dir_z",
+        senderId: "usr_sender",
+        recipient: {
+          userId: "usr_recipient",
+          username: "recipient",
+          keyVersion: 1,
+          x25519PublicKey: "x25519",
+          ed25519PublicKey: "ed25519",
+          fingerprintSha256: "fingerprint",
+          trustStatus: "accepted",
+        },
+        nodes,
+        plans,
+      },
+      { onProgress },
+    );
+
+    expect(material.wrappers.map((wrapper) => wrapper[0])).toEqual([1, 2, 3]);
+    expect(onProgress.mock.calls.map(([progress]) => progress)).toEqual([
+      { completedNodes: 1, totalNodes: 2 },
+      { completedNodes: 2, totalNodes: 2 },
     ]);
   });
 });

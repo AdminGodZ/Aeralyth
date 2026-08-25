@@ -60,10 +60,157 @@ describe("VaultMetadataResolver", () => {
     expect(apiMocks.getVaultMetadataPlans).toHaveBeenCalledWith(
       "csrf",
       references.map((value) => value.nodeId),
+      undefined,
+      expect.any(AbortSignal),
     );
     expect(getCachedMetadata).toHaveBeenCalledOnce();
     expect(openMetadataPlans).toHaveBeenCalledOnce();
     expect(openMetadataPlans.mock.calls[0][0]).toHaveLength(100);
+    expect(openMetadataPlans.mock.calls[0][1]).toMatchObject({
+      concurrency: 4,
+    });
+  });
+
+  it("revalidates shared grants before consulting plaintext or plan caches", async () => {
+    const target = reference("fil_shared_revalidation");
+    apiMocks.getVaultMetadataPlans.mockResolvedValue({
+      plans: [planFor(target)],
+    });
+    const { client, getCachedMetadata, openMetadataPlans } = fakeClient();
+    const resolver = new VaultMetadataResolver();
+    const context = {
+      csrfToken: "csrf",
+      client,
+      openNode: vi.fn(async () => undefined),
+    };
+
+    await resolver.resolve([target], context);
+    await resolver.resolve([target], context, {
+      requireServerValidation: true,
+    });
+
+    expect(apiMocks.getVaultMetadataPlans).toHaveBeenCalledTimes(2);
+    expect(getCachedMetadata).toHaveBeenCalledOnce();
+    expect(openMetadataPlans).toHaveBeenCalledTimes(2);
+  });
+
+  it("never coalesces independent shared-grant validation flights", async () => {
+    const first = deferred<{ plans: VaultMetadataPlan[] }>();
+    const second = deferred<{ plans: VaultMetadataPlan[] }>();
+    const target = reference("fil_shared_grant_flights");
+    apiMocks.getVaultMetadataPlans
+      .mockReturnValueOnce(first.promise)
+      .mockReturnValueOnce(second.promise);
+    const { client } = fakeClient();
+    const resolver = new VaultMetadataResolver();
+    const context = {
+      csrfToken: "csrf",
+      client,
+      openNode: vi.fn(async () => undefined),
+    };
+
+    const oldNavigation = resolver.resolve([target], context, {
+      requireServerValidation: true,
+    });
+    const newNavigation = resolver.resolve([target], context, {
+      requireServerValidation: true,
+    });
+    await vi.waitFor(() =>
+      expect(apiMocks.getVaultMetadataPlans).toHaveBeenCalledTimes(2),
+    );
+    first.resolve({ plans: [planFor(target)] });
+    second.resolve({ plans: [planFor(target)] });
+
+    await expect(oldNavigation).resolves.toHaveLength(1);
+    await expect(newNavigation).resolves.toHaveLength(1);
+  });
+
+  it("uses exactly five sequential plan requests for 500 cold rows", async () => {
+    const references = Array.from({ length: 500 }, (_, index) =>
+      reference(`fil_metadata_large_${index}`),
+    );
+    let activeRequests = 0;
+    let peakRequests = 0;
+    apiMocks.getVaultMetadataPlans.mockImplementation(
+      async (_csrfToken: string, nodeIds: string[]) => {
+        activeRequests += 1;
+        peakRequests = Math.max(peakRequests, activeRequests);
+        await Promise.resolve();
+        activeRequests -= 1;
+        const byId = new Map(references.map((value) => [value.nodeId, value]));
+        return {
+          plans: nodeIds.map((nodeId) => {
+            const value = byId.get(nodeId);
+            if (!value) throw new Error("unexpected metadata node id");
+            return planFor(value);
+          }),
+        };
+      },
+    );
+    const { client, openMetadataPlans } = fakeClient();
+    const resolver = new VaultMetadataResolver();
+
+    const results = await resolver.resolve(references, {
+      csrfToken: "csrf",
+      client,
+      openNode: vi.fn(async () => undefined),
+    });
+
+    expect(results).toHaveLength(500);
+    expect(apiMocks.getVaultMetadataPlans).toHaveBeenCalledTimes(5);
+    expect(
+      apiMocks.getVaultMetadataPlans.mock.calls.map(
+        ([, nodeIds]) => nodeIds.length,
+      ),
+    ).toEqual([100, 100, 100, 100, 100]);
+    expect(peakRequests).toBe(1);
+    expect(openMetadataPlans).toHaveBeenCalledOnce();
+    expect(openMetadataPlans.mock.calls[0][1]).toMatchObject({
+      concurrency: 4,
+    });
+  });
+
+  it("follows an encoded-size continuation without overlapping requests", async () => {
+    const references = Array.from({ length: 100 }, (_, index) =>
+      reference(`fil_metadata_continuation_${index}`),
+    );
+    const plans = references.map(planFor);
+    let activeRequests = 0;
+    let peakRequests = 0;
+    apiMocks.getVaultMetadataPlans
+      .mockImplementationOnce(async () => {
+        activeRequests += 1;
+        peakRequests = Math.max(peakRequests, activeRequests);
+        await Promise.resolve();
+        activeRequests -= 1;
+        return { plans: plans.slice(0, 50), continuation: 50 };
+      })
+      .mockImplementationOnce(async () => {
+        activeRequests += 1;
+        peakRequests = Math.max(peakRequests, activeRequests);
+        await Promise.resolve();
+        activeRequests -= 1;
+        return { plans: plans.slice(50) };
+      });
+    const { client } = fakeClient();
+    const resolver = new VaultMetadataResolver();
+
+    await expect(
+      resolver.resolve(references, {
+        csrfToken: "csrf",
+        client,
+        openNode: vi.fn(async () => undefined),
+      }),
+    ).resolves.toHaveLength(100);
+
+    expect(apiMocks.getVaultMetadataPlans).toHaveBeenCalledTimes(2);
+    expect(apiMocks.getVaultMetadataPlans.mock.calls[1]).toEqual([
+      "csrf",
+      references.map((value) => value.nodeId),
+      50,
+      expect.any(AbortSignal),
+    ]);
+    expect(peakRequests).toBe(1);
   });
 
   it("lets an abandoned navigation stop waiting without canceling shared plan warm-up", async () => {
@@ -95,6 +242,34 @@ describe("VaultMetadataResolver", () => {
     ]);
     expect(apiMocks.getVaultMetadataPlans).toHaveBeenCalledOnce();
     expect(openMetadataPlans).toHaveBeenCalledOnce();
+  });
+
+  it("aborts obsolete plan I/O when the last navigation consumer leaves", async () => {
+    const pending = deferred<{ plans: VaultMetadataPlan[] }>();
+    apiMocks.getVaultMetadataPlans.mockReturnValue(pending.promise);
+    const target = reference("fil_obsolete_navigation");
+    const { client } = fakeClient();
+    const resolver = new VaultMetadataResolver();
+    const controller = new AbortController();
+
+    const abandoned = resolver.resolve(
+      [target],
+      {
+        csrfToken: "csrf",
+        client,
+        openNode: vi.fn(async () => undefined),
+      },
+      { signal: controller.signal },
+    );
+    await vi.waitFor(() =>
+      expect(apiMocks.getVaultMetadataPlans).toHaveBeenCalledOnce(),
+    );
+    const networkSignal = apiMocks.getVaultMetadataPlans.mock.calls[0][3];
+    controller.abort();
+
+    await expect(abandoned).rejects.toMatchObject({ name: "AbortError" });
+    expect(networkSignal).toBeInstanceOf(AbortSignal);
+    expect(networkSignal.aborted).toBe(true);
   });
 
   it("rejects stale in-flight results after lock and does not repopulate caches", async () => {
@@ -141,6 +316,10 @@ function planFor(referenceValue: VaultMetadataReference): VaultMetadataPlan {
     entryType: "file",
     generationNumber: 1,
     generationId: referenceValue.generationId,
+    ciphertextLength: 4_112,
+    cryptoChunkBytes: 4 * 1024 * 1024,
+    chunkCount: 1,
+    ciphertextMerkleRoot: recordHash,
     bootstrapCbor: "bootstrap",
     bootstrapSignature: "signature",
     encryptedManifest: "manifest",

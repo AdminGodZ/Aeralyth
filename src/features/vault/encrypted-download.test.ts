@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { readEncryptedFileBlob } from "@/features/vault/encrypted-download";
+import {
+  downloadEncryptedFile,
+  MAX_IN_MEMORY_DOWNLOAD_BYTES,
+  readEncryptedFileBlob,
+  readEncryptedFileStream,
+} from "@/features/vault/encrypted-download";
 import {
   VAULT_CRYPTO_CHUNK_BYTES,
   type VaultDownloadPlan,
@@ -22,6 +27,8 @@ const manifest: VaultManifest = {
 };
 
 afterEach(() => {
+  vi.useRealTimers();
+  vi.restoreAllMocks();
   vi.unstubAllGlobals();
 });
 
@@ -171,6 +178,168 @@ describe("encrypted download buffering", () => {
       }),
     ).rejects.toThrow("ended before all chunks arrived");
     expect(aborted).toEqual(["active-session"]);
+  });
+
+  it("rejects an unsafe large in-memory fallback before starting I/O", async () => {
+    vi.stubGlobal("navigator", { storage: {} });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = {
+      startDecryption: vi.fn(),
+    } as unknown as VaultCryptoClient;
+
+    await expect(
+      downloadEncryptedFile({
+        plan: testPlan(1),
+        manifest: {
+          ...manifest,
+          chunkCount: 1,
+          paddedBytes: 1,
+          plaintextBytes: MAX_IN_MEMORY_DOWNLOAD_BYTES + 1,
+        },
+        client,
+      }),
+    ).rejects.toThrow("cannot stream this large download to disk");
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(client.startDecryption).not.toHaveBeenCalled();
+  });
+
+  it("streams compatibility downloads through OPFS and removes the temp entry", async () => {
+    vi.useFakeTimers();
+    const writes: ArrayBuffer[] = [];
+    const writable = {
+      write: vi.fn(async (data: ArrayBuffer) => {
+        writes.push(data);
+      }),
+      close: vi.fn(async () => undefined),
+      abort: vi.fn(async () => undefined),
+    };
+    const removeEntry = vi.fn(async () => undefined);
+    const getFile = vi.fn(async () => new Blob(writes) as unknown as File);
+    const getFileHandle = vi.fn(async () => ({
+      createWritable: async () => writable,
+      getFile,
+    }));
+    const getDirectory = vi.fn(async () => ({
+      getFileHandle,
+      removeEntry,
+    }));
+    vi.stubGlobal("navigator", { storage: { getDirectory } });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(Uint8Array.of(5), {
+            status: 200,
+          }),
+      ),
+    );
+    const anchor = {
+      href: "",
+      download: "",
+      rel: "",
+      click: vi.fn(),
+    };
+    vi.stubGlobal("document", {
+      createElement: vi.fn(() => anchor),
+    });
+    const createObjectURL = vi
+      .spyOn(URL, "createObjectURL")
+      .mockReturnValue("blob:aeralyth-test");
+    const revokeObjectURL = vi
+      .spyOn(URL, "revokeObjectURL")
+      .mockImplementation(() => undefined);
+    const client = {
+      async startDecryption() {
+        return { sessionId: "session", manifest };
+      },
+      async decryptChunk() {
+        return { plaintext: Uint8Array.of(7).buffer, plaintextBytes: 1 };
+      },
+      async finalizeDecryption() {},
+      async abortDecryption() {},
+    } as unknown as VaultCryptoClient;
+
+    await downloadEncryptedFile({
+      plan: testPlan(1),
+      manifest: {
+        ...manifest,
+        chunkCount: 1,
+        paddedBytes: 1,
+        plaintextBytes: 1,
+      },
+      client,
+    });
+
+    expect(writes.map((part) => Array.from(new Uint8Array(part)))).toEqual([
+      [7],
+    ]);
+    expect(writable.close).toHaveBeenCalledOnce();
+    expect(getFile).toHaveBeenCalledOnce();
+    expect(createObjectURL).toHaveBeenCalledOnce();
+    expect(anchor.download).toBe("fragmented.bin");
+    expect(anchor.click).toHaveBeenCalledOnce();
+    expect(removeEntry).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(revokeObjectURL).toHaveBeenCalledWith("blob:aeralyth-test");
+    expect(removeEntry).toHaveBeenCalledOnce();
+  });
+
+  it("backpressures decrypted archive streams to one queued plaintext chunk", async () => {
+    const ciphertextLength = 2 * (VAULT_CRYPTO_CHUNK_BYTES + 16) + 1;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(new Uint8Array(ciphertextLength), {
+            status: 200,
+          }),
+      ),
+    );
+    const streamManifest: VaultManifest = {
+      ...manifest,
+      plaintextBytes: 3,
+      paddedBytes: 3,
+      chunkCount: 3,
+    };
+    const decryptChunk = vi.fn(
+      async (_sessionId: string, chunkIndex: number) => ({
+        plaintext: Uint8Array.of(chunkIndex + 10).buffer,
+        plaintextBytes: 1,
+      }),
+    );
+    const client = {
+      async startDecryption() {
+        return { sessionId: "stream-session", manifest: streamManifest };
+      },
+      decryptChunk,
+      async finalizeDecryption() {},
+      async abortDecryption() {},
+    } as unknown as VaultCryptoClient;
+    const stream = readEncryptedFileStream({
+      plan: { ...testPlan(ciphertextLength), chunkCount: 3 },
+      manifest: streamManifest,
+      client,
+    });
+    const reader = stream.getReader();
+
+    expect(await reader.read()).toMatchObject({
+      done: false,
+      value: Uint8Array.of(10),
+    });
+    await vi.waitFor(() => expect(decryptChunk).toHaveBeenCalledTimes(2));
+    expect(decryptChunk).toHaveBeenCalledTimes(2);
+    expect(await reader.read()).toMatchObject({
+      done: false,
+      value: Uint8Array.of(11),
+    });
+    await vi.waitFor(() => expect(decryptChunk).toHaveBeenCalledTimes(3));
+    expect(await reader.read()).toMatchObject({
+      done: false,
+      value: Uint8Array.of(12),
+    });
+    expect(await reader.read()).toEqual({ done: true, value: undefined });
   });
 });
 

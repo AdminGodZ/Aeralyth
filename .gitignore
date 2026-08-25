@@ -17,7 +17,8 @@
 # next.js
 /.next/
 /out/
-/public/folder-zip.worker.js
+/.worker-build/
+/public/workers/*.worker.js
 
 # production
 /build

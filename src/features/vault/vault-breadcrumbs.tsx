@@ -15,6 +15,7 @@ import type { FileSort, FileSortDirection, FolderBreadcrumb } from "@/lib/api";
 
 type BreadcrumbResolutionState = {
   source: FolderBreadcrumb[] | null;
+  basePath: "/files" | "/shared";
   values: Record<string, VaultNameResolution>;
 };
 
@@ -31,17 +32,25 @@ export function VaultBreadcrumbs({
 }) {
   const vault = useVault();
   const [resolutionState, setResolutionState] =
-    useState<BreadcrumbResolutionState>({ source: null, values: {} });
+    useState<BreadcrumbResolutionState>({
+      source: null,
+      basePath,
+      values: {},
+    });
   const names =
-    resolutionState.source === breadcrumbs ? resolutionState.values : {};
+    resolutionState.source === breadcrumbs &&
+    resolutionState.basePath === basePath
+      ? resolutionState.values
+      : {};
 
   useEffect(() => {
     if (vault.state !== "unlocked") {
       setResolutionState((current) =>
         current.source === breadcrumbs &&
+        current.basePath === basePath &&
         Object.keys(current.values).length === 0
           ? current
-          : { source: breadcrumbs, values: {} },
+          : { source: breadcrumbs, basePath, values: {} },
       );
       return;
     }
@@ -78,12 +87,17 @@ export function VaultBreadcrumbs({
             : { status: "unavailable" };
       }
       if (!canceled) {
-        setResolutionState({ source: breadcrumbs, values: { ...values } });
+        setResolutionState({
+          source: breadcrumbs,
+          basePath,
+          values: { ...values },
+        });
       }
     };
     void vault
       .resolveMetadata(references, {
         signal: controller.signal,
+        requireServerValidation: basePath === "/shared",
         onCached: publish,
         onPriority: publish,
       })
@@ -94,14 +108,18 @@ export function VaultBreadcrumbs({
           values[reference.nodeId] = { status: "unavailable" };
         }
         if (!canceled) {
-          setResolutionState({ source: breadcrumbs, values: { ...values } });
+          setResolutionState({
+            source: breadcrumbs,
+            basePath,
+            values: { ...values },
+          });
         }
       });
     return () => {
       canceled = true;
       controller.abort();
     };
-  }, [breadcrumbs, vault.resolveMetadata, vault.state]);
+  }, [basePath, breadcrumbs, vault.resolveMetadata, vault.state]);
 
   const query = sort
     ? { sort, ...(direction ? { direction } : {}) }

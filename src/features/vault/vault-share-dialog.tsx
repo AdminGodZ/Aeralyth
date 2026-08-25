@@ -36,6 +36,7 @@ import {
   getPendingVaultEpochRotation,
   getVaultIdentity,
   getVaultSharePlan,
+  getVaultSharePreparationPlans,
   publishVaultEpochRotation,
   trustVaultIdentity,
   type VaultEpochRotationPlan,
@@ -70,16 +71,50 @@ function useVaultShareDialogController({
   const [identity, setIdentity] = useState<VaultPublicIdentity | null>(null);
   const [confirmed, setConfirmed] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [sharePreparationProgress, setSharePreparationProgress] = useState<{
+    completedNodes: number;
+    totalNodes: number;
+  } | null>(null);
   const [complete, setComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ownedShares, setOwnedShares] = useState<VaultOwnedShare[]>([]);
   const sharesCursorRef = useRef<string | null>(null);
   const loadMoreControllerRef = useRef<AbortController | null>(null);
+  const activeBusyRequestRef = useRef<number | null>(null);
+  const shareRequestRef = useRef(0);
   const [hasMoreShares, setHasMoreShares] = useState(false);
   const [loadingMoreShares, setLoadingMoreShares] = useState(false);
 
+  function beginBusyRequest(): number | null {
+    if (activeBusyRequestRef.current !== null) return null;
+    if (loadMoreControllerRef.current) {
+      loadMoreControllerRef.current.abort();
+      loadMoreControllerRef.current = null;
+      setLoadingMoreShares(false);
+    }
+    const requestId = ++shareRequestRef.current;
+    activeBusyRequestRef.current = requestId;
+    setBusy(true);
+    return requestId;
+  }
+
+  function finishBusyRequest(requestId: number, clearProgress = false): void {
+    if (
+      shareRequestRef.current !== requestId ||
+      activeBusyRequestRef.current !== requestId
+    ) {
+      return;
+    }
+    activeBusyRequestRef.current = null;
+    if (clearProgress) setSharePreparationProgress(null);
+    setBusy(false);
+  }
+
   useEffect(() => {
     if (!open) return;
+    loadMoreControllerRef.current?.abort();
+    loadMoreControllerRef.current = null;
+    setLoadingMoreShares(false);
     const controller = new AbortController();
     void getOwnedVaultShares(nodeId, undefined, controller.signal)
       .then((page) => {
@@ -93,49 +128,77 @@ function useVaultShareDialogController({
     return () => {
       controller.abort();
       loadMoreControllerRef.current?.abort();
+      loadMoreControllerRef.current = null;
+      shareRequestRef.current += 1;
+      activeBusyRequestRef.current = null;
+      setBusy(false);
+      setSharePreparationProgress(null);
     };
   }, [nodeId, open]);
 
   async function lookup(): Promise<void> {
-    setBusy(true);
+    const requestId = beginBusyRequest();
+    if (requestId === null) return;
+    setSharePreparationProgress(null);
     setError(null);
     setIdentity(null);
     setConfirmed(false);
     try {
-      setIdentity(await getVaultIdentity(username.trim()));
+      const nextIdentity = await getVaultIdentity(username.trim());
+      if (shareRequestRef.current !== requestId) return;
+      setIdentity(nextIdentity);
     } catch (failure) {
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : "The recipient was not found.",
-      );
+      if (shareRequestRef.current === requestId) {
+        setError(
+          failure instanceof Error
+            ? failure.message
+            : "The recipient was not found.",
+        );
+      }
     } finally {
-      setBusy(false);
+      // This helper resets the loading state only for the request owned by this finally.
+      // react-doctor-disable-next-line react-doctor/no-loading-flag-reset-outside-finally
+      finishBusyRequest(requestId);
     }
   }
 
   async function share(): Promise<void> {
     if (!identity || !confirmed || !vault.client) return;
-    setBusy(true);
+    const requestId = beginBusyRequest();
+    if (requestId === null) return;
     setError(null);
     try {
       if (identity.trustStatus !== "accepted") {
         await trustVaultIdentity(csrfToken, identity);
+        if (shareRequestRef.current !== requestId) return;
       }
       const plan = await getVaultSharePlan(nodeId);
-      for (const node of plan.nodes) {
-        // Descendant node keys are opened from their already-cached parent keys.
-        // react-doctor-disable-next-line react-doctor/async-await-in-loop
-        await vault.openNode(node.nodeId);
-      }
-      const shareId = randomPrefixedId("shr_");
-      const material = await vault.client.createShareMaterial({
-        shareId,
-        rootNodeId: nodeId,
-        senderId: currentUserId,
-        recipient: identity,
-        nodes: plan.nodes,
+      if (shareRequestRef.current !== requestId) return;
+      const plans = await getVaultSharePreparationPlans(csrfToken, plan.nodes);
+      if (shareRequestRef.current !== requestId) return;
+      setSharePreparationProgress({
+        completedNodes: 0,
+        totalNodes: plan.nodes.length,
       });
+      const shareId = randomPrefixedId("shr_");
+      const material = await vault.client.createShareMaterial(
+        {
+          shareId,
+          rootNodeId: nodeId,
+          senderId: currentUserId,
+          recipient: identity,
+          nodes: plan.nodes,
+          plans,
+        },
+        {
+          onProgress(progress) {
+            if (shareRequestRef.current === requestId) {
+              setSharePreparationProgress(progress);
+            }
+          },
+        },
+      );
+      if (shareRequestRef.current !== requestId) return;
       await createVaultShare(csrfToken, {
         shareId,
         rootNodeId: nodeId,
@@ -143,16 +206,22 @@ function useVaultShareDialogController({
         recipientKeyVersion: identity.keyVersion,
         ...material,
       });
-      await refreshOwnedShares();
+      if (shareRequestRef.current !== requestId) return;
+      await refreshOwnedShares(requestId);
+      if (shareRequestRef.current !== requestId) return;
       setComplete(true);
     } catch (failure) {
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : "The encrypted share could not be created.",
-      );
+      if (shareRequestRef.current === requestId) {
+        setError(
+          failure instanceof Error
+            ? failure.message
+            : "The encrypted share could not be created.",
+        );
+      }
     } finally {
-      setBusy(false);
+      // This helper resets the loading state only for the request owned by this finally.
+      // react-doctor-disable-next-line react-doctor/no-loading-flag-reset-outside-finally
+      finishBusyRequest(requestId, true);
     }
   }
 
@@ -161,7 +230,9 @@ function useVaultShareDialogController({
     recipientId: string,
   ): Promise<void> {
     if (!vault.client) return;
-    setBusy(true);
+    const requestId = beginBusyRequest();
+    if (requestId === null) return;
+    setSharePreparationProgress(null);
     setError(null);
     let pendingEpoch: number | null = null;
     try {
@@ -171,7 +242,7 @@ function useVaultShareDialogController({
         recipientId,
       );
       pendingEpoch = plan.pendingEpoch;
-      await completeRotation(share, plan);
+      await completeRotation(share, plan, requestId);
     } catch (failure) {
       if (pendingEpoch !== null) {
         await abortVaultEpochRotation(
@@ -180,37 +251,48 @@ function useVaultShareDialogController({
           pendingEpoch,
         ).catch(() => undefined);
       }
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : "The recipient could not be revoked.",
-      );
+      if (shareRequestRef.current === requestId) {
+        setError(
+          failure instanceof Error
+            ? failure.message
+            : "The recipient could not be revoked.",
+        );
+      }
     } finally {
-      setBusy(false);
+      // This helper resets the loading state only for the request owned by this finally.
+      // react-doctor-disable-next-line react-doctor/no-loading-flag-reset-outside-finally
+      finishBusyRequest(requestId, true);
     }
   }
 
   async function resumeRotation(share: VaultOwnedShare): Promise<void> {
     if (!vault.client) return;
-    setBusy(true);
+    const requestId = beginBusyRequest();
+    if (requestId === null) return;
+    setSharePreparationProgress(null);
     setError(null);
     try {
       const plan = await getPendingVaultEpochRotation(share.shareId);
-      await completeRotation(share, plan);
+      await completeRotation(share, plan, requestId);
     } catch (failure) {
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : "The pending revocation could not be resumed.",
-      );
+      if (shareRequestRef.current === requestId) {
+        setError(
+          failure instanceof Error
+            ? failure.message
+            : "The pending revocation could not be resumed.",
+        );
+      }
     } finally {
-      setBusy(false);
+      // This helper resets the loading state only for the request owned by this finally.
+      // react-doctor-disable-next-line react-doctor/no-loading-flag-reset-outside-finally
+      finishBusyRequest(requestId, true);
     }
   }
 
   async function cancelRotation(share: VaultOwnedShare): Promise<void> {
     if (share.pendingEpoch === null) return;
-    setBusy(true);
+    const requestId = beginBusyRequest();
+    if (requestId === null) return;
     setError(null);
     try {
       await abortVaultEpochRotation(
@@ -218,38 +300,55 @@ function useVaultShareDialogController({
         share.shareId,
         share.pendingEpoch,
       );
-      await refreshOwnedShares();
+      await refreshOwnedShares(requestId);
     } catch (failure) {
-      setError(
-        failure instanceof Error
-          ? failure.message
-          : "The pending revocation could not be canceled.",
-      );
+      if (shareRequestRef.current === requestId) {
+        setError(
+          failure instanceof Error
+            ? failure.message
+            : "The pending revocation could not be canceled.",
+        );
+      }
     } finally {
-      setBusy(false);
+      // This helper resets the loading state only for the request owned by this finally.
+      // react-doctor-disable-next-line react-doctor/no-loading-flag-reset-outside-finally
+      finishBusyRequest(requestId);
     }
   }
 
   async function completeRotation(
     share: VaultOwnedShare,
     plan: VaultEpochRotationPlan,
+    requestId: number,
   ): Promise<void> {
     if (!vault.client) throw new Error("Unlock the vault first.");
-    for (const node of plan.nodes) {
-      // Rotation material must follow the parent-before-child share plan.
-      // react-doctor-disable-next-line react-doctor/async-await-in-loop
-      await vault.openNode(node.nodeId);
+    const plans = await getVaultSharePreparationPlans(csrfToken, plan.nodes);
+    if (shareRequestRef.current === requestId) {
+      setSharePreparationProgress({
+        completedNodes: 0,
+        totalNodes: plan.nodes.length,
+      });
     }
-    const material = await vault.client.rotateShareMaterial({
-      shareId: share.shareId,
-      rootNodeId: nodeId,
-      senderId: currentUserId,
-      epoch: plan.pendingEpoch,
-      recordVersion: plan.recordVersion,
-      previousRecordHash: plan.previousRecordHash,
-      recipients: plan.retainedRecipients,
-      nodes: plan.nodes,
-    });
+    const material = await vault.client.rotateShareMaterial(
+      {
+        shareId: share.shareId,
+        rootNodeId: nodeId,
+        senderId: currentUserId,
+        epoch: plan.pendingEpoch,
+        recordVersion: plan.recordVersion,
+        previousRecordHash: plan.previousRecordHash,
+        recipients: plan.retainedRecipients,
+        nodes: plan.nodes,
+        plans,
+      },
+      {
+        onProgress(progress) {
+          if (shareRequestRef.current === requestId) {
+            setSharePreparationProgress(progress);
+          }
+        },
+      },
+    );
     await publishVaultEpochRotation(
       csrfToken,
       share.shareId,
@@ -259,11 +358,17 @@ function useVaultShareDialogController({
         ...material,
       },
     );
-    await refreshOwnedShares();
+    await refreshOwnedShares(requestId);
   }
 
-  async function refreshOwnedShares(): Promise<void> {
+  async function refreshOwnedShares(shareRequestId?: number): Promise<void> {
     const page = await getOwnedVaultShares(nodeId);
+    if (
+      shareRequestId !== undefined &&
+      shareRequestRef.current !== shareRequestId
+    ) {
+      return;
+    }
     setOwnedShares(page.shares);
     sharesCursorRef.current = page.nextCursor;
     setHasMoreShares(page.hasMore);
@@ -271,13 +376,17 @@ function useVaultShareDialogController({
 
   async function loadMoreShares(): Promise<void> {
     const cursor = sharesCursorRef.current;
-    if (!cursor || loadMoreControllerRef.current) return;
+    if (busy || !cursor || loadMoreControllerRef.current) return;
+    const requestId = shareRequestRef.current;
     const controller = new AbortController();
     loadMoreControllerRef.current = controller;
     setLoadingMoreShares(true);
     setError(null);
     try {
       const page = await getOwnedVaultShares(nodeId, cursor, controller.signal);
+      if (controller.signal.aborted || shareRequestRef.current !== requestId) {
+        return;
+      }
       setOwnedShares((current) => [
         ...current,
         ...page.shares.filter(
@@ -287,7 +396,7 @@ function useVaultShareDialogController({
       sharesCursorRef.current = page.nextCursor;
       setHasMoreShares(page.hasMore);
     } catch (failure) {
-      if (!controller.signal.aborted) {
+      if (!controller.signal.aborted && shareRequestRef.current === requestId) {
         setError(
           failure instanceof Error
             ? failure.message
@@ -295,10 +404,14 @@ function useVaultShareDialogController({
         );
       }
     } finally {
-      loadMoreControllerRef.current = null;
-      // The controller ref blocks every newer load-more request until this finally runs.
-      // react-doctor-disable-next-line react-doctor/no-unowned-async-error-clear
-      setLoadingMoreShares(false);
+      if (loadMoreControllerRef.current === controller) {
+        loadMoreControllerRef.current = null;
+      }
+      if (shareRequestRef.current === requestId) {
+        // The controller ref blocks every newer load-more request until this finally runs.
+        // react-doctor-disable-next-line react-doctor/no-unowned-async-error-clear, react-doctor/no-loading-flag-reset-outside-finally
+        setLoadingMoreShares(false);
+      }
     }
   }
 
@@ -306,11 +419,16 @@ function useVaultShareDialogController({
     if (busy) return;
     onOpenChange(next);
     if (!next) {
+      loadMoreControllerRef.current?.abort();
+      loadMoreControllerRef.current = null;
+      shareRequestRef.current += 1;
       setUsername("");
       setIdentity(null);
       setConfirmed(false);
       setComplete(false);
       setError(null);
+      setSharePreparationProgress(null);
+      setLoadingMoreShares(false);
     }
   }
 
@@ -323,6 +441,7 @@ function useVaultShareDialogController({
     confirmed,
     setConfirmed,
     busy,
+    sharePreparationProgress,
     complete,
     error,
     ownedShares,
@@ -347,6 +466,7 @@ function VaultShareDialogView({
   confirmed,
   setConfirmed,
   busy,
+  sharePreparationProgress,
   complete,
   error,
   ownedShares,
@@ -464,7 +584,7 @@ function VaultShareDialogView({
                 type="button"
                 variant="outline"
                 className="w-full"
-                disabled={loadingMoreShares}
+                disabled={busy || loadingMoreShares}
                 onClick={() => void loadMoreShares()}
               >
                 {loadingMoreShares ? (
@@ -490,6 +610,7 @@ function VaultShareDialogView({
                   value={username}
                   onChange={(event) => setUsername(event.target.value)}
                   autoComplete="off"
+                  disabled={busy}
                   required
                 />
               </div>
@@ -553,6 +674,18 @@ function VaultShareDialogView({
                 <AlertTitle>Sharing failed</AlertTitle>
                 <AlertDescription>{error}</AlertDescription>
               </Alert>
+            ) : null}
+
+            {busy && sharePreparationProgress ? (
+              <p
+                className="text-sm text-muted-foreground"
+                role="status"
+                aria-live="polite"
+              >
+                Preparing encrypted wrappers{" "}
+                {sharePreparationProgress.completedNodes}/
+                {sharePreparationProgress.totalNodes}
+              </p>
             ) : null}
 
             <DialogFooter>

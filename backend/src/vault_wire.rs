@@ -2,12 +2,15 @@ use std::fmt;
 
 use bytes::Bytes;
 
+use crate::e2ee::MAX_SHARE_WRAPPERS;
+
 const MAGIC: &[u8; 4] = b"AVLT";
 const VERSION: u8 = 1;
 const NODE_PUBLICATION: u8 = 1;
 const SHARE_DIRECTORY: u8 = 2;
 const CREATE_SHARE: u8 = 3;
 const PUBLISH_EPOCH: u8 = 4;
+const FOLDER_BATCH: u8 = 5;
 const NULL_LENGTH: u32 = u32::MAX;
 
 #[derive(Debug)]
@@ -33,6 +36,10 @@ pub struct NodePublication {
     pub bootstrap_signature: Bytes,
     pub encrypted_manifest: Bytes,
     pub wrappers: Vec<Bytes>,
+}
+
+pub struct FolderBatchPublication {
+    pub records: Vec<NodePublication>,
 }
 
 pub struct ShareDirectoryPublication {
@@ -81,15 +88,22 @@ pub fn decode_node_publication(input: Bytes) -> Result<NodePublication, WireErro
             checksum_sha256: reader.text(256)?,
         });
     }
-    let publication = NodePublication {
-        parts,
-        bootstrap_cbor: reader.bytes(65_536)?,
-        bootstrap_signature: reader.fixed_bytes(64)?,
-        encrypted_manifest: reader.bytes(1_048_576)?,
-        wrappers: reader.bytes_array(4_096, 65_536)?,
-    };
+    let publication = reader.node_publication(parts)?;
     reader.finish()?;
     Ok(publication)
+}
+
+pub fn decode_folder_batch(input: Bytes) -> Result<FolderBatchPublication, WireError> {
+    let mut reader = Reader::new(input, FOLDER_BATCH)?;
+    let count = reader.count(100)?;
+    if count == 0 {
+        return Err(WireError("folder publication batch is empty"));
+    }
+    let records = (0..count)
+        .map(|_| reader.node_publication(Vec::new()))
+        .collect::<Result<Vec<_>, _>>()?;
+    reader.finish()?;
+    Ok(FolderBatchPublication { records })
 }
 
 pub fn decode_share_directory(input: Bytes) -> Result<ShareDirectoryPublication, WireError> {
@@ -97,7 +111,7 @@ pub fn decode_share_directory(input: Bytes) -> Result<ShareDirectoryPublication,
     let publication = ShareDirectoryPublication {
         directory_cbor: reader.optional_bytes(4_096)?,
         directory_signature: reader.optional_fixed_bytes(64)?,
-        wrappers: reader.bytes_array(8_192, 65_536)?,
+        wrappers: reader.bytes_array(MAX_SHARE_WRAPPERS, 65_536)?,
     };
     reader.finish()?;
     Ok(publication)
@@ -110,7 +124,7 @@ pub fn decode_create_share(input: Bytes) -> Result<CreateSharePublication, WireE
         root_node_id: reader.text(128)?,
         recipient_id: reader.text(128)?,
         recipient_key_version: reader.u64()?,
-        wrappers: reader.bytes_array(8_192, 65_536)?,
+        wrappers: reader.bytes_array(MAX_SHARE_WRAPPERS, 65_536)?,
         envelopes: reader.envelopes()?,
         owner_epoch_key: reader.owner_epoch_key()?,
     };
@@ -122,7 +136,7 @@ pub fn decode_publish_epoch(input: Bytes) -> Result<PublishEpochPublication, Wir
     let mut reader = Reader::new(input, PUBLISH_EPOCH)?;
     let publication = PublishEpochPublication {
         fence_snapshot_hash: reader.fixed_bytes(32)?,
-        wrappers: reader.bytes_array(8_192, 65_536)?,
+        wrappers: reader.bytes_array(MAX_SHARE_WRAPPERS, 65_536)?,
         envelopes: reader.envelopes()?,
         owner_epoch_key: reader.owner_epoch_key()?,
     };
@@ -250,6 +264,19 @@ impl Reader {
         })
     }
 
+    fn node_publication(
+        &mut self,
+        parts: Vec<CompletedPart>,
+    ) -> Result<NodePublication, WireError> {
+        Ok(NodePublication {
+            parts,
+            bootstrap_cbor: self.bytes(65_536)?,
+            bootstrap_signature: self.fixed_bytes(64)?,
+            encrypted_manifest: self.bytes(1_048_576)?,
+            wrappers: self.bytes_array(4_096, 65_536)?,
+        })
+    }
+
     fn length(&mut self) -> Result<usize, WireError> {
         usize::try_from(self.u32()?).map_err(|_| WireError("vault binary field length is invalid"))
     }
@@ -314,6 +341,27 @@ mod tests {
         assert_eq!(publication.bootstrap_signature.as_ref(), &[3; 64]);
         assert_eq!(publication.encrypted_manifest.as_ref(), &[4, 5, 6]);
         assert_eq!(publication.wrappers[0].as_ref(), &[7, 8]);
+    }
+
+    #[test]
+    fn decodes_parent_ordered_browser_folder_batch_fixture() {
+        let mut fixture = header(FOLDER_BATCH);
+        push_u32(&mut fixture, 2);
+        for marker in [1_u8, 2_u8] {
+            push_bytes(&mut fixture, &[marker, marker + 1]);
+            push_bytes(&mut fixture, &[marker + 2; 64]);
+            push_bytes(&mut fixture, &[marker + 3; 16]);
+            push_u32(&mut fixture, 1);
+            push_bytes(&mut fixture, &[marker + 4, marker + 5]);
+        }
+
+        let batch = decode_folder_batch(Bytes::from(fixture)).unwrap();
+
+        assert_eq!(batch.records.len(), 2);
+        assert!(batch.records.iter().all(|record| record.parts.is_empty()));
+        assert_eq!(batch.records[0].bootstrap_cbor.as_ref(), &[1, 2]);
+        assert_eq!(batch.records[1].bootstrap_cbor.as_ref(), &[2, 3]);
+        assert_eq!(batch.records[1].wrappers[0].as_ref(), &[6, 7]);
     }
 
     #[test]

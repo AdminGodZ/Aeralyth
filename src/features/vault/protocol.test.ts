@@ -19,8 +19,12 @@ import {
   encryptedLength,
   equalBytes,
   fillRandomBytes,
+  MAX_SHARE_WRAPPERS,
   merkleRootFromLeaves,
   padmeLength,
+  sha256,
+  sha256Parts,
+  shareAuthorizationVersion,
   toArrayBuffer,
   toBase64Url,
   VAULT_AAD_SCHEMA_ID,
@@ -33,6 +37,29 @@ import {
 } from "@/features/vault/protocol";
 
 describe("vault protocol", () => {
+  it("preserves one-shot SHA-256 vectors across incremental parts", async () => {
+    const parts = [Uint8Array.of(1, 2), new Uint8Array(0), Uint8Array.of(3, 4)];
+
+    expect(await sha256Parts(...parts)).toEqual(
+      await sha256(Uint8Array.of(1, 2, 3, 4)),
+    );
+  });
+
+  it("matches the Rust share-authorization version vector", async () => {
+    const version = await shareAuthorizationVersion({
+      shareId: "shr_test",
+      epoch: 2,
+      recipientId: "usr_recipient",
+      recipientKeyVersion: 4,
+      shareRecordVersion: 7,
+      envelopeHash: new Uint8Array(32).fill(9),
+    });
+
+    expect(Buffer.from(version).toString("hex")).toBe(
+      "99ee526ddf51decc35bcba6dddd7ead44d5fa3b6c34f8acd539e1c4cc3d80581",
+    );
+  });
+
   it("fills random padding beyond Web Crypto's per-call quota", () => {
     const output = new Uint8Array(65_536 * 2 + 7);
 
@@ -235,6 +262,16 @@ describe("vault protocol", () => {
         expectedRoot: root,
       }),
     ).toBe(true);
+  });
+
+  it("builds the maximum 50,000-file share commitment", async () => {
+    const hashes = Array.from({ length: MAX_SHARE_WRAPPERS }, (_, index) => {
+      const hash = new Uint8Array(32);
+      new DataView(hash.buffer).setUint32(28, index);
+      return hash;
+    });
+
+    await expect(wrapperSetRoot(hashes)).resolves.toHaveLength(32);
   });
 
   it("uses a deterministic 96-bit big-endian chunk counter", () => {

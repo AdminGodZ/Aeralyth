@@ -3,21 +3,22 @@ use actix_web::http::header::{
 };
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use futures_util::stream;
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::fs::File as AsyncFile;
-use tokio::io::AsyncReadExt;
 use tokio_postgres::IsolationLevel;
 
 use crate::auth::{parse_json_body, require_csrf, require_principal, session_principal};
+use crate::routes::local_file_stream::local_file_stream;
 use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
 use crate::routes::tree_walk::{
     MAX_TREE_MUTATION_NODES, TreeWalkScope, update_tree_state, walk_subtree,
 };
-use crate::state::AppState;
+use crate::state::{AppState, LoadShedError};
 use crate::timestamps;
+
+use super::conditional;
 
 pub(crate) const SHARE_TOKEN_HEADER: &str = "x-aeralyth-share-token";
 const MIN_LINK_LIFETIME_SECONDS: i64 = 5 * 60;
@@ -607,13 +608,14 @@ pub async fn list_owned(
         })
         .collect::<Result<Vec<_>>>()?;
 
-    Ok(HttpResponse::Ok()
-        .insert_header((CACHE_CONTROL, "private, no-store"))
-        .json(OwnedShareLinksResponse {
+    conditional::private_json(
+        &request,
+        &OwnedShareLinksResponse {
             links,
             next_cursor,
             has_more,
-        }))
+        },
+    )
 }
 
 pub async fn rotate(
@@ -695,7 +697,9 @@ pub async fn revoke(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    Ok(HttpResponse::NoContent().finish())
+    Ok(HttpResponse::NoContent()
+        .insert_header((CACHE_CONTROL, "private, no-store"))
+        .finish())
 }
 
 pub async fn access(
@@ -705,6 +709,12 @@ pub async fn access(
     query: web::Query<ShareAccessQuery>,
 ) -> Result<HttpResponse> {
     let token = path.into_inner();
+    validate_token(&token)?;
+    let admission_key = sha256_hex(&token);
+    let _recursive_permit = state
+        .recursive_operation_limiter
+        .try_acquire(&admission_key)
+        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
     let requested_folder_id = query
         .folder
         .as_deref()
@@ -736,18 +746,21 @@ pub async fn access(
         }
     };
 
-    Ok(no_store(&mut HttpResponse::Ok()).json(ShareAccessResponse {
-        access_scope: context.grant.access_scope,
-        permission: context.grant.permission,
-        expires_at: context.grant.expires_at,
-        owner_username: context.grant.owner_username,
-        root: context.root,
-        current_folder_id: context.current_folder_id,
-        breadcrumbs: context.breadcrumbs,
-        entries: entry_page.entries,
-        next_cursor: entry_page.next_cursor,
-        has_more: entry_page.has_more,
-    }))
+    conditional::private_json(
+        &request,
+        &ShareAccessResponse {
+            access_scope: context.grant.access_scope,
+            permission: context.grant.permission,
+            expires_at: context.grant.expires_at,
+            owner_username: context.grant.owner_username,
+            root: context.root,
+            current_folder_id: context.current_folder_id,
+            breadcrumbs: context.breadcrumbs,
+            entries: entry_page.entries,
+            next_cursor: entry_page.next_cursor,
+            has_more: entry_page.has_more,
+        },
+    )
 }
 
 pub async fn download(
@@ -756,6 +769,12 @@ pub async fn download(
     path: web::Path<(String, String)>,
 ) -> Result<HttpResponse> {
     let (token, file_id) = path.into_inner();
+    validate_token(&token)?;
+    let admission_key = sha256_hex(&token);
+    let _recursive_permit = state
+        .recursive_operation_limiter
+        .try_acquire(&admission_key)
+        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
     let context = get_share_download_context(&state, &token, &file_id).await?;
     authorize_share_recipient(&state, &request, &context.grant).await?;
     let Some(file) = context.file.filter(|_| context.node_authorized) else {
@@ -764,9 +783,14 @@ pub async fn download(
     state.db.release_request_connection().await;
 
     if let Some(download_url) = state
-        .storage
-        .download_url(&file.storage_name, &file.original_name)
-        .await
+        .storage_operations
+        .run(
+            &file.owner_id,
+            state
+                .storage
+                .download_url(&file.storage_name, &file.original_name),
+        )
+        .await?
         .map_err(error::ErrorBadGateway)?
     {
         return Ok(no_store(&mut HttpResponse::Found())
@@ -786,23 +810,7 @@ pub async fn download(
         .await
         .map_err(error::ErrorInternalServerError)?
         .len();
-    let body = stream::unfold(stored_file, |mut stored_file| async {
-        let mut buffer = vec![0_u8; 64 * 1024];
-        match stored_file.read(&mut buffer).await {
-            Ok(0) => None,
-            Ok(bytes_read) => {
-                buffer.truncate(bytes_read);
-                Some((
-                    Ok::<web::Bytes, actix_web::Error>(web::Bytes::from(buffer)),
-                    stored_file,
-                ))
-            }
-            Err(read_error) => Some((
-                Err(error::ErrorInternalServerError(read_error)),
-                stored_file,
-            )),
-        }
-    });
+    let body = local_file_stream(stored_file);
 
     Ok(no_store(&mut HttpResponse::Ok())
         .insert_header((
@@ -837,6 +845,10 @@ pub async fn remove_entry(
             "the share root cannot be removed through its link",
         ));
     }
+    let _recursive_permit = state
+        .recursive_operation_limiter
+        .try_acquire(&grant.owner_id)
+        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
     require_shared_node(&state, &grant, &file_id, None).await?;
     let mut client = state
         .db
@@ -875,7 +887,9 @@ pub async fn remove_entry(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    Ok(HttpResponse::NoContent().finish())
+    Ok(HttpResponse::NoContent()
+        .insert_header((CACHE_CONTROL, "private, no-store"))
+        .finish())
 }
 
 pub(crate) async fn editor_grant_from_header(
@@ -1315,10 +1329,14 @@ fn token_for_link(secret: &str, link_id: &str, token_version: i64) -> Result<Str
 }
 
 fn sha256_hex(value: &str) -> String {
-    Sha256::digest(value.as_bytes())
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(value.as_bytes());
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
 }
 
 fn no_store(builder: &mut actix_web::HttpResponseBuilder) -> &mut actix_web::HttpResponseBuilder {
@@ -1332,10 +1350,27 @@ fn no_store(builder: &mut actix_web::HttpResponseBuilder) -> &mut actix_web::Htt
 mod tests {
     use super::{
         EditorShareGrant, SHARE_ACCESS_CONTEXT_QUERY, SHARE_DOWNLOAD_CONTEXT_QUERY,
-        SHARE_TOKEN_ROTATE_QUERY, SHARE_TOKEN_VERSION_LOCK_QUERY, token_for_link,
+        SHARE_TOKEN_ROTATE_QUERY, SHARE_TOKEN_VERSION_LOCK_QUERY, sha256_hex, token_for_link,
         validate_access_scope, validate_editor_replacement, validate_expiration,
         validate_permission, validate_token,
     };
+
+    #[test]
+    fn share_token_hash_uses_one_preallocated_lowercase_hex_buffer() {
+        assert_eq!(
+            sha256_hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+
+        let source = include_str!("share_links.rs");
+        let encoder = source
+            .split_once("fn sha256_hex(")
+            .and_then(|(_, tail)| tail.split_once("fn no_store("))
+            .map(|(encoder, _)| encoder)
+            .expect("share token hex encoder should remain inspectable");
+        assert!(encoder.contains("String::with_capacity(digest.len() * 2)"));
+        assert!(!encoder.contains("format!"));
+    }
 
     #[test]
     fn browsing_combines_grant_root_and_upward_authorization() {
@@ -1357,6 +1392,13 @@ mod tests {
         assert_eq!(access.matches("list_shared_children(").count(), 1);
         assert!(!access.contains("resolve_grant("));
         assert!(!access.contains("require_shared_node("));
+        let admission = access
+            .find("recursive_operation_limiter")
+            .expect("share access admission should be present");
+        let recursive_query = access
+            .find("get_share_access_context(")
+            .expect("share access query should be present");
+        assert!(admission < recursive_query);
     }
 
     #[test]
@@ -1374,6 +1416,32 @@ mod tests {
         assert!(!download.contains("resolve_grant("));
         assert!(!download.contains("require_shared_node("));
         assert!(!download.contains("query_opt("));
+        let admission = download
+            .find("recursive_operation_limiter")
+            .expect("share download admission should be present");
+        let recursive_query = download
+            .find("get_share_download_context(")
+            .expect("share download query should be present");
+        assert!(admission < recursive_query);
+    }
+
+    #[test]
+    fn editor_removal_is_admitted_before_recursive_authorization() {
+        let source = include_str!("share_links.rs");
+        let remove = source
+            .split_once("pub async fn remove_entry(")
+            .and_then(|(_, tail)| tail.split_once("pub(crate) async fn editor_grant_from_header("))
+            .map(|(remove, _)| remove)
+            .expect("share removal source should remain inspectable");
+
+        let admission = remove
+            .find("recursive_operation_limiter")
+            .expect("share removal admission should be present");
+        let recursive_query = remove
+            .find("require_shared_node(")
+            .expect("share removal authorization should be present");
+        assert!(admission < recursive_query);
+        assert!(remove.contains("walk_subtree("));
     }
 
     #[actix_web::test]

@@ -1,10 +1,21 @@
 # Aeralyth production on Railway
 
 Aeralyth runs as one public Railway web service. Inside that service, Caddy
-routes `/api/*`, `/health`, and `/metrics` directly to Actix on port 8081 and
+routes `/api/*`, `/health`, `/health/*`, and `/metrics` directly to Actix on port 8081 and
 routes all other requests to the standalone Next.js server on port 3000. Only
 Caddy listens on Railway's public `PORT`; startup automatically moves either
 internal listener if a custom public port would otherwise collide.
+
+The public listener allows 10 seconds for headers, 10 minutes for request-body
+reads, 30 minutes for response writes, and two minutes of keep-alive idle time.
+Actix independently bounds header parsing, disconnect cleanup, keep-alive, and
+graceful shutdown. Handler futures are not wrapped in a blanket deadline because
+mutations use durable idempotency/state-machine boundaries. Database checkout and
+S3 operations retain their narrower service-specific deadlines.
+
+Caddy compresses text, JSON, JavaScript, SVG, and WebAssembly responses of at
+least 1 KiB with zstd or gzip. Ciphertext, CBOR publications, image bodies, and
+generic object streams are intentionally excluded.
 
 PostgreSQL and `aeralyth-storage-prod` remain separate private Railway
 resources. The production site uses the single public origin
@@ -157,7 +168,9 @@ Reapply the production S3 CORS policy if the final origin differs from
 
 ## Post-deploy checks
 
-1. `GET /health` and `GET /api/health` return `200`.
+1. `GET /health` and `GET /api/health` return dependency-free liveness `200`
+   responses, while `GET /health/ready` and `GET /api/health/ready` confirm the
+   cached PostgreSQL readiness check.
 2. Login succeeds only with the changed password; the local seed password fails.
 3. Settings loads, a password change signs out every active session, and the new
    password works.

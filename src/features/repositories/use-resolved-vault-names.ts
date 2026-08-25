@@ -12,8 +12,12 @@ export type RepositoryNamedNode = {
   id: string;
   name: string;
   e2eeState: "legacy" | "staged" | "encrypted";
+  parentId?: string | null;
   entryType?: "file" | "folder";
   updatedAt?: string;
+  vaultGenerationId: string | null;
+  vaultRecordVersion: number | null;
+  vaultRecordHash: string | null;
 };
 
 type StoredVaultName = VaultNameResolution & { sourceVersion: string };
@@ -22,8 +26,6 @@ type RepositoryNameResolutionState = {
   source: RepositoryNamedNode[] | null;
   values: Record<string, StoredVaultName>;
 };
-
-const NAME_PROGRESS_BATCH_SIZE = 24;
 
 export function useResolvedVaultNames(nodes: RepositoryNamedNode[]) {
   const vault = useVault();
@@ -41,54 +43,82 @@ export function useResolvedVaultNames(nodes: RepositoryNamedNode[]) {
       return;
     }
 
+    const controller = new AbortController();
     let canceled = false;
-    void (async () => {
-      const next: Record<string, StoredVaultName> = {};
-      let encryptedProcessed = 0;
-      const publishProgress = () => {
-        if (canceled) return;
+    const next: Record<string, StoredVaultName> = {};
+    const nodesById = new Map(nodes.map((node) => [node.id, node]));
+    const references = nodes.flatMap((node) => {
+      if (node.e2eeState !== "encrypted") return [];
+      if (
+        node.vaultGenerationId === null ||
+        node.vaultRecordVersion === null ||
+        node.vaultRecordHash === null
+      ) {
+        next[node.id] = {
+          status: "unavailable",
+          sourceVersion: sourceVersion(node),
+        };
+        return [];
+      }
+      return [
+        {
+          nodeId: node.id,
+          parentId: node.parentId ?? null,
+          recordVersion: node.vaultRecordVersion,
+          recordHash: node.vaultRecordHash,
+          generationId: node.vaultGenerationId,
+        },
+      ];
+    });
+    const publish = (
+      results: Awaited<ReturnType<typeof vault.resolveMetadata>>,
+    ) => {
+      for (const result of results) {
+        const node = nodesById.get(result.nodeId);
+        if (!node || result.recordHash !== node.vaultRecordHash) continue;
+        next[node.id] =
+          result.status === "ready"
+            ? {
+                status: "ready",
+                name: result.manifest.name,
+                sourceVersion: sourceVersion(node),
+              }
+            : {
+                status: "unavailable",
+                sourceVersion: sourceVersion(node),
+              };
+      }
+      if (!canceled) {
         setResolutionState({ source: nodes, values: { ...next } });
-      };
-      for (const node of nodes) {
-        if (canceled) return;
-        if (node.e2eeState !== "encrypted") {
-          continue;
-        }
-        let resolution: StoredVaultName;
-        try {
-          // Repository nodes share the vault worker/key cache, so bounded
-          // sequential resolution avoids fanning out decrypt operations.
-          // react-doctor-disable-next-line react-doctor/async-await-in-loop
-          const manifest = await vault.openNode(node.id);
-          resolution = {
-            status: "ready",
-            name: manifest.name,
-            sourceVersion: sourceVersion(node),
-          };
-        } catch {
-          resolution = {
+      }
+    };
+    void vault
+      .resolveMetadata(references, {
+        signal: controller.signal,
+        onCached: publish,
+        onPriority: publish,
+      })
+      .then(publish)
+      .catch(() => {
+        if (controller.signal.aborted) return;
+        for (const reference of references) {
+          const node = nodesById.get(reference.nodeId);
+          if (!node) continue;
+          next[node.id] = {
             status: "unavailable",
             sourceVersion: sourceVersion(node),
           };
         }
-        next[node.id] = resolution;
-        encryptedProcessed += 1;
-        if (
-          encryptedProcessed === 1 ||
-          encryptedProcessed % NAME_PROGRESS_BATCH_SIZE === 0
-        ) {
-          publishProgress();
+        if (!canceled) {
+          setResolutionState({ source: nodes, values: { ...next } });
         }
-      }
-      if (!canceled) {
-        setResolutionState({ source: nodes, values: next });
-      }
-    })();
+      });
 
     return () => {
       canceled = true;
+      controller.abort();
     };
-  }, [nodes, vault.openNode, vault.state]);
+  }, [nodes, vault.resolveMetadata, vault.state]);
 
   function presentationFor(node: RepositoryNamedNode) {
     const stored = encryptedNames[node.id];
@@ -106,5 +136,5 @@ export function useResolvedVaultNames(nodes: RepositoryNamedNode[]) {
 }
 
 function sourceVersion(node: RepositoryNamedNode): string {
-  return `${node.updatedAt ?? ""}\u0000${node.name}`;
+  return node.vaultRecordHash ?? `${node.updatedAt ?? ""}\u0000${node.name}`;
 }

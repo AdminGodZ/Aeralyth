@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { FolderZipSource } from "@/features/dashboard/folder-zip-messages";
 import { downloadFolderArchive } from "@/features/files/folder-archive";
 import {
   toBase64Url,
@@ -10,11 +9,13 @@ import type { VaultCryptoClient } from "@/features/vault/vault-client";
 import type { FolderArchiveEntry } from "@/lib/api";
 
 const mocks = vi.hoisted(() => ({
-  createBrowserZip: vi.fn(
-    async (_request: { sources: FolderZipSource[] }) => new Blob(["zip"]),
-  ),
+  createStreamingZipDestination: vi.fn(),
+  zipAdd: vi.fn(),
+  zipClose: vi.fn(),
+  discard: vi.fn(),
+  release: vi.fn(),
   triggerBlobDownload: vi.fn(),
-  readEncryptedFileBlob: vi.fn(async () => new Blob(["data"])),
+  readEncryptedFileStream: vi.fn(),
   getVaultDownloadPlan: vi.fn(),
 }));
 
@@ -22,12 +23,12 @@ vi.mock("@/features/archive/browser-archive", async (importOriginal) => ({
   ...(await importOriginal<
     typeof import("@/features/archive/browser-archive")
   >()),
-  createBrowserZip: mocks.createBrowserZip,
+  createStreamingZipDestination: mocks.createStreamingZipDestination,
   triggerBlobDownload: mocks.triggerBlobDownload,
 }));
 
 vi.mock("@/features/vault/encrypted-download", () => ({
-  readEncryptedFileBlob: mocks.readEncryptedFileBlob,
+  readEncryptedFileStream: mocks.readEncryptedFileStream,
 }));
 
 vi.mock("@/features/vault/vault-api", () => ({
@@ -77,13 +78,38 @@ const encryptedFile: FolderArchiveEntry = {
   updatedAt: "2026-08-17T00:00:00Z",
   contentVersion: "2026-08-17T00:00:00.123456Z",
   vaultGenerationId: toBase64Url(fileGeneration),
+  vaultRecordVersion: 1,
   vaultRecordHash: "record",
 };
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.createBrowserZip.mockResolvedValue(new Blob(["zip"]));
-  mocks.readEncryptedFileBlob.mockResolvedValue(new Blob(["data"]));
+  mocks.zipAdd.mockImplementation(
+    async (_path: string, source?: ReadableStream<Uint8Array>) => {
+      if (!source) return;
+      const reader = source.getReader();
+      while (!(await reader.read()).done) {
+        // Drain the backpressured source as the ZIP writer would.
+      }
+    },
+  );
+  mocks.zipClose.mockResolvedValue(new Blob(["zip"]));
+  mocks.createStreamingZipDestination.mockResolvedValue({
+    zipWriter: { add: mocks.zipAdd },
+    diskBacked: true,
+    close: mocks.zipClose,
+    discard: mocks.discard,
+    release: mocks.release,
+  });
+  mocks.readEncryptedFileStream.mockImplementation(
+    () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("data"));
+          controller.close();
+        },
+      }),
+  );
   mocks.getVaultDownloadPlan.mockImplementation(async (nodeId: string) =>
     plan(
       nodeId,
@@ -135,12 +161,12 @@ describe("encrypted folder ZIP", () => {
       }),
     ).resolves.toBeUndefined();
 
-    const zipRequest = mocks.createBrowserZip.mock.calls[0]?.[0];
-    const downloadedSource = zipRequest?.sources.find(
-      (source): source is Extract<FolderZipSource, { directory?: false }> =>
-        !source.directory,
+    expect(mocks.readEncryptedFileStream).toHaveBeenCalledWith(
+      expect.objectContaining({
+        plan: expect.objectContaining({ nodeId: "file" }),
+        manifest: fileManifest,
+      }),
     );
-    expect(downloadedSource?.file.size).toBe(fileManifest.plaintextBytes);
     expect(encryptedFile.sizeBytes).not.toBe(fileManifest.plaintextBytes);
     expect(mocks.triggerBlobDownload).toHaveBeenCalledOnce();
   });
@@ -176,7 +202,7 @@ describe("encrypted folder ZIP", () => {
         },
       }),
     ).rejects.toThrow("changed during ZIP preparation");
-    expect(mocks.readEncryptedFileBlob).not.toHaveBeenCalled();
+    expect(mocks.readEncryptedFileStream).not.toHaveBeenCalled();
     expect(mocks.triggerBlobDownload).not.toHaveBeenCalled();
   });
 });

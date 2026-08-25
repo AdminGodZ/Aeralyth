@@ -3,6 +3,10 @@ import type {
   FolderUploadResolution,
 } from "@/features/dashboard/folder-upload-conflicts";
 import {
+  runUploadWithRetry,
+  uploadRequestErrorFromResponse,
+} from "@/features/uploads/upload-retry";
+import {
   BoundedBatchPipeline,
   detectedCryptoConcurrency,
   mapWithConcurrency,
@@ -18,12 +22,18 @@ import {
   VAULT_CRYPTO_CHUNK_BYTES,
   VAULT_MAX_CIPHERTEXT_BYTES,
 } from "@/features/vault/protocol";
-import { enqueueShareDirectorySync } from "@/features/vault/share-directory-sync";
+import {
+  beginShareDirectorySyncBatch,
+  enqueueShareDirectorySync,
+  finishShareDirectorySyncBatch,
+} from "@/features/vault/share-directory-sync";
 import {
   abortVaultUpload,
   getVaultContentUrl,
+  getVaultPartUrl,
   getVaultPartUrls,
   initVaultUpload,
+  publishVaultFoldersBatch,
   publishVaultUpload,
   type VaultCompletedPart,
   type VaultMigrationNode,
@@ -36,6 +46,7 @@ const VAULT_UPLOAD_CONCURRENCY = 4;
 const VAULT_MULTIPART_LOOKAHEAD_PARTS = 1;
 const VAULT_SMALL_FILE_CONCURRENCY_MAX = 3;
 const VAULT_CONCURRENT_FILE_MAX_BYTES = 8 * 1024 * 1024;
+const VAULT_FOLDER_PUBLICATION_BATCH_SIZE = 100;
 
 type PendingVaultPart = {
   partNumber: number;
@@ -86,96 +97,215 @@ export async function uploadEncryptedSelections({
   const folderIds = new Map<string, string>();
   folderIds.set("", parentFolderId ?? "");
   const folders = collectFolders(selections);
+  const shareSyncBatchId = beginShareDirectorySyncBatch();
 
-  for (const path of folders) {
-    assertNotAborted(signal);
-    const existing = resolution?.existingFolders.get(path);
-    if (existing) {
-      folderIds.set(path, existing.id);
-      continue;
-    }
-    const parentPath = parentDirectory(path);
-    const parentId = folderIds.get(parentPath);
-    if (parentId === undefined) {
-      throw new Error("The selected folder hierarchy is invalid.");
-    }
-    // Each folder must exist before its children can use the returned node ID.
-    // react-doctor-disable-next-line react-doctor/async-await-in-loop
-    const result = await uploadEncryptedEntry({
-      file: null,
-      name: baseName(path),
-      parentId: parentId || null,
+  try {
+    await publishEncryptedFolderTree({
+      folders,
+      folderIds,
+      existingFolders: resolution?.existingFolders,
       csrfToken,
       client,
       signal,
-      onChunk: () => undefined,
+      shareSyncBatchId,
     });
-    folderIds.set(path, result.nodeId);
-  }
 
-  const fileConcurrency = detectedCryptoConcurrency(
-    VAULT_SMALL_FILE_CONCURRENCY_MAX,
-  );
-  const fileBudget = new WeightedSemaphore(fileConcurrency);
-  const operation = linkedAbortController(signal);
-  try {
-    await mapWithConcurrency(
-      selections,
-      fileConcurrency,
-      async (selection, fileIndex) => {
-        const weight =
-          selection.file.size <= VAULT_CONCURRENT_FILE_MAX_BYTES
-            ? 1
-            : fileConcurrency;
-        const release = await fileBudget.acquire(weight, operation.signal);
-        try {
-          assertNotAborted(operation.signal);
-          onFileStart(fileIndex);
-          let fileProcessedBytes = 0;
-          const path = normalizeRelativePath(
-            selection.relativePath || selection.file.name,
-          );
-          const parentId = folderIds.get(parentDirectory(path));
-          if (parentId === undefined) {
-            throw new Error("The selected file hierarchy is invalid.");
-          }
-          await uploadEncryptedEntry({
-            file: selection.file,
-            name: baseName(path),
-            parentId: parentId || null,
-            csrfToken,
-            client,
-            signal: operation.signal,
-            replacement: resolution?.replacementFiles.get(path),
-            onChunk: (sourceBytes) => {
-              processedBytes += sourceBytes;
-              fileProcessedBytes += sourceBytes;
-              onProgress(
-                processedBytes,
-                totalBytes,
-                fileIndex,
-                fileProcessedBytes,
-              );
-            },
-          });
-          onFileComplete(fileIndex);
-        } catch (error) {
-          if (!operation.signal.aborted) operation.abort(error);
-          throw error;
-        } finally {
-          release();
-        }
-      },
+    const fileConcurrency = detectedCryptoConcurrency(
+      VAULT_SMALL_FILE_CONCURRENCY_MAX,
     );
-  } finally {
-    operation.dispose();
-  }
+    const fileBudget = new WeightedSemaphore(fileConcurrency);
+    const operation = linkedAbortController(signal);
+    try {
+      await mapWithConcurrency(
+        selections,
+        fileConcurrency,
+        async (selection, fileIndex) => {
+          const weight =
+            selection.file.size <= VAULT_CONCURRENT_FILE_MAX_BYTES
+              ? 1
+              : fileConcurrency;
+          const release = await fileBudget.acquire(weight, operation.signal);
+          try {
+            assertNotAborted(operation.signal);
+            onFileStart(fileIndex);
+            let fileProcessedBytes = 0;
+            const path = normalizeRelativePath(
+              selection.relativePath || selection.file.name,
+            );
+            const parentId = folderIds.get(parentDirectory(path));
+            if (parentId === undefined) {
+              throw new Error("The selected file hierarchy is invalid.");
+            }
+            await uploadEncryptedEntry({
+              file: selection.file,
+              name: baseName(path),
+              parentId: parentId || null,
+              csrfToken,
+              client,
+              signal: operation.signal,
+              replacement: resolution?.replacementFiles.get(path),
+              shareSyncBatchId,
+              onChunk: (sourceBytes) => {
+                processedBytes += sourceBytes;
+                fileProcessedBytes += sourceBytes;
+                onProgress(
+                  processedBytes,
+                  totalBytes,
+                  fileIndex,
+                  fileProcessedBytes,
+                );
+              },
+            });
+            onFileComplete(fileIndex);
+          } catch (error) {
+            if (!operation.signal.aborted) operation.abort(error);
+            throw error;
+          } finally {
+            release();
+          }
+        },
+      );
+    } finally {
+      operation.dispose();
+    }
 
-  const rootFolders = folders.filter((path) => !path.includes("/"));
-  return {
-    rootFolderId:
-      rootFolders.length === 1 ? (folderIds.get(rootFolders[0]) ?? null) : null,
+    const rootFolders = folders.filter((path) => !path.includes("/"));
+    return {
+      rootFolderId:
+        rootFolders.length === 1
+          ? (folderIds.get(rootFolders[0]) ?? null)
+          : null,
+    };
+  } finally {
+    void finishShareDirectorySyncBatch({ batchId: shareSyncBatchId, client });
+  }
+}
+
+type PendingEncryptedFolder = {
+  sessionId: string;
+  parentId: string | null;
+  complete: Awaited<ReturnType<VaultCryptoClient["finalizeEncryption"]>>;
+};
+
+async function publishEncryptedFolderTree({
+  folders,
+  folderIds,
+  existingFolders,
+  csrfToken,
+  client,
+  signal,
+  shareSyncBatchId,
+}: {
+  folders: string[];
+  folderIds: Map<string, string>;
+  existingFolders?: Map<string, ExistingUploadNode>;
+  csrfToken: string;
+  client: VaultCryptoClient;
+  signal: AbortSignal;
+  shareSyncBatchId: string;
+}): Promise<void> {
+  let pending: PendingEncryptedFolder[] = [];
+
+  const abortPending = async () => {
+    await Promise.allSettled(
+      pending.map(({ sessionId, complete }) =>
+        client.abortEncryption(sessionId, complete.nodeId),
+      ),
+    );
   };
+  const flush = async () => {
+    if (pending.length === 0) return;
+    const batch = pending;
+    const response = await publishVaultFoldersBatch(
+      csrfToken,
+      batch.map(({ complete }) => complete.record),
+      signal,
+    );
+    if (response.folders.length !== batch.length) {
+      throw new Error(
+        "The encrypted folder publication response is incomplete.",
+      );
+    }
+    for (const [index, published] of response.folders.entries()) {
+      const { complete, parentId } = batch[index];
+      if (
+        published.nodeId !== complete.nodeId ||
+        published.generationNumber !== complete.generationNumber ||
+        published.generationId !== complete.generationId ||
+        published.recordVersion !== complete.recordVersion
+      ) {
+        throw new Error(
+          "The encrypted folder publication response is invalid.",
+        );
+      }
+      if (published.shareSyncRequired) {
+        enqueueShareDirectorySync({
+          csrfToken,
+          client,
+          batchId: shareSyncBatchId,
+          job: {
+            ...published,
+            contextCacheKey: parentId ?? published.nodeId,
+            entryType: "folder",
+          },
+        });
+      }
+    }
+    pending = [];
+  };
+
+  try {
+    for (const path of folders) {
+      assertNotAborted(signal);
+      const existing = existingFolders?.get(path);
+      if (existing) {
+        folderIds.set(path, existing.id);
+        continue;
+      }
+      const parentPath = parentDirectory(path);
+      const parentId = folderIds.get(parentPath);
+      if (parentId === undefined) {
+        throw new Error("The selected folder hierarchy is invalid.");
+      }
+      // Parent keys are intentionally prepared in order inside the worker. The
+      // signed records are published together once the bounded batch is ready.
+      // react-doctor-disable-next-line react-doctor/async-await-in-loop
+      const started = await client.startEncryption({
+        parentId: parentId || null,
+        entryType: "folder",
+        name: baseName(path),
+        mimeType: null,
+        plaintextBytes: 0,
+        lastModified: Date.now(),
+      });
+      let complete: Awaited<
+        ReturnType<VaultCryptoClient["finalizeEncryption"]>
+      >;
+      try {
+        // react-doctor-disable-next-line react-doctor/async-await-in-loop
+        complete = await client.finalizeEncryption(started.sessionId);
+      } catch (error) {
+        await client
+          .abortEncryption(started.sessionId, started.nodeId)
+          .catch(() => undefined);
+        throw error;
+      }
+      folderIds.set(path, complete.nodeId);
+      pending.push({
+        sessionId: started.sessionId,
+        parentId: parentId || null,
+        complete,
+      });
+      if (pending.length === VAULT_FOLDER_PUBLICATION_BATCH_SIZE) {
+        // react-doctor-disable-next-line react-doctor/async-await-in-loop
+        await flush();
+      }
+    }
+    await flush();
+  } catch (error) {
+    await abortPending();
+    throw error;
+  }
 }
 
 export async function createEncryptedFolder({
@@ -321,6 +451,7 @@ async function uploadEncryptedEntry({
   client,
   signal,
   replacement,
+  shareSyncBatchId,
   onChunk,
 }: {
   file: File | null;
@@ -330,6 +461,7 @@ async function uploadEncryptedEntry({
   client: VaultCryptoClient;
   signal: AbortSignal;
   replacement?: ExistingUploadNode;
+  shareSyncBatchId?: string;
   onChunk(bytes: number): void;
 }): Promise<{ nodeId: string }> {
   const replacementVersion = getEncryptedReplacementVersion(replacement);
@@ -401,8 +533,16 @@ async function uploadEncryptedEntry({
       enqueueShareDirectorySync({
         csrfToken,
         client,
+        batchId: shareSyncBatchId,
         job: {
           ...published,
+          ...(shareSyncBatchId
+            ? {
+                contextCacheKey: replacement
+                  ? published.nodeId
+                  : (parentId ?? published.nodeId),
+              }
+            : {}),
           entryType: file ? "file" : "folder",
         },
       });
@@ -460,11 +600,6 @@ async function encryptAndUploadFile({
 }): Promise<VaultCompletedPart[]> {
   if (plan.mode === "none")
     throw new Error("The storage plan omitted file content.");
-  if (plan.existingParts.length > 0) {
-    throw new Error(
-      "An encrypted upload cannot resume after its browser key was discarded.",
-    );
-  }
   const assembler = new FixedSizeBufferAssembler(
     encryptedUploadBufferSize(plan, started.ciphertextLength),
   );
@@ -564,11 +699,6 @@ async function encryptAndUploadStream({
 }): Promise<VaultCompletedPart[]> {
   if (plan.mode === "none")
     throw new Error("The storage plan omitted file content.");
-  if (plan.existingParts.length > 0) {
-    throw new Error(
-      "An encrypted migration cannot resume with discarded browser keys.",
-    );
-  }
   const reader = new ExactStreamReader(stream.getReader());
   const assembler = new FixedSizeBufferAssembler(
     encryptedUploadBufferSize(plan, started.ciphertextLength),
@@ -718,7 +848,18 @@ async function uploadSingle(
     if (signed.contentLength !== content.length) {
       throw new Error("The signed upload length is invalid.");
     }
-    await putEncryptedBytes(signed.url, content, checksum, signal);
+    await putEncryptedBytes(signed.url, content, checksum, signal, async () => {
+      const refreshed = await getVaultContentUrl(
+        csrfToken,
+        uploadId,
+        checksum,
+        signal,
+      );
+      if (refreshed.contentLength !== content.length) {
+        throw new Error("The signed upload length is invalid.");
+      }
+      return refreshed.url;
+    });
   } finally {
     content.fill(0);
   }
@@ -774,6 +915,19 @@ async function uploadMultipartParts(
               part.content,
               part.checksumSha256,
               signal,
+              async () => {
+                const refreshed = await getVaultPartUrl(
+                  csrfToken,
+                  uploadId,
+                  part.partNumber,
+                  part.checksumSha256,
+                  signal,
+                );
+                if (refreshed.contentLength !== part.content.length) {
+                  throw new Error("The signed multipart length is invalid.");
+                }
+                return refreshed.url;
+              },
             );
             const etag = upload.headers.get("ETag")?.trim();
             if (!etag) {
@@ -801,12 +955,13 @@ async function putEncryptedBytes(
   content: Uint8Array,
   checksum: string,
   signal: AbortSignal,
+  refreshUrl?: () => Promise<string>,
 ): Promise<Response> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    assertNotAborted(signal);
-    try {
-      const response = await fetch(url, {
+  return runUploadWithRetry({
+    initialUrl: url,
+    refreshUrl,
+    request: async (candidateUrl) => {
+      const response = await fetch(candidateUrl, {
         method: "PUT",
         headers: {
           "Content-Type": "application/octet-stream",
@@ -816,20 +971,12 @@ async function putEncryptedBytes(
         signal,
       });
       if (!response.ok) {
-        throw new Error(
-          `Storage upload failed with status ${response.status}.`,
-        );
+        throw await uploadRequestErrorFromResponse(response);
       }
       return response;
-    } catch (error) {
-      if (signal.aborted) throw error;
-      lastError = error;
-      await delay(300 * 2 ** attempt, signal);
-    }
-  }
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("Storage upload failed.");
+    },
+    signal,
+  });
 }
 
 function collectFolders(selections: EncryptedUploadSelection[]): string[] {
@@ -839,6 +986,9 @@ function collectFolders(selections: EncryptedUploadSelection[]): string[] {
       normalizeRelativePath(selection.relativePath || selection.file.name),
     );
     while (directory) {
+      if (pathDepth(directory) > 100) {
+        throw new Error("The selected folder hierarchy exceeds 100 levels.");
+      }
       folders.add(directory);
       directory = parentDirectory(directory);
     }
@@ -885,20 +1035,6 @@ async function sha256Base64(content: Uint8Array): Promise<string> {
   for (const byte of digest) binary += String.fromCharCode(byte);
   digest.fill(0);
   return btoa(binary);
-}
-
-function delay(milliseconds: number, signal: AbortSignal): Promise<void> {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(resolve, milliseconds);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timeout);
-        reject(new DOMException("Upload canceled", "AbortError"));
-      },
-      { once: true },
-    );
-  });
 }
 
 function assertNotAborted(signal: AbortSignal): void {

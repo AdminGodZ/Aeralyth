@@ -10,6 +10,7 @@ import type {
   VaultRewrapPayload,
   VaultSetupPayload,
   VaultShareNodeSnapshot,
+  VaultSharePreparationPlan,
   VaultUnlockMaterial,
 } from "@/features/vault/protocol";
 
@@ -70,6 +71,11 @@ export type VaultWorkerRequest =
     }
   | {
       id: number;
+      type: "cancelMetadataOperation";
+      operationId: number;
+    }
+  | {
+      id: number;
       type: "startEncryption";
       input: VaultEncryptionInput;
     }
@@ -95,6 +101,11 @@ export type VaultWorkerRequest =
       id: number;
       type: "createShareDirectory";
       input: VaultShareDirectoryInput;
+    }
+  | {
+      id: number;
+      type: "clearShareContextCache";
+      cacheKey: string;
     }
   | {
       id: number;
@@ -176,6 +187,7 @@ export type VaultShareDirectoryInput = {
   recordVersion: number;
   recordHash: string;
   shareContexts: VaultActiveShareContext[];
+  shareContextCacheKey?: string;
 };
 
 export type VaultShareDirectoryResult = {
@@ -208,10 +220,21 @@ export type VaultCachedMetadataResult = Extract<
   { status: "ready" }
 >;
 
-export type VaultWorkerProgress = {
-  type: "openMetadataPlans";
-  results: VaultMetadataOpenResult[];
+export type VaultShareMaterialProgress = {
+  completedNodes: number;
+  totalNodes: number;
 };
+
+export type VaultWorkerProgress =
+  | {
+      type: "openMetadataPlans";
+      results: VaultMetadataOpenResult[];
+    }
+  | (VaultShareMaterialProgress & {
+      type: "shareMaterial";
+      nodeId: string;
+      wrappers: Uint8Array[];
+    });
 
 export type VaultDecryptionStart = VaultOpenPlanResult & {
   sessionId: string;
@@ -247,6 +270,7 @@ export type VaultShareMaterialInput = {
   senderId: string;
   recipient: VaultPublicIdentity;
   nodes: VaultShareNodeSnapshot[];
+  plans: VaultSharePreparationPlan[];
 };
 
 export type VaultShareRotationInput = {
@@ -262,6 +286,7 @@ export type VaultShareRotationInput = {
     x25519PublicKey: string;
   }>;
   nodes: VaultShareNodeSnapshot[];
+  plans: VaultSharePreparationPlan[];
 };
 
 export type VaultShareMaterialResult = {
@@ -282,11 +307,13 @@ export type VaultWorkerResult =
   | { type: "openPlan"; result: VaultOpenPlanResult }
   | { type: "getCachedMetadata"; results: VaultCachedMetadataResult[] }
   | { type: "openMetadataPlans"; results: VaultMetadataOpenResult[] }
+  | { type: "cancelMetadataOperation" }
   | { type: "startEncryption"; result: VaultEncryptionStart }
   | { type: "encryptChunk"; result: VaultEncryptedChunk }
   | { type: "finalizeEncryption"; result: VaultEncryptionComplete }
   | { type: "abortEncryption" }
   | { type: "createShareDirectory"; result: VaultShareDirectoryResult }
+  | { type: "clearShareContextCache" }
   | { type: "startDecryption"; result: VaultDecryptionStart }
   | { type: "decryptChunk"; result: VaultDecryptedChunk }
   | { type: "finalizeDecryption" }

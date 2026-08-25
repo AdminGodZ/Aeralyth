@@ -20,7 +20,7 @@ assert.deepEqual(config.deploy?.preDeployCommand, [
   "/app/scripts/migrate-production.sh",
 ]);
 assert.equal(config.deploy?.startCommand, "/app/scripts/start-production.sh");
-assert.equal(config.deploy?.healthcheckPath, "/health");
+assert.equal(config.deploy?.healthcheckPath, "/health/ready");
 assert.equal(config.deploy?.healthcheckTimeout, 300);
 assert.equal(config.deploy?.restartPolicyType, "ON_FAILURE");
 assert.equal(config.deploy?.restartPolicyMaxRetries, 5);

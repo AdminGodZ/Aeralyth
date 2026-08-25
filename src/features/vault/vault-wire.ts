@@ -7,6 +7,7 @@ const NODE_PUBLICATION = 1;
 const SHARE_DIRECTORY = 2;
 const CREATE_SHARE = 3;
 const PUBLISH_EPOCH = 4;
+const FOLDER_BATCH = 5;
 const NULL_LENGTH = 0xffff_ffff;
 const HEADER_BYTES = 8;
 const encoder = new TextEncoder();
@@ -66,6 +67,23 @@ export function encodeNodePublication(
   writer.bytes(record.bootstrapSignature);
   writer.bytes(record.encryptedManifest);
   writer.byteArray(record.wrappers);
+  return writer.finish();
+}
+
+export function encodeFolderBatchPublication(
+  records: NodeRecord[],
+): Uint8Array {
+  if (records.length < 1 || records.length > 100) {
+    throw new Error("Folder publication batch must contain 1 to 100 records.");
+  }
+  const writer = new Writer(
+    HEADER_BYTES +
+      4 +
+      records.reduce((total, record) => total + sizedNodeRecord(record), 0),
+    FOLDER_BATCH,
+  );
+  writer.count(records.length);
+  for (const record of records) writer.nodeRecord(record);
   return writer.finish();
 }
 
@@ -213,6 +231,13 @@ class Writer {
       this.bytes(value.signature);
     }
   }
+
+  nodeRecord(record: NodeRecord): void {
+    this.bytes(record.bootstrapCbor);
+    this.bytes(record.bootstrapSignature);
+    this.bytes(record.encryptedManifest);
+    this.byteArray(record.wrappers);
+  }
 }
 
 function encodeText(value: string): Uint8Array {
@@ -240,6 +265,15 @@ function sizedEnvelopes(values: SignedEnvelope[]): number {
         total + sizedBytes(value.canonicalCbor) + sizedBytes(value.signature),
       0,
     )
+  );
+}
+
+function sizedNodeRecord(record: NodeRecord): number {
+  return (
+    sizedBytes(record.bootstrapCbor) +
+    sizedBytes(record.bootstrapSignature) +
+    sizedBytes(record.encryptedManifest) +
+    sizedByteArray(record.wrappers)
   );
 }
 

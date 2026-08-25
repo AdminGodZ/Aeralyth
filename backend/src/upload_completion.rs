@@ -25,6 +25,7 @@ pub(crate) struct FileUploadRecord {
     pub replacement_file_id: Option<String>,
     pub expires_at: SystemTime,
     pub completion_attempts: i32,
+    pub completion_lease_token: String,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -47,6 +48,7 @@ pub(crate) async fn claim_file_upload_completions(
                   SELECT id
                   FROM file_uploads
                   WHERE status = 'completing'
+                    AND completion_dead_lettered_at IS NULL
                     AND completion_available_at <= now()
                     AND (
                       completion_locked_until IS NULL
@@ -57,7 +59,8 @@ pub(crate) async fn claim_file_upload_completions(
                   FOR UPDATE SKIP LOCKED
                 )
                 UPDATE file_uploads AS uploads
-                SET completion_locked_until = now() + interval '2 minutes'
+                SET completion_locked_until = now() + interval '5 minutes',
+                    completion_lease_token = gen_random_uuid()::text
                 FROM claimed
                 WHERE uploads.id = claimed.id
                 RETURNING
@@ -77,7 +80,8 @@ pub(crate) async fn claim_file_upload_completions(
                   uploads.share_link_id,
                   uploads.replacement_file_id,
                   uploads.expires_at,
-                  uploads.completion_attempts
+                  uploads.completion_attempts,
+                  uploads.completion_lease_token
             ",
             &[&limit],
         )
@@ -90,6 +94,7 @@ pub(crate) async fn defer_file_upload_completion(
     db: &Database,
     upload_id: &str,
     owner_id: &str,
+    lease_token: &str,
     error_message: &str,
     delay_seconds: i64,
 ) -> Result<bool, Box<dyn StdError + Send + Sync>> {
@@ -100,12 +105,26 @@ pub(crate) async fn defer_file_upload_completion(
                 UPDATE file_uploads
                 SET completion_attempts = completion_attempts + 1,
                     completion_available_at =
-                      now() + ($3::bigint * interval '1 second'),
+                      now() + ($4::bigint * interval '1 second'),
                     completion_locked_until = NULL,
-                    completion_last_error = $4
-                WHERE id = $1 AND owner_id = $2 AND status = 'completing'
+                    completion_lease_token = NULL,
+                    completion_dead_lettered_at = CASE
+                      WHEN completion_attempts + 1 >= 12 THEN now()
+                      ELSE completion_dead_lettered_at
+                    END,
+                    completion_last_error = $5
+                WHERE id = $1
+                  AND owner_id = $2
+                  AND completion_lease_token = $3
+                  AND status = 'completing'
             ",
-            &[&upload_id, &owner_id, &delay_seconds, &error_message],
+            &[
+                &upload_id,
+                &owner_id,
+                &lease_token,
+                &delay_seconds,
+                &error_message,
+            ],
         )
         .await?;
 
@@ -122,7 +141,7 @@ pub(crate) async fn finalize_file_upload_record(
     let transaction = client.transaction().await?;
     let current = transaction
         .query_opt(
-            "SELECT status FROM file_uploads WHERE id = $1 AND owner_id = $2 FOR UPDATE",
+            "SELECT status, completion_lease_token FROM file_uploads WHERE id = $1 AND owner_id = $2 FOR UPDATE",
             &[&upload.id, &upload.owner_id],
         )
         .await?;
@@ -131,12 +150,15 @@ pub(crate) async fn finalize_file_upload_record(
         return Ok(FileUploadFinalizeOutcome::Missing);
     };
     let current_status: String = current.get("status");
+    let current_lease_token: Option<String> = current.get("completion_lease_token");
 
     if current_status == "completed" {
         transaction.commit().await?;
         return Ok(FileUploadFinalizeOutcome::AlreadyCompleted);
     }
-    if current_status != "completing" {
+    if current_status != "completing"
+        || current_lease_token.as_deref() != Some(upload.completion_lease_token.as_str())
+    {
         transaction.commit().await?;
         return Ok(FileUploadFinalizeOutcome::StateChanged);
     }
@@ -274,14 +296,19 @@ pub(crate) async fn finalize_file_upload_record(
                     completion_etag = $4,
                     completion_verified_at = now(),
                     completion_locked_until = NULL,
+                    completion_lease_token = NULL,
                     completion_last_error = NULL
-                WHERE id = $1 AND owner_id = $2 AND status = 'completing'
+                WHERE id = $1
+                  AND owner_id = $2
+                  AND completion_lease_token = $5
+                  AND status = 'completing'
             ",
             &[
                 &upload.id,
                 &upload.owner_id,
                 &metadata.checksum_sha256,
                 &metadata.etag,
+                &upload.completion_lease_token,
             ],
         )
         .await?;
@@ -297,6 +324,7 @@ pub(crate) async fn transition_file_upload_to_cleanup(
     object_key: &str,
     multipart_upload_id: Option<&str>,
     from_statuses: &[&str],
+    lease_token: Option<&str>,
 ) -> Result<bool, Box<dyn StdError + Send + Sync>> {
     let statuses = from_statuses
         .iter()
@@ -307,14 +335,16 @@ pub(crate) async fn transition_file_upload_to_cleanup(
             "
                 WITH transitioned AS (
                   UPDATE file_uploads
-                  SET status = 'aborting',
+                  SET status = 'aborted',
                       multipart_upload_id = COALESCE($1, multipart_upload_id),
                       expires_at = now() + interval '24 hours',
-                      completion_locked_until = NULL
+                      completion_locked_until = NULL,
+                      completion_lease_token = NULL
                   WHERE id = $2
                     AND owner_id = $3
                     AND object_key = $4
                     AND status = ANY($5)
+                    AND ($6::text IS NULL OR completion_lease_token = $6)
                   RETURNING object_key, multipart_upload_id, upload_mode, write_expires_at
                 )
                 INSERT INTO storage_deletion_jobs (
@@ -348,6 +378,7 @@ pub(crate) async fn transition_file_upload_to_cleanup(
                 &owner_id,
                 &object_key,
                 &statuses,
+                &lease_token,
             ],
         )
         .await?;
@@ -369,18 +400,28 @@ pub(crate) fn file_upload_metadata_matches(
     size_matches && checksum_matches
 }
 
-pub(crate) fn completion_retry_delay_seconds(attempts: i32, upload_id: &str) -> i64 {
-    let exponent = u32::try_from(attempts.clamp(0, 8)).unwrap_or(0);
-    let base = i64::from(2_i32.pow(exponent)).min(240);
-    let hash = upload_id.bytes().fold(0_u64, |value, byte| {
-        value
-            .wrapping_mul(1099511628211)
-            .wrapping_add(u64::from(byte))
-    });
-    let jitter_window = u64::try_from((base / 4).max(1)).unwrap_or(1);
-    let jitter = i64::try_from(hash % (jitter_window + 1)).unwrap_or(0);
+pub(crate) fn completion_retry_delay_seconds(attempts: i32) -> i64 {
+    let mut sample = [0_u8; 8];
+    if getrandom::fill(&mut sample).is_err() {
+        let fallback = SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_le_bytes();
+        sample.copy_from_slice(&fallback[..8]);
+    }
+    completion_retry_delay_from_sample(attempts, u64::from_le_bytes(sample))
+}
 
-    (base + jitter).min(300)
+fn completion_retry_delay_from_sample(attempts: i32, sample: u64) -> i64 {
+    const FLOOR_SECONDS: i64 = 10;
+    const CAP_SECONDS: i64 = 60 * 60;
+    let exponent = u32::try_from(attempts.clamp(0, 16)).unwrap_or_default();
+    let ceiling = FLOOR_SECONDS
+        .saturating_mul(1_i64.checked_shl(exponent).unwrap_or(i64::MAX))
+        .min(CAP_SECONDS);
+    let window = u64::try_from(ceiling - FLOOR_SECONDS).unwrap_or_default();
+    FLOOR_SECONDS + i64::try_from(sample % (window + 1)).unwrap_or_default()
 }
 
 pub(crate) fn file_upload_from_row(row: tokio_postgres::Row) -> FileUploadRecord {
@@ -402,6 +443,7 @@ pub(crate) fn file_upload_from_row(row: tokio_postgres::Row) -> FileUploadRecord
         replacement_file_id: row.get("replacement_file_id"),
         expires_at: row.get("expires_at"),
         completion_attempts: row.get("completion_attempts"),
+        completion_lease_token: row.get("completion_lease_token"),
     }
 }
 
@@ -409,7 +451,9 @@ pub(crate) fn file_upload_from_row(row: tokio_postgres::Row) -> FileUploadRecord
 mod tests {
     use std::time::{Duration, UNIX_EPOCH};
 
-    use super::{FileUploadRecord, completion_retry_delay_seconds, file_upload_metadata_matches};
+    use super::{
+        FileUploadRecord, completion_retry_delay_from_sample, file_upload_metadata_matches,
+    };
     use crate::storage::ObjectMetadata;
 
     fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
@@ -420,11 +464,11 @@ mod tests {
     }
 
     #[test]
-    fn completion_backoff_is_bounded_and_stable_per_upload() {
-        let first = completion_retry_delay_seconds(3, "upload-a");
-        assert_eq!(first, completion_retry_delay_seconds(3, "upload-a"));
-        assert!((8..=10).contains(&first));
-        assert!(completion_retry_delay_seconds(100, "upload-a") <= 300);
+    fn completion_backoff_uses_full_jitter_with_a_poll_aligned_floor() {
+        assert_eq!(completion_retry_delay_from_sample(0, 0), 10);
+        assert_eq!(completion_retry_delay_from_sample(1, 0), 10);
+        assert_eq!(completion_retry_delay_from_sample(1, 10), 20);
+        assert!(completion_retry_delay_from_sample(100, u64::MAX) <= 3_600);
     }
 
     #[test]
@@ -447,6 +491,7 @@ mod tests {
             replacement_file_id: None,
             expires_at: UNIX_EPOCH + Duration::from_secs(1),
             completion_attempts: 0,
+            completion_lease_token: "lease".to_owned(),
         };
         let metadata = ObjectMetadata {
             size_bytes: 4,
@@ -528,5 +573,79 @@ mod tests {
             "async fn decode_and_verify_node_record(",
         );
         assert!(encrypted_completion.contains("touch_ancestor_collections("));
+    }
+
+    #[test]
+    fn upload_abort_queues_cleanup_without_waiting_for_provider_io() {
+        let files = include_str!("routes/files.rs");
+        let file_abort = source_between(
+            files,
+            "pub async fn abort_upload(",
+            "pub async fn download(",
+        );
+        assert!(file_abort.contains("enqueue_upload_cleanup("));
+        assert!(file_abort.contains("HttpResponse::Accepted()"));
+        assert!(!file_abort.contains(".abort_multipart("));
+        assert!(!file_abort.contains(".delete_object("));
+
+        let vault = include_str!("routes/vault.rs");
+        let vault_abort = source_between(
+            vault,
+            "pub async fn abort_upload(",
+            "pub async fn share_plan(",
+        );
+        assert!(vault_abort.contains("SET status = 'aborted'"));
+        assert!(vault_abort.contains("INSERT INTO storage_deletion_jobs"));
+        assert!(vault_abort.contains("write_expires_at"));
+        assert!(vault_abort.contains("HttpResponse::Accepted()"));
+        assert!(!vault_abort.contains(".abort_multipart("));
+        assert!(!vault_abort.contains(".delete_object("));
+
+        let vault_init = source_between(
+            vault,
+            "pub async fn init_upload(",
+            "pub async fn presign_content(",
+        );
+        assert!(vault_init.contains("WITH initialized AS"));
+        assert!(vault_init.contains("NOT EXISTS (SELECT 1 FROM initialized)"));
+        assert!(vault_init.contains("INSERT INTO storage_deletion_jobs"));
+        assert!(vault_init.contains("EXCLUDED.multipart_upload_id"));
+        assert!(vault_init.contains("SET status = 'aborted', expires_at = now()"));
+
+        let vault_publish = source_between(
+            vault,
+            "async fn publish_record_transaction(",
+            "async fn decode_and_verify_node_record(",
+        );
+        assert!(vault_publish.contains("FROM vault_uploads"));
+        assert!(vault_publish.contains("FOR UPDATE"));
+        assert!(vault_publish.contains("Some(\"pending\" | \"completing\")"));
+        assert!(vault_publish.contains("if published != 1"));
+
+        let transition = source_between(
+            include_str!("upload_completion.rs"),
+            "pub(crate) async fn transition_file_upload_to_cleanup(",
+            "#[cfg(test)]",
+        );
+        assert!(transition.contains("SET status = 'aborted'"));
+        assert!(transition.contains("INSERT INTO storage_deletion_jobs"));
+
+        let storage = include_str!("storage.rs");
+        let finish_job = source_between(
+            storage,
+            "async fn finish_storage_deletion_job(",
+            "async fn process_deletion_jobs(",
+        );
+        assert!(finish_job.contains("FOR UPDATE"));
+        assert!(finish_job.contains("current_multipart_upload_id != multipart_upload_id"));
+        assert!(finish_job.contains("SET available_at = now(), locked_until = NULL"));
+
+        let process_jobs = source_between(
+            storage,
+            "async fn process_deletion_jobs(",
+            "async fn reconcile_file_upload_completions(",
+        );
+        assert!(process_jobs.contains("discover_multipart"));
+        assert!(process_jobs.contains("abort_multipart_uploads_for_key"));
     }
 }

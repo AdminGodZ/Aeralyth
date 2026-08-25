@@ -43,6 +43,14 @@ pub struct Config {
     pub password_queue_capacity: usize,
     pub login_attempts_per_address_minute: u32,
     pub login_attempts_per_account_minute: u32,
+    pub upload_control_concurrency: usize,
+    pub upload_control_per_user: usize,
+    pub recursive_operation_concurrency: usize,
+    pub recursive_operation_per_user: usize,
+    pub storage_operation_concurrency: usize,
+    pub storage_operation_per_user: usize,
+    pub storage_operation_queue_capacity: usize,
+    pub storage_operation_per_user_queue_capacity: usize,
     pub metrics_token: Option<String>,
     pub request_slow_ms: u64,
     pub request_success_sample_rate: usize,
@@ -55,6 +63,7 @@ pub struct Config {
     pub storage_multipart_threshold_bytes: u64,
     pub storage_multipart_part_bytes: u64,
     pub storage_multipart_orphan_grace_seconds: u64,
+    pub storage_maintenance_concurrency: usize,
     pub e2ee_mode: E2eeMode,
     pub share_link_secret: String,
     pub s3_bucket: Option<String>,
@@ -63,6 +72,7 @@ pub struct Config {
     pub s3_access_key_id: Option<String>,
     pub s3_secret_access_key: Option<String>,
     pub s3_force_path_style: bool,
+    pub s3_abort_incomplete_multipart_days: Option<u64>,
 }
 
 impl Config {
@@ -106,6 +116,41 @@ impl Config {
             16,
             password_workers,
             256,
+        );
+        let upload_control_concurrency = env_usize("AERALYTH_UPLOAD_CONTROL_CONCURRENCY", 8, 1, 64);
+        let upload_control_per_user = env_usize(
+            "AERALYTH_UPLOAD_CONTROL_PER_USER",
+            3,
+            1,
+            upload_control_concurrency,
+        );
+        let recursive_operation_concurrency =
+            env_usize("AERALYTH_RECURSIVE_OPERATION_CONCURRENCY", 2, 1, 16);
+        let recursive_operation_per_user = env_usize(
+            "AERALYTH_RECURSIVE_OPERATION_PER_USER",
+            1,
+            1,
+            recursive_operation_concurrency,
+        );
+        let storage_operation_concurrency =
+            env_usize("AERALYTH_STORAGE_OPERATION_CONCURRENCY", 16, 1, 128);
+        let storage_operation_per_user = env_usize(
+            "AERALYTH_STORAGE_OPERATION_PER_USER",
+            8,
+            1,
+            storage_operation_concurrency,
+        );
+        let storage_operation_queue_capacity = env_usize(
+            "AERALYTH_STORAGE_OPERATION_QUEUE_CAPACITY",
+            storage_operation_concurrency.saturating_mul(2),
+            storage_operation_concurrency,
+            512,
+        );
+        let storage_operation_per_user_queue_capacity = env_usize(
+            "AERALYTH_STORAGE_OPERATION_PER_USER_QUEUE_CAPACITY",
+            storage_operation_per_user.saturating_mul(2),
+            storage_operation_per_user,
+            storage_operation_queue_capacity,
         );
         let cookie_secure = env::var("AERALYTH_COOKIE_SECURE")
             .map(|value| matches!(value.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
@@ -190,6 +235,35 @@ impl Config {
         let s3_force_path_style = first_env(&["AERALYTH_S3_URL_STYLE", "AWS_S3_URL_STYLE"])
             .map(|value| value.eq_ignore_ascii_case("path"))
             .unwrap_or(false);
+        let storage_presign_seconds = env_u64("AERALYTH_STORAGE_PRESIGN_SECONDS", 900, 60, 3_600);
+        let storage_multipart_orphan_grace_seconds = env_u64(
+            "AERALYTH_MULTIPART_ORPHAN_GRACE_SECONDS",
+            60 * 60,
+            5 * 60,
+            7 * 24 * 60 * 60,
+        );
+        let s3_abort_incomplete_multipart_days =
+            env_optional_u64("AERALYTH_S3_ABORT_INCOMPLETE_MULTIPART_DAYS", 2, 3_650)?;
+        if let Some(days) = s3_abort_incomplete_multipart_days {
+            let lifecycle_age_seconds = days.saturating_mul(24 * 60 * 60);
+            let minimum_safe_age_seconds = storage_multipart_orphan_grace_seconds
+                .max(storage_presign_seconds)
+                .max(24 * 60 * 60);
+            if lifecycle_age_seconds <= minimum_safe_age_seconds {
+                return Err(format!(
+                    "AERALYTH_S3_ABORT_INCOMPLETE_MULTIPART_DAYS must exceed the longest valid upload or orphan grace period ({minimum_safe_age_seconds} seconds)"
+                ));
+            }
+            if s3_endpoint
+                .as_deref()
+                .is_some_and(is_railway_bucket_endpoint)
+            {
+                return Err(
+                    "Railway Storage Buckets do not support bucket lifecycle configuration; leave AERALYTH_S3_ABORT_INCOMPLETE_MULTIPART_DAYS unset and retain application reconciliation"
+                        .to_owned(),
+                );
+            }
+        }
 
         Ok(Self {
             host,
@@ -229,6 +303,14 @@ impl Config {
                 1,
                 1_000,
             ),
+            upload_control_concurrency,
+            upload_control_per_user,
+            recursive_operation_concurrency,
+            recursive_operation_per_user,
+            storage_operation_concurrency,
+            storage_operation_per_user,
+            storage_operation_queue_capacity,
+            storage_operation_per_user_queue_capacity,
             metrics_token,
             request_slow_ms: env_u64("AERALYTH_REQUEST_SLOW_MS", 500, 1, 60_000),
             request_success_sample_rate: env_usize(
@@ -249,7 +331,7 @@ impl Config {
                 1024 * 1024,
                 u64::MAX,
             ),
-            storage_presign_seconds: env_u64("AERALYTH_STORAGE_PRESIGN_SECONDS", 900, 60, 3_600),
+            storage_presign_seconds,
             storage_multipart_threshold_bytes: env_u64(
                 "AERALYTH_MULTIPART_THRESHOLD_BYTES",
                 100 * 1024 * 1024,
@@ -262,11 +344,12 @@ impl Config {
                 5 * 1024 * 1024,
                 512 * 1024 * 1024,
             ),
-            storage_multipart_orphan_grace_seconds: env_u64(
-                "AERALYTH_MULTIPART_ORPHAN_GRACE_SECONDS",
-                60 * 60,
-                5 * 60,
-                7 * 24 * 60 * 60,
+            storage_multipart_orphan_grace_seconds,
+            storage_maintenance_concurrency: env_usize(
+                "AERALYTH_STORAGE_MAINTENANCE_CONCURRENCY",
+                8,
+                1,
+                32,
             ),
             e2ee_mode,
             share_link_secret,
@@ -276,6 +359,7 @@ impl Config {
             s3_access_key_id,
             s3_secret_access_key,
             s3_force_path_style,
+            s3_abort_incomplete_multipart_days,
         })
     }
 
@@ -309,10 +393,60 @@ fn env_u64(name: &str, default: u64, min: u64, max: u64) -> u64 {
         .unwrap_or(default)
 }
 
+fn env_optional_u64(name: &str, min: u64, max: u64) -> Result<Option<u64>, String> {
+    let Some(value) = env::var(name)
+        .ok()
+        .map(|value| value.trim().to_owned())
+        .filter(|value| !value.is_empty())
+    else {
+        return Ok(None);
+    };
+    let parsed = value
+        .parse::<u64>()
+        .map_err(|_| format!("{name} must be an integer between {min} and {max}"))?;
+    if !(min..=max).contains(&parsed) {
+        return Err(format!("{name} must be between {min} and {max}"));
+    }
+    Ok(Some(parsed))
+}
+
+fn is_railway_bucket_endpoint(endpoint: &str) -> bool {
+    endpoint
+        .split_once("://")
+        .map_or(endpoint, |(_, authority)| authority)
+        .split('/')
+        .next()
+        .is_some_and(|authority| {
+            authority == "storage.railway.app" || authority.ends_with(".up.railway.app")
+        })
+}
+
 fn env_u32(name: &str, default: u32, min: u32, max: u32) -> u32 {
     env::var(name)
         .ok()
         .and_then(|value| value.parse::<u32>().ok())
         .map(|value| value.clamp(min, max))
         .unwrap_or(default)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_railway_bucket_endpoint;
+
+    #[test]
+    fn recognizes_only_railway_bucket_hosts_for_lifecycle_guarding() {
+        assert!(is_railway_bucket_endpoint(
+            "https://example-bucket.up.railway.app"
+        ));
+        assert!(is_railway_bucket_endpoint("https://storage.railway.app"));
+        assert!(is_railway_bucket_endpoint(
+            "example-bucket.up.railway.app/path"
+        ));
+        assert!(!is_railway_bucket_endpoint(
+            "https://s3.us-east-1.amazonaws.com"
+        ));
+        assert!(!is_railway_bucket_endpoint(
+            "https://up.railway.app.example.com"
+        ));
+    }
 }

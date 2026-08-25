@@ -7,7 +7,7 @@
   "deploy": {
     "preDeployCommand": ["/app/scripts/migrate-production.sh"],
     "startCommand": "/app/scripts/start-production.sh",
-    "healthcheckPath": "/health",
+    "healthcheckPath": "/health/ready",
     "healthcheckTimeout": 300,
     "restartPolicyType": "ON_FAILURE",
     "restartPolicyMaxRetries": 5,

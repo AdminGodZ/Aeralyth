@@ -20,6 +20,7 @@ import type {
   VaultShareDirectoryInput,
   VaultShareDirectoryResult,
   VaultShareMaterialInput,
+  VaultShareMaterialProgress,
   VaultShareMaterialResult,
   VaultShareRotationInput,
   VaultUnlockResult,
@@ -267,6 +268,13 @@ export class VaultCryptoClient {
     ).result;
   }
 
+  async clearShareContextCache(cacheKey: string): Promise<void> {
+    expectResult(
+      await this.send({ type: "clearShareContextCache", cacheKey }),
+      "clearShareContextCache",
+    );
+  }
+
   async startDecryption(
     plan: VaultDownloadPlan,
   ): Promise<VaultDecryptionStart> {
@@ -306,20 +314,34 @@ export class VaultCryptoClient {
 
   async createShareMaterial(
     input: VaultShareMaterialInput,
+    options: {
+      onProgress?(progress: VaultShareMaterialProgress): void;
+    } = {},
   ): Promise<VaultShareMaterialResult> {
-    return expectResult(
-      await this.send({ type: "createShareMaterial", input }),
+    const collector = createShareMaterialCollector(input.nodes, options);
+    const material = expectResult(
+      await this.send({ type: "createShareMaterial", input }, [], {
+        onProgress: collector.accept,
+      }),
       "createShareMaterial",
     ).result;
+    return collector.finish(material);
   }
 
   async rotateShareMaterial(
     input: VaultShareRotationInput,
+    options: {
+      onProgress?(progress: VaultShareMaterialProgress): void;
+    } = {},
   ): Promise<VaultShareMaterialResult> {
-    return expectResult(
-      await this.send({ type: "rotateShareMaterial", input }),
+    const collector = createShareMaterialCollector(input.nodes, options);
+    const material = expectResult(
+      await this.send({ type: "rotateShareMaterial", input }, [], {
+        onProgress: collector.accept,
+      }),
       "rotateShareMaterial",
     ).result;
+    return collector.finish(material);
   }
 
   async close(): Promise<void> {
@@ -356,6 +378,15 @@ export class VaultCryptoClient {
       if (options.signal) {
         pending.abort = () => {
           if (!this.pending.delete(id)) return;
+          if (request.type === "openMetadataPlans") {
+            const cancellationId = this.nextId;
+            this.nextId += 1;
+            this.worker.postMessage({
+              id: cancellationId,
+              type: "cancelMetadataOperation",
+              operationId: id,
+            });
+          }
           reject(abortReason(options.signal as AbortSignal));
         };
         options.signal.addEventListener("abort", pending.abort, { once: true });
@@ -374,6 +405,75 @@ export class VaultCryptoClient {
     }
     this.pending.clear();
   }
+}
+
+function createShareMaterialCollector(
+  nodes: VaultShareMaterialInput["nodes"],
+  {
+    onProgress,
+  }: {
+    onProgress?(progress: VaultShareMaterialProgress): void;
+  },
+): {
+  accept(progress: VaultWorkerProgress): void;
+  finish(material: VaultShareMaterialResult): VaultShareMaterialResult;
+} {
+  const expectedWrappers = new Map(
+    nodes.map((node) => [node.nodeId, node.entryType === "file" ? 2 : 1]),
+  );
+  const chunks = new Map<string, Uint8Array[]>();
+  let completedNodes = 0;
+  let failure: Error | null = null;
+
+  return {
+    accept(progress) {
+      if (progress.type !== "shareMaterial" || failure) return;
+      const expectedCount = expectedWrappers.get(progress.nodeId);
+      if (
+        expectedCount === undefined ||
+        chunks.has(progress.nodeId) ||
+        progress.wrappers.length !== expectedCount ||
+        progress.totalNodes !== nodes.length ||
+        progress.completedNodes !== completedNodes + 1
+      ) {
+        failure = new Error(
+          "The vault worker returned invalid share-preparation progress.",
+        );
+        return;
+      }
+      chunks.set(progress.nodeId, progress.wrappers);
+      completedNodes = progress.completedNodes;
+      onProgress?.({
+        completedNodes: progress.completedNodes,
+        totalNodes: progress.totalNodes,
+      });
+    },
+    finish(material) {
+      if (failure) throw failure;
+      if (
+        material.wrappers.length !== 0 ||
+        completedNodes !== nodes.length ||
+        chunks.size !== nodes.length
+      ) {
+        throw new Error(
+          "The vault worker returned incomplete share-preparation material.",
+        );
+      }
+      const wrappers = [...chunks]
+        .sort(([left], [right]) => left.localeCompare(right))
+        .flatMap(([, chunk]) => chunk);
+      const expectedCount = [...expectedWrappers.values()].reduce(
+        (sum, count) => sum + count,
+        0,
+      );
+      if (wrappers.length !== expectedCount) {
+        throw new Error(
+          "The vault worker returned an invalid share wrapper count.",
+        );
+      }
+      return { ...material, wrappers };
+    },
+  };
 }
 
 function abortReason(signal: AbortSignal): unknown {

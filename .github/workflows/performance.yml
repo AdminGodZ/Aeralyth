@@ -40,8 +40,8 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run worker:build
-      - name: Verify committed workers and fingerprints are current
-        run: git diff --exit-code -- public/vault.worker.js public/folder-zip.worker.js src/generated/worker-assets.ts
+      - name: Verify generated worker manifest is current
+        run: git diff --exit-code -- src/generated/worker-assets.ts
       - run: npx tsc --noEmit
       - run: npm run lint
       - run: npm test
@@ -213,11 +213,11 @@ jobs:
               test -s "${worker_body}"
               test "$(grep --ignore-case --count '^cache-control:' "${worker_headers}" || true)" -eq 1
               grep --ignore-case --fixed-strings --line-regexp \
-                $'cache-control: private, no-cache, max-age=0, must-revalidate\r' \
+                $'cache-control: public, max-age=31536000, immutable\r' \
                 "${worker_headers}"
               test "$(grep --ignore-case --count '^cdn-cache-control:' "${worker_headers}" || true)" -eq 1
               grep --ignore-case --fixed-strings --line-regexp \
-                $'cdn-cache-control: no-store\r' \
+                $'cdn-cache-control: public, max-age=31536000, immutable\r' \
                 "${worker_headers}"
               rm --force "${worker_headers}" "${worker_body}"
             }
@@ -249,8 +249,12 @@ jobs:
             curl --fail --silent --show-error http://127.0.0.1:18081/health | grep '"service":"aeralyth-api"'
             curl --fail --silent --show-error http://127.0.0.1:18081/api/health | grep '"service":"aeralyth-api"'
             curl --fail --silent --show-error http://127.0.0.1:18081/login | grep 'Welcome back'
-            verify_worker /vault.worker.js
-            verify_worker /folder-zip.worker.js
+            vault_worker_path="$(grep --after-context=1 'VAULT_WORKER_URL' src/generated/worker-assets.ts | tail --lines=1 | cut --delimiter='"' --fields=2)"
+            zip_worker_path="$(grep --after-context=1 'FOLDER_ZIP_WORKER_URL' src/generated/worker-assets.ts | tail --lines=1 | cut --delimiter='"' --fields=2)"
+            checksum_worker_path="$(grep --after-context=1 'UPLOAD_CHECKSUM_WORKER_URL' src/generated/worker-assets.ts | tail --lines=1 | cut --delimiter='"' --fields=2)"
+            verify_worker "${vault_worker_path}"
+            verify_worker "${zip_worker_path}"
+            verify_worker "${checksum_worker_path}"
             docker logs aeralyth-production-smoke 2>&1 | grep "127.0.0.1:${expected_api_port}"
             docker rm --force aeralyth-production-smoke
           }

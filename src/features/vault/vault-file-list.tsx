@@ -128,6 +128,10 @@ function useVaultFileListController({
   const [resolved, setResolved] = useState<Record<string, ResolvedMetadata>>(
     {},
   );
+  const [sharedValidatedSource, setSharedValidatedSource] = useState<{
+    entries: FileEntry[];
+    folderId: string | null;
+  } | null>(null);
   const [sort, setSort] = useState<FileSort>(initialSort ?? "name");
   const [direction, setDirection] = useState<FileSortDirection>(
     initialDirection ?? (initialSort === "name" ? "asc" : "desc"),
@@ -199,6 +203,7 @@ function useVaultFileListController({
 
   useEffect(() => {
     if (vault.state !== "unlocked") {
+      setSharedValidatedSource(null);
       setResolved((current) =>
         Object.keys(current).length === 0 ? current : {},
       );
@@ -210,6 +215,7 @@ function useVaultFileListController({
     }
     const controller = new AbortController();
     let canceled = false;
+    if (sectionKey === "shared") setSharedValidatedSource(null);
     void (async () => {
       const next: Record<string, ResolvedMetadata> = {};
       const references = entries.flatMap((entry) => {
@@ -272,6 +278,7 @@ function useVaultFileListController({
         }
         const results = await vault.resolveMetadata(references, {
           signal: controller.signal,
+          requireServerValidation: sectionKey === "shared",
           onCached(cached) {
             if (canceled) return;
             metadataCommitStartedAtRef.current ??= vaultPerformanceNow();
@@ -282,6 +289,9 @@ function useVaultFileListController({
           },
           onPriority(priority) {
             if (canceled) return;
+            if (sectionKey === "shared") {
+              setSharedValidatedSource({ entries, folderId: currentFolderId });
+            }
             metadataCommitStartedAtRef.current ??= vaultPerformanceNow();
             setResolved((current) => ({
               ...current,
@@ -289,6 +299,9 @@ function useVaultFileListController({
             }));
           },
         });
+        if (sectionKey === "shared" && !canceled) {
+          setSharedValidatedSource({ entries, folderId: currentFolderId });
+        }
         Object.assign(next, metadataFromResults(results));
       } catch {
         if (controller.signal.aborted) return;
@@ -328,7 +341,12 @@ function useVaultFileListController({
       }
 
       const storedMetadata = resolved[entry.id];
+      const sharedMetadataValidated =
+        sectionKey !== "shared" ||
+        (sharedValidatedSource?.entries === entries &&
+          sharedValidatedSource.folderId === currentFolderId);
       const currentMetadata =
+        sharedMetadataValidated &&
         entry.vaultRecordHash !== null &&
         storedMetadata?.sourceRecordHash === entry.vaultRecordHash
           ? storedMetadata
@@ -394,7 +412,17 @@ function useVaultFileListController({
       if (comparison === 0) comparison = left.id.localeCompare(right.id);
       return direction === "asc" ? comparison : -comparison;
     });
-  }, [direction, localEntries, resolved, sort, vault.state]);
+  }, [
+    currentFolderId,
+    direction,
+    entries,
+    localEntries,
+    resolved,
+    sectionKey,
+    sharedValidatedSource,
+    sort,
+    vault.state,
+  ]);
 
   function changeSort(field: FileSort): void {
     if (sort === field) {

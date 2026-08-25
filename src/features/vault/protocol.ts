@@ -1,3 +1,4 @@
+import { sha256 as nobleSha256 } from "@noble/hashes/sha2";
 import {
   detectedCryptoConcurrency,
   mapWithConcurrency,
@@ -6,6 +7,7 @@ import {
 export const VAULT_FORMAT_VERSION = 1;
 export const VAULT_SHARE_ENVELOPE_VERSION = 2;
 export const VAULT_SHARE_DIRECTORY_VERSION = 1;
+export const MAX_SHARE_WRAPPERS = 100_000;
 export const VAULT_SUITE_ID = 1;
 export const VAULT_AAD_SCHEMA_ID = 1;
 export const VAULT_CRYPTO_CHUNK_BYTES = 4 * 1024 * 1024;
@@ -44,8 +46,13 @@ export type VaultUnlockMaterial = {
     privateRecordId: string;
     privateCiphertext: string;
   };
-  accountStateRecordId: string | null;
-  encryptedAccountState: string;
+  accountState: VaultAccountStateManifest | null;
+};
+
+export type VaultAccountStateManifest = {
+  recordId: string;
+  version: number;
+  ciphertextBytes: number;
 };
 
 export type VaultSetupPayload = {
@@ -145,6 +152,10 @@ export type VaultMetadataPlan = {
   entryType: VaultEntryType;
   generationNumber: number;
   generationId: string;
+  ciphertextLength: number;
+  cryptoChunkBytes: number;
+  chunkCount: number;
+  ciphertextMerkleRoot: string;
   bootstrapCbor: string;
   bootstrapSignature: string;
   encryptedManifest: string;
@@ -157,10 +168,6 @@ export type VaultMetadataPlan = {
 };
 
 export type VaultDownloadPlan = VaultMetadataPlan & {
-  ciphertextLength: number;
-  cryptoChunkBytes: number;
-  chunkCount: number;
-  ciphertextMerkleRoot: string;
   downloadUrl: string | null;
 };
 
@@ -188,6 +195,7 @@ export type VaultShareDownloadMaterial = {
   senderEd25519PublicKey: string;
   senderFingerprintSha256: string;
   recipientKeyVersion: number;
+  authorizationVersion: string;
   wrapperProofs: Array<{
     leafIndex: number;
     proof: string;
@@ -214,11 +222,18 @@ export type VaultPublicIdentity = {
 
 export type VaultShareNodeSnapshot = {
   nodeId: string;
+  parentId: string | null;
+  depth: number;
   entryType: VaultEntryType;
   generationNumber: number;
   generationId: string | null;
   recordVersion: number;
   recordHash: string;
+};
+
+export type VaultSharePreparationPlan = {
+  snapshot: VaultShareNodeSnapshot;
+  metadata: VaultMetadataPlan;
 };
 
 export type VaultActiveShareContext = {
@@ -515,6 +530,54 @@ export async function sha256(value: Uint8Array): Promise<Uint8Array> {
   );
 }
 
+export async function sha256Parts(
+  ...values: readonly Uint8Array[]
+): Promise<Uint8Array> {
+  const hasher = nobleSha256.create();
+  let digested = false;
+  try {
+    for (const value of values) hasher.update(value);
+    const digest = hasher.digest();
+    digested = true;
+    return digest;
+  } finally {
+    if (!digested) hasher.destroy();
+  }
+}
+
+export async function shareAuthorizationVersion(input: {
+  shareId: string;
+  epoch: number;
+  recipientId: string;
+  recipientKeyVersion: number;
+  shareRecordVersion: number;
+  envelopeHash: Uint8Array;
+}): Promise<Uint8Array> {
+  const shareId = utf8(input.shareId);
+  const recipientId = utf8(input.recipientId);
+  return sha256Parts(
+    utf8("aeralyth/share-authorization/v1"),
+    encodeUnsigned32(shareId.length),
+    shareId,
+    encodeUnsigned64(input.epoch),
+    encodeUnsigned32(recipientId.length),
+    recipientId,
+    encodeUnsigned64(input.recipientKeyVersion),
+    encodeUnsigned64(input.shareRecordVersion),
+    encodeUnsigned32(input.envelopeHash.length),
+    input.envelopeHash,
+  );
+}
+
+function encodeUnsigned32(value: number): Uint8Array {
+  if (!Number.isSafeInteger(value) || value < 0 || value > 0xffff_ffff) {
+    throw new Error("Invalid unsigned protocol length.");
+  }
+  const output = new Uint8Array(4);
+  new DataView(output.buffer).setUint32(0, value, false);
+  return output;
+}
+
 export async function merkleRootFromLeaves(
   leaves: Uint8Array[],
 ): Promise<Uint8Array> {
@@ -531,9 +594,7 @@ export async function merkleRootFromLeaves(
         if (index + 1 === level.length) {
           return level[index];
         }
-        return sha256(
-          concatBytes(Uint8Array.of(1), level[index], level[index + 1]),
-        );
+        return sha256Parts(Uint8Array.of(1), level[index], level[index + 1]);
       },
     );
     level = next;
@@ -548,7 +609,7 @@ const WRAPPER_ROOT_DOMAIN = utf8("aeralyth/share-wrapper-root/v2");
 export async function wrapperSetRoot(
   wrapperHashes: Uint8Array[],
 ): Promise<Uint8Array> {
-  if (wrapperHashes.length === 0 || wrapperHashes.length > 8192) {
+  if (wrapperHashes.length === 0 || wrapperHashes.length > MAX_SHARE_WRAPPERS) {
     throw new Error("Invalid share wrapper count.");
   }
   const ordered = wrapperHashes
@@ -565,7 +626,7 @@ export async function wrapperSetRoot(
   let level = await mapWithConcurrency(
     ordered,
     PROTOCOL_HASH_CONCURRENCY,
-    (hash) => sha256(concatBytes(WRAPPER_LEAF_DOMAIN, hash)),
+    (hash) => sha256Parts(WRAPPER_LEAF_DOMAIN, hash),
   );
   while (level.length > 1) {
     level = await mapWithConcurrency(
@@ -574,16 +635,14 @@ export async function wrapperSetRoot(
       (pairIndex) => {
         const index = pairIndex * 2;
         const right = level[index + 1] ?? level[index];
-        return sha256(concatBytes(WRAPPER_BRANCH_DOMAIN, level[index], right));
+        return sha256Parts(WRAPPER_BRANCH_DOMAIN, level[index], right);
       },
     );
   }
-  return sha256(
-    concatBytes(
-      WRAPPER_ROOT_DOMAIN,
-      encodeUnsigned64(wrapperHashes.length),
-      level[0],
-    ),
+  return sha256Parts(
+    WRAPPER_ROOT_DOMAIN,
+    encodeUnsigned64(wrapperHashes.length),
+    level[0],
   );
 }
 
@@ -601,7 +660,7 @@ export async function verifyWrapperSetProof(input: {
     input.leafIndex < 0 ||
     !Number.isSafeInteger(input.wrapperCount) ||
     input.wrapperCount < 1 ||
-    input.wrapperCount > 8192 ||
+    input.wrapperCount > MAX_SHARE_WRAPPERS ||
     input.leafIndex >= input.wrapperCount
   ) {
     return false;
@@ -610,21 +669,19 @@ export async function verifyWrapperSetProof(input: {
   if (input.proof.length !== depth * 32) return false;
 
   let index = input.leafIndex;
-  let node = await sha256(concatBytes(WRAPPER_LEAF_DOMAIN, input.wrapperHash));
+  let node = await sha256Parts(WRAPPER_LEAF_DOMAIN, input.wrapperHash);
   for (let level = 0; level < depth; level += 1) {
     const sibling = input.proof.subarray(level * 32, (level + 1) * 32);
     node =
       index % 2 === 0
-        ? await sha256(concatBytes(WRAPPER_BRANCH_DOMAIN, node, sibling))
-        : await sha256(concatBytes(WRAPPER_BRANCH_DOMAIN, sibling, node));
+        ? await sha256Parts(WRAPPER_BRANCH_DOMAIN, node, sibling)
+        : await sha256Parts(WRAPPER_BRANCH_DOMAIN, sibling, node);
     index = Math.floor(index / 2);
   }
-  const root = await sha256(
-    concatBytes(
-      WRAPPER_ROOT_DOMAIN,
-      encodeUnsigned64(input.wrapperCount),
-      node,
-    ),
+  const root = await sha256Parts(
+    WRAPPER_ROOT_DOMAIN,
+    encodeUnsigned64(input.wrapperCount),
+    node,
   );
   return equalBytes(root, input.expectedRoot);
 }
@@ -642,7 +699,7 @@ export async function ciphertextLeafHash(
 ): Promise<Uint8Array> {
   const index = new Uint8Array(8);
   new DataView(index.buffer).setBigUint64(0, BigInt(chunkIndex), false);
-  return sha256(concatBytes(Uint8Array.of(0), index, ciphertext));
+  return sha256Parts(Uint8Array.of(0), index, ciphertext);
 }
 
 export function asBufferSource(value: Uint8Array): Uint8Array<ArrayBuffer> {

@@ -25,6 +25,7 @@ function entry(
     updatedAt: "2026-08-17T00:00:00Z",
     contentVersion: "2026-08-17T00:00:00.123456Z",
     vaultGenerationId: null,
+    vaultRecordVersion: null,
     vaultRecordHash: null,
   };
 }
@@ -185,7 +186,9 @@ describe("folder archive manifest", () => {
       "utf8",
     );
     expect(archiveSource).toContain("entry.contentVersion");
-    expect(archiveSource).toContain("encryptedDownloadBatch");
+    expect(archiveSource).toContain("createStreamingZipDestination");
+    expect(archiveSource).toContain("readEncryptedFileStream");
+    expect(archiveSource).not.toContain("downloadedFiles");
     expect(archiveSource).not.toContain("new Map<string, VaultDownloadPlan>");
   });
 });

@@ -23,6 +23,7 @@ struct MetricsInner {
     started_at: Instant,
     request_sequence: AtomicU64,
     success_log_sequence: AtomicU64,
+    high_volume_success_log_sequence: AtomicU64,
     success_sample_rate: u64,
     slow_request: Duration,
     http: Mutex<BTreeMap<HttpKey, HttpStats>>,
@@ -31,6 +32,10 @@ struct MetricsInner {
     pool_lifetime_recycles: Mutex<BTreeMap<String, u64>>,
     maintenance: Mutex<BTreeMap<String, DurationStats>>,
     maintenance_restarts: Mutex<BTreeMap<String, u64>>,
+    maintenance_item_failures: Mutex<BTreeMap<String, u64>>,
+    s3_retry_attempts: Mutex<BTreeMap<String, u64>>,
+    counter_reconciliation_rows_scanned: AtomicU64,
+    counter_reconciliation_rows_updated: AtomicU64,
 }
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -73,6 +78,7 @@ impl Metrics {
                 started_at: Instant::now(),
                 request_sequence: AtomicU64::new(1),
                 success_log_sequence: AtomicU64::new(0),
+                high_volume_success_log_sequence: AtomicU64::new(0),
                 success_sample_rate: config.request_success_sample_rate as u64,
                 slow_request: Duration::from_millis(config.request_slow_ms),
                 http: Mutex::new(BTreeMap::new()),
@@ -81,6 +87,10 @@ impl Metrics {
                 pool_lifetime_recycles: Mutex::new(BTreeMap::new()),
                 maintenance: Mutex::new(BTreeMap::new()),
                 maintenance_restarts: Mutex::new(BTreeMap::new()),
+                maintenance_item_failures: Mutex::new(BTreeMap::new()),
+                s3_retry_attempts: Mutex::new(BTreeMap::new()),
+                counter_reconciliation_rows_scanned: AtomicU64::new(0),
+                counter_reconciliation_rows_updated: AtomicU64::new(0),
             }),
         }
     }
@@ -128,6 +138,16 @@ impl Metrics {
                 database_checkouts = observation.database_checkouts,
                 "request failed"
             );
+        } else if observation.status >= 400 {
+            tracing::warn!(
+                request_id,
+                method = observation.method,
+                route = observation.route,
+                status = observation.status,
+                duration_ms,
+                database_checkouts = observation.database_checkouts,
+                "request rejected"
+            );
         } else if observation.duration >= self.inner.slow_request {
             tracing::warn!(
                 request_id,
@@ -138,21 +158,32 @@ impl Metrics {
                 database_checkouts = observation.database_checkouts,
                 "slow request"
             );
-        } else if self
-            .inner
-            .success_log_sequence
-            .fetch_add(1, Ordering::Relaxed)
-            .is_multiple_of(self.inner.success_sample_rate)
-        {
-            tracing::info!(
-                request_id,
-                method = observation.method,
-                route = observation.route,
-                status = observation.status,
-                duration_ms,
-                database_checkouts = observation.database_checkouts,
-                "request completed"
-            );
+        } else {
+            let (sequence, sample_rate) = match success_log_class(observation.route) {
+                SuccessLogClass::Excluded => return,
+                SuccessLogClass::Standard => (
+                    &self.inner.success_log_sequence,
+                    self.inner.success_sample_rate,
+                ),
+                SuccessLogClass::HighVolume => (
+                    &self.inner.high_volume_success_log_sequence,
+                    self.inner.success_sample_rate.saturating_mul(10),
+                ),
+            };
+            if sequence
+                .fetch_add(1, Ordering::Relaxed)
+                .is_multiple_of(sample_rate.max(1))
+            {
+                tracing::info!(
+                    request_id,
+                    method = observation.method,
+                    route = observation.route,
+                    status = observation.status,
+                    duration_ms,
+                    database_checkouts = observation.database_checkouts,
+                    "request completed"
+                );
+            }
         }
     }
 
@@ -182,6 +213,23 @@ impl Metrics {
         let mut restarts = lock_unpoisoned(&self.inner.maintenance_restarts);
         let count = restarts.entry(worker.to_owned()).or_default();
         *count = count.saturating_add(1);
+    }
+
+    pub fn record_maintenance_item_failure(&self, worker: &str) {
+        increment_labeled_counter(&self.inner.maintenance_item_failures, worker);
+    }
+
+    pub fn record_s3_retry_attempt(&self, policy: &str) {
+        increment_labeled_counter(&self.inner.s3_retry_attempts, policy);
+    }
+
+    pub fn record_counter_reconciliation(&self, rows_scanned: u64, rows_updated: u64) {
+        self.inner
+            .counter_reconciliation_rows_scanned
+            .fetch_add(rows_scanned, Ordering::Relaxed);
+        self.inner
+            .counter_reconciliation_rows_updated
+            .fetch_add(rows_updated, Ordering::Relaxed);
     }
 
     pub fn render(&self, pools: &[(&str, PoolStatus)]) -> String {
@@ -222,6 +270,17 @@ impl Metrics {
             &mut output,
             &lock_unpoisoned(&self.inner.maintenance),
             &lock_unpoisoned(&self.inner.maintenance_restarts),
+            &lock_unpoisoned(&self.inner.maintenance_item_failures),
+        );
+        render_storage_metrics(
+            &mut output,
+            &lock_unpoisoned(&self.inner.s3_retry_attempts),
+            self.inner
+                .counter_reconciliation_rows_scanned
+                .load(Ordering::Relaxed),
+            self.inner
+                .counter_reconciliation_rows_updated
+                .load(Ordering::Relaxed),
         );
         output
     }
@@ -449,6 +508,7 @@ fn render_maintenance_metrics(
     output: &mut String,
     maintenance: &BTreeMap<String, DurationStats>,
     restarts: &BTreeMap<String, u64>,
+    item_failures: &BTreeMap<String, u64>,
 ) {
     writeln!(
         output,
@@ -472,6 +532,16 @@ fn render_maintenance_metrics(
     )
     .ok();
     writeln!(output, "# TYPE aeralyth_maintenance_restarts_total counter").ok();
+    writeln!(
+        output,
+        "# HELP aeralyth_maintenance_item_failures_total Individual maintenance items that failed while sibling work continued."
+    )
+    .ok();
+    writeln!(
+        output,
+        "# TYPE aeralyth_maintenance_item_failures_total counter"
+    )
+    .ok();
     for (worker, stats) in maintenance {
         let labels = format!("worker=\"{}\"", escape_label(worker));
         render_duration_histogram(
@@ -495,6 +565,66 @@ fn render_maintenance_metrics(
         )
         .ok();
     }
+    for (worker, count) in item_failures {
+        writeln!(
+            output,
+            "aeralyth_maintenance_item_failures_total{{worker=\"{}\"}} {count}",
+            escape_label(worker),
+        )
+        .ok();
+    }
+}
+
+fn render_storage_metrics(
+    output: &mut String,
+    s3_retry_attempts: &BTreeMap<String, u64>,
+    counter_rows_scanned: u64,
+    counter_rows_updated: u64,
+) {
+    writeln!(
+        output,
+        "# HELP aeralyth_s3_retry_attempts_total S3 attempts after the first attempt."
+    )
+    .ok();
+    writeln!(output, "# TYPE aeralyth_s3_retry_attempts_total counter").ok();
+    for (policy, count) in s3_retry_attempts {
+        writeln!(
+            output,
+            "aeralyth_s3_retry_attempts_total{{policy=\"{}\"}} {count}",
+            escape_label(policy),
+        )
+        .ok();
+    }
+    writeln!(
+        output,
+        "# HELP aeralyth_counter_reconciliation_rows_scanned_total Counter rows inspected by drift reconciliation."
+    )
+    .ok();
+    writeln!(
+        output,
+        "# TYPE aeralyth_counter_reconciliation_rows_scanned_total counter"
+    )
+    .ok();
+    writeln!(
+        output,
+        "aeralyth_counter_reconciliation_rows_scanned_total {counter_rows_scanned}"
+    )
+    .ok();
+    writeln!(
+        output,
+        "# HELP aeralyth_counter_reconciliation_rows_updated_total Counter rows repaired by drift reconciliation."
+    )
+    .ok();
+    writeln!(
+        output,
+        "# TYPE aeralyth_counter_reconciliation_rows_updated_total counter"
+    )
+    .ok();
+    writeln!(
+        output,
+        "aeralyth_counter_reconciliation_rows_updated_total {counter_rows_updated}"
+    )
+    .ok();
 }
 
 fn render_duration_histogram(output: &mut String, name: &str, labels: &str, stats: &DurationStats) {
@@ -522,6 +652,42 @@ fn render_duration_histogram(output: &mut String, name: &str, labels: &str, stat
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SuccessLogClass {
+    Excluded,
+    Standard,
+    HighVolume,
+}
+
+fn success_log_class(route: &str) -> SuccessLogClass {
+    if matches!(
+        route,
+        "/health"
+            | "/health/live"
+            | "/health/ready"
+            | "/api/health"
+            | "/api/health/live"
+            | "/api/health/ready"
+    ) {
+        return SuccessLogClass::Excluded;
+    }
+
+    if matches!(
+        route,
+        "/api/files/uploads/{id}/content-url"
+            | "/api/files/uploads/{id}/parts/{part_number}"
+            | "/api/files/uploads/{id}/parts"
+            | "/api/files/uploads/{id}/status"
+            | "/api/vault/uploads/{id}/content-url"
+            | "/api/vault/uploads/{id}/parts/{part_number}"
+            | "/api/vault/uploads/{id}/parts"
+    ) {
+        return SuccessLogClass::HighVolume;
+    }
+
+    SuccessLogClass::Standard
+}
+
 fn escape_label(value: &str) -> String {
     value
         .replace('\\', "\\\\")
@@ -543,10 +709,61 @@ fn lock_unpoisoned<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Metrics, RequestObservation};
+    use super::{Metrics, RequestObservation, SuccessLogClass, success_log_class};
     use crate::config::Config;
     use deadpool_postgres::Status as PoolStatus;
+    use std::sync::atomic::Ordering;
     use std::time::Duration;
+
+    #[test]
+    fn successful_request_logs_exclude_health_and_downsample_upload_control() {
+        assert_eq!(success_log_class("/health"), SuccessLogClass::Excluded);
+        assert_eq!(
+            success_log_class("/api/vault/uploads/{id}/parts/{part_number}"),
+            SuccessLogClass::HighVolume
+        );
+        assert_eq!(
+            success_log_class("/api/repositories/{id}"),
+            SuccessLogClass::Standard
+        );
+
+        let mut config = Config::from_env().expect("test configuration should load");
+        config.request_success_sample_rate = 100;
+        let metrics = Metrics::new(&config);
+        let observation = |route, status| RequestObservation {
+            method: "GET",
+            route,
+            status,
+            duration: Duration::from_millis(1),
+            request_bytes: 0,
+            response_bytes: 0,
+            database_checkouts: 0,
+        };
+
+        metrics.log_request("health", &observation("/health", 200));
+        assert_eq!(
+            metrics.inner.success_log_sequence.load(Ordering::Relaxed),
+            0
+        );
+        assert_eq!(
+            metrics
+                .inner
+                .high_volume_success_log_sequence
+                .load(Ordering::Relaxed),
+            0
+        );
+
+        let upload_route = "/api/files/uploads/{id}/parts/{part_number}";
+        metrics.log_request("upload", &observation(upload_route, 200));
+        metrics.log_request("upload-error", &observation(upload_route, 429));
+        assert_eq!(
+            metrics
+                .inner
+                .high_volume_success_log_sequence
+                .load(Ordering::Relaxed),
+            1
+        );
+    }
 
     #[test]
     fn renders_route_pool_and_maintenance_metrics_without_raw_paths() {
@@ -568,6 +785,9 @@ mod tests {
         metrics.record_pool_connection_created("maintenance");
         metrics.record_pool_lifetime_recycle("maintenance");
         metrics.record_maintenance("storage deletion", Duration::from_millis(4), true);
+        metrics.record_maintenance_item_failure("multipart reconciliation abort");
+        metrics.record_s3_retry_attempt("maintenance");
+        metrics.record_counter_reconciliation(501, 2);
         let rendered = metrics.render(&[
             (
                 "request",
@@ -597,6 +817,12 @@ mod tests {
         assert!(
             rendered.contains("aeralyth_db_pool_connections{pool=\"maintenance\",state=\"max\"} 2")
         );
+        assert!(rendered.contains(
+            "aeralyth_maintenance_item_failures_total{worker=\"multipart reconciliation abort\"} 1"
+        ));
+        assert!(rendered.contains("aeralyth_s3_retry_attempts_total{policy=\"maintenance\"} 1"));
+        assert!(rendered.contains("aeralyth_counter_reconciliation_rows_scanned_total 501"));
+        assert!(rendered.contains("aeralyth_counter_reconciliation_rows_updated_total 2"));
         assert!(
             rendered
                 .contains("aeralyth_db_pool_checkout_duration_seconds_count{pool=\"request\"} 1")

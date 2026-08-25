@@ -1,10 +1,12 @@
 import { BlobReader, BlobWriter, ZipWriter } from "@zip.js/zip.js";
 
+import { archiveCompressionLevel } from "@/features/archive/compression-policy";
 import { BoundedBlobWriter } from "@/features/dashboard/bounded-blob-writer";
 import type {
   FolderZipWorkerRequest,
   FolderZipWorkerResponse,
 } from "@/features/dashboard/folder-zip-messages";
+import { createIntervalProgressCoalescer } from "@/features/uploads/progress-coalescer";
 
 type WorkerScope = {
   onmessage: ((event: MessageEvent<FolderZipWorkerRequest>) => void) | null;
@@ -30,7 +32,7 @@ workerScope.onmessage = (event) => {
 async function createArchive(
   request: Extract<FolderZipWorkerRequest, { type: "compress" }>,
 ) {
-  const { sources, maxOutputBytes } = request;
+  const { sources, compressionMode = "balanced", maxOutputBytes } = request;
   const controller = new AbortController();
   activeController = controller;
   const totalBytes = sources.reduce(
@@ -38,8 +40,22 @@ async function createArchive(
     0,
   );
   let completedBytes = 0;
+  let currentPath = "";
+  const progressReporter = createIntervalProgressCoalescer(
+    (message: Extract<FolderZipWorkerResponse, { type: "progress" }>) =>
+      workerScope.postMessage(message),
+  );
 
   try {
+    progressReporter.publish(
+      {
+        type: "progress",
+        processedBytes: 0,
+        totalBytes,
+        currentPath,
+      },
+      true,
+    );
     if (
       maxOutputBytes !== undefined &&
       (!Number.isSafeInteger(maxOutputBytes) || maxOutputBytes <= 0)
@@ -51,7 +67,6 @@ async function createArchive(
         ? new BlobWriter("application/zip")
         : new BoundedBlobWriter(maxOutputBytes);
     const zipWriter = new ZipWriter(blobWriter, {
-      level: 6,
       signal: controller.signal,
       useWebWorkers: false,
     });
@@ -65,25 +80,32 @@ async function createArchive(
 
       if (source.directory) {
         const directoryPath = path.endsWith("/") ? path : `${path}/`;
+        currentPath = directoryPath;
         await zipWriter.add(directoryPath, undefined, {
           directory: true,
           lastModDate: new Date(source.lastModified),
           signal: controller.signal,
         });
-        workerScope.postMessage({
+        progressReporter.publish({
           type: "progress",
           processedBytes: completedBytes,
           totalBytes,
-          currentPath: directoryPath,
+          currentPath,
         });
         continue;
       }
 
+      currentPath = path;
       await zipWriter.add(path, new BlobReader(source.file), {
+        level: archiveCompressionLevel({
+          path,
+          mimeType: source.file.type,
+          mode: compressionMode,
+        }),
         lastModDate: new Date(source.file.lastModified),
         signal: controller.signal,
         onprogress(progress) {
-          workerScope.postMessage({
+          progressReporter.publish({
             type: "progress",
             processedBytes: completedBytes + progress,
             totalBytes,
@@ -93,11 +115,11 @@ async function createArchive(
       });
 
       completedBytes += source.file.size;
-      workerScope.postMessage({
+      progressReporter.publish({
         type: "progress",
         processedBytes: completedBytes,
         totalBytes,
-        currentPath: path,
+        currentPath,
       });
     }
 
@@ -108,6 +130,15 @@ async function createArchive(
       return;
     }
 
+    progressReporter.publish(
+      {
+        type: "progress",
+        processedBytes: totalBytes,
+        totalBytes,
+        currentPath,
+      },
+      true,
+    );
     workerScope.postMessage({ type: "complete", archive });
   } catch (error) {
     if (controller.signal.aborted) {

@@ -1,9 +1,13 @@
 use std::collections::HashMap;
 use std::error::Error as StdError;
 use std::fmt;
+use std::future::Future;
 use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use actix_web::http::{StatusCode, header::RETRY_AFTER};
+use actix_web::{HttpResponse, ResponseError};
+use tokio::sync::{Mutex as AsyncMutex, OwnedSemaphorePermit, Semaphore};
 
 use crate::config::Config;
 use crate::db::{Database, DatabasePoolMonitor};
@@ -15,12 +19,56 @@ pub struct AppState {
     pub config: Config,
     pub db: Database,
     pub database_pools: DatabasePoolMonitor,
+    pub database_readiness: ReadinessCache,
     pub metrics: Metrics,
     pub passwords: PasswordService,
     pub login_rate_limiter: LoginRateLimiter,
     pub storage: Storage,
-    pub vault_mutation_limiter: MutationLimiter,
+    pub upload_control_limiter: MutationLimiter,
+    pub recursive_operation_limiter: MutationLimiter,
+    pub storage_operations: AsyncOperationService,
     pub vault_validation: VaultValidationService,
+}
+
+#[derive(Clone)]
+pub struct ReadinessCache {
+    ttl: Duration,
+    state: Arc<AsyncMutex<CachedReadiness>>,
+}
+
+#[derive(Default)]
+struct CachedReadiness {
+    checked_at: Option<Instant>,
+    ready: bool,
+}
+
+impl ReadinessCache {
+    pub fn new(ttl: Duration) -> Self {
+        assert!(!ttl.is_zero());
+        Self {
+            ttl,
+            state: Arc::new(AsyncMutex::new(CachedReadiness::default())),
+        }
+    }
+
+    pub async fn get_or_check<Check, CheckFuture>(&self, check: Check) -> bool
+    where
+        Check: FnOnce() -> CheckFuture,
+        CheckFuture: Future<Output = bool>,
+    {
+        let mut state = self.state.lock().await;
+        if state
+            .checked_at
+            .is_some_and(|checked_at| checked_at.elapsed() < self.ttl)
+        {
+            return state.ready;
+        }
+
+        let ready = check().await;
+        state.checked_at = Some(Instant::now());
+        state.ready = ready;
+        ready
+    }
 }
 
 #[derive(Clone)]
@@ -39,6 +87,54 @@ pub struct MutationPermit {
 pub struct VaultValidationService {
     limiter: MutationLimiter,
     admission: MutationLimiter,
+}
+
+#[derive(Clone)]
+pub struct AsyncOperationService {
+    limiter: MutationLimiter,
+    admission: MutationLimiter,
+}
+
+#[derive(Debug)]
+pub struct LoadShedError {
+    status: StatusCode,
+    message: &'static str,
+}
+
+impl LoadShedError {
+    pub fn too_many_requests(message: &'static str) -> Self {
+        Self {
+            status: StatusCode::TOO_MANY_REQUESTS,
+            message,
+        }
+    }
+
+    pub fn service_unavailable(message: &'static str) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message,
+        }
+    }
+}
+
+impl fmt::Display for LoadShedError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.message)
+    }
+}
+
+impl StdError for LoadShedError {}
+
+impl ResponseError for LoadShedError {
+    fn status_code(&self) -> StatusCode {
+        self.status
+    }
+
+    fn error_response(&self) -> HttpResponse {
+        HttpResponse::build(self.status)
+            .insert_header((RETRY_AFTER, "1"))
+            .body(self.message)
+    }
 }
 
 #[derive(Debug)]
@@ -106,6 +202,43 @@ impl VaultValidationService {
     }
 }
 
+impl AsyncOperationService {
+    pub fn new(
+        worker_count: usize,
+        per_user: usize,
+        queue_capacity: usize,
+        per_user_queue_capacity: usize,
+    ) -> Self {
+        assert!(
+            worker_count > 0
+                && per_user > 0
+                && queue_capacity >= worker_count
+                && per_user_queue_capacity >= per_user
+                && per_user_queue_capacity <= queue_capacity
+        );
+        Self {
+            limiter: MutationLimiter::new(worker_count, per_user.min(worker_count)),
+            admission: MutationLimiter::new(queue_capacity, per_user_queue_capacity),
+        }
+    }
+
+    pub async fn run<T, Operation>(
+        &self,
+        user_id: &str,
+        operation: Operation,
+    ) -> Result<T, LoadShedError>
+    where
+        Operation: Future<Output = T>,
+    {
+        let _admission = self
+            .admission
+            .try_acquire(user_id)
+            .map_err(|()| LoadShedError::service_unavailable("storage operation queue is full"))?;
+        let _worker = self.limiter.acquire(user_id).await;
+        Ok(operation.await)
+    }
+}
+
 impl MutationLimiter {
     pub fn new(global: usize, per_user: usize) -> Self {
         assert!(global > 0 && per_user > 0);
@@ -133,7 +266,7 @@ impl MutationLimiter {
         }
     }
 
-    fn try_acquire(&self, user_id: &str) -> Result<MutationPermit, ()> {
+    pub fn try_acquire(&self, user_id: &str) -> Result<MutationPermit, ()> {
         let user = self
             .user_limiter(user_id)
             .try_acquire_owned()
@@ -168,7 +301,12 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
-    use super::{MutationLimiter, VaultValidationError, VaultValidationService};
+    use actix_web::ResponseError;
+
+    use super::{
+        AsyncOperationService, LoadShedError, MutationLimiter, VaultValidationError,
+        VaultValidationService,
+    };
 
     #[actix_web::test]
     async fn mutation_limiter_caps_each_user_without_blocking_other_users() {
@@ -191,6 +329,49 @@ mod tests {
             .expect("released per-user capacity should be reusable");
         drop(second);
         drop(other_user);
+    }
+
+    #[actix_web::test]
+    async fn direct_admission_sheds_instead_of_creating_unbounded_waiters() {
+        let limiter = MutationLimiter::new(1, 1);
+        let _active = limiter.try_acquire("user-a").unwrap();
+
+        assert!(limiter.try_acquire("user-b").is_err());
+
+        let response = LoadShedError::too_many_requests("upload capacity is full").error_response();
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+    }
+
+    #[actix_web::test]
+    async fn async_operation_queue_is_bounded_and_returns_retry_hint() {
+        let service = AsyncOperationService::new(1, 1, 1, 1);
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let active_service = service.clone();
+        let active = actix_web::rt::spawn(async move {
+            active_service
+                .run("user-a", async move {
+                    started_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                })
+                .await
+        });
+        started_rx.await.unwrap();
+
+        let rejected = service.run("user-b", async {}).await.unwrap_err();
+        let response = rejected.error_response();
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+
+        release_tx.send(()).unwrap();
+        active.await.unwrap().unwrap();
     }
 
     #[actix_web::test]

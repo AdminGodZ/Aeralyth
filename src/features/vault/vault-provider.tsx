@@ -30,7 +30,10 @@ import type {
   VaultManifest,
   VaultMetadataReference,
 } from "@/features/vault/protocol";
-import { enqueueShareDirectorySync } from "@/features/vault/share-directory-sync";
+import {
+  cancelShareDirectorySyncForLock,
+  enqueueShareDirectorySync,
+} from "@/features/vault/share-directory-sync";
 import {
   getUnlockMaterial,
   getVaultDownloadPlan,
@@ -201,6 +204,7 @@ function useVaultProviderController({
     persistedResumeExpirationRef.current = 0;
     const storage = vaultSessionStorage();
     if (storage) clearVaultResumeMarker(storage);
+    cancelShareDirectorySyncForLock();
     if (enabled) {
       window.dispatchEvent(new Event(VAULT_LOCKING_EVENT));
       setState(configured ? "locked" : "setup");
@@ -506,6 +510,7 @@ function useVaultProviderController({
         failure instanceof Error
           ? failure.message
           : "The vault operation failed.";
+      cancelShareDirectorySyncForLock();
       await clientRef.current?.lock().catch(() => undefined);
       setError(message);
       if (

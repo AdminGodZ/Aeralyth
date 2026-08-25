@@ -10,10 +10,13 @@ export type FolderZipSource =
       path: string;
     };
 
+export type FolderZipCompressionMode = "balanced" | "speed";
+
 export type FolderZipWorkerRequest =
   | {
       type: "compress";
       sources: FolderZipSource[];
+      compressionMode?: FolderZipCompressionMode;
       maxOutputBytes?: number;
     }
   | {

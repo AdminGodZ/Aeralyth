@@ -3,7 +3,7 @@ use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::future::Future;
 
-use crate::state::AppState;
+use crate::state::{AppState, LoadShedError};
 use crate::timestamps;
 
 pub const SESSION_COOKIE: &str = "aeralyth_session";
@@ -144,7 +144,7 @@ pub async fn authenticate_password(
         .await
         .map_err(|password_error| match password_error {
             crate::passwords::PasswordError::Busy => {
-                error::ErrorTooManyRequests("too many authentication requests")
+                LoadShedError::too_many_requests("too many authentication requests").into()
             }
             _ => error::ErrorServiceUnavailable("authentication temporarily unavailable"),
         })?;

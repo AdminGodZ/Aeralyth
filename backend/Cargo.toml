@@ -9,6 +9,7 @@ actix-web = "4"
 aws-config = "1"
 aws-credential-types = "1"
 aws-sdk-s3 = "1"
+aws-smithy-runtime-api = "1"
 aws-types = "1"
 base64 = "0.22.1"
 bcrypt = "0.19.3"
@@ -24,7 +25,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10.9"
 tokio = { version = "1", features = ["fs", "io-util", "sync", "time"] }
+tokio-util = { version = "0.7.19", features = ["io"] }
 tokio-postgres = { version = "0.7.17", features = ["with-time-0_3"] }
 time = "0.3.47"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.22", features = ["env-filter", "fmt", "json"] }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1

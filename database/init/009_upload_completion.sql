@@ -22,14 +22,16 @@ ALTER TABLE file_uploads
     CHECK (completion_attempts >= 0),
   ADD COLUMN completion_available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   ADD COLUMN completion_locked_until TIMESTAMPTZ,
+  ADD COLUMN completion_lease_token TEXT,
+  ADD COLUMN completion_dead_lettered_at TIMESTAMPTZ,
   ADD COLUMN completion_last_error TEXT,
   ADD COLUMN completion_checksum_sha256 TEXT,
   ADD COLUMN completion_etag TEXT,
   ADD COLUMN completion_verified_at TIMESTAMPTZ;
 
 CREATE INDEX file_uploads_completion_jobs_idx
-  ON file_uploads (completion_available_at, id)
-  WHERE status = 'completing';
+  ON file_uploads (completion_available_at, completion_locked_until, id)
+  WHERE status = 'completing' AND completion_dead_lettered_at IS NULL;
 
 INSERT INTO schema_migrations (version)
 VALUES ('009-upload-completion');

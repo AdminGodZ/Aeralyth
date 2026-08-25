@@ -30,4 +30,18 @@ describe("vault metadata plan API", () => {
     expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("csrf-token");
     expect(JSON.parse(String(init?.body))).toEqual({ nodeIds });
   });
+
+  it("sends an encoded-size continuation without changing the authorized targets", async () => {
+    const fetchMock = vi.fn<
+      (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    >(async () => Response.json({ plans: [] }, { status: 200 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await getVaultMetadataPlans("csrf-token", ["fil_metadata"], 42);
+
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
+      nodeIds: ["fil_metadata"],
+      continuation: 42,
+    });
+  });
 });

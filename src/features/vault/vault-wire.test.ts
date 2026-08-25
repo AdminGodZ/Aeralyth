@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   encodeCreateSharePublication,
+  encodeFolderBatchPublication,
   encodeNodePublication,
   encodePublishEpochPublication,
   encodeShareDirectoryPublication,
@@ -102,5 +103,36 @@ describe("vault binary publication wire", () => {
     expect(Buffer.from(directory).toString("hex")).toBe(directoryHex);
     expect(Buffer.from(created).toString("hex")).toBe(createdHex);
     expect(Buffer.from(epoch).toString("hex")).toBe(epochHex);
+  });
+
+  it("encodes parent-ordered records in one bounded binary publication", () => {
+    const records = [1, 2].map((marker) => ({
+      bootstrapCbor: Uint8Array.of(marker, marker + 1),
+      bootstrapSignature: new Uint8Array(64).fill(marker + 2),
+      encryptedManifest: new Uint8Array(16).fill(marker + 3),
+      wrappers: [Uint8Array.of(marker + 4, marker + 5)],
+    }));
+
+    const encoded = encodeFolderBatchPublication(records);
+    const view = new DataView(encoded.buffer);
+
+    expect(Array.from(encoded.slice(0, 8))).toEqual([
+      0x41, 0x56, 0x4c, 0x54, 1, 5, 0, 0,
+    ]);
+    expect(view.getUint32(8, false)).toBe(2);
+    expect(encoded.length).toBe(220);
+  });
+
+  it("rejects empty and unbounded folder batches before allocating", () => {
+    expect(() => encodeFolderBatchPublication([])).toThrow(/1 to 100/);
+    const record = {
+      bootstrapCbor: Uint8Array.of(1),
+      bootstrapSignature: new Uint8Array(64),
+      encryptedManifest: new Uint8Array(16),
+      wrappers: [Uint8Array.of(2)],
+    };
+    expect(() =>
+      encodeFolderBatchPublication(Array.from({ length: 101 }, () => record)),
+    ).toThrow(/1 to 100/);
   });
 });

@@ -15,11 +15,32 @@ type FileSystemFileHandle = {
   createWritable(): Promise<FileSystemWritableFileStream>;
 };
 
+type OriginPrivateFileSystemHandle = FileSystemFileHandle & {
+  getFile(): Promise<File>;
+};
+
+type OriginPrivateFileSystemDirectory = {
+  getFileHandle(
+    name: string,
+    options: { create: true },
+  ): Promise<OriginPrivateFileSystemHandle>;
+  removeEntry(name: string): Promise<void>;
+};
+
+type OriginPrivateDownload = {
+  directory: OriginPrivateFileSystemDirectory;
+  fileHandle: OriginPrivateFileSystemHandle;
+  fileName: string;
+  writable: FileSystemWritableFileStream;
+};
+
 type FileSystemWritableFileStream = {
   write(data: ArrayBuffer): Promise<void>;
   close(): Promise<void>;
   abort(reason?: unknown): Promise<void>;
 };
+
+export const MAX_IN_MEMORY_DOWNLOAD_BYTES = 128 * 1024 * 1024;
 
 export async function downloadEncryptedFile({
   plan,
@@ -39,11 +60,20 @@ export async function downloadEncryptedFile({
   }
   const savePicker = getSaveFilePicker();
   let writable: FileSystemWritableFileStream | null = null;
+  let originPrivateDownload: OriginPrivateDownload | null = null;
   if (savePicker) {
     const handle = await savePicker({
       suggestedName: safeDownloadName(manifest.name),
     });
     writable = await handle.createWritable();
+  } else {
+    originPrivateDownload = await createOriginPrivateDownload();
+    writable = originPrivateDownload?.writable ?? null;
+    if (!writable && manifest.plaintextBytes > MAX_IN_MEMORY_DOWNLOAD_BYTES) {
+      throw new Error(
+        "This browser cannot stream this large download to disk. Use a browser with the File System Access API or download a file no larger than 128 MiB.",
+      );
+    }
   }
   const plaintextParts: BlobPart[] = [];
 
@@ -65,12 +95,25 @@ export async function downloadEncryptedFile({
     if (writable) {
       await writable.close();
       writable = null;
+      if (originPrivateDownload) {
+        const completed = await originPrivateDownload.fileHandle.getFile();
+        const cleanup = originPrivateDownload;
+        triggerBlobDownload(completed, manifest.name, () =>
+          cleanup.directory.removeEntry(cleanup.fileName),
+        );
+        originPrivateDownload = null;
+      }
     } else {
       triggerBlobDownload(new Blob(plaintextParts), manifest.name);
     }
     onProgress?.(100);
   } catch (error) {
     await writable?.abort(error).catch(() => undefined);
+    if (originPrivateDownload) {
+      await originPrivateDownload.directory
+        .removeEntry(originPrivateDownload.fileName)
+        .catch(() => undefined);
+    }
     throw error;
   }
 }
@@ -102,6 +145,73 @@ export async function readEncryptedFileBlob({
   return new Blob(plaintextParts, {
     type: manifest.mimeType ?? "application/octet-stream",
   });
+}
+
+export function readEncryptedFileStream({
+  plan,
+  manifest,
+  client,
+  signal,
+  onProgress,
+}: {
+  plan: VaultDownloadPlan;
+  manifest: VaultManifest;
+  client: VaultCryptoClient;
+  signal?: AbortSignal;
+  onProgress?(value: number): void;
+}): ReadableStream<Uint8Array> {
+  const operation = new AbortController();
+  const abortFromParent = () => operation.abort(signal?.reason);
+  if (signal?.aborted) abortFromParent();
+  else signal?.addEventListener("abort", abortFromParent, { once: true });
+
+  let demand = Promise.withResolvers<void>();
+  let producer: Promise<void> | null = null;
+  let canceled = false;
+
+  return new ReadableStream<Uint8Array>(
+    {
+      start(controller) {
+        producer = decryptEncryptedFile({
+          plan,
+          manifest,
+          client,
+          signal: operation.signal,
+          onProgress,
+          async write(plaintext) {
+            if (operation.signal.aborted) {
+              throw abortReason(operation.signal);
+            }
+            demand = Promise.withResolvers<void>();
+            controller.enqueue(new Uint8Array(plaintext));
+            await demand.promise;
+            if (operation.signal.aborted) {
+              throw abortReason(operation.signal);
+            }
+          },
+        })
+          .then(() => {
+            if (!canceled) controller.close();
+          })
+          .catch((error: unknown) => {
+            if (!canceled) controller.error(error);
+          })
+          .finally(() => {
+            signal?.removeEventListener("abort", abortFromParent);
+          });
+      },
+      pull() {
+        demand.resolve();
+      },
+      async cancel(reason) {
+        canceled = true;
+        operation.abort(reason);
+        demand.resolve();
+        await producer?.catch(() => undefined);
+      },
+    },
+    { highWaterMark: 1 },
+  );
 }
 
 async function decryptEncryptedFile({
@@ -219,14 +329,63 @@ function getSaveFilePicker(): SaveFilePicker | null {
   return typeof candidate === "function" ? candidate.bind(globalThis) : null;
 }
 
-function triggerBlobDownload(blob: Blob, fileName: string): void {
+async function createOriginPrivateDownload(): Promise<OriginPrivateDownload | null> {
+  if (typeof navigator === "undefined") return null;
+  const storage = navigator.storage as
+    | (StorageManager & {
+        getDirectory?: () => Promise<OriginPrivateFileSystemDirectory>;
+      })
+    | undefined;
+  const getDirectory = storage?.getDirectory;
+  if (typeof getDirectory !== "function") return null;
+
+  let directory: OriginPrivateFileSystemDirectory | null = null;
+  let fileName: string | null = null;
+  try {
+    directory = await getDirectory.call(storage);
+    fileName = `aeralyth-download-${randomFileToken()}.tmp`;
+    const fileHandle = await directory.getFileHandle(fileName, {
+      create: true,
+    });
+    const writable = await fileHandle.createWritable();
+    return { directory, fileHandle, fileName, writable };
+  } catch {
+    if (directory && fileName) {
+      await directory.removeEntry(fileName).catch(() => undefined);
+    }
+    return null;
+  }
+}
+
+function triggerBlobDownload(
+  blob: Blob,
+  fileName: string,
+  release?: () => void | Promise<void>,
+): void {
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
   anchor.download = safeDownloadName(fileName);
   anchor.rel = "noopener";
   anchor.click();
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+    void Promise.resolve(release?.()).catch(() => undefined);
+  }, 60_000);
+}
+
+function randomFileToken(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  return (
+    signal.reason ??
+    new DOMException("The operation was aborted.", "AbortError")
+  );
 }
 
 function safeDownloadName(name: string): string {

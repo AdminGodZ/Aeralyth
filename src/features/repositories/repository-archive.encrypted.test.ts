@@ -1,5 +1,4 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import type { FolderZipSource } from "@/features/dashboard/folder-zip-messages";
 import { downloadRepositoryArchive } from "@/features/repositories/repository-archive";
 import {
   toBase64Url,
@@ -10,13 +9,13 @@ import type { VaultCryptoClient } from "@/features/vault/vault-client";
 import type { RepositoryArchiveEntry, RepositorySummary } from "@/lib/api";
 
 const mocks = vi.hoisted(() => ({
-  createBrowserZip: vi.fn(
-    async (_request: { sources: FolderZipSource[] }) => new Blob(["zip"]),
-  ),
+  createStreamingZipDestination: vi.fn(),
+  zipAdd: vi.fn(),
+  zipClose: vi.fn(),
+  discard: vi.fn(),
+  release: vi.fn(),
   triggerBlobDownload: vi.fn(),
-  readEncryptedFileBlob: vi.fn(
-    async (_request: { signal?: AbortSignal }) => new Blob(["data"]),
-  ),
+  readEncryptedFileStream: vi.fn(),
   getVaultDownloadPlan: vi.fn(),
 }));
 
@@ -24,12 +23,12 @@ vi.mock("@/features/archive/browser-archive", async (importOriginal) => ({
   ...(await importOriginal<
     typeof import("@/features/archive/browser-archive")
   >()),
-  createBrowserZip: mocks.createBrowserZip,
+  createStreamingZipDestination: mocks.createStreamingZipDestination,
   triggerBlobDownload: mocks.triggerBlobDownload,
 }));
 
 vi.mock("@/features/vault/encrypted-download", () => ({
-  readEncryptedFileBlob: mocks.readEncryptedFileBlob,
+  readEncryptedFileStream: mocks.readEncryptedFileStream,
 }));
 
 vi.mock("@/features/vault/vault-api", () => ({
@@ -81,6 +80,7 @@ const encryptedEntry: RepositoryArchiveEntry = {
   updatedAt: "2026-08-17T00:00:00Z",
   contentVersion: "2026-08-17T00:00:00.123456Z",
   vaultGenerationId: generation,
+  vaultRecordVersion: 1,
   vaultRecordHash: "record",
 };
 const repository: RepositorySummary = {
@@ -93,6 +93,9 @@ const repository: RepositorySummary = {
     name: "project",
     e2eeState: "encrypted",
     updatedAt: "2026-08-17T00:00:00Z",
+    vaultGenerationId: generation,
+    vaultRecordVersion: 1,
+    vaultRecordHash: "record",
   },
   createdAt: "2026-08-17T00:00:00Z",
   updatedAt: "2026-08-17T00:00:00Z",
@@ -100,8 +103,32 @@ const repository: RepositorySummary = {
 
 beforeEach(() => {
   vi.clearAllMocks();
-  mocks.createBrowserZip.mockResolvedValue(new Blob(["zip"]));
-  mocks.readEncryptedFileBlob.mockResolvedValue(new Blob(["data"]));
+  mocks.zipAdd.mockImplementation(
+    async (_path: string, source?: ReadableStream<Uint8Array>) => {
+      if (!source) return;
+      const reader = source.getReader();
+      while (!(await reader.read()).done) {
+        // Drain the backpressured source as the ZIP writer would.
+      }
+    },
+  );
+  mocks.zipClose.mockResolvedValue(new Blob(["zip"]));
+  mocks.createStreamingZipDestination.mockResolvedValue({
+    zipWriter: { add: mocks.zipAdd },
+    diskBacked: true,
+    close: mocks.zipClose,
+    discard: mocks.discard,
+    release: mocks.release,
+  });
+  mocks.readEncryptedFileStream.mockImplementation(
+    () =>
+      new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode("data"));
+          controller.close();
+        },
+      }),
+  );
   mocks.getVaultDownloadPlan.mockResolvedValue(downloadPlan);
   vi.stubGlobal(
     "fetch",
@@ -109,7 +136,13 @@ beforeEach(() => {
       Response.json({
         repository,
         entries: [encryptedEntry],
+        snapshotVersion: 1,
         totalBytes: encryptedEntry.sizeBytes,
+        totalEntries: 1,
+        totalFiles: 1,
+        totalEncryptedEntries: 1,
+        nextCursor: null,
+        hasMore: false,
       }),
     ),
   );
@@ -120,6 +153,72 @@ afterEach(() => {
 });
 
 describe("encrypted repository ZIP", () => {
+  it("consumes each bounded manifest page before requesting the next one", async () => {
+    const folder: RepositoryArchiveEntry = {
+      id: "folder",
+      name: "src",
+      mimeType: null,
+      entryType: "folder",
+      parentId: "root",
+      sizeBytes: 0,
+      e2eeState: "legacy",
+      updatedAt: "2026-08-17T00:00:00Z",
+      contentVersion: "2026-08-17T00:00:00.000001Z",
+      vaultGenerationId: null,
+      vaultRecordVersion: null,
+      vaultRecordHash: null,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        Response.json({
+          repository,
+          entries: [folder],
+          snapshotVersion: 3,
+          totalBytes: encryptedEntry.sizeBytes,
+          totalEntries: 2,
+          totalFiles: 1,
+          totalEncryptedEntries: 1,
+          nextCursor: "second-page",
+          hasMore: true,
+        }),
+      )
+      .mockImplementationOnce(async () => {
+        expect(mocks.zipAdd).toHaveBeenCalledTimes(2);
+        return Response.json({
+          repository,
+          entries: [encryptedEntry],
+          snapshotVersion: 3,
+          totalBytes: encryptedEntry.sizeBytes,
+          totalEntries: 2,
+          totalFiles: 1,
+          totalEncryptedEntries: 1,
+          nextCursor: null,
+          hasMore: false,
+        });
+      });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await downloadRepositoryArchive({
+      repository,
+      repositoryName: "project",
+      vault: {
+        state: "unlocked",
+        client: {} as VaultCryptoClient,
+        requestUnlock: vi.fn(),
+        openNode: async () => encryptedManifest,
+        isUnlocked: () => true,
+      },
+    });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/api/repositories/repository/archive-manifest?cursor=second-page",
+      { signal: undefined, cache: "no-cache" },
+    );
+  });
+
   it("reuses one snapshot-bound plan and validates plaintext size", async () => {
     const openNode = vi.fn(
       async (_nodeId: string, plan: VaultDownloadPlan | undefined) => {
@@ -142,7 +241,7 @@ describe("encrypted repository ZIP", () => {
 
     expect(mocks.getVaultDownloadPlan).toHaveBeenCalledOnce();
     expect(openNode).toHaveBeenCalledOnce();
-    expect(mocks.readEncryptedFileBlob).toHaveBeenCalledWith(
+    expect(mocks.readEncryptedFileStream).toHaveBeenCalledWith(
       expect.objectContaining({
         plan: downloadPlan,
         manifest: encryptedManifest,
@@ -153,7 +252,7 @@ describe("encrypted repository ZIP", () => {
 
   it("does not release decrypted ZIP output when the vault locks during compression", async () => {
     let unlocked = true;
-    mocks.createBrowserZip.mockImplementationOnce(async () => {
+    mocks.zipClose.mockImplementationOnce(async () => {
       unlocked = false;
       return new Blob(["zip"]);
     });
@@ -209,12 +308,16 @@ describe("encrypted repository ZIP", () => {
 
   it("cancels in-flight decryption without releasing a ZIP", async () => {
     const controller = new AbortController();
-    mocks.readEncryptedFileBlob.mockImplementationOnce(
-      async ({ signal }: { signal?: AbortSignal }) =>
-        new Promise<Blob>((_resolve, reject) => {
-          signal?.addEventListener("abort", () => reject(signal.reason), {
-            once: true,
-          });
+    mocks.readEncryptedFileStream.mockImplementationOnce(
+      ({ signal }: { signal?: AbortSignal }) =>
+        new ReadableStream<Uint8Array>({
+          start(streamController) {
+            signal?.addEventListener(
+              "abort",
+              () => streamController.error(signal.reason),
+              { once: true },
+            );
+          },
         }),
     );
 
@@ -231,7 +334,7 @@ describe("encrypted repository ZIP", () => {
       signal: controller.signal,
     });
     await vi.waitFor(() =>
-      expect(mocks.readEncryptedFileBlob).toHaveBeenCalledOnce(),
+      expect(mocks.readEncryptedFileStream).toHaveBeenCalledOnce(),
     );
     controller.abort();
 
@@ -241,18 +344,19 @@ describe("encrypted repository ZIP", () => {
 
   it("cancels in-flight ZIP compression without releasing its output", async () => {
     const controller = new AbortController();
-    mocks.createBrowserZip.mockImplementationOnce(
-      async ({
-        signal,
-      }: {
-        sources: FolderZipSource[];
-        signal?: AbortSignal;
-      }) =>
-        new Promise<Blob>((_resolve, reject) => {
+    mocks.zipAdd.mockImplementation(
+      async (
+        _path: string,
+        source?: ReadableStream<Uint8Array>,
+        { signal }: { signal?: AbortSignal } = {},
+      ) => {
+        if (!source) return;
+        await new Promise<void>((_resolve, reject) => {
           signal?.addEventListener("abort", () => reject(signal.reason), {
             once: true,
           });
-        }),
+        });
+      },
     );
 
     const download = downloadRepositoryArchive({
@@ -267,9 +371,7 @@ describe("encrypted repository ZIP", () => {
       },
       signal: controller.signal,
     });
-    await vi.waitFor(() =>
-      expect(mocks.createBrowserZip).toHaveBeenCalledOnce(),
-    );
+    await vi.waitFor(() => expect(mocks.zipAdd).toHaveBeenCalledTimes(2));
     controller.abort();
 
     await expect(download).rejects.toMatchObject({ name: "AbortError" });
@@ -293,7 +395,13 @@ describe("encrypted repository ZIP", () => {
         Response.json({
           repository,
           entries: [legacyEntry],
+          snapshotVersion: 1,
           totalBytes: legacyEntry.sizeBytes,
+          totalEntries: 1,
+          totalFiles: 1,
+          totalEncryptedEntries: 0,
+          nextCursor: null,
+          hasMore: false,
         }),
       )
       .mockResolvedValueOnce(new Response("data"));

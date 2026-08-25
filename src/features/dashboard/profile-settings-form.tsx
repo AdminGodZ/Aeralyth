@@ -180,6 +180,7 @@ export function ProfileSettingsForm({
     try {
       const response = await fetch(form.action, {
         method: "POST",
+        headers: { "x-csrf-token": csrfToken },
         body: new FormData(form),
         credentials: "same-origin",
       });

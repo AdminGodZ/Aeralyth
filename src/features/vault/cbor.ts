@@ -6,6 +6,7 @@ import type {
   VaultWrapperRecord,
 } from "@/features/vault/protocol";
 import {
+  MAX_SHARE_WRAPPERS,
   VAULT_FORMAT_VERSION,
   VAULT_SHARE_ENVELOPE_VERSION,
 } from "@/features/vault/protocol";
@@ -193,7 +194,7 @@ export function encodeShareEnvelope(
     record.wrapperSetRoot?.length !== 32 ||
     !Number.isSafeInteger(record.wrapperCount) ||
     record.wrapperCount < 1 ||
-    record.wrapperCount > 8192
+    record.wrapperCount > MAX_SHARE_WRAPPERS
   ) {
     throw new Error("Unsupported share envelope version.");
   }
@@ -225,7 +226,7 @@ export function decodeShareEnvelope(
     formatVersion === VAULT_SHARE_ENVELOPE_VERSION
       ? requiredNumber(map, 19)
       : wrapperHashes.length;
-  if (wrapperCount < 1 || wrapperCount > 8192) {
+  if (wrapperCount < 1 || wrapperCount > MAX_SHARE_WRAPPERS) {
     throw new Error("Invalid share wrapper count.");
   }
   return {

@@ -49,7 +49,8 @@ CREATE TABLE IF NOT EXISTS user_vaults (
   recovery_root_ciphertext BYTEA NOT NULL CHECK (octet_length(recovery_root_ciphertext) = 48),
   identity_record_id BYTEA NOT NULL UNIQUE CHECK (octet_length(identity_record_id) = 16),
   identity_private_ciphertext BYTEA NOT NULL CHECK (octet_length(identity_private_ciphertext) BETWEEN 96 AND 8192),
-  encrypted_account_state BYTEA NOT NULL DEFAULT '\x'::bytea,
+  encrypted_account_state BYTEA NOT NULL DEFAULT '\x'::bytea
+    CHECK (octet_length(encrypted_account_state) <= 16384),
   account_state_record_id BYTEA CHECK (account_state_record_id IS NULL OR octet_length(account_state_record_id) = 16),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
@@ -270,7 +271,7 @@ BEGIN
           AND wrapper_set_root IS NOT NULL
           AND octet_length(wrapper_set_root) = 32
           AND wrapper_count IS NOT NULL
-          AND wrapper_count BETWEEN 1 AND 8192
+          AND wrapper_count BETWEEN 1 AND 100000
         )
       );
   END IF;
@@ -403,7 +404,7 @@ CREATE TABLE IF NOT EXISTS vault_share_wrapper_directories (
   canonical_cbor BYTEA NOT NULL CHECK (octet_length(canonical_cbor) BETWEEN 96 AND 4096),
   signature BYTEA NOT NULL CHECK (octet_length(signature) = 64),
   wrapper_set_root BYTEA NOT NULL CHECK (octet_length(wrapper_set_root) = 32),
-  wrapper_count INTEGER NOT NULL CHECK (wrapper_count BETWEEN 1 AND 8192),
+  wrapper_count INTEGER NOT NULL CHECK (wrapper_count BETWEEN 1 AND 100000),
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   PRIMARY KEY (node_id, record_version),
   FOREIGN KEY (node_id, record_version)

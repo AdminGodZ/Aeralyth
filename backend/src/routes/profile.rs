@@ -1,5 +1,5 @@
 use actix_multipart::Multipart;
-use actix_web::http::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION};
+use actix_web::http::header::LOCATION;
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -7,8 +7,10 @@ use serde::Deserialize;
 use crate::auth::{CSRF_FIELD, parse_json_body, require_csrf, require_principal};
 use crate::passwords::PasswordError;
 use crate::state::AppState;
+use crate::timestamps;
 
 use super::auth::expired_session_cookie;
+use super::avatar;
 
 const MAX_PROFILE_IMAGE_BYTES: usize = 2 * 1024 * 1024;
 const PASSWORD_CHANGE_JSON_LIMIT: usize = 1024;
@@ -78,7 +80,6 @@ pub struct PasswordChangeRequest {
 
 #[derive(Default)]
 struct ProfileUpdate {
-    csrf_token: Option<String>,
     display_name: Option<String>,
     theme_preference: Option<String>,
     accent_color: Option<String>,
@@ -100,13 +101,30 @@ pub async fn update(
     mut payload: Multipart,
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
+    let mut csrf_validated = false;
+    if let Some(token) = request
+        .headers()
+        .get("x-csrf-token")
+        .and_then(|value| value.to_str().ok())
+    {
+        require_csrf(&state, &request, token).await?;
+        csrf_validated = true;
+    }
     let mut update = ProfileUpdate::default();
 
     while let Some(field_result) = payload.next().await {
         let mut field = field_result.map_err(error::ErrorBadRequest)?;
-        let Some(content_disposition) = field.content_disposition() else {
-            drain_field(&mut field).await?;
-            continue;
+        let content_disposition = match field.content_disposition() {
+            Some(content_disposition) => content_disposition,
+            None if !csrf_validated => {
+                return Err(error::ErrorForbidden(
+                    "csrf token must be the first form field",
+                ));
+            }
+            None => {
+                drain_field(&mut field).await?;
+                continue;
+            }
         };
         let field_name = content_disposition
             .get_name()
@@ -114,9 +132,24 @@ pub async fn update(
             .unwrap_or_default();
         let filename = content_disposition.get_filename().map(str::to_owned);
 
+        // Native multipart forms cannot set a CSRF header. Preserve that fallback
+        // without exposing the image-read regression: the token must be the first
+        // part, and no later field is polled until it has been validated.
+        if !csrf_validated {
+            if field_name != CSRF_FIELD {
+                return Err(error::ErrorForbidden(
+                    "csrf token must be the first form field",
+                ));
+            }
+            let token = read_limited_text_field_without_drain(&mut field, 512).await?;
+            require_csrf(&state, &request, &token).await?;
+            csrf_validated = true;
+            continue;
+        }
+
         match field_name.as_str() {
             CSRF_FIELD => {
-                update.csrf_token = Some(read_limited_text_field(&mut field, 512).await?);
+                drain_field(&mut field).await?;
             }
             "display_name" => {
                 update.display_name = Some(read_limited_text_field(&mut field, 256).await?);
@@ -184,10 +217,9 @@ pub async fn update(
         }
     }
 
-    let Some(csrf_token) = update.csrf_token else {
+    if !csrf_validated {
         return Err(error::ErrorForbidden("csrf token required"));
-    };
-    require_csrf(&state, &request, &csrf_token).await?;
+    }
 
     let display_name_present = update.display_name.is_some();
     let display_name = normalize_display_name(update.display_name.as_deref());
@@ -247,7 +279,9 @@ pub async fn avatar(state: web::Data<AppState>, request: HttpRequest) -> Result<
         .db
         .query_opt(
             "
-                SELECT profile_image_bytes, profile_image_mime_type
+                SELECT profile_image_bytes, profile_image_mime_type,
+                       COALESCE(profile_image_updated_at, updated_at)
+                         AS profile_image_version_at
                 FROM users
                 WHERE id = $1
                   AND profile_image_bytes IS NOT NULL
@@ -266,14 +300,14 @@ pub async fn avatar(state: web::Data<AppState>, request: HttpRequest) -> Result<
         return Ok(HttpResponse::NotFound().finish());
     };
     let mime_type: Option<String> = row.get("profile_image_mime_type");
+    let version = timestamps::version_millis(row.get("profile_image_version_at"));
 
-    Ok(HttpResponse::Ok()
-        .insert_header((
-            CONTENT_TYPE,
-            mime_type.unwrap_or_else(|| "application/octet-stream".to_owned()),
-        ))
-        .insert_header((CACHE_CONTROL, "private, no-store"))
-        .body(bytes))
+    Ok(avatar::response(
+        &request,
+        bytes,
+        mime_type.unwrap_or_else(|| "application/octet-stream".to_owned()),
+        &version,
+    ))
 }
 
 pub async fn change_password(
@@ -371,6 +405,23 @@ async fn read_limited_text_field(
     let Some(bytes) = read_limited_binary_field(field, max_bytes).await? else {
         return Err(error::ErrorBadRequest("form field is too large"));
     };
+
+    String::from_utf8(bytes).map_err(error::ErrorBadRequest)
+}
+
+async fn read_limited_text_field_without_drain(
+    field: &mut actix_multipart::Field,
+    max_bytes: usize,
+) -> Result<String> {
+    let mut bytes = Vec::new();
+
+    while let Some(chunk_result) = field.next().await {
+        let chunk = chunk_result.map_err(error::ErrorBadRequest)?;
+        if bytes.len().saturating_add(chunk.len()) > max_bytes {
+            return Err(error::ErrorBadRequest("form field is too large"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
 
     String::from_utf8(bytes).map_err(error::ErrorBadRequest)
 }
@@ -502,6 +553,46 @@ mod tests {
             .find("parse_json_body::<PasswordChangeRequest>")
             .expect("password change must parse its bounded body");
         assert!(authentication < csrf && csrf < body);
+    }
+
+    #[test]
+    fn profile_update_checks_csrf_before_polling_any_image_bytes() {
+        let source = include_str!("profile.rs");
+        let handler = source
+            .split_once("pub async fn update(")
+            .and_then(|(_, tail)| tail.split_once("pub async fn avatar("))
+            .map(|(handler, _)| handler)
+            .expect("profile update handler should remain inspectable");
+        let authentication = handler
+            .find("require_principal(")
+            .expect("profile update must authenticate");
+        let csrf = handler
+            .find(".get(\"x-csrf-token\")")
+            .expect("profile update must inspect header CSRF first");
+        let multipart = handler
+            .find("payload.next()")
+            .expect("profile update must parse its bounded multipart body");
+
+        assert!(authentication < csrf && csrf < multipart);
+        let fallback = handler
+            .find("if !csrf_validated")
+            .expect("native multipart fallback must be guarded");
+        let missing_disposition = handler
+            .find("None if !csrf_validated")
+            .expect("missing first-part disposition must fail without draining");
+        let field_dispatch = handler
+            .find("match field_name.as_str()")
+            .expect("profile fields must remain explicitly bounded");
+        assert!(missing_disposition < fallback && fallback < field_dispatch);
+        assert!(handler.contains("field_name != CSRF_FIELD"));
+        assert!(handler.contains("read_limited_text_field_without_drain(&mut field, 512)"));
+
+        let no_drain_reader = source
+            .split_once("async fn read_limited_text_field_without_drain(")
+            .and_then(|(_, tail)| tail.split_once("async fn read_limited_binary_field("))
+            .map(|(reader, _)| reader)
+            .expect("native CSRF reader should remain inspectable");
+        assert!(!no_drain_reader.contains("drain_field"));
     }
 
     #[test]

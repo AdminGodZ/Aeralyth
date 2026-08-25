@@ -45,6 +45,8 @@ import {
   needsLegacyFolderManifest,
   validateLegacyFolderManifest,
 } from "@/features/dashboard/legacy-folder-manifest";
+import { scheduleLegacyUploads } from "@/features/dashboard/legacy-upload-scheduler";
+import { sha256BlobBase64 } from "@/features/dashboard/upload-checksum-client";
 import { UploadExclusionReviewDialog } from "@/features/dashboard/upload-exclusion-review-dialog";
 import {
   UploadProgressPanel,
@@ -57,6 +59,13 @@ import {
   type PreparedFolderUploadSelection,
   prepareFolderUploadSelection,
 } from "@/features/dashboard/upload-selection-policy";
+import { createAnimationFrameProgressCoalescer } from "@/features/uploads/progress-coalescer";
+import {
+  runUploadWithRetry,
+  UploadRequestError,
+  waitForUploadRetry,
+} from "@/features/uploads/upload-retry";
+import { WeightedSemaphore } from "@/features/vault/bounded-async";
 import { uploadEncryptedSelections } from "@/features/vault/encrypted-upload";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import { useVault } from "@/features/vault/vault-provider";
@@ -178,7 +187,6 @@ type UploadChildrenPage = {
 const MULTIPART_CONCURRENCY = 4;
 const MULTIPART_PRESIGN_BATCH_SIZE = 8;
 const LOCAL_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
-const UPLOAD_RETRY_COUNT = 3;
 const UPLOAD_FINALIZATION_TIMEOUT_MS = 45_000;
 const UPLOAD_TREE_PAGE_SIZE = 100;
 const UPLOAD_TREE_DECRYPT_CONCURRENCY = 8;
@@ -339,42 +347,72 @@ function useUploadPanelController({
     let uploadedBytes = 0;
     let activeFileIndex: number | null = null;
 
+    const progressPublisher = createAnimationFrameProgressCoalescer(
+      (snapshot: {
+        activeFileIndex: number | null;
+        activeFileUploadedBytes: number;
+        completedFiles: number;
+        totalBytes?: number;
+        uploadedBytes: number;
+      }) => {
+        setUploadSession((current) =>
+          current?.status === "uploading"
+            ? {
+                ...current,
+                ...(snapshot.totalBytes === undefined
+                  ? {}
+                  : { totalBytes: snapshot.totalBytes }),
+                uploadedBytes: Math.min(
+                  snapshot.totalBytes ?? current.totalBytes,
+                  snapshot.uploadedBytes,
+                ),
+                completedFiles: snapshot.completedFiles,
+                activeFileIndex: snapshot.activeFileIndex,
+                activeFileUploadedBytes: snapshot.activeFileUploadedBytes,
+                updatedAt: Date.now(),
+              }
+            : current,
+        );
+      },
+    );
+    const publishProgress = (immediate = false, totalBytes?: number) => {
+      const fileBytes =
+        activeFileIndex === null
+          ? 0
+          : (uploadedByFile.get(activeFileIndex) ?? 0);
+      progressPublisher.publish(
+        {
+          activeFileIndex,
+          activeFileUploadedBytes:
+            activeFileIndex === null
+              ? 0
+              : Math.min(
+                  files[activeFileIndex]?.file.size ?? fileBytes,
+                  fileBytes,
+                ),
+          completedFiles: completedFileIndexes.size,
+          totalBytes,
+          uploadedBytes,
+        },
+        immediate,
+      );
+    };
+
     const startFile = (fileIndex: number) => {
       activeFileIndexes.add(fileIndex);
       activeFileIndex = fileIndex;
-      setUploadSession((current) =>
-        current?.status === "uploading"
-          ? {
-              ...current,
-              activeFileIndex: fileIndex,
-              activeFileUploadedBytes: uploadedByFile.get(fileIndex) ?? 0,
-              updatedAt: Date.now(),
-            }
-          : current,
-      );
+      publishProgress(true);
     };
     const reportProgress = (fileIndex: number, key: string, loaded: number) => {
       activeFileIndex = fileIndex;
       const previousPartBytes = uploadedByPart.get(key) ?? 0;
-      const delta = Math.max(0, loaded - previousPartBytes);
-      uploadedByPart.set(key, loaded);
+      const nextPartBytes = Math.max(previousPartBytes, loaded);
+      const delta = nextPartBytes - previousPartBytes;
+      uploadedByPart.set(key, nextPartBytes);
       uploadedBytes += delta;
       const fileBytes = (uploadedByFile.get(fileIndex) ?? 0) + delta;
       uploadedByFile.set(fileIndex, fileBytes);
-      setUploadSession((current) =>
-        current?.status === "uploading"
-          ? {
-              ...current,
-              uploadedBytes: Math.min(current.totalBytes, uploadedBytes),
-              activeFileIndex: fileIndex,
-              activeFileUploadedBytes: Math.min(
-                current.items[fileIndex]?.sizeBytes ?? fileBytes,
-                fileBytes,
-              ),
-              updatedAt: Date.now(),
-            }
-          : current,
-      );
+      publishProgress();
     };
     const completeFile = (fileIndex: number) => {
       const fileSize = files[fileIndex]?.file.size ?? 0;
@@ -386,21 +424,7 @@ function useUploadPanelController({
       if (activeFileIndex === fileIndex) {
         activeFileIndex = Array.from(activeFileIndexes).at(-1) ?? null;
       }
-      setUploadSession((current) =>
-        current?.status === "uploading"
-          ? {
-              ...current,
-              uploadedBytes: Math.min(current.totalBytes, uploadedBytes),
-              completedFiles: completedFileIndexes.size,
-              activeFileIndex,
-              activeFileUploadedBytes:
-                activeFileIndex === null
-                  ? 0
-                  : (uploadedByFile.get(activeFileIndex) ?? 0),
-              updatedAt: Date.now(),
-            }
-          : current,
-      );
+      publishProgress(true);
     };
 
     try {
@@ -432,21 +456,7 @@ function useUploadPanelController({
             activeFileIndex = fileIndex;
             uploadedBytes = processedBytes;
             uploadedByFile.set(fileIndex, fileProcessedBytes);
-            setUploadSession((current) =>
-              current?.status === "uploading"
-                ? {
-                    ...current,
-                    totalBytes: encryptedTotalBytes,
-                    uploadedBytes: Math.min(
-                      encryptedTotalBytes,
-                      processedBytes,
-                    ),
-                    activeFileIndex: fileIndex,
-                    activeFileUploadedBytes: fileProcessedBytes,
-                    updatedAt: Date.now(),
-                  }
-                : current,
-            );
+            publishProgress(false, encryptedTotalBytes);
           },
         });
         await finishSuccessfulUpload(
@@ -479,27 +489,30 @@ function useUploadPanelController({
           )
         : null;
       let rootFolderId: string | null = folderManifest?.rootFolderId ?? null;
-      for (const [fileIndex, selection] of files.entries()) {
-        if (controller.signal.aborted) {
-          throw new DOMException("Upload canceled", "AbortError");
-        }
-
-        startFile(fileIndex);
-
-        // Legacy uploads are deliberately serialized so per-file multipart
-        // concurrency cannot multiply memory and network pressure.
-        // react-doctor-disable-next-line react-doctor/async-await-in-loop
-        const uploadedRootFolderId = await uploadSelection(
-          selection,
-          fileIndex,
-          resolution,
-          folderManifest?.parentIds[fileIndex],
-          controller.signal,
-          (key, loaded) => reportProgress(fileIndex, key, loaded),
-        );
-        rootFolderId ??= uploadedRootFolderId;
-        completeFile(fileIndex);
-      }
+      const multipartSlots = new WeightedSemaphore(MULTIPART_CONCURRENCY);
+      const uploadedRootFolderIds = await scheduleLegacyUploads(
+        Array.from(files.entries()),
+        controller.signal,
+        ([, selection]) => selection.file.size,
+        async ([fileIndex, selection], signal) => {
+          startFile(fileIndex);
+          const uploadedRootFolderId = await uploadSelection(
+            selection,
+            fileIndex,
+            resolution,
+            folderManifest?.parentIds[fileIndex],
+            signal,
+            multipartSlots,
+            (key, loaded) => reportProgress(fileIndex, key, loaded),
+          );
+          completeFile(fileIndex);
+          return uploadedRootFolderId;
+        },
+      );
+      rootFolderId ??=
+        uploadedRootFolderIds.find(
+          (candidate): candidate is string => candidate !== null,
+        ) ?? null;
 
       await finishSuccessfulUpload(
         rootFolderId,
@@ -521,6 +534,8 @@ function useUploadPanelController({
           : "Upload failed. Check the backend and try again.",
         activeFileIndex,
       );
+    } finally {
+      progressPublisher.cancel();
     }
   }
 
@@ -570,6 +585,7 @@ function useUploadPanelController({
     resolution: FolderUploadResolution | undefined,
     resolvedParentId: string | null | undefined,
     signal: AbortSignal,
+    multipartSlots: WeightedSemaphore,
     reportProgress: (key: string, loaded: number) => void,
   ) {
     if (selection.file.size > MAX_UPLOAD_BYTES) {
@@ -644,7 +660,7 @@ function useUploadPanelController({
               const start = (part.partNumber - 1) * partSizeBytes;
               const end = Math.min(start + partSizeBytes, selection.file.size);
               const blob = selection.file.slice(start, end, "");
-              const checksumSha256 = await sha256Base64(blob);
+              const checksumSha256 = await sha256BlobBase64(blob, signal);
               const existingPart = existingParts.get(part.partNumber);
               const completed =
                 existingPart?.checksumSha256 === checksumSha256 &&
@@ -702,14 +718,30 @@ function useUploadPanelController({
                 );
               }
               const progressKey = `${fileIndex}:${part.partNumber}`;
-              const response = await putBlobWithRetry(
-                signedPart.url,
-                part.blob,
-                { "x-amz-checksum-sha256": part.checksumSha256 },
-                signal,
-                activeUploadRequests,
-                (loaded) => reportProgress(progressKey, loaded),
-              );
+              const releasePartSlot = await multipartSlots.acquire(1, signal);
+              let response: XMLHttpRequest;
+              try {
+                response = await putBlobWithRetry(
+                  signedPart.url,
+                  part.blob,
+                  { "x-amz-checksum-sha256": part.checksumSha256 },
+                  signal,
+                  activeUploadRequests,
+                  (loaded) => reportProgress(progressKey, loaded),
+                  async () => {
+                    const refreshed = await requestLegacySignedUploadUrl(
+                      `/api/files/uploads/${encodeURIComponent(plan.uploadId)}/parts/${part.partNumber}`,
+                      part.checksumSha256,
+                      requestAuthHeaders,
+                      signal,
+                    );
+                    assertSignedUploadLength(refreshed, part.blob.size);
+                    return refreshed.url;
+                  },
+                );
+              } finally {
+                releasePartSlot();
+              }
               const etag = response.getResponseHeader("ETag")?.trim();
               if (!etag) {
                 throw new Error(
@@ -728,20 +760,16 @@ function useUploadPanelController({
         parts.sort((left, right) => left.partNumber - right.partNumber);
       } else {
         const checksumSha256 =
-          plan.mode === "single" ? await sha256Base64(selection.file) : null;
+          plan.mode === "single"
+            ? await sha256BlobBase64(selection.file, signal)
+            : null;
         const signedUpload =
           plan.mode === "single"
-            ? await requestJson<UploadUrl>(
+            ? await requestLegacySignedUploadUrl(
                 `/api/files/uploads/${encodeURIComponent(plan.uploadId)}/content-url`,
-                {
-                  method: "POST",
-                  headers: {
-                    "Content-Type": "application/json",
-                    ...requestAuthHeaders,
-                  },
-                  body: JSON.stringify({ checksumSha256 }),
-                  signal,
-                },
+                checksumSha256 as string,
+                requestAuthHeaders,
+                signal,
               )
             : null;
         const uploadUrl = signedUpload?.url ?? plan.uploadUrl;
@@ -784,6 +812,16 @@ function useUploadPanelController({
             signal,
             activeUploadRequests,
             (loaded) => reportProgress(`${fileIndex}:single`, loaded),
+            async () => {
+              const refreshed = await requestLegacySignedUploadUrl(
+                `/api/files/uploads/${encodeURIComponent(plan.uploadId)}/content-url`,
+                checksumSha256 as string,
+                requestAuthHeaders,
+                signal,
+              );
+              assertSignedUploadLength(refreshed, selection.file.size);
+              return refreshed.url;
+            },
           );
         }
       }
@@ -796,7 +834,7 @@ function useUploadPanelController({
         signal,
       );
     } catch (error) {
-      if (signal.aborted || (!completionStarted && plan.mode !== "multipart")) {
+      if (signal.aborted || !completionStarted) {
         await fetch(`/api/files/uploads/${encodeURIComponent(plan.uploadId)}`, {
           method: "DELETE",
           headers: requestAuthHeaders,
@@ -1207,6 +1245,7 @@ function useUploadPanelController({
     });
     worker.postMessage({
       type: "compress",
+      compressionMode: "speed",
       sources: pendingFolderUpload.files.map(({ file, relativePath }) => ({
         file,
         path: relativePath,
@@ -1727,7 +1766,7 @@ async function completeUploadWithPolling(
       );
     }
 
-    await wait(delayMs, signal);
+    await waitForUploadRetry(delayMs, signal);
     completion = await requestUploadCompletion(completion.pollUrl, {
       method: "GET",
       headers: authHeaders,
@@ -1787,27 +1826,6 @@ function completionRetryDelay(retryAfterSeconds: number) {
   return Math.min(5_000, Math.max(500, retryAfterSeconds * 1_000));
 }
 
-async function sha256Base64(blob: Blob) {
-  if (!globalThis.crypto?.subtle) {
-    throw new Error(
-      "This browser cannot verify upload integrity with SHA-256.",
-    );
-  }
-
-  const digest = await globalThis.crypto.subtle.digest(
-    "SHA-256",
-    await blob.arrayBuffer(),
-  );
-  const bytes = new Uint8Array(digest);
-  let binary = "";
-
-  for (const byte of bytes) {
-    binary += String.fromCharCode(byte);
-  }
-
-  return btoa(binary);
-}
-
 async function putBlobWithRetry(
   url: string,
   blob: Blob,
@@ -1815,41 +1833,23 @@ async function putBlobWithRetry(
   signal: AbortSignal,
   activeRequests: Set<XMLHttpRequest>,
   onProgress: (loaded: number) => void,
+  refreshUrl?: () => Promise<string>,
 ) {
-  let lastError: unknown;
-
-  for (let attempt = 0; attempt < UPLOAD_RETRY_COUNT; attempt += 1) {
-    if (signal.aborted) {
-      throw new DOMException("Upload canceled", "AbortError");
-    }
-
-    onProgress(0);
-
-    try {
-      return await putBlobOnce(
-        url,
+  return runUploadWithRetry({
+    initialUrl: url,
+    onAttemptStart: () => onProgress(0),
+    refreshUrl,
+    request: (candidateUrl) =>
+      putBlobOnce(
+        candidateUrl,
         blob,
         headers,
         signal,
         activeRequests,
         onProgress,
-      );
-    } catch (error) {
-      if (signal.aborted || isAbortError(error)) {
-        throw error;
-      }
-
-      lastError = error;
-
-      if (attempt + 1 < UPLOAD_RETRY_COUNT) {
-        await wait(400 * 2 ** attempt, signal);
-      }
-    }
-  }
-
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("The object upload failed after multiple attempts.");
+      ),
+    signal,
+  });
 }
 
 async function putLocalBlobWithRetry(
@@ -1929,16 +1929,25 @@ function putBlobOnce(
         request.responseText,
       );
       reject(
-        new Error(
-          responseMessage
+        new UploadRequestError({
+          message: responseMessage
             ? `Object upload failed (${request.status}): ${responseMessage}`
             : `Object upload failed (${request.status}).`,
-        ),
+          networkFailure: request.status === 0,
+          responseBody: request.responseText,
+          retryAfter: request.getResponseHeader("Retry-After"),
+          status: request.status || null,
+        }),
       );
     });
     request.addEventListener("error", () => {
       cleanup();
-      reject(new Error("The storage service could not be reached."));
+      reject(
+        new UploadRequestError({
+          message: "The storage service could not be reached.",
+          networkFailure: true,
+        }),
+      );
     });
     request.addEventListener("abort", () => {
       cleanup();
@@ -1947,6 +1956,31 @@ function putBlobOnce(
     signal.addEventListener("abort", abortRequest, { once: true });
     request.send(blob);
   });
+}
+
+function requestLegacySignedUploadUrl(
+  path: string,
+  checksumSha256: string,
+  authHeaders: Record<string, string>,
+  signal: AbortSignal,
+) {
+  return requestJson<UploadUrl>(path, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      ...authHeaders,
+    },
+    body: JSON.stringify({ checksumSha256 }),
+    signal,
+  });
+}
+
+function assertSignedUploadLength(upload: UploadUrl, expectedBytes: number) {
+  if (upload.contentLength !== expectedBytes) {
+    throw new Error(
+      "The storage service returned an invalid signed upload length.",
+    );
+  }
 }
 
 function getObjectUploadFailureMessage(responseText: string) {
@@ -2012,20 +2046,6 @@ async function mapWithConcurrency<T, R>(
   }
 
   return results;
-}
-
-function wait(milliseconds: number, signal: AbortSignal) {
-  return new Promise<void>((resolve, reject) => {
-    const timeout = setTimeout(resolve, milliseconds);
-    signal.addEventListener(
-      "abort",
-      () => {
-        clearTimeout(timeout);
-        reject(new DOMException("Upload canceled", "AbortError"));
-      },
-      { once: true },
-    );
-  });
 }
 
 function isAbortError(error: unknown) {

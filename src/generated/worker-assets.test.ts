@@ -1,11 +1,12 @@
 import { createHash } from "node:crypto";
 import { readdirSync, readFileSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { basename, resolve } from "node:path";
+import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
   FOLDER_ZIP_WORKER_URL,
+  UPLOAD_CHECKSUM_WORKER_URL,
   VAULT_WORKER_URL,
 } from "@/generated/worker-assets";
 
@@ -21,13 +22,37 @@ function sourceFiles(directory: string): string[] {
 
 describe("worker asset fingerprints", () => {
   it.each([
-    ["public/vault.worker.js", VAULT_WORKER_URL],
-    ["public/folder-zip.worker.js", FOLDER_ZIP_WORKER_URL],
-  ])("matches the committed contents of %s", async (path, url) => {
-    const bytes = await readFile(resolve(root, path));
+    ["vault", VAULT_WORKER_URL],
+    ["folder-zip", FOLDER_ZIP_WORKER_URL],
+    ["upload-checksum", UPLOAD_CHECKSUM_WORKER_URL],
+  ])("matches the emitted content hash for %s", async (name, url) => {
+    expect(url).toMatch(
+      new RegExp(`^/workers/${name}\\.([a-f0-9]{64})\\.worker\\.js$`, "u"),
+    );
+    const bytes = await readFile(resolve(root, `public${url}`));
     const fingerprint = createHash("sha256").update(bytes).digest("hex");
 
-    expect(url).toBe(`/${basename(path)}?v=${fingerprint}`);
+    expect(url).toBe(`/workers/${name}.${fingerprint}.worker.js`);
+  });
+
+  it("serves only hash-named worker assets with immutable caching", () => {
+    const config = readFileSync(resolve(root, "next.config.ts"), "utf8");
+    const buildScript = readFileSync(
+      resolve(root, "scripts/write-worker-assets.mjs"),
+      "utf8",
+    );
+
+    expect(config).toContain('source: "/workers/:asset*"');
+    expect(config).toContain('value: "public, max-age=31536000, immutable"');
+    expect(buildScript).toMatch(
+      /const fileName = `\$\{workerName\}\.\$\{fingerprint\}\.worker\.js`;/u,
+    );
+    expect(buildScript).not.toMatch(/\?v=\$\{fingerprint\}/u);
+    expect(readdirSync(resolve(root, "public/workers")).sort()).toEqual(
+      [VAULT_WORKER_URL, FOLDER_ZIP_WORKER_URL, UPLOAD_CHECKSUM_WORKER_URL]
+        .map((url) => url.slice("/workers/".length))
+        .sort(),
+    );
   });
 
   it("uses fingerprinted URLs at every worker construction site", () => {
@@ -43,15 +68,22 @@ describe("worker asset fingerprints", () => {
       resolve(root, "src/features/archive/browser-archive.ts"),
       "utf8",
     );
+    const uploadChecksumClient = readFileSync(
+      resolve(root, "src/features/dashboard/upload-checksum-client.ts"),
+      "utf8",
+    );
 
     expect(vaultClient).toContain("new Worker(VAULT_WORKER_URL");
     expect(uploadPanel).toContain("new Worker(FOLDER_ZIP_WORKER_URL");
     expect(browserArchive).toContain("new Worker(FOLDER_ZIP_WORKER_URL");
+    expect(uploadChecksumClient).toContain(
+      "new Worker(UPLOAD_CHECKSUM_WORKER_URL",
+    );
     const allSource = sourceFiles(resolve(root, "src"))
       .map((path) => readFileSync(path, "utf8"))
       .join("\n");
     expect(allSource).not.toMatch(
-      /new Worker\(["']\/(?:vault|folder-zip)\.worker\.js/,
+      /new Worker\(["']\/(?:vault|folder-zip|upload-checksum)(?:\.[a-f0-9]{64})?\.worker\.js/,
     );
   });
 

@@ -25,7 +25,7 @@ pub const fn uses_vault_multipart_upload(ciphertext_bytes: u64) -> bool {
 }
 
 const MAX_WRAPPERS_PER_RECORD: usize = 4_096;
-const MAX_SHARE_WRAPPERS: usize = 8_192;
+pub const MAX_SHARE_WRAPPERS: usize = 100_000;
 
 #[cfg(test)]
 thread_local! {
@@ -62,45 +62,45 @@ pub struct BootstrapRecord {
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct WrapperRecord {
+pub struct WrapperMaterialRecord {
     pub format_version: u64,
     pub wrapper_id: [u8; 16],
     pub kind: u64,
-    pub node_id: String,
-    pub parent_node_id: Option<String>,
+    pub node_id: Bytes,
+    pub parent_node_id: Option<Bytes>,
     pub generation_id: Option<[u8; 16]>,
-    pub share_id: Option<String>,
+    pub share_id: Option<Bytes>,
     pub epoch: Option<u64>,
     pub record_version: u64,
-    pub ciphertext: Vec<u8>,
+    pub ciphertext: Bytes,
     pub aad_schema_id: u64,
 }
 
 #[derive(Debug, Eq, PartialEq)]
 pub struct DecodedWrapper {
     pub canonical: Bytes,
-    pub record: WrapperRecord,
+    pub record: WrapperMaterialRecord,
     pub hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct ShareEnvelopeRecord {
+pub struct ShareEnvelopeMaterialRecord {
     pub format_version: u64,
     pub suite_id: u64,
     pub envelope_id: [u8; 16],
-    pub share_id: String,
+    pub share_id: Bytes,
     pub epoch: u64,
-    pub sender_id: String,
+    pub sender_id: Bytes,
     pub sender_key_version: u64,
-    pub recipient_id: String,
+    pub recipient_id: Bytes,
     pub recipient_key_version: u64,
-    pub node_id: String,
+    pub node_id: Bytes,
     pub permissions: u64,
     pub generation_scope: Option<u64>,
     pub record_version: u64,
     pub previous_record_hash: Option<[u8; 32]>,
     pub encapsulated_key: [u8; 32],
-    pub ciphertext: Vec<u8>,
+    pub ciphertext: Bytes,
     pub aad_schema_id: u64,
     pub wrapper_hashes: Vec<[u8; 32]>,
     pub wrapper_set_root: Option<[u8; 32]>,
@@ -270,10 +270,10 @@ pub fn decode_share_directory(input: &[u8]) -> Result<ShareDirectoryRecord, Prot
     })
 }
 
-pub fn decode_wrapper(input: &[u8]) -> Result<WrapperRecord, ProtocolError> {
+pub fn decode_wrapper_material(canonical: Bytes) -> Result<DecodedWrapper, ProtocolError> {
     #[cfg(test)]
     WRAPPER_DECODE_CALLS.with(|calls| calls.set(calls.get() + 1));
-    let mut reader = CborReader::new(input);
+    let mut reader = BytesCborReader::new(canonical.clone());
     reader.expect_map_len(11)?;
     reader.expect_key(1)?;
     let format_version = reader.read_uint()?;
@@ -299,47 +299,18 @@ pub fn decode_wrapper(input: &[u8]) -> Result<WrapperRecord, ProtocolError> {
     let aad_schema_id = reader.read_uint()?;
     reader.finish()?;
 
-    if format_version != FORMAT_VERSION
-        || aad_schema_id != AAD_SCHEMA_ID
-        || !matches!(kind, 1..=4)
-        || record_version == 0
-        || !(16..=65_536).contains(&ciphertext.len())
-    {
-        return Err(ProtocolError::new("wrapper protocol fields are invalid"));
-    }
-    match kind {
-        1 if parent_node_id.is_some()
-            || generation_id.is_some()
-            || share_id.is_some()
-            || epoch.is_some() =>
-        {
-            return Err(ProtocolError::new("account-root wrapper scope is invalid"));
-        }
-        2 if parent_node_id.is_none()
-            || generation_id.is_some()
-            || share_id.is_some()
-            || epoch.is_some() =>
-        {
-            return Err(ProtocolError::new("parent-node wrapper scope is invalid"));
-        }
-        3 if parent_node_id.is_some()
-            || share_id.is_none()
-            || epoch.is_none()
-            || generation_id.is_none() =>
-        {
-            return Err(ProtocolError::new("share wrapper scope is invalid"));
-        }
-        4 if parent_node_id.is_some()
-            || share_id.is_none()
-            || epoch.is_none()
-            || generation_id.is_some() =>
-        {
-            return Err(ProtocolError::new("share wrapper scope is invalid"));
-        }
-        _ => {}
-    }
-
-    Ok(WrapperRecord {
+    validate_wrapper_fields(
+        format_version,
+        aad_schema_id,
+        kind,
+        record_version,
+        ciphertext.len(),
+        parent_node_id.is_some(),
+        generation_id.is_some(),
+        share_id.is_some(),
+        epoch.is_some(),
+    )?;
+    let record = WrapperMaterialRecord {
         format_version,
         wrapper_id,
         kind,
@@ -351,11 +322,7 @@ pub fn decode_wrapper(input: &[u8]) -> Result<WrapperRecord, ProtocolError> {
         record_version,
         ciphertext,
         aad_schema_id,
-    })
-}
-
-pub fn decode_wrapper_material(canonical: Bytes) -> Result<DecodedWrapper, ProtocolError> {
-    let record = decode_wrapper(&canonical)?;
+    };
     let hash = sha256(&canonical);
     Ok(DecodedWrapper {
         canonical,
@@ -364,8 +331,49 @@ pub fn decode_wrapper_material(canonical: Bytes) -> Result<DecodedWrapper, Proto
     })
 }
 
-pub fn decode_share_envelope(input: &[u8]) -> Result<ShareEnvelopeRecord, ProtocolError> {
-    let mut reader = CborReader::new(input);
+#[allow(clippy::too_many_arguments)]
+fn validate_wrapper_fields(
+    format_version: u64,
+    aad_schema_id: u64,
+    kind: u64,
+    record_version: u64,
+    ciphertext_len: usize,
+    has_parent_node_id: bool,
+    has_generation_id: bool,
+    has_share_id: bool,
+    has_epoch: bool,
+) -> Result<(), ProtocolError> {
+    if format_version != FORMAT_VERSION
+        || aad_schema_id != AAD_SCHEMA_ID
+        || !matches!(kind, 1..=4)
+        || record_version == 0
+        || !(16..=65_536).contains(&ciphertext_len)
+    {
+        return Err(ProtocolError::new("wrapper protocol fields are invalid"));
+    }
+    match kind {
+        1 if has_parent_node_id || has_generation_id || has_share_id || has_epoch => {
+            Err(ProtocolError::new("account-root wrapper scope is invalid"))
+        }
+        2 if !has_parent_node_id || has_generation_id || has_share_id || has_epoch => {
+            Err(ProtocolError::new("parent-node wrapper scope is invalid"))
+        }
+        3 if has_parent_node_id || !has_generation_id || !has_share_id || !has_epoch => {
+            Err(ProtocolError::new("share wrapper scope is invalid"))
+        }
+        4 if has_parent_node_id || has_generation_id || !has_share_id || !has_epoch => {
+            Err(ProtocolError::new("share wrapper scope is invalid"))
+        }
+        _ => Ok(()),
+    }
+}
+
+pub fn verify_share_envelope_material(
+    canonical_cbor: Bytes,
+    signature: &[u8],
+    ed25519_public_key: &[u8],
+) -> Result<(ShareEnvelopeMaterialRecord, [u8; 32]), ProtocolError> {
+    let mut reader = BytesCborReader::new(canonical_cbor.clone());
     let field_count = reader.read_map_len()?;
     reader.expect_key(1)?;
     let format_version = reader.read_uint()?;
@@ -417,7 +425,6 @@ pub fn decode_share_envelope(input: &[u8]) -> Result<ShareEnvelopeRecord, Protoc
         _ => return Err(ProtocolError::new("share envelope version is unsupported")),
     };
     reader.finish()?;
-
     if suite_id != SUITE_ID
         || aad_schema_id != AAD_SCHEMA_ID
         || epoch == 0
@@ -436,36 +443,6 @@ pub fn decode_share_envelope(input: &[u8]) -> Result<ShareEnvelopeRecord, Protoc
         return Err(ProtocolError::new("share envelope fields are invalid"));
     }
 
-    Ok(ShareEnvelopeRecord {
-        format_version,
-        suite_id,
-        envelope_id,
-        share_id,
-        epoch,
-        sender_id,
-        sender_key_version,
-        recipient_id,
-        recipient_key_version,
-        node_id,
-        permissions,
-        generation_scope,
-        record_version,
-        previous_record_hash,
-        encapsulated_key,
-        ciphertext,
-        aad_schema_id,
-        wrapper_hashes,
-        wrapper_set_root,
-        wrapper_count,
-    })
-}
-
-pub fn verify_share_envelope(
-    canonical_cbor: &[u8],
-    signature: &[u8],
-    ed25519_public_key: &[u8],
-) -> Result<(ShareEnvelopeRecord, [u8; 32]), ProtocolError> {
-    let envelope = decode_share_envelope(canonical_cbor)?;
     let public_key: [u8; 32] = ed25519_public_key
         .try_into()
         .map_err(|_| ProtocolError::new("Ed25519 public key length is invalid"))?;
@@ -474,12 +451,35 @@ pub fn verify_share_envelope(
     let signature = Signature::from_slice(signature)
         .map_err(|_| ProtocolError::new("Ed25519 signature length is invalid"))?;
     verifying_key
-        .verify(canonical_cbor, &signature)
+        .verify(&canonical_cbor, &signature)
         .map_err(|_| ProtocolError::new("share envelope signature is invalid"))?;
-    let mut signed_record = Vec::with_capacity(canonical_cbor.len() + 64);
-    signed_record.extend_from_slice(canonical_cbor);
-    signed_record.extend_from_slice(&signature.to_bytes());
-    Ok((envelope, sha256(&signed_record)))
+    let signature_bytes = signature.to_bytes();
+    let hash = sha256_parts(&[&canonical_cbor, &signature_bytes]);
+    Ok((
+        ShareEnvelopeMaterialRecord {
+            format_version,
+            suite_id,
+            envelope_id,
+            share_id,
+            epoch,
+            sender_id,
+            sender_key_version,
+            recipient_id,
+            recipient_key_version,
+            node_id,
+            permissions,
+            generation_scope,
+            record_version,
+            previous_record_hash,
+            encapsulated_key,
+            ciphertext,
+            aad_schema_id,
+            wrapper_hashes,
+            wrapper_set_root,
+            wrapper_count,
+        },
+        hash,
+    ))
 }
 
 #[cfg(test)]
@@ -542,18 +542,24 @@ pub fn verify_decoded_node_record(
         .verify(bootstrap_cbor, &signature)
         .map_err(|_| ProtocolError::new("bootstrap signature is invalid"))?;
 
-    let mut signed_record = Vec::with_capacity(bootstrap_cbor.len() + signature.to_bytes().len());
-    signed_record.extend_from_slice(bootstrap_cbor);
-    signed_record.extend_from_slice(&signature.to_bytes());
+    let signature_bytes = signature.to_bytes();
 
     Ok(VerifiedNodeRecord {
         bootstrap,
-        record_hash: sha256(&signed_record),
+        record_hash: sha256_parts(&[bootstrap_cbor, &signature_bytes]),
     })
 }
 
 pub fn sha256(input: &[u8]) -> [u8; 32] {
     Sha256::digest(input).into()
+}
+
+pub fn sha256_parts(parts: &[&[u8]]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    hasher.finalize().into()
 }
 
 const WRAPPER_LEAF_DOMAIN: &[u8] = b"aeralyth/share-wrapper-leaf/v2";
@@ -583,15 +589,10 @@ pub fn wrapper_set_commitment(
     let mut level = ordered
         .iter()
         .enumerate()
-        .map(|(index, hash)| {
-            let mut input = Vec::with_capacity(WRAPPER_LEAF_DOMAIN.len() + hash.len());
-            input.extend_from_slice(WRAPPER_LEAF_DOMAIN);
-            input.extend_from_slice(hash);
-            Node {
-                hash: sha256(&input),
-                start: index,
-                end: index + 1,
-            }
+        .map(|(index, hash)| Node {
+            hash: sha256_parts(&[WRAPPER_LEAF_DOMAIN, hash]),
+            start: index,
+            end: index + 1,
         })
         .collect::<Vec<_>>();
 
@@ -608,12 +609,8 @@ pub fn wrapper_set_commitment(
                     proof.extend_from_slice(&left.hash);
                 }
             }
-            let mut input = Vec::with_capacity(WRAPPER_BRANCH_DOMAIN.len() + 64);
-            input.extend_from_slice(WRAPPER_BRANCH_DOMAIN);
-            input.extend_from_slice(&left.hash);
-            input.extend_from_slice(&right.hash);
             next.push(Node {
-                hash: sha256(&input),
+                hash: sha256_parts(&[WRAPPER_BRANCH_DOMAIN, &left.hash, &right.hash]),
                 start: left.start,
                 end: right.end,
             });
@@ -623,11 +620,8 @@ pub fn wrapper_set_commitment(
 
     let count = i32::try_from(ordered.len())
         .map_err(|_| ProtocolError::new("share wrapper count is invalid"))?;
-    let mut root_input = Vec::with_capacity(WRAPPER_ROOT_DOMAIN.len() + 8 + 32);
-    root_input.extend_from_slice(WRAPPER_ROOT_DOMAIN);
-    root_input.extend_from_slice(&(ordered.len() as u64).to_be_bytes());
-    root_input.extend_from_slice(&level[0].hash);
-    let root = sha256(&root_input);
+    let count_bytes = (ordered.len() as u64).to_be_bytes();
+    let root = sha256_parts(&[WRAPPER_ROOT_DOMAIN, &count_bytes, &level[0].hash]);
     let proofs = ordered
         .into_iter()
         .zip(proofs)
@@ -667,28 +661,17 @@ pub fn verify_wrapper_set_proof(
         return false;
     }
 
-    let mut leaf_input = Vec::with_capacity(WRAPPER_LEAF_DOMAIN.len() + 32);
-    leaf_input.extend_from_slice(WRAPPER_LEAF_DOMAIN);
-    leaf_input.extend_from_slice(&wrapper_hash);
-    let mut node = sha256(&leaf_input);
+    let mut node = sha256_parts(&[WRAPPER_LEAF_DOMAIN, &wrapper_hash]);
     for sibling in proof.as_chunks::<32>().0 {
-        let mut input = Vec::with_capacity(WRAPPER_BRANCH_DOMAIN.len() + 64);
-        input.extend_from_slice(WRAPPER_BRANCH_DOMAIN);
         if index % 2 == 0 {
-            input.extend_from_slice(&node);
-            input.extend_from_slice(sibling);
+            node = sha256_parts(&[WRAPPER_BRANCH_DOMAIN, &node, sibling]);
         } else {
-            input.extend_from_slice(sibling);
-            input.extend_from_slice(&node);
+            node = sha256_parts(&[WRAPPER_BRANCH_DOMAIN, sibling, &node]);
         }
-        node = sha256(&input);
         index /= 2;
     }
-    let mut root_input = Vec::with_capacity(WRAPPER_ROOT_DOMAIN.len() + 8 + 32);
-    root_input.extend_from_slice(WRAPPER_ROOT_DOMAIN);
-    root_input.extend_from_slice(&(count as u64).to_be_bytes());
-    root_input.extend_from_slice(&node);
-    sha256(&root_input) == expected_root
+    let count_bytes = (count as u64).to_be_bytes();
+    sha256_parts(&[WRAPPER_ROOT_DOMAIN, &count_bytes, &node]) == expected_root
 }
 
 pub fn verify_ed25519_signature(
@@ -718,11 +701,9 @@ pub fn merkle_root(chunks: &[&[u8]]) -> [u8; 32] {
         .iter()
         .enumerate()
         .map(|(index, chunk)| {
-            let mut leaf = Vec::with_capacity(1 + 8 + chunk.len());
-            leaf.push(0);
-            leaf.extend_from_slice(&(index as u64).to_be_bytes());
-            leaf.extend_from_slice(chunk);
-            sha256(&leaf)
+            let domain = [0_u8];
+            let index = (index as u64).to_be_bytes();
+            sha256_parts(&[&domain, &index, chunk])
         })
         .collect::<Vec<_>>();
 
@@ -733,11 +714,8 @@ pub fn merkle_root(chunks: &[&[u8]]) -> [u8; 32] {
                 next.push(pair[0]);
                 continue;
             }
-            let mut branch = Vec::with_capacity(65);
-            branch.push(1);
-            branch.extend_from_slice(&pair[0]);
-            branch.extend_from_slice(&pair[1]);
-            next.push(sha256(&branch));
+            let domain = [1_u8];
+            next.push(sha256_parts(&[&domain, &pair[0], &pair[1]]));
         }
         level = next;
     }
@@ -765,6 +743,201 @@ fn validate_bootstrap(record: &BootstrapRecord) -> Result<(), ProtocolError> {
     }
 
     Ok(())
+}
+
+struct BytesCborReader {
+    input: Bytes,
+    offset: usize,
+}
+
+impl BytesCborReader {
+    fn new(input: Bytes) -> Self {
+        Self { input, offset: 0 }
+    }
+
+    fn finish(&self) -> Result<(), ProtocolError> {
+        if self.offset == self.input.len() {
+            Ok(())
+        } else {
+            Err(ProtocolError::new("CBOR record has trailing bytes"))
+        }
+    }
+
+    fn expect_map_len(&mut self, expected: usize) -> Result<(), ProtocolError> {
+        if self.read_len(5)? == expected as u64 {
+            Ok(())
+        } else {
+            Err(ProtocolError::new("CBOR map has an invalid field count"))
+        }
+    }
+
+    fn read_map_len(&mut self) -> Result<u64, ProtocolError> {
+        self.read_len(5)
+    }
+
+    fn expect_key(&mut self, expected: u64) -> Result<(), ProtocolError> {
+        if self.read_uint()? == expected {
+            Ok(())
+        } else {
+            Err(ProtocolError::new(
+                "CBOR map keys are missing, duplicated, or out of order",
+            ))
+        }
+    }
+
+    fn read_uint(&mut self) -> Result<u64, ProtocolError> {
+        self.read_len(0)
+    }
+
+    fn read_nullable_uint(&mut self) -> Result<Option<u64>, ProtocolError> {
+        if self.peek()? == 0xf6 {
+            self.offset += 1;
+            Ok(None)
+        } else {
+            self.read_uint().map(Some)
+        }
+    }
+
+    fn read_bytes(&mut self, maximum: usize) -> Result<Bytes, ProtocolError> {
+        let length = usize::try_from(self.read_len(2)?)
+            .map_err(|_| ProtocolError::new("CBOR byte string is too large"))?;
+        if length > maximum {
+            return Err(ProtocolError::new("CBOR byte string exceeds its limit"));
+        }
+        self.take(length)
+    }
+
+    fn read_fixed_bytes<const SIZE: usize>(&mut self) -> Result<[u8; SIZE], ProtocolError> {
+        self.read_bytes(SIZE)?
+            .as_ref()
+            .try_into()
+            .map_err(|_| ProtocolError::new("CBOR byte string has an invalid length"))
+    }
+
+    fn read_nullable_fixed_bytes<const SIZE: usize>(
+        &mut self,
+    ) -> Result<Option<[u8; SIZE]>, ProtocolError> {
+        if self.peek()? == 0xf6 {
+            self.offset += 1;
+            Ok(None)
+        } else {
+            self.read_fixed_bytes::<SIZE>().map(Some)
+        }
+    }
+
+    fn read_fixed_bytes_array<const SIZE: usize>(
+        &mut self,
+        maximum: usize,
+    ) -> Result<Vec<[u8; SIZE]>, ProtocolError> {
+        let length = usize::try_from(self.read_len(4)?)
+            .map_err(|_| ProtocolError::new("CBOR array is too large"))?;
+        if length > maximum {
+            return Err(ProtocolError::new("CBOR array exceeds its limit"));
+        }
+        (0..length)
+            .map(|_| self.read_fixed_bytes::<SIZE>())
+            .collect()
+    }
+
+    fn read_identifier(&mut self) -> Result<Bytes, ProtocolError> {
+        let length = usize::try_from(self.read_len(3)?)
+            .map_err(|_| ProtocolError::new("CBOR text string is too large"))?;
+        if length > 128 {
+            return Err(ProtocolError::new("CBOR text string exceeds its limit"));
+        }
+        let value = self.take(length)?;
+        if value.len() < 3
+            || !value
+                .iter()
+                .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+        {
+            return Err(ProtocolError::new("CBOR identifier is invalid"));
+        }
+        Ok(value)
+    }
+
+    fn read_nullable_identifier(&mut self) -> Result<Option<Bytes>, ProtocolError> {
+        if self.peek()? == 0xf6 {
+            self.offset += 1;
+            Ok(None)
+        } else {
+            self.read_identifier().map(Some)
+        }
+    }
+
+    fn read_len(&mut self, expected_major: u8) -> Result<u64, ProtocolError> {
+        let first = self.read_byte()?;
+        let major = first >> 5;
+        let additional = first & 0x1f;
+        if major != expected_major {
+            return Err(ProtocolError::new("CBOR value has an invalid type"));
+        }
+        match additional {
+            value @ 0..=23 => Ok(u64::from(value)),
+            24 => {
+                let value = u64::from(self.read_byte()?);
+                if value < 24 {
+                    Err(ProtocolError::new("CBOR integer is not minimally encoded"))
+                } else {
+                    Ok(value)
+                }
+            }
+            25 => {
+                let value = u64::from(u16::from_be_bytes(
+                    self.take(2)?.as_ref().try_into().unwrap(),
+                ));
+                if value <= u64::from(u8::MAX) {
+                    Err(ProtocolError::new("CBOR integer is not minimally encoded"))
+                } else {
+                    Ok(value)
+                }
+            }
+            26 => {
+                let value = u64::from(u32::from_be_bytes(
+                    self.take(4)?.as_ref().try_into().unwrap(),
+                ));
+                if value <= u64::from(u16::MAX) {
+                    Err(ProtocolError::new("CBOR integer is not minimally encoded"))
+                } else {
+                    Ok(value)
+                }
+            }
+            27 => {
+                let value = u64::from_be_bytes(self.take(8)?.as_ref().try_into().unwrap());
+                if value <= u64::from(u32::MAX) {
+                    Err(ProtocolError::new("CBOR integer is not minimally encoded"))
+                } else {
+                    Ok(value)
+                }
+            }
+            _ => Err(ProtocolError::new(
+                "indefinite-length or reserved CBOR values are forbidden",
+            )),
+        }
+    }
+
+    fn peek(&self) -> Result<u8, ProtocolError> {
+        self.input
+            .get(self.offset)
+            .copied()
+            .ok_or_else(|| ProtocolError::new("CBOR record ended unexpectedly"))
+    }
+
+    fn read_byte(&mut self) -> Result<u8, ProtocolError> {
+        let byte = self.peek()?;
+        self.offset += 1;
+        Ok(byte)
+    }
+
+    fn take(&mut self, length: usize) -> Result<Bytes, ProtocolError> {
+        let start = self.offset;
+        let end = start
+            .checked_add(length)
+            .filter(|end| *end <= self.input.len())
+            .ok_or_else(|| ProtocolError::new("CBOR record ended unexpectedly"))?;
+        self.offset = end;
+        Ok(self.input.slice(start..end))
+    }
 }
 
 struct CborReader<'a> {
@@ -810,15 +983,6 @@ impl<'a> CborReader<'a> {
 
     fn read_uint(&mut self) -> Result<u64, ProtocolError> {
         self.read_len(0)
-    }
-
-    fn read_nullable_uint(&mut self) -> Result<Option<u64>, ProtocolError> {
-        if self.peek()? == 0xf6 {
-            self.offset += 1;
-            Ok(None)
-        } else {
-            self.read_uint().map(Some)
-        }
     }
 
     fn read_bytes(&mut self, maximum: usize) -> Result<Vec<u8>, ProtocolError> {
@@ -880,15 +1044,6 @@ impl<'a> CborReader<'a> {
             return Err(ProtocolError::new("CBOR identifier is invalid"));
         }
         String::from_utf8(value).map_err(|_| ProtocolError::new("CBOR identifier is not UTF-8"))
-    }
-
-    fn read_nullable_identifier(&mut self) -> Result<Option<String>, ProtocolError> {
-        if self.peek()? == 0xf6 {
-            self.offset += 1;
-            Ok(None)
-        } else {
-            self.read_identifier().map(Some)
-        }
     }
 
     fn read_len(&mut self, expected_major: u8) -> Result<u64, ProtocolError> {
@@ -978,6 +1133,11 @@ mod tests {
     }
 
     #[test]
+    fn incremental_sha256_parts_preserve_the_one_shot_vector() {
+        assert_eq!(sha256_parts(&[b"one", b"", b"two"]), sha256(b"onetwo"));
+    }
+
+    #[test]
     fn merkle_tree_promotes_an_unpaired_hash() {
         let chunks = [b"one".as_slice(), b"two".as_slice(), b"three".as_slice()];
         let root = merkle_root(&chunks);
@@ -1055,6 +1215,45 @@ mod tests {
     }
 
     #[test]
+    fn publication_material_keeps_variable_fields_as_canonical_byte_slices() {
+        let canonical = Bytes::from(encode_wrapper_for_test());
+        let start = canonical.as_ptr() as usize;
+        let end = start + canonical.len();
+        let decoded = decode_wrapper_material(canonical).unwrap();
+
+        for value in [&decoded.record.node_id, &decoded.record.ciphertext] {
+            let pointer = value.as_ptr() as usize;
+            assert!(pointer >= start && pointer + value.len() <= end);
+        }
+
+        let signing_key = SigningKey::from_bytes(&[17_u8; 32]);
+        let commitment = wrapper_set_commitment(&[[7_u8; 32]]).unwrap();
+        let canonical = Bytes::from(encode_share_envelope_v2_for_test(
+            commitment.root,
+            commitment.count as u8,
+        ));
+        let signature = signing_key.sign(&canonical).to_bytes();
+        let start = canonical.as_ptr() as usize;
+        let end = start + canonical.len();
+        let (decoded, _) = verify_share_envelope_material(
+            canonical,
+            &signature,
+            &signing_key.verifying_key().to_bytes(),
+        )
+        .unwrap();
+        for value in [
+            &decoded.share_id,
+            &decoded.sender_id,
+            &decoded.recipient_id,
+            &decoded.node_id,
+            &decoded.ciphertext,
+        ] {
+            let pointer = value.as_ptr() as usize;
+            assert!(pointer >= start && pointer + value.len() <= end);
+        }
+    }
+
+    #[test]
     fn wrapper_set_commitment_proofs_cover_every_sorted_leaf() {
         let hashes = [[3_u8; 32], [1_u8; 32], [2_u8; 32]];
         let commitment = wrapper_set_commitment(&hashes).unwrap();
@@ -1096,13 +1295,42 @@ mod tests {
     fn decodes_a_constant_size_protocol_v2_share_envelope() {
         let commitment = wrapper_set_commitment(&[[7_u8; 32]]).unwrap();
         let input = encode_share_envelope_v2_for_test(commitment.root, commitment.count as u8);
-        let decoded = decode_share_envelope(&input).unwrap();
+        let signing_key = SigningKey::from_bytes(&[19_u8; 32]);
+        let signature = signing_key.sign(&input).to_bytes();
+        let (decoded, _) = verify_share_envelope_material(
+            Bytes::from(input.clone()),
+            &signature,
+            signing_key.verifying_key().as_bytes(),
+        )
+        .unwrap();
 
         assert_eq!(decoded.format_version, SHARE_ENVELOPE_VERSION);
         assert_eq!(decoded.wrapper_set_root, Some(commitment.root));
         assert_eq!(decoded.wrapper_count, 1);
         assert!(decoded.wrapper_hashes.is_empty());
         assert!(input.len() < 300);
+    }
+
+    #[test]
+    fn commitments_cover_the_maximum_fifty_thousand_file_share() {
+        let hashes = (0..MAX_SHARE_WRAPPERS as u32)
+            .map(|index| {
+                let mut hash = [0_u8; 32];
+                hash[28..].copy_from_slice(&index.to_be_bytes());
+                hash
+            })
+            .collect::<Vec<_>>();
+
+        let commitment = wrapper_set_commitment(&hashes).unwrap();
+        assert_eq!(commitment.count, MAX_SHARE_WRAPPERS as i32);
+        let proof = commitment.proofs.last().unwrap();
+        assert!(verify_wrapper_set_proof(
+            proof.wrapper_hash,
+            proof.leaf_index,
+            &proof.proof,
+            commitment.count,
+            commitment.root,
+        ));
     }
 
     #[test]

@@ -1,13 +1,13 @@
 import {
   claimArchivePath,
-  createBrowserZip,
+  createStreamingZipDestination,
   normalizeArchiveSegment,
   parseArchiveTimestamp,
   triggerBlobDownload,
 } from "@/features/archive/browser-archive";
-import type { FolderZipSource } from "@/features/dashboard/folder-zip-messages";
-import { mapWithConcurrency } from "@/features/vault/bounded-async";
-import { readEncryptedFileBlob } from "@/features/vault/encrypted-download";
+import { archiveCompressionLevel } from "@/features/archive/compression-policy";
+import { createAnimationFrameProgressCoalescer } from "@/features/uploads/progress-coalescer";
+import { readEncryptedFileStream } from "@/features/vault/encrypted-download";
 import {
   toBase64Url,
   type VaultDownloadPlan,
@@ -21,10 +21,8 @@ import type {
   RepositoryEntry,
 } from "@/lib/api";
 
-const FILE_DOWNLOAD_CONCURRENCY = 4;
 const MAX_FOLDER_ARCHIVE_ENTRIES = 50_000;
-const MAX_FOLDER_ARCHIVE_BYTES = 128 * 1024 * 1024;
-const MAX_FOLDER_ARCHIVE_OUTPUT_BYTES = 160 * 1024 * 1024;
+const MAX_FOLDER_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024;
 
 export type FolderArchiveProgress = {
   label: string;
@@ -63,7 +61,12 @@ export async function downloadFolderArchive({
   onProgress?(progress: FolderArchiveProgress): void;
 }): Promise<void> {
   throwIfAborted(signal);
-  onProgress?.({ label: "Reading folder tree…", percentage: null });
+  const progress = onProgress
+    ? createAnimationFrameProgressCoalescer(onProgress)
+    : null;
+  const reportProgress = (value: FolderArchiveProgress, immediate = false) =>
+    progress?.publish(value, immediate);
+  reportProgress({ label: "Reading folder tree…", percentage: null }, true);
   const archiveManifest = await requestFolderArchiveManifest(folder.id, signal);
   const encryptedEntries = archiveManifest.entries.filter(
     (entry) => entry.e2eeState === "encrypted",
@@ -82,50 +85,15 @@ export async function downloadFolderArchive({
     archiveManifest.entries.map((entry) => [entry.id, entry]),
   );
   const namesById = new Map<string, string>();
-  const downloadedFiles = new Map<string, File>();
-  let encryptedDownloadBatch: Array<{
-    entry: FolderArchiveEntry;
-    manifest: VaultManifest;
-    plan: VaultDownloadPlan;
-  }> = [];
   let rootName = folder.name;
   let decryptedNames = 0;
   let completedFiles = 0;
+  let completedBytes = 0;
   const totalFiles = archiveManifest.entries.filter(
     (entry) => entry.entryType === "file",
   ).length;
   const totalEncryptedNames =
     encryptedEntries.length + (folder.e2eeState === "encrypted" ? 1 : 0);
-  const flushEncryptedDownloads = async () => {
-    if (encryptedDownloadBatch.length === 0) return;
-    const batch = encryptedDownloadBatch;
-    encryptedDownloadBatch = [];
-    await mapWithConcurrency(
-      batch,
-      FILE_DOWNLOAD_CONCURRENCY,
-      async ({ entry, manifest, plan }) => {
-        throwIfAborted(signal);
-        onProgress?.({
-          label: `Downloading ${manifest.name}…`,
-          percentage: totalEncryptedNames
-            ? (decryptedNames / totalEncryptedNames) * 20
-            : 20,
-        });
-        const file = await readEncryptedArchiveFile({
-          entry,
-          manifest,
-          plan,
-          client: vault.client,
-          signal,
-        });
-        if (file.size !== manifest.plaintextBytes) {
-          throw new Error(`The downloaded size of ${manifest.name} changed.`);
-        }
-        downloadedFiles.set(entry.id, file);
-        completedFiles += 1;
-      },
-    );
-  };
 
   if (folder.e2eeState === "encrypted") {
     throwIfAborted(signal);
@@ -137,132 +105,135 @@ export async function downloadFolderArchive({
     }
     rootName = rootManifest.name;
     decryptedNames += 1;
-    reportNameProgress(onProgress, decryptedNames, totalEncryptedNames);
+    reportNameProgress(reportProgress, decryptedNames, totalEncryptedNames);
   }
 
   for (const entry of archiveManifest.entries) {
     if (entry.e2eeState !== "encrypted") namesById.set(entry.id, entry.name);
   }
-  for (const entry of encryptedEntries) {
-    throwIfAborted(signal);
-    // Parent keys can be required to open children, so metadata resolution is
-    // intentionally parent-first. The server returns this bounded order.
-    // react-doctor-disable-next-line react-doctor/async-await-in-loop
-    const plan = await getVaultDownloadPlan(entry.id, signal);
-    const manifest = await vault.openNode(entry.id, plan, signal);
-    throwIfAborted(signal);
-    if (
-      manifest.entryType !== entry.entryType ||
-      manifest.parentId !== entry.parentId
-    ) {
-      throw new Error("The encrypted folder tree is inconsistent.");
-    }
-    namesById.set(entry.id, manifest.name);
-    decryptedNames += 1;
-    reportNameProgress(onProgress, decryptedNames, totalEncryptedNames);
-    if (entry.entryType === "file") {
-      encryptedDownloadBatch.push({ entry, manifest, plan });
-      if (encryptedDownloadBatch.length >= FILE_DOWNLOAD_CONCURRENCY) {
-        // Keep plan/wrapper metadata bounded while preserving four-way file I/O.
-        // react-doctor-disable-next-line react-doctor/async-await-in-loop
-        await flushEncryptedDownloads();
-      }
-    }
-  }
-  await flushEncryptedDownloads();
 
   const archiveRoot = normalizeArchiveSegment(rootName);
-  const sources: FolderZipSource[] = [
-    {
-      directory: true,
-      lastModified: parseArchiveTimestamp(folder.updatedAt),
-      path: archiveRoot,
-    },
-  ];
-  const files: Array<{ entry: FolderArchiveEntry; path: string }> = [];
   const claimedPaths = new Set<string>();
   claimArchivePath(claimedPaths, archiveRoot);
-
-  for (const entry of archiveManifest.entries) {
-    const path = buildFolderArchivePath({
-      entry,
-      entriesById,
-      namesById,
-      rootFolderId: folder.id,
-      archiveRoot,
-    });
-    claimArchivePath(claimedPaths, path);
-    if (entry.entryType === "folder") {
-      sources.push({
-        directory: true,
-        lastModified: parseArchiveTimestamp(entry.updatedAt),
-        path,
-      });
-    } else {
-      files.push({ entry, path });
-    }
-  }
-
-  await mapWithConcurrency(
-    files.filter(({ entry }) => entry.e2eeState !== "encrypted"),
-    FILE_DOWNLOAD_CONCURRENCY,
-    async ({ entry }) => {
-      throwIfAborted(signal);
-      const fileName = namesById.get(entry.id) ?? "folder file";
-      onProgress?.({
-        label: `Downloading ${fileName}…`,
-        percentage: totalFiles ? 20 + (completedFiles / totalFiles) * 55 : 75,
-      });
-      const file = await readLegacyArchiveFile(entry, fileName, signal);
-      if (file.size !== entry.sizeBytes) {
-        throw new Error(`The downloaded size of ${fileName} changed.`);
-      }
-      downloadedFiles.set(entry.id, file);
-      completedFiles += 1;
-      onProgress?.({
-        label: `Downloaded ${completedFiles} of ${totalFiles} files…`,
-        percentage: totalFiles ? 20 + (completedFiles / totalFiles) * 55 : 75,
-      });
-    },
-  );
-  for (const { entry, path } of files) {
-    const file = downloadedFiles.get(entry.id);
-    if (!file) throw new Error("A folder file was not downloaded.");
-    sources.push({ file, path });
-  }
-  downloadedFiles.clear();
-
-  throwIfAborted(signal);
-  const archive = await createBrowserZip({
-    sources,
-    signal,
-    workerName: "aeralyth-folder-zip",
-    errorMessage: "The folder ZIP archive could not be created.",
-    maxOutputBytes: MAX_FOLDER_ARCHIVE_OUTPUT_BYTES,
-    onProgress: (progress) => {
-      const compressionPercentage = progress.totalBytes
-        ? (progress.processedBytes / progress.totalBytes) * 25
-        : 25;
-      onProgress?.({
-        label: progress.currentPath
-          ? `Compressing ${progress.currentPath}`
-          : "Compressing folder…",
-        percentage: Math.min(99, 75 + compressionPercentage),
-      });
-    },
+  const destination = await createStreamingZipDestination({
+    totalSourceBytes: archiveManifest.totalBytes,
   });
-  throwIfAborted(signal);
-  if (archive.size > MAX_FOLDER_ARCHIVE_OUTPUT_BYTES) {
-    throw new Error("The ZIP archive exceeds the 160 MB browser safety limit.");
-  }
-  if (needsVault && !vault.isUnlocked()) {
-    throw new DOMException(
-      "The vault locked before the ZIP download completed.",
-      "AbortError",
+
+  try {
+    await destination.zipWriter.add(`${archiveRoot}/`, undefined, {
+      directory: true,
+      lastModDate: new Date(parseArchiveTimestamp(folder.updatedAt)),
+      signal,
+    });
+    for (const entry of archiveManifest.entries) {
+      throwIfAborted(signal);
+      let encrypted:
+        | { manifest: VaultManifest; plan: VaultDownloadPlan }
+        | undefined;
+      if (entry.e2eeState === "encrypted") {
+        // Parent keys can be required to open children, so archive entries stay
+        // in the bounded parent-first order returned by the server.
+        // react-doctor-disable-next-line react-doctor/async-await-in-loop
+        const plan = await getVaultDownloadPlan(entry.id, signal);
+        const manifest = await vault.openNode(entry.id, plan, signal);
+        throwIfAborted(signal);
+        if (
+          manifest.entryType !== entry.entryType ||
+          manifest.parentId !== entry.parentId
+        ) {
+          throw new Error("The encrypted folder tree is inconsistent.");
+        }
+        namesById.set(entry.id, manifest.name);
+        decryptedNames += 1;
+        reportNameProgress(reportProgress, decryptedNames, totalEncryptedNames);
+        encrypted = { manifest, plan };
+      }
+
+      const path = buildFolderArchivePath({
+        entry,
+        entriesById,
+        namesById,
+        rootFolderId: folder.id,
+        archiveRoot,
+      });
+      claimArchivePath(claimedPaths, path);
+      if (entry.entryType === "folder") {
+        // ZIP entries must be serialized into one output stream.
+        // react-doctor-disable-next-line react-doctor/async-await-in-loop
+        await destination.zipWriter.add(`${path}/`, undefined, {
+          directory: true,
+          lastModDate: new Date(parseArchiveTimestamp(entry.updatedAt)),
+          signal,
+        });
+        continue;
+      }
+
+      const resolvedName = namesById.get(entry.id) ?? "folder file";
+      reportProgress({
+        label: `Archiving ${resolvedName}…`,
+        percentage: archivePercentage(
+          completedBytes,
+          archiveManifest.totalBytes,
+        ),
+      });
+      const source = encrypted
+        ? readEncryptedArchiveFileStream({
+            entry,
+            ...encrypted,
+            client: vault.client,
+            signal,
+          })
+        : await readLegacyArchiveFileStream(entry, resolvedName, signal);
+      // A ZIP writer has one ordered output stream, so entries are consumed
+      // sequentially while each source remains backpressured.
+      // react-doctor-disable-next-line react-doctor/async-await-in-loop
+      await destination.zipWriter.add(path, source, {
+        level: archiveCompressionLevel({
+          path,
+          mimeType: encrypted?.manifest.mimeType ?? entry.mimeType,
+        }),
+        lastModDate: new Date(parseArchiveTimestamp(entry.updatedAt)),
+        signal,
+        onprogress(processedBytes) {
+          reportProgress({
+            label: `Archiving ${resolvedName}…`,
+            percentage: archivePercentage(
+              completedBytes + processedBytes,
+              archiveManifest.totalBytes,
+            ),
+          });
+        },
+      });
+      completedBytes += entry.sizeBytes;
+      completedFiles += 1;
+      reportProgress({
+        label: `Archived ${completedFiles} of ${totalFiles} files…`,
+        percentage: archivePercentage(
+          completedBytes,
+          archiveManifest.totalBytes,
+        ),
+      });
+    }
+
+    throwIfAborted(signal);
+    const archive = await destination.close();
+    throwIfAborted(signal);
+    if (needsVault && !vault.isUnlocked()) {
+      throw new DOMException(
+        "The vault locked before the ZIP download completed.",
+        "AbortError",
+      );
+    }
+    triggerBlobDownload(archive, `${archiveRoot}.zip`, () =>
+      destination.release(),
     );
+    reportProgress({ label: "ZIP download ready", percentage: 100 }, true);
+  } catch (error) {
+    await destination.discard(error);
+    throw error;
+  } finally {
+    progress?.cancel();
   }
-  triggerBlobDownload(archive, `${archiveRoot}.zip`);
-  onProgress?.({ label: "ZIP download ready", percentage: 100 });
 }
 
 export async function requestFolderArchiveManifest(
@@ -335,11 +306,11 @@ export function buildFolderArchivePath({
   throw new Error("A folder entry is outside the selected folder.");
 }
 
-async function readLegacyArchiveFile(
+async function readLegacyArchiveFileStream(
   entry: FolderArchiveEntry,
   resolvedName: string,
   signal?: AbortSignal,
-): Promise<File> {
+): Promise<ReadableStream<Uint8Array>> {
   const response = await fetch(
     `/api/files/${encodeURIComponent(entry.id)}/download?version=${encodeURIComponent(entry.contentVersion)}`,
     { signal, cache: "no-store" },
@@ -347,14 +318,17 @@ async function readLegacyArchiveFile(
   if (!response.ok) {
     throw new Error(`Could not download ${resolvedName} (${response.status}).`);
   }
-  const blob = await response.blob();
-  return new File([blob], normalizeArchiveSegment(resolvedName), {
-    type: blob.type || entry.mimeType || "application/octet-stream",
-    lastModified: parseArchiveTimestamp(entry.updatedAt),
-  });
+  if (!response.body) {
+    throw new Error(`Could not stream ${resolvedName}.`);
+  }
+  return requireExactStreamLength(
+    response.body,
+    entry.sizeBytes,
+    `The downloaded size of ${resolvedName} changed.`,
+  );
 }
 
-async function readEncryptedArchiveFile({
+function readEncryptedArchiveFileStream({
   entry,
   manifest,
   plan,
@@ -366,7 +340,7 @@ async function readEncryptedArchiveFile({
   plan: VaultDownloadPlan | undefined;
   client: VaultCryptoClient | null;
   signal?: AbortSignal;
-}): Promise<File> {
+}): ReadableStream<Uint8Array> {
   if (!manifest || !plan || !client) {
     throw new Error("The encrypted folder is not unlocked.");
   }
@@ -378,16 +352,36 @@ async function readEncryptedArchiveFile({
   ) {
     throw new Error("The encrypted folder changed during ZIP preparation.");
   }
-  const blob = await readEncryptedFileBlob({
-    plan,
-    manifest,
-    client,
-    signal,
-  });
-  return new File([blob], normalizeArchiveSegment(manifest.name), {
-    type: manifest.mimeType ?? "application/octet-stream",
-    lastModified: manifest.lastModified,
-  });
+  return requireExactStreamLength(
+    readEncryptedFileStream({ plan, manifest, client, signal }),
+    manifest.plaintextBytes,
+    `The downloaded size of ${manifest.name} changed.`,
+  );
+}
+
+function requireExactStreamLength(
+  stream: ReadableStream<Uint8Array>,
+  expectedBytes: number,
+  errorMessage: string,
+): ReadableStream<Uint8Array> {
+  let receivedBytes = 0;
+  return stream.pipeThrough(
+    new TransformStream<Uint8Array, Uint8Array>({
+      transform(chunk, controller) {
+        receivedBytes += chunk.byteLength;
+        if (receivedBytes > expectedBytes) throw new Error(errorMessage);
+        controller.enqueue(chunk);
+      },
+      flush() {
+        if (receivedBytes !== expectedBytes) throw new Error(errorMessage);
+      },
+    }),
+  );
+}
+
+function archivePercentage(processedBytes: number, totalBytes: number): number {
+  if (totalBytes === 0) return 99;
+  return Math.min(99, 20 + (processedBytes / totalBytes) * 79);
 }
 
 function reportNameProgress(

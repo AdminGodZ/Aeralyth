@@ -2,11 +2,12 @@ import { Aes256Gcm, CipherSuite, HkdfSha256 } from "@hpke/core";
 import { DhkemX25519HkdfSha256 } from "@hpke/dhkem-x25519";
 import bs58check from "bs58check";
 import sodium from "libsodium-wrappers-sumo";
-
+import { BatchScopedValueCache } from "@/features/vault/batch-scoped-value-cache";
 import {
   detectedCryptoConcurrency,
   mapWithConcurrency,
 } from "@/features/vault/bounded-async";
+import { BoundedLruCache } from "@/features/vault/bounded-lru-cache";
 import {
   decodeBootstrap,
   decodeManifest,
@@ -19,13 +20,13 @@ import {
   encodeShareEnvelope,
   encodeWrapper,
 } from "@/features/vault/cbor";
+import { incrementalCiphertextLeafHash } from "@/features/vault/incremental-ciphertext-hash";
 import { isVaultNodeId } from "@/features/vault/node-id";
 import {
   ARGON2ID_PROFILE,
   asBufferSource,
   assertArgon2idProfile,
   chunkNonce,
-  ciphertextLeafHash,
   concatBytes,
   encodeChunkAad,
   encodeRecordAad,
@@ -39,6 +40,8 @@ import {
   randomBytes,
   randomPrefixedId,
   sha256,
+  sha256Parts,
+  shareAuthorizationVersion,
   toArrayBuffer,
   toBase64Url,
   utf8,
@@ -61,6 +64,7 @@ import {
   type VaultShareDirectoryRecord,
   type VaultShareEnvelopeRecord,
   type VaultShareNodeSnapshot,
+  type VaultSharePreparationPlan,
   type VaultUnlockMaterial,
   type VaultWrapperRecord,
   verifyWrapperSetProof,
@@ -68,6 +72,7 @@ import {
   wrapperSetRoot,
   zeroNonce,
 } from "@/features/vault/protocol";
+import { SessionOperationQueue } from "@/features/vault/session-operation-queue";
 import type {
   VaultCachedMetadataResult,
   VaultDecryptedChunk,
@@ -84,6 +89,7 @@ import type {
   VaultShareDirectoryInput,
   VaultShareDirectoryResult,
   VaultShareMaterialInput,
+  VaultShareMaterialProgress,
   VaultShareMaterialResult,
   VaultShareRotationInput,
   VaultUnlockResult,
@@ -108,6 +114,7 @@ type IdentitySecrets = {
 
 type EncryptionSession = {
   id: string;
+  sessionGeneration: number;
   nodeId: string;
   parentId: string | null;
   nodeKey: CryptoKey;
@@ -127,6 +134,7 @@ type EncryptionSession = {
 
 type DecryptionSession = {
   id: string;
+  sessionGeneration: number;
   nodeId: string;
   contentKey: CryptoKey;
   generationNumber: number;
@@ -143,6 +151,13 @@ type OpenedPlan = {
   manifest: VaultManifest;
   nodeKey: CryptoKey | null;
   contentKey: CryptoKey | null;
+};
+
+type VerifiedPlanMaterial = {
+  bootstrap: VaultBootstrapRecord;
+  wrappers: VaultWrapperRecord[];
+  wrapperBytes: Uint8Array[];
+  wrapperHashes: Uint8Array[];
 };
 
 type StoredMetadataRecord = {
@@ -163,6 +178,11 @@ type StoredVaultResumeSession = {
   rootKey: CryptoKey;
 };
 
+type MetadataOperation = {
+  cancelled: boolean;
+  nodeIds: Set<string>;
+};
+
 type SerializedManifest = Omit<VaultManifest, "generationId"> & {
   generationId: string;
 };
@@ -171,20 +191,31 @@ const scope = globalThis as unknown as WorkerScope;
 let rootKey: CryptoKey | null = null;
 let identity: IdentitySecrets | null = null;
 let vaultSessionGeneration = 0;
-const nodeKeys = new Map<string, CryptoKey>();
+const MAX_NODE_KEY_ENTRIES = 8_192;
+const nodeKeys = new BoundedLruCache<string, CryptoKey>(MAX_NODE_KEY_ENTRIES);
 const nodeOpenFlights = new Map<string, Promise<OpenedPlan>>();
 const metadataMemoryCache = new Map<string, VaultCachedMetadataResult>();
+const metadataMemorySizes = new Map<string, number>();
+let metadataMemoryBytes = 0;
 let metadataCacheKey: CryptoKey | null = null;
 let metadataCacheNamespace: string | null = null;
 let activeResumeSessionId: string | null = null;
 const encryptionSessions = new Map<string, EncryptionSession>();
 const decryptionSessions = new Map<string, DecryptionSession>();
+const sessionOperations = new SessionOperationQueue();
+const metadataOperations = new Map<number, MetadataOperation>();
+const shareContextCache = new BatchScopedValueCache<
+  Array<[string, { epoch: number; key: CryptoKey }]>
+>();
 const SHARE_WRAPPER_CRYPTO_CONCURRENCY = detectedCryptoConcurrency(16);
 const SHARE_HASH_CRYPTO_CONCURRENCY = detectedCryptoConcurrency(16);
 const SHARE_ENVELOPE_CRYPTO_CONCURRENCY = detectedCryptoConcurrency(8, 2);
 const SHARE_SIDECAR_CRYPTO_CONCURRENCY = SHARE_WRAPPER_CRYPTO_CONCURRENCY;
-const MAX_METADATA_DECRYPTION_CONCURRENCY = 30;
-const MAX_METADATA_MEMORY_ENTRIES = 1_000;
+const MAX_METADATA_DECRYPTION_CONCURRENCY = 4;
+const MAX_SHARE_PREPARATION_CONCURRENCY = 4;
+const MAX_METADATA_MEMORY_ENTRIES = 1_024;
+const MAX_METADATA_MEMORY_BYTES = 16 * 1024 * 1024;
+const NODE_KEY_ACCOUNTED_BYTES = 32;
 const METADATA_CACHE_DATABASE = "aeralyth-vault-metadata-v1";
 const METADATA_CACHE_DATABASE_VERSION = 3;
 const METADATA_CACHE_STORE = "metadata";
@@ -292,6 +323,7 @@ async function dispatch(
         result: {
           type: "openMetadataPlans",
           results: await openMetadataPlans(
+            request.id,
             request.plans,
             request.concurrency,
             request.priorityCount,
@@ -305,6 +337,9 @@ async function dispatch(
           ),
         },
       };
+    case "cancelMetadataOperation":
+      cancelMetadataOperation(request.operationId);
+      return { result: { type: "cancelMetadataOperation" } };
     case "startEncryption":
       return {
         result: {
@@ -313,10 +348,12 @@ async function dispatch(
         },
       };
     case "encryptChunk": {
-      const encrypted = await encryptChunk(
-        request.sessionId,
-        request.chunkIndex,
-        new Uint8Array(request.plaintext),
+      const encrypted = await sessionOperations.run(request.sessionId, () =>
+        encryptChunk(
+          request.sessionId,
+          request.chunkIndex,
+          new Uint8Array(request.plaintext),
+        ),
       );
       return {
         result: { type: "encryptChunk", result: encrypted },
@@ -324,7 +361,9 @@ async function dispatch(
       };
     }
     case "finalizeEncryption": {
-      const complete = await finalizeEncryption(request.sessionId);
+      const complete = await sessionOperations.run(request.sessionId, () =>
+        finalizeEncryption(request.sessionId),
+      );
       return {
         result: {
           type: "finalizeEncryption",
@@ -339,7 +378,9 @@ async function dispatch(
       };
     }
     case "abortEncryption":
-      abortEncryption(request.sessionId, request.nodeId);
+      await sessionOperations.run(request.sessionId, async () => {
+        abortEncryption(request.sessionId, request.nodeId);
+      });
       return { result: { type: "abortEncryption" } };
     case "createShareDirectory": {
       const directory = await createShareDirectory(request.input);
@@ -355,6 +396,9 @@ async function dispatch(
         ]),
       };
     }
+    case "clearShareContextCache":
+      shareContextCache.delete(request.cacheKey);
+      return { result: { type: "clearShareContextCache" } };
     case "startDecryption":
       return {
         result: {
@@ -363,10 +407,12 @@ async function dispatch(
         },
       };
     case "decryptChunk": {
-      const decrypted = await decryptChunk(
-        request.sessionId,
-        request.chunkIndex,
-        new Uint8Array(request.ciphertext),
+      const decrypted = await sessionOperations.run(request.sessionId, () =>
+        decryptChunk(
+          request.sessionId,
+          request.chunkIndex,
+          new Uint8Array(request.ciphertext),
+        ),
       );
       return {
         result: { type: "decryptChunk", result: decrypted },
@@ -374,13 +420,26 @@ async function dispatch(
       };
     }
     case "finalizeDecryption":
-      await finalizeDecryption(request.sessionId);
+      await sessionOperations.run(request.sessionId, () =>
+        finalizeDecryption(request.sessionId),
+      );
       return { result: { type: "finalizeDecryption" } };
     case "abortDecryption":
-      abortDecryption(request.sessionId);
+      await sessionOperations.run(request.sessionId, async () => {
+        abortDecryption(request.sessionId);
+      });
       return { result: { type: "abortDecryption" } };
     case "createShareMaterial": {
-      const material = await createShareMaterial(request.input);
+      const material = await createShareMaterial(request.input, (chunk) => {
+        scope.postMessage(
+          {
+            id: request.id,
+            ok: true,
+            progress: { type: "shareMaterial", ...chunk },
+          },
+          transferableBuffers(chunk.wrappers),
+        );
+      });
       return {
         result: {
           type: "createShareMaterial",
@@ -390,7 +449,16 @@ async function dispatch(
       };
     }
     case "rotateShareMaterial": {
-      const material = await rotateShareMaterial(request.input);
+      const material = await rotateShareMaterial(request.input, (chunk) => {
+        scope.postMessage(
+          {
+            id: request.id,
+            ok: true,
+            progress: { type: "shareMaterial", ...chunk },
+          },
+          transferableBuffers(chunk.wrappers),
+        );
+      });
       return {
         result: {
           type: "rotateShareMaterial",
@@ -489,7 +557,7 @@ async function setupVault(password: string): Promise<VaultSetupResult> {
     const ed25519 = sodium.crypto_sign_keypair();
     const [fingerprint, privateCiphertext, accountStateCiphertext] =
       await Promise.all([
-        sha256(concatBytes(x25519.publicKey, ed25519.publicKey)),
+        sha256Parts(x25519.publicKey, ed25519.publicKey),
         encryptRootRecord(
           importedRoot,
           "identity-private",
@@ -866,9 +934,7 @@ async function installUnlockedRoot(
   const ed25519PrivateKey = privateBytes.slice(32);
   const x25519PublicKey = fromBase64Url(material.identity.x25519PublicKey);
   const ed25519PublicKey = fromBase64Url(material.identity.ed25519PublicKey);
-  const fingerprint = await sha256(
-    concatBytes(x25519PublicKey, ed25519PublicKey),
-  );
+  const fingerprint = await sha256Parts(x25519PublicKey, ed25519PublicKey);
   const expectedFingerprint = fromBase64Url(
     material.identity.fingerprintSha256,
   );
@@ -899,18 +965,6 @@ async function installUnlockedRoot(
     );
   }
   wipe(derivedX25519PublicKey, derivedEd25519PublicKey);
-
-  if (material.accountStateRecordId && material.encryptedAccountState) {
-    const accountStateId = fromBase64Url(material.accountStateRecordId);
-    const accountState = await decryptRootRecord(
-      importedRoot,
-      "account-state",
-      accountStateId,
-      material.vaultVersion,
-      fromBase64Url(material.encryptedAccountState),
-    );
-    wipe(accountStateId, accountState);
-  }
 
   const cacheKey = await deriveAesKey(
     importedRoot,
@@ -950,8 +1004,17 @@ function lockVault(): void {
   activeResumeSessionId = null;
   nodeKeys.clear();
   nodeOpenFlights.clear();
+  shareContextCache.clear();
+  for (const operation of metadataOperations.values()) {
+    operation.cancelled = true;
+  }
+  metadataOperations.clear();
   metadataMemoryCache.clear();
-  encryptionSessions.clear();
+  metadataMemorySizes.clear();
+  metadataMemoryBytes = 0;
+  for (const [sessionId, session] of encryptionSessions) {
+    abortEncryption(sessionId, session.nodeId);
+  }
   for (const sessionId of decryptionSessions.keys()) {
     abortDecryption(sessionId);
   }
@@ -959,7 +1022,21 @@ function lockVault(): void {
 
 async function decryptShareContexts(
   contexts: VaultActiveShareContext[],
+  cacheKey?: string,
 ): Promise<Array<[string, { epoch: number; key: CryptoKey }]>> {
+  if (cacheKey) {
+    const fingerprint = JSON.stringify(
+      contexts.map(({ shareId, epoch, wrapperId, ciphertext }) => [
+        shareId,
+        epoch,
+        wrapperId,
+        ciphertext,
+      ]),
+    );
+    return shareContextCache.getOrLoad(cacheKey, fingerprint, () =>
+      decryptShareContexts(contexts),
+    );
+  }
   const root = requireRootKey();
   const loadedEntries = await mapWithConcurrency(
     contexts,
@@ -1003,6 +1080,8 @@ async function decryptShareContexts(
 async function startEncryption(
   input: VaultEncryptionInput,
 ): Promise<VaultEncryptionStart> {
+  requireRootKey();
+  const sessionGeneration = vaultSessionGeneration;
   const nodeId = input.nodeId ?? randomPrefixedId("fil_");
   validateNodeId(nodeId);
   const generationNumber = input.generationNumber ?? 1;
@@ -1012,9 +1091,11 @@ async function startEncryption(
     ? fromBase64Url(input.previousRecordHash)
     : null;
   if ((recordVersion === 1) !== (previousRecordHash === null)) {
+    wipe(generationId, previousRecordHash);
     throw new Error("The node record chain is invalid.");
   }
   if (input.parentId && !nodeKeys.has(input.parentId)) {
+    wipe(generationId, previousRecordHash);
     throw vaultError(
       "PARENT_KEY_REQUIRED",
       `Unlock the parent folder first:${input.parentId}`,
@@ -1022,95 +1103,120 @@ async function startEncryption(
   }
 
   const nodeMaterial = randomBytes(32);
-  const nodeKey = await importHkdf(nodeMaterial);
-  const paddedBytes =
-    input.entryType === "file" ? padmeLength(input.plaintextBytes) : 0;
-  const layout =
-    input.entryType === "file"
-      ? encryptedLength(paddedBytes)
-      : { chunkCount: 0, ciphertextBytes: 0 };
-  const contentKey =
-    input.entryType === "file"
-      ? await deriveAesKey(
-          nodeKey,
-          generationId,
-          `aeralyth/content/v1/${nodeId}/${generationNumber}`,
-        )
-      : null;
-  const wrapperId = randomBytes(16);
-  const wrapperKind = input.parentId ? 2 : 1;
-  const wrappingKey = input.parentId
-    ? (nodeKeys.get(input.parentId) ?? null)
-    : requireRootKey();
-  if (!wrappingKey) {
-    wipe(nodeMaterial, generationId, wrapperId, previousRecordHash);
-    throw vaultError("PARENT_KEY_REQUIRED", "The parent folder is locked.");
-  }
-  const wrapperPurpose = nodeWrapperPurpose(wrapperKind, nodeId);
-  const wrapperCiphertext = await encryptDerivedRecord(
-    wrappingKey,
-    wrapperId,
-    wrapperPurpose,
-    toBase64Url(wrapperId),
-    recordVersion,
-    nodeMaterial,
-  );
-  const ownerWrapper = encodeWrapper({
-    formatVersion: VAULT_FORMAT_VERSION,
-    wrapperId,
-    kind: wrapperKind,
-    nodeId,
-    parentNodeId: input.parentId,
-    generationId: null,
-    shareId: null,
-    epoch: null,
-    recordVersion,
-    ciphertext: wrapperCiphertext,
-    aadSchemaId: VAULT_AAD_SCHEMA_ID,
-  });
-  const manifest: VaultManifest = {
-    name: normalizeName(input.name),
-    mimeType: input.mimeType?.slice(0, 255) || null,
-    entryType: input.entryType,
-    plaintextBytes: input.entryType === "file" ? input.plaintextBytes : 0,
-    paddedBytes,
-    lastModified: Math.max(0, Math.trunc(input.lastModified)),
-    parentId: input.parentId,
-    chunkCount: layout.chunkCount,
-    generationId: new Uint8Array(generationId),
-    createdAt: Date.now(),
-  };
-  const sessionId = randomPrefixedId("ves_");
-  encryptionSessions.set(sessionId, {
-    id: sessionId,
-    nodeId,
-    parentId: input.parentId,
-    nodeKey,
-    contentKey,
-    generationNumber,
-    generationId,
-    recordVersion,
-    previousRecordHash,
-    manifest,
-    ciphertextLength: layout.ciphertextBytes,
-    chunkCount: layout.chunkCount,
-    encryptedChunks: 0,
-    consumedPlaintext: 0,
-    leaves: [],
-    ownerWrapper,
-  });
-  wipe(nodeMaterial);
+  let wrapperId: Uint8Array | null = null;
+  let wrapperCiphertext: Uint8Array | null = null;
+  let ownerWrapper: Uint8Array | null = null;
+  let manifest: VaultManifest | null = null;
+  let sessionStored = false;
+  try {
+    const nodeKey = await importHkdf(nodeMaterial);
+    const paddedBytes =
+      input.entryType === "file" ? padmeLength(input.plaintextBytes) : 0;
+    const layout =
+      input.entryType === "file"
+        ? encryptedLength(paddedBytes)
+        : { chunkCount: 0, ciphertextBytes: 0 };
+    const contentKey =
+      input.entryType === "file"
+        ? await deriveAesKey(
+            nodeKey,
+            generationId,
+            `aeralyth/content/v1/${nodeId}/${generationNumber}`,
+          )
+        : null;
+    assertVaultSession(sessionGeneration);
+    wrapperId = randomBytes(16);
+    const wrapperKind = input.parentId ? 2 : 1;
+    const parentLease = input.parentId ? pinNodeKey(input.parentId) : null;
+    const wrappingKey = input.parentId
+      ? (parentLease?.value ?? null)
+      : requireRootKey();
+    if (!wrappingKey) {
+      throw vaultError("PARENT_KEY_REQUIRED", "The parent folder is locked.");
+    }
+    const wrapperPurpose = nodeWrapperPurpose(wrapperKind, nodeId);
+    try {
+      wrapperCiphertext = await encryptDerivedRecord(
+        wrappingKey,
+        wrapperId,
+        wrapperPurpose,
+        toBase64Url(wrapperId),
+        recordVersion,
+        nodeMaterial,
+      );
+      assertVaultSession(sessionGeneration);
+    } finally {
+      parentLease?.release();
+    }
+    ownerWrapper = encodeWrapper({
+      formatVersion: VAULT_FORMAT_VERSION,
+      wrapperId,
+      kind: wrapperKind,
+      nodeId,
+      parentNodeId: input.parentId,
+      generationId: null,
+      shareId: null,
+      epoch: null,
+      recordVersion,
+      ciphertext: wrapperCiphertext,
+      aadSchemaId: VAULT_AAD_SCHEMA_ID,
+    });
+    manifest = {
+      name: normalizeName(input.name),
+      mimeType: input.mimeType?.slice(0, 255) || null,
+      entryType: input.entryType,
+      plaintextBytes: input.entryType === "file" ? input.plaintextBytes : 0,
+      paddedBytes,
+      lastModified: Math.max(0, Math.trunc(input.lastModified)),
+      parentId: input.parentId,
+      chunkCount: layout.chunkCount,
+      generationId: new Uint8Array(generationId),
+      createdAt: Date.now(),
+    };
+    const sessionId = randomPrefixedId("ves_");
+    assertVaultSession(sessionGeneration);
+    encryptionSessions.set(sessionId, {
+      id: sessionId,
+      sessionGeneration,
+      nodeId,
+      parentId: input.parentId,
+      nodeKey,
+      contentKey,
+      generationNumber,
+      generationId,
+      recordVersion,
+      previousRecordHash,
+      manifest,
+      ciphertextLength: layout.ciphertextBytes,
+      chunkCount: layout.chunkCount,
+      encryptedChunks: 0,
+      consumedPlaintext: 0,
+      leaves: [],
+      ownerWrapper,
+    });
+    sessionStored = true;
 
-  return {
-    sessionId,
-    nodeId,
-    generationNumber,
-    generationId: toBase64Url(generationId),
-    recordVersion,
-    paddedBytes,
-    ciphertextLength: layout.ciphertextBytes,
-    chunkCount: layout.chunkCount,
-  };
+    return {
+      sessionId,
+      nodeId,
+      generationNumber,
+      generationId: toBase64Url(generationId),
+      recordVersion,
+      paddedBytes,
+      ciphertextLength: layout.ciphertextBytes,
+      chunkCount: layout.chunkCount,
+    };
+  } finally {
+    wipe(nodeMaterial, wrapperId, wrapperCiphertext);
+    if (!sessionStored) {
+      wipe(
+        generationId,
+        previousRecordHash,
+        ownerWrapper,
+        manifest?.generationId,
+      );
+    }
+  }
 }
 
 async function encryptChunk(
@@ -1118,7 +1224,16 @@ async function encryptChunk(
   chunkIndex: number,
   plaintext: Uint8Array,
 ): Promise<VaultEncryptedChunk> {
-  const session = requireEncryptionSession(sessionId);
+  let session: EncryptionSession;
+  try {
+    session = requireEncryptionSession(sessionId);
+  } catch (error) {
+    // A lock can remove the session while this operation waits behind another
+    // request for the same session. The transferred plaintext is worker-owned
+    // by then and must be wiped even though encryption never starts.
+    wipe(plaintext);
+    throw error;
+  }
   if (
     !session.contentKey ||
     chunkIndex !== session.encryptedChunks ||
@@ -1143,9 +1258,12 @@ async function encryptChunk(
     wipe(plaintext);
     throw new Error("The plaintext chunk has an unexpected length.");
   }
-  const padded = new Uint8Array(expectedPaddedLength);
-  padded.set(plaintext);
-  if (expectedSourceLength < expectedPaddedLength) {
+  const padded =
+    expectedSourceLength === expectedPaddedLength
+      ? plaintext
+      : new Uint8Array(expectedPaddedLength);
+  if (padded !== plaintext) {
+    padded.set(plaintext);
     fillRandomBytes(padded.subarray(expectedSourceLength));
   }
   const aad = encodeChunkAad({
@@ -1168,13 +1286,26 @@ async function encryptChunk(
         asBufferSource(padded),
       ),
     );
-    session.leaves.push(await ciphertextLeafHash(chunkIndex, ciphertext));
-    session.encryptedChunks += 1;
-    session.consumedPlaintext += plaintext.length;
-    return {
-      ciphertext: ciphertext.buffer,
-      ciphertextBytes: ciphertext.length,
-    };
+    try {
+      assertEncryptionSessionActive(sessionId, session);
+      const leaf = incrementalCiphertextLeafHash(chunkIndex, ciphertext);
+      try {
+        assertEncryptionSessionActive(sessionId, session);
+        session.leaves.push(leaf);
+      } catch (error) {
+        wipe(leaf);
+        throw error;
+      }
+      session.encryptedChunks += 1;
+      session.consumedPlaintext += plaintext.length;
+      return {
+        ciphertext: ciphertext.buffer,
+        ciphertextBytes: ciphertext.length,
+      };
+    } catch (error) {
+      wipe(ciphertext);
+      throw error;
+    }
   } finally {
     wipe(plaintext, padded, aad);
   }
@@ -1193,71 +1324,96 @@ async function finalizeEncryption(
   }
 
   const manifestPlaintext = encodeManifest(session.manifest);
-  const manifestKey = await deriveAesKey(
-    session.nodeKey,
-    session.generationId,
-    `aeralyth/manifest/v1/${session.nodeId}/${session.recordVersion}`,
-  );
   const manifestAad = encodeRecordAad(
     "manifest",
     session.nodeId,
     session.recordVersion,
   );
-  const encryptedManifest = new Uint8Array(
-    await crypto.subtle.encrypt(
-      {
-        name: "AES-GCM",
-        iv: asBufferSource(zeroNonce()),
-        additionalData: asBufferSource(manifestAad),
-        tagLength: 128,
-      },
-      manifestKey,
-      asBufferSource(manifestPlaintext),
-    ),
-  );
-  const canonicalWrappers = [session.ownerWrapper];
-  const decodedWrappers = canonicalWrappers.map(decodeWrapper);
-  const wrapperHashes = await Promise.all(canonicalWrappers.map(sha256));
-  const bootstrap: VaultBootstrapRecord = {
-    formatVersion: VAULT_FORMAT_VERSION,
-    suiteId: VAULT_SUITE_ID,
-    aadSchemaId: VAULT_AAD_SCHEMA_ID,
-    nodeId: session.nodeId,
-    generationNumber: session.generationNumber,
-    generationId: session.generationId,
-    manifestIv: zeroNonce(),
-    wrapperIds: decodedWrappers.map((wrapper) => wrapper.wrapperId),
-    ciphertextLength: session.ciphertextLength,
-    signerKeyVersion: activeIdentity.keyVersion,
-    recordVersion: session.recordVersion,
-    previousRecordHash: session.previousRecordHash,
-    manifestHash: await sha256(encryptedManifest),
-    wrapperHashes,
-    ciphertextMerkleRoot: await merkleRootFromLeaves(session.leaves),
-  };
-  const bootstrapCbor = encodeBootstrap(bootstrap);
-  const signature = sodium.crypto_sign_detached(
-    bootstrapCbor,
-    activeIdentity.ed25519PrivateKey,
-  );
-  const complete: VaultEncryptionComplete = {
-    nodeId: session.nodeId,
-    generationNumber: session.generationNumber,
-    generationId: toBase64Url(session.generationId),
-    recordVersion: session.recordVersion,
-    ciphertextLength: session.ciphertextLength,
-    chunkCount: session.chunkCount,
-    record: {
+  let encryptedManifest: Uint8Array | null = null;
+  let manifestHash: Uint8Array | null = null;
+  let ciphertextMerkleRoot: Uint8Array | null = null;
+  let wrapperHashes: Uint8Array[] = [];
+  let completed = false;
+  try {
+    const manifestKey = await deriveAesKey(
+      session.nodeKey,
+      session.generationId,
+      `aeralyth/manifest/v1/${session.nodeId}/${session.recordVersion}`,
+    );
+    assertEncryptionSessionActive(sessionId, session);
+    encryptedManifest = new Uint8Array(
+      await crypto.subtle.encrypt(
+        {
+          name: "AES-GCM",
+          iv: asBufferSource(zeroNonce()),
+          additionalData: asBufferSource(manifestAad),
+          tagLength: 128,
+        },
+        manifestKey,
+        asBufferSource(manifestPlaintext),
+      ),
+    );
+    assertEncryptionSessionActive(sessionId, session);
+    const canonicalWrappers = [session.ownerWrapper];
+    const decodedWrappers = canonicalWrappers.map(decodeWrapper);
+    wrapperHashes = await Promise.all(canonicalWrappers.map(sha256));
+    assertEncryptionSessionActive(sessionId, session);
+    manifestHash = await sha256(encryptedManifest);
+    assertEncryptionSessionActive(sessionId, session);
+    ciphertextMerkleRoot = await merkleRootFromLeaves(session.leaves);
+    assertEncryptionSessionActive(sessionId, session);
+    const bootstrap: VaultBootstrapRecord = {
+      formatVersion: VAULT_FORMAT_VERSION,
+      suiteId: VAULT_SUITE_ID,
+      aadSchemaId: VAULT_AAD_SCHEMA_ID,
+      nodeId: session.nodeId,
+      generationNumber: session.generationNumber,
+      generationId: session.generationId,
+      manifestIv: zeroNonce(),
+      wrapperIds: decodedWrappers.map((wrapper) => wrapper.wrapperId),
+      ciphertextLength: session.ciphertextLength,
+      signerKeyVersion: activeIdentity.keyVersion,
+      recordVersion: session.recordVersion,
+      previousRecordHash: session.previousRecordHash,
+      manifestHash,
+      wrapperHashes,
+      ciphertextMerkleRoot,
+    };
+    const bootstrapCbor = encodeBootstrap(bootstrap);
+    const signature = sodium.crypto_sign_detached(
       bootstrapCbor,
-      bootstrapSignature: signature,
-      encryptedManifest,
-      wrappers: canonicalWrappers,
-    },
-  };
-  nodeKeys.set(session.nodeId, session.nodeKey);
-  encryptionSessions.delete(sessionId);
-  wipe(manifestPlaintext, manifestAad, ...wrapperHashes, ...session.leaves);
-  return complete;
+      activeIdentity.ed25519PrivateKey,
+    );
+    const complete: VaultEncryptionComplete = {
+      nodeId: session.nodeId,
+      generationNumber: session.generationNumber,
+      generationId: toBase64Url(session.generationId),
+      recordVersion: session.recordVersion,
+      ciphertextLength: session.ciphertextLength,
+      chunkCount: session.chunkCount,
+      record: {
+        bootstrapCbor,
+        bootstrapSignature: signature,
+        encryptedManifest,
+        wrappers: canonicalWrappers,
+      },
+    };
+    assertEncryptionSessionActive(sessionId, session);
+    nodeKeys.set(session.nodeId, session.nodeKey);
+    encryptionSessions.delete(sessionId);
+    completed = true;
+    return complete;
+  } finally {
+    wipe(
+      manifestPlaintext,
+      manifestAad,
+      manifestHash,
+      ciphertextMerkleRoot,
+      ...wrapperHashes,
+      ...session.leaves,
+    );
+    if (!completed) wipe(encryptedManifest);
+  }
 }
 
 function abortEncryption(sessionId: string, nodeId: string): void {
@@ -1273,6 +1429,7 @@ function abortEncryption(sessionId: string, nodeId: string): void {
   if (session) {
     wipe(
       session.generationId,
+      session.manifest.generationId,
       session.previousRecordHash,
       session.ownerWrapper,
       ...session.leaves,
@@ -1283,6 +1440,7 @@ function abortEncryption(sessionId: string, nodeId: string): void {
 async function createShareDirectory(
   input: VaultShareDirectoryInput,
 ): Promise<VaultShareDirectoryResult> {
+  const sessionGeneration = vaultSessionGeneration;
   const activeIdentity = requireIdentity();
   const nodeKey = nodeKeys.get(input.nodeId);
   if (!nodeKey) {
@@ -1306,7 +1464,11 @@ async function createShareDirectory(
   if (generationId.length !== 16 || recordHash.length !== 32) {
     throw new Error("The share-directory record binding is invalid.");
   }
-  const contexts = await decryptShareContexts(input.shareContexts);
+  const contexts = await decryptShareContexts(
+    input.shareContexts,
+    input.shareContextCacheKey,
+  );
+  assertVaultSession(sessionGeneration);
   const wrappersByShare = await mapWithConcurrency(
     contexts,
     SHARE_SIDECAR_CRYPTO_CONCURRENCY,
@@ -1336,13 +1498,16 @@ async function createShareDirectory(
       ]);
     },
   );
+  assertVaultSession(sessionGeneration);
   const wrappers = wrappersByShare.flat();
   const wrapperHashes = await mapWithConcurrency(
     wrappers,
     SHARE_SIDECAR_CRYPTO_CONCURRENCY,
     sha256,
   );
+  assertVaultSession(sessionGeneration);
   const wrapperRoot = await wrapperSetRoot(wrapperHashes);
+  assertVaultSession(sessionGeneration);
   const directory: VaultShareDirectoryRecord = {
     formatVersion: VAULT_SHARE_DIRECTORY_VERSION,
     suiteId: VAULT_SUITE_ID,
@@ -1437,6 +1602,7 @@ async function getCachedMetadata(
 }
 
 async function openMetadataPlans(
+  operationId: number,
   plans: VaultMetadataPlan[],
   concurrency: number,
   priorityCount: number,
@@ -1462,31 +1628,79 @@ async function openMetadataPlans(
     }
     uniquePlanKeys.add(key);
   }
+  const operation: MetadataOperation = {
+    cancelled: false,
+    nodeIds: new Set(plans.map((plan) => plan.nodeId)),
+  };
+  metadataOperations.set(operationId, operation);
 
-  const priorityBoundary = Math.min(priorityCount, plans.length);
-  const priorityResults = await openMetadataPlanSet(
-    plans.slice(0, priorityBoundary),
-    concurrency,
-  );
-  const priorityReady = readyMetadataResults(priorityResults);
-  for (const result of priorityReady) rememberMetadata(result);
-  if (priorityResults.length > 0) onPriority(priorityResults);
-  void writePersistentMetadata(priorityReady).catch(() => undefined);
+  try {
+    assertMetadataOperationActive(operation, sessionGeneration);
+    const priorityBoundary = Math.min(priorityCount, plans.length);
+    const priorityResults = await openMetadataPlanSet(
+      plans.slice(0, priorityBoundary),
+      concurrency,
+      operation,
+      sessionGeneration,
+    );
+    assertMetadataOperationActive(operation, sessionGeneration);
+    const priorityReady = readyMetadataResults(priorityResults);
+    for (const result of priorityReady) rememberMetadata(result);
+    if (priorityResults.length > 0) onPriority(priorityResults);
 
-  const remainingResults = await openMetadataPlanSet(
-    plans.slice(priorityBoundary),
-    concurrency,
-  );
-  const remainingReady = readyMetadataResults(remainingResults);
-  for (const result of remainingReady) rememberMetadata(result);
-  void writePersistentMetadata(remainingReady).catch(() => undefined);
-  assertVaultSession(sessionGeneration);
-  return [...priorityResults, ...remainingResults];
+    const remainingResults = await openMetadataPlanSet(
+      plans.slice(priorityBoundary),
+      concurrency,
+      operation,
+      sessionGeneration,
+    );
+    assertMetadataOperationActive(operation, sessionGeneration);
+    const remainingReady = readyMetadataResults(remainingResults);
+    for (const result of remainingReady) rememberMetadata(result);
+    assertMetadataOperationActive(operation, sessionGeneration);
+    persistCompletedMetadataOperation(operation, sessionGeneration, [
+      ...priorityReady,
+      ...remainingReady,
+    ]);
+    return [...priorityResults, ...remainingResults];
+  } finally {
+    if (
+      operation.cancelled &&
+      metadataOperations.get(operationId) === operation
+    ) {
+      metadataOperations.delete(operationId);
+    } else {
+      setTimeout(() => {
+        if (metadataOperations.get(operationId) === operation) {
+          metadataOperations.delete(operationId);
+        }
+      }, 1_000);
+    }
+    if (operation.cancelled) evictMetadataOperation(operation);
+  }
+}
+
+function persistCompletedMetadataOperation(
+  operation: MetadataOperation,
+  sessionGeneration: number,
+  results: VaultCachedMetadataResult[],
+): void {
+  setTimeout(() => {
+    if (
+      !operation.cancelled &&
+      sessionGeneration === vaultSessionGeneration &&
+      results.length > 0
+    ) {
+      void writePersistentMetadata(results).catch(() => undefined);
+    }
+  }, 1_000);
 }
 
 async function openMetadataPlanSet(
   plans: VaultMetadataPlan[],
   concurrency: number,
+  operation: MetadataOperation,
+  sessionGeneration: number,
 ): Promise<VaultMetadataOpenResult[]> {
   if (plans.length === 0) return [];
   const results = new Array<VaultMetadataOpenResult>(plans.length);
@@ -1497,8 +1711,12 @@ async function openMetadataPlanSet(
       pending,
       concurrency,
       async ({ plan, index }) => {
+        assertMetadataOperationActive(operation, sessionGeneration);
         try {
-          const { manifest } = await openAndVerifyPlanSingleFlight(plan);
+          const { manifest } = await openAndVerifyPlan(plan, () => {
+            assertMetadataOperationActive(operation, sessionGeneration);
+          });
+          assertMetadataOperationActive(operation, sessionGeneration);
           return {
             index,
             result: {
@@ -1510,6 +1728,7 @@ async function openMetadataPlanSet(
             parentRequired: false,
           };
         } catch (failure) {
+          assertMetadataOperationActive(operation, sessionGeneration);
           const normalized = normalizeError(failure);
           return {
             index,
@@ -1525,6 +1744,7 @@ async function openMetadataPlanSet(
         }
       },
     );
+    assertMetadataOperationActive(operation, sessionGeneration);
     const madeProgress = round.some(({ result }) => result.status === "ready");
     const retry: typeof pending = [];
     for (let offset = 0; offset < round.length; offset += 1) {
@@ -1547,6 +1767,35 @@ async function openMetadataPlanSet(
   return results;
 }
 
+function assertMetadataOperationActive(
+  operation: MetadataOperation,
+  sessionGeneration: number,
+): void {
+  assertVaultSession(sessionGeneration);
+  if (operation.cancelled) {
+    throw new DOMException(
+      "The metadata operation was cancelled.",
+      "AbortError",
+    );
+  }
+}
+
+function cancelMetadataOperation(operationId: number): void {
+  const operation = metadataOperations.get(operationId);
+  if (!operation) return;
+  operation.cancelled = true;
+  evictMetadataOperation(operation);
+}
+
+function evictMetadataOperation(operation: MetadataOperation): void {
+  for (const nodeId of operation.nodeIds) {
+    for (const key of metadataMemoryCache.keys()) {
+      if (key.startsWith(`${nodeId}:`)) evictMetadata(key);
+    }
+    nodeKeys.deleteIfUnpinned(nodeId);
+  }
+}
+
 function readyMetadataResults(
   results: VaultMetadataOpenResult[],
 ): VaultCachedMetadataResult[] {
@@ -1559,16 +1808,86 @@ function rememberMetadata(result: VaultCachedMetadataResult): void {
   const key = metadataCacheEntryKey(result.nodeId, result.recordHash);
   for (const existingKey of metadataMemoryCache.keys()) {
     if (existingKey !== key && existingKey.startsWith(`${result.nodeId}:`)) {
-      metadataMemoryCache.delete(existingKey);
+      evictMetadata(existingKey);
     }
   }
-  metadataMemoryCache.delete(key);
+  evictMetadata(key);
   metadataMemoryCache.set(key, result);
-  while (metadataMemoryCache.size > MAX_METADATA_MEMORY_ENTRIES) {
-    const oldest = metadataMemoryCache.keys().next().value;
-    if (typeof oldest !== "string") break;
-    metadataMemoryCache.delete(oldest);
+  const bytes = estimateMetadataBytes(result);
+  metadataMemorySizes.set(key, bytes);
+  metadataMemoryBytes += bytes;
+  trimCombinedMetadataCaches();
+}
+
+function trimCombinedMetadataCaches(): void {
+  while (
+    combinedMetadataEntryCount() > MAX_METADATA_MEMORY_ENTRIES ||
+    metadataMemoryBytes + nodeKeys.size * NODE_KEY_ACCOUNTED_BYTES >
+      MAX_METADATA_MEMORY_BYTES
+  ) {
+    let evicted = false;
+    for (const oldest of metadataMemoryCache.keys()) {
+      const nodeId = metadataNodeId(oldest);
+      if (nodeKeys.isPinned(nodeId)) continue;
+      evictMetadata(oldest);
+      nodeKeys.deleteIfUnpinned(nodeId);
+      evicted = true;
+      break;
+    }
+    if (!evicted) {
+      const oldestNodeKey = nodeKeys.oldestUnpinnedKey();
+      if (oldestNodeKey === undefined) break;
+      nodeKeys.deleteIfUnpinned(oldestNodeKey);
+      evicted = true;
+    }
+    if (!evicted) break;
   }
+}
+
+function combinedMetadataEntryCount(): number {
+  const nodeIds = new Set(nodeKeys.keys());
+  for (const key of metadataMemoryCache.keys())
+    nodeIds.add(metadataNodeId(key));
+  return nodeIds.size;
+}
+
+function pinNodeKey(nodeId: string) {
+  const lease = nodeKeys.pin(nodeId);
+  if (!lease) return null;
+  return {
+    value: lease.value,
+    release() {
+      lease.release();
+      trimCombinedMetadataCaches();
+    },
+  };
+}
+
+function metadataNodeId(key: string): string {
+  const separator = key.indexOf(":");
+  return separator === -1 ? key : key.slice(0, separator);
+}
+
+function evictMetadata(key: string): void {
+  metadataMemoryCache.delete(key);
+  const bytes = metadataMemorySizes.get(key);
+  if (bytes !== undefined) {
+    metadataMemoryBytes -= bytes;
+    metadataMemorySizes.delete(key);
+  }
+}
+
+function estimateMetadataBytes(result: VaultCachedMetadataResult): number {
+  const manifest = result.manifest;
+  return (
+    256 +
+    result.nodeId.length * 2 +
+    result.recordHash.length * 2 +
+    manifest.name.length * 2 +
+    (manifest.mimeType?.length ?? 0) * 2 +
+    (manifest.parentId?.length ?? 0) * 2 +
+    manifest.generationId.byteLength
+  );
 }
 
 function assertMetadataReference(reference: VaultMetadataReference): void {
@@ -1609,7 +1928,7 @@ async function readPersistentMetadata(
       reference,
       stored: stored[index],
     })),
-    Math.min(MAX_METADATA_DECRYPTION_CONCURRENCY, 16),
+    MAX_METADATA_DECRYPTION_CONCURRENCY,
     async ({ reference, stored: record }) => {
       if (
         !record ||
@@ -1672,7 +1991,7 @@ async function writePersistentMetadata(
   const databasePromise = openMetadataDatabase();
   const records = await mapWithConcurrency(
     results,
-    Math.min(MAX_METADATA_DECRYPTION_CONCURRENCY, 16),
+    MAX_METADATA_DECRYPTION_CONCURRENCY,
     async (result): Promise<StoredMetadataRecord> => {
       const iv = randomBytes(12);
       const aad = metadataCacheAad(namespace, result.nodeId, result.recordHash);
@@ -2001,7 +2320,10 @@ function transactionComplete(transaction: IDBTransaction): Promise<void> {
 async function startDecryption(
   plan: VaultDownloadPlan,
 ): Promise<VaultDecryptionStart> {
+  requireRootKey();
+  const sessionGeneration = vaultSessionGeneration;
   const opened = await openAndVerifyPlanSingleFlight(plan);
+  assertVaultSession(sessionGeneration);
   if (opened.manifest.entryType !== "file") {
     throw new Error("Folders do not have encrypted content streams.");
   }
@@ -2014,10 +2336,13 @@ async function startDecryption(
           `aeralyth/content/v1/${plan.nodeId}/${plan.generationNumber}`,
         )
       : null);
+  assertVaultSession(sessionGeneration);
   if (!contentKey) throw new Error("The shared generation key is unavailable.");
   const sessionId = randomPrefixedId("vds_");
+  assertVaultSession(sessionGeneration);
   decryptionSessions.set(sessionId, {
     id: sessionId,
+    sessionGeneration,
     nodeId: plan.nodeId,
     contentKey,
     generationNumber: plan.generationNumber,
@@ -2038,8 +2363,12 @@ async function decryptChunk(
   ciphertext: Uint8Array,
 ): Promise<VaultDecryptedChunk> {
   const session = decryptionSessions.get(sessionId);
+  if (!session) {
+    wipe(ciphertext);
+    throw new Error("The decryption session is no longer available.");
+  }
+  assertDecryptionSessionActive(sessionId, session);
   if (
-    !session ||
     chunkIndex !== session.decryptedChunks ||
     chunkIndex >= session.chunkCount
   ) {
@@ -2056,7 +2385,6 @@ async function decryptChunk(
     wipe(ciphertext);
     throw new Error("The ciphertext chunk has an invalid length.");
   }
-  session.leaves.push(await ciphertextLeafHash(chunkIndex, ciphertext));
   const aad = encodeChunkAad({
     nodeId: session.nodeId,
     generationNumber: session.generationNumber,
@@ -2064,8 +2392,14 @@ async function decryptChunk(
     chunkIndex,
     plaintextLength: expectedPlaintextLength,
   });
+  let leaf: Uint8Array | null = null;
+  let padded: Uint8Array<ArrayBuffer> | null = null;
   try {
-    const padded = new Uint8Array(
+    leaf = incrementalCiphertextLeafHash(chunkIndex, ciphertext);
+    assertDecryptionSessionActive(sessionId, session);
+    session.leaves.push(leaf);
+    leaf = null;
+    padded = new Uint8Array(
       await crypto.subtle.decrypt(
         {
           name: "AES-GCM",
@@ -2077,24 +2411,27 @@ async function decryptChunk(
         asBufferSource(ciphertext),
       ),
     );
+    assertDecryptionSessionActive(sessionId, session);
     const offset = chunkIndex * VAULT_CRYPTO_CHUNK_BYTES;
     const usefulLength = Math.max(
       0,
       Math.min(padded.length, session.manifest.plaintextBytes - offset),
     );
-    const plaintext = padded.slice(0, usefulLength);
-    wipe(padded);
+    const plaintext =
+      usefulLength === padded.length ? padded : padded.slice(0, usefulLength);
+    if (plaintext === padded) padded = null;
     session.decryptedChunks += 1;
     return { plaintext: plaintext.buffer, plaintextBytes: plaintext.length };
   } catch (error) {
     abortDecryption(sessionId);
+    if (isCryptoLifecycleError(error)) throw error;
     throw vaultError(
       "AUTHENTICATION_FAILED",
       "Encrypted file authentication failed.",
       error,
     );
   } finally {
-    wipe(ciphertext, aad);
+    wipe(ciphertext, aad, leaf, padded);
   }
 }
 
@@ -2103,30 +2440,39 @@ async function finalizeDecryption(sessionId: string): Promise<void> {
   if (!session || session.decryptedChunks !== session.chunkCount) {
     throw new Error("Not all ciphertext chunks were decrypted.");
   }
+  assertDecryptionSessionActive(sessionId, session);
   const actualRoot = await merkleRootFromLeaves(session.leaves);
-  if (!equalBytes(actualRoot, session.expectedMerkleRoot)) {
-    wipe(actualRoot);
+  try {
+    assertDecryptionSessionActive(sessionId, session);
+    if (!equalBytes(actualRoot, session.expectedMerkleRoot)) {
+      abortDecryption(sessionId);
+      throw vaultError(
+        "AUTHENTICATION_FAILED",
+        "The encrypted file Merkle root is invalid.",
+      );
+    }
     abortDecryption(sessionId);
-    throw vaultError(
-      "AUTHENTICATION_FAILED",
-      "The encrypted file Merkle root is invalid.",
-    );
+  } finally {
+    wipe(actualRoot);
   }
-  wipe(actualRoot);
-  abortDecryption(sessionId);
 }
 
 function abortDecryption(sessionId: string): void {
   const session = decryptionSessions.get(sessionId);
   if (!session) return;
   decryptionSessions.delete(sessionId);
-  wipe(session.generationId, session.expectedMerkleRoot, ...session.leaves);
+  wipe(
+    session.generationId,
+    session.manifest.generationId,
+    session.expectedMerkleRoot,
+    ...session.leaves,
+  );
 }
 
 function openAndVerifyPlanSingleFlight(
   plan: VaultMetadataPlan,
 ): Promise<OpenedPlan> {
-  const key = metadataCacheEntryKey(plan.nodeId, plan.recordHash);
+  const key = planFlightKey(plan);
   const existing = nodeOpenFlights.get(key);
   if (existing) return existing;
   const operation = openAndVerifyPlan(plan);
@@ -2138,18 +2484,31 @@ function openAndVerifyPlanSingleFlight(
   return operation;
 }
 
+function planFlightKey(plan: VaultMetadataPlan): string {
+  const authorization = plan.share?.authorizationVersion ?? "owner";
+  return `${metadataCacheEntryKey(plan.nodeId, plan.recordHash)}:${authorization}`;
+}
+
 function isDownloadPlan(plan: VaultMetadataPlan): plan is VaultDownloadPlan {
   return "downloadUrl" in plan;
 }
 
-async function openAndVerifyPlan(plan: VaultMetadataPlan): Promise<OpenedPlan> {
+async function openAndVerifyPlan(
+  plan: VaultMetadataPlan,
+  assertActive: () => void = () => undefined,
+): Promise<OpenedPlan> {
   requireRootKey();
+  assertActive();
   const sessionGeneration = vaultSessionGeneration;
   const downloadPlan = isDownloadPlan(plan) ? plan : null;
   const bootstrapBytes = fromBase64Url(plan.bootstrapCbor);
   const signature = fromBase64Url(plan.bootstrapSignature);
   const bootstrap = decodeBootstrap(bootstrapBytes);
   const publicKey = fromBase64Url(plan.signerEd25519PublicKey);
+  const expectedChunkCount =
+    plan.ciphertextLength === 0
+      ? 0
+      : Math.ceil(plan.ciphertextLength / (VAULT_CRYPTO_CHUNK_BYTES + 16));
   if (
     !sodium.crypto_sign_verify_detached(signature, bootstrapBytes, publicKey)
   ) {
@@ -2158,7 +2517,7 @@ async function openAndVerifyPlan(plan: VaultMetadataPlan): Promise<OpenedPlan> {
       "The node record signature is invalid.",
     );
   }
-  const signedHash = await sha256(concatBytes(bootstrapBytes, signature));
+  const signedHash = await sha256Parts(bootstrapBytes, signature);
   if (
     bootstrap.formatVersion !== VAULT_FORMAT_VERSION ||
     bootstrap.suiteId !== VAULT_SUITE_ID ||
@@ -2171,13 +2530,15 @@ async function openAndVerifyPlan(plan: VaultMetadataPlan): Promise<OpenedPlan> {
       (bootstrap.previousRecordHash === null) ||
     !equalBytes(bootstrap.manifestIv, zeroNonce()) ||
     !equalBytes(bootstrap.generationId, fromBase64Url(plan.generationId)) ||
-    (downloadPlan !== null &&
-      (bootstrap.ciphertextLength !== downloadPlan.ciphertextLength ||
-        downloadPlan.cryptoChunkBytes !== VAULT_CRYPTO_CHUNK_BYTES ||
-        !equalBytes(
-          bootstrap.ciphertextMerkleRoot,
-          fromBase64Url(downloadPlan.ciphertextMerkleRoot),
-        ))) ||
+    bootstrap.ciphertextLength !== plan.ciphertextLength ||
+    plan.cryptoChunkBytes !== VAULT_CRYPTO_CHUNK_BYTES ||
+    plan.chunkCount !== expectedChunkCount ||
+    (plan.entryType === "folder") !== (plan.ciphertextLength === 0) ||
+    bootstrap.wrapperIds.length !== plan.wrappers.length ||
+    !equalBytes(
+      bootstrap.ciphertextMerkleRoot,
+      fromBase64Url(plan.ciphertextMerkleRoot),
+    ) ||
     !equalBytes(signedHash, fromBase64Url(plan.recordHash))
   ) {
     throw vaultError(
@@ -2198,12 +2559,23 @@ async function openAndVerifyPlan(plan: VaultMetadataPlan): Promise<OpenedPlan> {
     const wrapper = decodeWrapper(wrapperBytes[index]);
     wrappers.push(wrapper);
   }
+  const wrapperHashes = await mapWithConcurrency(
+    wrapperBytes,
+    SHARE_HASH_CRYPTO_CONCURRENCY,
+    sha256,
+  );
+  const verifiedMaterial: VerifiedPlanMaterial = {
+    bootstrap,
+    wrappers,
+    wrapperBytes,
+    wrapperHashes,
+  };
 
   let nodeKey: CryptoKey | null = null;
   let manifestKey: CryptoKey | null = null;
   let contentKey: CryptoKey | null = null;
   if (plan.share) {
-    const shared = await openSharedKeys(plan, wrappers, wrapperBytes);
+    const shared = await openSharedKeys(plan, verifiedMaterial);
     manifestKey = shared.manifestKey;
     contentKey = shared.contentKey;
   } else {
@@ -2216,21 +2588,13 @@ async function openAndVerifyPlan(plan: VaultMetadataPlan): Promise<OpenedPlan> {
         "The wrapper commitment count is invalid.",
       );
     }
-    const computedWrapperHashes = await mapWithConcurrency(
-      wrapperBytes,
-      SHARE_HASH_CRYPTO_CONCURRENCY,
-      sha256,
-    );
     for (let index = 0; index < wrappers.length; index += 1) {
       const wrapper = wrappers[index];
       if (
         wrapper.nodeId !== plan.nodeId ||
         wrapper.recordVersion !== plan.recordVersion ||
         !equalBytes(wrapper.wrapperId, bootstrap.wrapperIds[index]) ||
-        !equalBytes(
-          computedWrapperHashes[index],
-          bootstrap.wrapperHashes[index],
-        )
+        !equalBytes(wrapperHashes[index], bootstrap.wrapperHashes[index])
       ) {
         throw vaultError(
           "AUTHENTICATION_FAILED",
@@ -2250,12 +2614,12 @@ async function openAndVerifyPlan(plan: VaultMetadataPlan): Promise<OpenedPlan> {
         "No owner node-key wrapper is available.",
       );
     }
+    const parentLease =
+      ownerWrapper.kind === 2 && ownerWrapper.parentNodeId
+        ? pinNodeKey(ownerWrapper.parentNodeId)
+        : null;
     const wrappingKey =
-      ownerWrapper.kind === 1
-        ? requireRootKey()
-        : ownerWrapper.parentNodeId
-          ? (nodeKeys.get(ownerWrapper.parentNodeId) ?? null)
-          : null;
+      ownerWrapper.kind === 1 ? requireRootKey() : (parentLease?.value ?? null);
     if (!wrappingKey) {
       throw vaultError(
         "PARENT_KEY_REQUIRED",
@@ -2263,22 +2627,28 @@ async function openAndVerifyPlan(plan: VaultMetadataPlan): Promise<OpenedPlan> {
       );
     }
     const purpose = nodeWrapperPurpose(ownerWrapper.kind, ownerWrapper.nodeId);
-    const raw = await decryptDerivedRecord(
-      wrappingKey,
-      ownerWrapper.wrapperId,
-      purpose,
-      toBase64Url(ownerWrapper.wrapperId),
-      ownerWrapper.recordVersion,
-      ownerWrapper.ciphertext,
-    );
     try {
-      if (raw.length !== 32)
-        throw new Error("The node key has an invalid length.");
-      nodeKey = await importHkdf(raw);
-      assertVaultSession(sessionGeneration);
-      nodeKeys.set(plan.nodeId, nodeKey);
+      const raw = await decryptDerivedRecord(
+        wrappingKey,
+        ownerWrapper.wrapperId,
+        purpose,
+        toBase64Url(ownerWrapper.wrapperId),
+        ownerWrapper.recordVersion,
+        ownerWrapper.ciphertext,
+      );
+      try {
+        if (raw.length !== 32)
+          throw new Error("The node key has an invalid length.");
+        nodeKey = await importHkdf(raw);
+        assertActive();
+        assertVaultSession(sessionGeneration);
+        nodeKeys.set(plan.nodeId, nodeKey);
+        trimCombinedMetadataCaches();
+      } finally {
+        wipe(raw);
+      }
     } finally {
-      wipe(raw);
+      parentLease?.release();
     }
   }
   if (!plan.share) {
@@ -2345,56 +2715,78 @@ async function openAndVerifyPlan(plan: VaultMetadataPlan): Promise<OpenedPlan> {
     manifestAad,
     manifestPlaintext,
     ...wrapperBytes,
+    ...wrapperHashes,
   );
+  assertActive();
   assertVaultSession(sessionGeneration);
   return { manifest, nodeKey, contentKey };
 }
 
 async function createShareMaterial(
   input: VaultShareMaterialInput,
+  onWrapperChunk: ShareWrapperChunkHandler,
 ): Promise<VaultShareMaterialResult> {
   await validateShareIdentity(input.recipient);
-  return buildShareMaterial({
-    shareId: input.shareId,
-    rootNodeId: input.rootNodeId,
-    senderId: input.senderId,
-    epoch: 1,
-    recordVersion: 1,
-    previousRecordHash: null,
-    recipients: [
-      {
-        userId: input.recipient.userId,
-        keyVersion: input.recipient.keyVersion,
-        x25519PublicKey: input.recipient.x25519PublicKey,
-      },
-    ],
-    nodes: input.nodes,
-  });
+  return buildShareMaterial(
+    {
+      shareId: input.shareId,
+      rootNodeId: input.rootNodeId,
+      senderId: input.senderId,
+      epoch: 1,
+      recordVersion: 1,
+      previousRecordHash: null,
+      recipients: [
+        {
+          userId: input.recipient.userId,
+          keyVersion: input.recipient.keyVersion,
+          x25519PublicKey: input.recipient.x25519PublicKey,
+        },
+      ],
+      nodes: input.nodes,
+      plans: input.plans,
+    },
+    onWrapperChunk,
+  );
 }
 
 async function rotateShareMaterial(
   input: VaultShareRotationInput,
+  onWrapperChunk: ShareWrapperChunkHandler,
 ): Promise<VaultShareMaterialResult> {
-  return buildShareMaterial({
-    ...input,
-    previousRecordHash: fromBase64Url(input.previousRecordHash),
-  });
+  return buildShareMaterial(
+    {
+      ...input,
+      previousRecordHash: fromBase64Url(input.previousRecordHash),
+    },
+    onWrapperChunk,
+  );
 }
 
-async function buildShareMaterial(input: {
-  shareId: string;
-  rootNodeId: string;
-  senderId: string;
-  epoch: number;
-  recordVersion: number;
-  previousRecordHash: Uint8Array | null;
-  recipients: Array<{
-    userId: string;
-    keyVersion: number;
-    x25519PublicKey: string;
-  }>;
-  nodes: VaultShareNodeSnapshot[];
-}): Promise<VaultShareMaterialResult> {
+type ShareWrapperChunkHandler = (
+  chunk: VaultShareMaterialProgress & {
+    nodeId: string;
+    wrappers: Uint8Array[];
+  },
+) => void;
+
+async function buildShareMaterial(
+  input: {
+    shareId: string;
+    rootNodeId: string;
+    senderId: string;
+    epoch: number;
+    recordVersion: number;
+    previousRecordHash: Uint8Array | null;
+    recipients: Array<{
+      userId: string;
+      keyVersion: number;
+      x25519PublicKey: string;
+    }>;
+    nodes: VaultShareNodeSnapshot[];
+    plans: VaultSharePreparationPlan[];
+  },
+  onWrapperChunk: ShareWrapperChunkHandler,
+): Promise<VaultShareMaterialResult> {
   const root = requireRootKey();
   if (!/^shr_[A-Za-z0-9_-]{4,92}$/u.test(input.shareId) || input.epoch < 1) {
     throw new Error("The share ID or epoch is invalid.");
@@ -2403,51 +2795,53 @@ async function buildShareMaterial(input: {
   const epochKey = await importHkdf(epochMaterial);
   const wrapperId = randomBytes(16);
   try {
-    const wrappers = await createSubtreeShareWrappers(
+    const wrapperHashes = await createSubtreeShareWrappers(
       input.nodes,
+      input.plans,
+      input.rootNodeId,
       input.shareId,
       input.epoch,
       epochKey,
+      onWrapperChunk,
     );
-    const wrapperHashes = await mapWithConcurrency(
-      wrappers,
-      SHARE_HASH_CRYPTO_CONCURRENCY,
-      sha256,
-    );
-    const wrapperRoot = await wrapperSetRoot(wrapperHashes);
-    const envelopes = await mapWithConcurrency(
-      input.recipients,
-      SHARE_ENVELOPE_CRYPTO_CONCURRENCY,
-      (recipient) =>
-        createHpkeEnvelope({
-          shareId: input.shareId,
-          rootNodeId: input.rootNodeId,
-          senderId: input.senderId,
-          epoch: input.epoch,
-          recordVersion: input.recordVersion,
-          previousRecordHash: input.previousRecordHash,
-          recipient,
-          wrapperSetRoot: wrapperRoot,
-          wrapperCount: wrapperHashes.length,
-          epochMaterial,
-        }),
-    );
-    const ownerCiphertext = await encryptDerivedRecord(
-      root,
-      wrapperId,
-      shareOwnerPurpose(input.shareId, input.epoch),
-      toBase64Url(wrapperId),
-      input.epoch,
-      epochMaterial,
-    );
-    return {
-      wrappers,
-      envelopes,
-      ownerEpochKey: {
-        wrapperId: wrapperId.slice(),
-        ciphertext: ownerCiphertext,
-      },
-    };
+    try {
+      const wrapperRoot = await wrapperSetRoot(wrapperHashes);
+      const envelopes = await mapWithConcurrency(
+        input.recipients,
+        SHARE_ENVELOPE_CRYPTO_CONCURRENCY,
+        (recipient) =>
+          createHpkeEnvelope({
+            shareId: input.shareId,
+            rootNodeId: input.rootNodeId,
+            senderId: input.senderId,
+            epoch: input.epoch,
+            recordVersion: input.recordVersion,
+            previousRecordHash: input.previousRecordHash,
+            recipient,
+            wrapperSetRoot: wrapperRoot,
+            wrapperCount: wrapperHashes.length,
+            epochMaterial,
+          }),
+      );
+      const ownerCiphertext = await encryptDerivedRecord(
+        root,
+        wrapperId,
+        shareOwnerPurpose(input.shareId, input.epoch),
+        toBase64Url(wrapperId),
+        input.epoch,
+        epochMaterial,
+      );
+      return {
+        wrappers: [],
+        envelopes,
+        ownerEpochKey: {
+          wrapperId: wrapperId.slice(),
+          ciphertext: ownerCiphertext,
+        },
+      };
+    } finally {
+      wipe(...wrapperHashes);
+    }
   } finally {
     wipe(epochMaterial, wrapperId);
   }
@@ -2455,25 +2849,66 @@ async function buildShareMaterial(input: {
 
 async function createSubtreeShareWrappers(
   nodes: VaultShareNodeSnapshot[],
+  plans: VaultSharePreparationPlan[],
+  rootNodeId: string,
   shareId: string,
   epoch: number,
   epochKey: CryptoKey,
+  onWrapperChunk: ShareWrapperChunkHandler,
 ): Promise<Uint8Array[]> {
-  const ordered = [...nodes].sort((left, right) =>
-    left.nodeId.localeCompare(right.nodeId),
+  const context = { shareId, epoch, epochKey };
+  if (nodes.length === 0 || plans.length !== nodes.length) {
+    throw new Error("The share-preparation plan is incomplete.");
+  }
+  const snapshots = new Map(nodes.map((node) => [node.nodeId, node]));
+  const preparations = new Map(
+    plans.map((plan) => [plan.snapshot.nodeId, plan]),
   );
-  const tasks: Array<{
-    node: VaultShareNodeSnapshot;
-    nodeKey: CryptoKey;
-    generationId: Uint8Array;
-    kind: 3 | 4;
-  }> = [];
-  for (const node of ordered) {
-    const nodeKey = nodeKeys.get(node.nodeId);
+  const children = new Map<string, VaultSharePreparationPlan[]>();
+  for (const preparation of plans) {
+    const snapshot = snapshots.get(preparation.snapshot.nodeId);
+    if (
+      !snapshot ||
+      preparation.snapshot.parentId !== snapshot.parentId ||
+      preparation.snapshot.depth !== snapshot.depth ||
+      preparation.snapshot.entryType !== snapshot.entryType ||
+      preparation.snapshot.generationNumber !== snapshot.generationNumber ||
+      preparation.snapshot.generationId !== snapshot.generationId ||
+      preparation.metadata.nodeId !== snapshot.nodeId ||
+      preparation.metadata.recordVersion !== snapshot.recordVersion ||
+      preparation.metadata.recordHash !== snapshot.recordHash ||
+      preparation.metadata.generationId !== snapshot.generationId
+    ) {
+      throw new Error("The share-preparation snapshot is inconsistent.");
+    }
+    if (snapshot.parentId) {
+      const siblings = children.get(snapshot.parentId) ?? [];
+      siblings.push(preparation);
+      children.set(snapshot.parentId, siblings);
+    }
+  }
+  const root = preparations.get(rootNodeId);
+  if (!root || root.snapshot.parentId !== null || root.snapshot.depth !== 0) {
+    throw new Error("The share-preparation root is invalid.");
+  }
+  for (const siblings of children.values()) {
+    siblings.sort((left, right) =>
+      left.snapshot.nodeId.localeCompare(right.snapshot.nodeId),
+    );
+  }
+
+  const wrapperHashes: Uint8Array[] = [];
+  const visited = new Set<string>();
+  let completedNodes = 0;
+  const activeLeases = new Set<NonNullable<ReturnType<typeof pinNodeKey>>>();
+  const openAndWrap = async (preparation: VaultSharePreparationPlan) => {
+    const node = preparation.snapshot;
+    const opened = await openAndVerifyPlan(preparation.metadata);
+    const nodeKey = opened.nodeKey;
     if (!nodeKey) {
       throw vaultError(
         "NODE_KEY_REQUIRED",
-        `Unlock every node in the shared subtree first:${node.nodeId}`,
+        `The share-preparation node key is unavailable:${node.nodeId}`,
       );
     }
     const generationId = node.generationId
@@ -2482,26 +2917,81 @@ async function createSubtreeShareWrappers(
     if (generationId.length !== 16) {
       throw new Error("A share generation ID is invalid.");
     }
-    tasks.push({ node, nodeKey, generationId, kind: 4 });
-    if (node.entryType === "file") {
-      tasks.push({ node, nodeKey, generationId, kind: 3 });
+    const kinds: Array<3 | 4> = node.entryType === "file" ? [4, 3] : [4];
+    const wrappers = await mapWithConcurrency(
+      kinds,
+      SHARE_WRAPPER_CRYPTO_CONCURRENCY,
+      (kind) =>
+        createShareWrapperFromNode(
+          node.nodeId,
+          node.recordVersion,
+          node.generationNumber,
+          generationId,
+          nodeKey,
+          context,
+          kind,
+        ),
+    );
+    const hashes = await mapWithConcurrency(
+      wrappers,
+      SHARE_HASH_CRYPTO_CONCURRENCY,
+      sha256,
+    );
+    wrapperHashes.push(...hashes);
+    visited.add(node.nodeId);
+    wipe(generationId);
+    const hasChildren = (children.get(node.nodeId)?.length ?? 0) > 0;
+    const lease = hasChildren ? pinNodeKey(node.nodeId) : null;
+    if (hasChildren && !lease) {
+      throw new Error("A share-preparation parent key could not be pinned.");
     }
+    if (lease) activeLeases.add(lease);
+    if (!hasChildren) nodeKeys.deleteIfUnpinned(node.nodeId, nodeKey);
+    completedNodes += 1;
+    onWrapperChunk({
+      nodeId: node.nodeId,
+      wrappers,
+      completedNodes,
+      totalNodes: nodes.length,
+    });
+    return { preparation, lease };
+  };
+  const visitChildren = async (
+    parent: Awaited<ReturnType<typeof openAndWrap>>,
+  ): Promise<void> => {
+    try {
+      const descendants =
+        children.get(parent.preparation.snapshot.nodeId) ?? [];
+      for (
+        let offset = 0;
+        offset < descendants.length;
+        offset += MAX_SHARE_PREPARATION_CONCURRENCY
+      ) {
+        const opened = await mapWithConcurrency(
+          descendants.slice(offset, offset + MAX_SHARE_PREPARATION_CONCURRENCY),
+          MAX_SHARE_PREPARATION_CONCURRENCY,
+          openAndWrap,
+        );
+        for (const child of opened) await visitChildren(child);
+      }
+    } finally {
+      if (parent.lease) {
+        activeLeases.delete(parent.lease);
+        parent.lease.release();
+      }
+      nodeKeys.deleteIfUnpinned(parent.preparation.snapshot.nodeId);
+    }
+  };
+
+  try {
+    await visitChildren(await openAndWrap(root));
+    if (visited.size !== nodes.length) {
+      throw new Error("The share-preparation hierarchy is disconnected.");
+    }
+    return wrapperHashes;
+  } finally {
+    for (const lease of activeLeases) lease.release();
   }
-  const context = { shareId, epoch, epochKey };
-  return mapWithConcurrency(
-    tasks,
-    SHARE_WRAPPER_CRYPTO_CONCURRENCY,
-    ({ node, nodeKey, generationId, kind }) =>
-      createShareWrapperFromNode(
-        node.nodeId,
-        node.recordVersion,
-        node.generationNumber,
-        generationId,
-        nodeKey,
-        context,
-        kind,
-      ),
-  );
 }
 
 async function createShareWrapperFromNode(
@@ -2639,9 +3129,9 @@ async function createHpkeEnvelope(input: {
 
 async function openSharedKeys(
   plan: VaultMetadataPlan,
-  wrappers: VaultWrapperRecord[],
-  wrapperBytes: Uint8Array[],
+  material: VerifiedPlanMaterial,
 ): Promise<{ manifestKey: CryptoKey; contentKey: CryptoKey | null }> {
+  const { bootstrap, wrappers, wrapperBytes, wrapperHashes } = material;
   const share = plan.share;
   const activeIdentity = requireIdentity();
   if (!share) throw new Error("Shared key material is missing.");
@@ -2663,14 +3153,26 @@ async function openSharedKeys(
   const envelope = decodeShareEnvelope(envelopeBytes);
   const senderX25519 = fromBase64Url(share.senderX25519PublicKey);
   const [envelopeHash, senderFingerprint] = await Promise.all([
-    sha256(concatBytes(envelopeBytes, envelopeSignature)),
-    sha256(concatBytes(senderX25519, senderEd25519)),
+    sha256Parts(envelopeBytes, envelopeSignature),
+    sha256Parts(senderX25519, senderEd25519),
   ]);
+  const authorizationVersion = await shareAuthorizationVersion({
+    shareId: share.shareId,
+    epoch: share.epoch,
+    recipientId: share.recipientId,
+    recipientKeyVersion: share.recipientKeyVersion,
+    shareRecordVersion: share.recordVersion,
+    envelopeHash,
+  });
   const expectedPreviousRecordHash = share.previousRecordHash
     ? fromBase64Url(share.previousRecordHash)
     : null;
   if (
     !equalBytes(envelopeHash, fromBase64Url(share.envelopeHash)) ||
+    !equalBytes(
+      authorizationVersion,
+      fromBase64Url(share.authorizationVersion),
+    ) ||
     (envelope.formatVersion !== VAULT_FORMAT_VERSION &&
       envelope.formatVersion !== VAULT_SHARE_ENVELOPE_VERSION) ||
     envelope.shareId !== share.shareId ||
@@ -2699,11 +3201,6 @@ async function openSharedKeys(
       "The share envelope scope is invalid.",
     );
   }
-  const bootstrap = decodeBootstrap(fromBase64Url(plan.bootstrapCbor));
-  const bootstrapCommitments = new Set(
-    bootstrap.wrapperHashes.map(toBase64Url),
-  );
-  const legacyCommitments = new Set(envelope.wrapperHashes.map(toBase64Url));
   const wrapperProofs = share.wrapperProofs ?? [];
   if (
     envelope.formatVersion === VAULT_SHARE_ENVELOPE_VERSION &&
@@ -2717,16 +3214,16 @@ async function openSharedKeys(
     );
   }
   const directoryMaterial = share.directory;
-  const directory = directoryMaterial
-    ? decodeShareDirectory(fromBase64Url(directoryMaterial.canonicalCbor))
+  const directoryCbor = directoryMaterial
+    ? fromBase64Url(directoryMaterial.canonicalCbor)
     : null;
+  const directory = directoryCbor ? decodeShareDirectory(directoryCbor) : null;
   if (directory && directoryMaterial) {
-    const directoryCbor = fromBase64Url(directoryMaterial.canonicalCbor);
     const directorySignature = fromBase64Url(directoryMaterial.signature);
     if (
       !sodium.crypto_sign_verify_detached(
         directorySignature,
-        directoryCbor,
+        directoryCbor as Uint8Array,
         fromBase64Url(plan.signerEd25519PublicKey),
       ) ||
       directory.formatVersion !== VAULT_SHARE_DIRECTORY_VERSION ||
@@ -2747,19 +3244,13 @@ async function openSharedKeys(
       );
     }
   }
-  const receivedWrapperHashes = await mapWithConcurrency(
-    wrapperBytes,
-    SHARE_HASH_CRYPTO_CONCURRENCY,
-    sha256,
-  );
   const commitments = await mapWithConcurrency(
-    receivedWrapperHashes,
+    wrapperHashes,
     SHARE_HASH_CRYPTO_CONCURRENCY,
     async (hashBytes, index) => {
-      const hash = toBase64Url(hashBytes);
-      let committed = bootstrapCommitments.has(hash);
+      let committed = containsFixedHash(bootstrap.wrapperHashes, hashBytes);
       if (!committed && envelope.formatVersion === VAULT_FORMAT_VERSION) {
-        committed = legacyCommitments.has(hash);
+        committed = containsFixedHash(envelope.wrapperHashes, hashBytes);
       }
       if (
         !committed &&
@@ -2796,18 +3287,19 @@ async function openSharedKeys(
           wipe(proofBytes);
         }
       }
-      return { committed, hash };
+      return { committed, hashBytes };
     },
   );
-  const seenWrapperHashes = new Set<string>();
-  for (const { committed, hash } of commitments) {
-    if (!committed || seenWrapperHashes.has(hash)) {
+  const seenWrapperHashes: Uint8Array[] = [];
+  for (const { committed, hashBytes } of commitments) {
+    if (committed && !containsFixedHash(seenWrapperHashes, hashBytes)) {
+      seenWrapperHashes.push(hashBytes);
+    } else {
       throw vaultError(
         "AUTHENTICATION_FAILED",
         "A share wrapper is not committed.",
       );
     }
-    seenWrapperHashes.add(hash);
   }
   if (wrappers.length !== (plan.entryType === "file" ? 2 : 1)) {
     throw vaultError(
@@ -2905,6 +3397,8 @@ async function openSharedKeys(
       senderFingerprint,
       expectedPreviousRecordHash,
       envelopeHash,
+      authorizationVersion,
+      directoryCbor,
       info,
       aad,
       epochMaterial,
@@ -2920,6 +3414,13 @@ function nullableEqualBytes(
 ): boolean {
   if (left === null || right === null) return left === right;
   return equalBytes(left, right);
+}
+
+function containsFixedHash(
+  hashes: readonly Uint8Array[],
+  expected: Uint8Array,
+): boolean {
+  return hashes.some((hash) => equalBytes(hash, expected));
 }
 
 function validFileManifestLayout(
@@ -2973,7 +3474,7 @@ async function validateShareIdentity(
   if (x25519.length !== 32 || ed25519.length !== 32) {
     throw new Error("The recipient identity keys are invalid.");
   }
-  const fingerprint = await sha256(concatBytes(x25519, ed25519));
+  const fingerprint = await sha256Parts(x25519, ed25519);
   if (!equalBytes(fingerprint, fromBase64Url(recipient.fingerprintSha256))) {
     throw new Error("The recipient identity fingerprint is invalid.");
   }
@@ -3226,6 +3727,16 @@ function assertUnlockMaterial(material: VaultUnlockMaterial): void {
   ) {
     throw new Error("The server returned invalid vault wrapping material.");
   }
+  if (
+    material.accountState &&
+    (fromBase64Url(material.accountState.recordId).length !== 16 ||
+      material.accountState.version !== material.vaultVersion ||
+      !Number.isSafeInteger(material.accountState.ciphertextBytes) ||
+      material.accountState.ciphertextBytes < 16 ||
+      material.accountState.ciphertextBytes > 4 * 1024 * 1024)
+  ) {
+    throw new Error("The server returned an invalid account-state manifest.");
+  }
 }
 
 function requireRootKey(): CryptoKey {
@@ -3251,7 +3762,43 @@ function requireEncryptionSession(sessionId: string): EncryptionSession {
   const session = encryptionSessions.get(sessionId);
   if (!session)
     throw new Error("The encryption session is no longer available.");
+  assertEncryptionSessionActive(sessionId, session);
   return session;
+}
+
+function assertEncryptionSessionActive(
+  sessionId: string,
+  session: EncryptionSession,
+): void {
+  if (session.sessionGeneration !== vaultSessionGeneration) {
+    throw vaultError("VAULT_LOCKED", "The vault locked during encryption.");
+  }
+  if (encryptionSessions.get(sessionId) !== session) {
+    throw vaultError(
+      "CRYPTO_SESSION_ABORTED",
+      "The encryption session was aborted.",
+    );
+  }
+}
+
+function assertDecryptionSessionActive(
+  sessionId: string,
+  session: DecryptionSession,
+): void {
+  if (session.sessionGeneration !== vaultSessionGeneration) {
+    throw vaultError("VAULT_LOCKED", "The vault locked during decryption.");
+  }
+  if (decryptionSessions.get(sessionId) !== session) {
+    throw vaultError(
+      "CRYPTO_SESSION_ABORTED",
+      "The decryption session was aborted.",
+    );
+  }
+}
+
+function isCryptoLifecycleError(error: unknown): boolean {
+  const code = (error as { code?: unknown })?.code;
+  return code === "VAULT_LOCKED" || code === "CRYPTO_SESSION_ABORTED";
 }
 
 function validatePassword(password: string): void {

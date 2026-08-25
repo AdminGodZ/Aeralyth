@@ -837,6 +837,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-049 [P2] Hash construction repeatedly concatenates temporary buffers
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Rust protocol, route, and publication hashes now stream domain-separated parts into `Sha256`; browser protocol and worker hashes use the incremental `@noble/hashes` SHA-256 implementation where WebCrypto would require aggregate buffers. Rust/browser commitment and authorization vectors match, and the full frontend, backend, TypeScript, Biome, rustfmt, and strict-Clippy gates pass.
+
 **Confidence:** Confirmed
 
 **Evidence:** Rust verification and browser worker code concatenate canonical bytes with signatures or prefixes before hashing. Share snapshot hashes also build aggregate vectors.
@@ -848,6 +852,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Allocation profiles should no longer show aggregate hash buffers proportional to the whole request.
 
 ## PERF-050 [P2] The Rust CBOR reader owns byte strings and identifiers unnecessarily
+
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Publication wrapper and share-envelope validation now retains canonical request/response material as `Bytes` and exposes variable identifiers and ciphertext as slices of that allocation. Owned strings and vectors are created only at database boundaries. Pointer-range regressions prove slice ownership, the shared-plan response uses the same verified Bytes-backed envelope parser, and the old copying envelope parser was removed.
 
 **Confidence:** Confirmed
 
@@ -861,6 +869,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-051 [P1] Client node-key and share-key caches grow without a bound until vault lock
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** The worker node-key cache is now a pinned LRU capped at 8,192 entries, matching the protocol's largest legal share-wrapper set instead of breaking large valid share operations. Cache hits refresh recency, active parent keys are pinned while child wrappers are encrypted or opened, same-key replacement is deferred until the final lease releases, overflow is trimmed as soon as pins release, and vault lock clears the cache synchronously. Share epoch keys remain operation-scoped rather than entering another persistent cache. Unit tests prove least-recently-used eviction, pin-safe temporary overflow, idempotent lease release, same-key replacement under two active leases, and a stable 1,024-entry plateau after 20,000 unique insertions. A source regression test requires the production worker to keep the 8,192-entry bound and both active-parent pin sites.
+
 **Confidence:** Confirmed
 
 **Evidence:** The vault worker stores opened `CryptoKey` objects in maps. Repository/share preparation can open thousands of nodes. Keys are cleared mainly when the whole vault locks.
@@ -872,6 +884,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Open tens of thousands of nodes and verify worker heap reaches a stable plateau.
 
 ## PERF-052 [P1] Failed or canceled crypto sessions are not reliably removed
+
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Upload and download failures and cancellations call the worker's explicit abort commands, including the race where a decryption session starts after its network request has already failed. Abort removes the session and wipes both session and manifest generation-ID buffers, record hashes, wrapper bytes, Merkle leaves, and expected roots. Vault locking now runs every live encryption session through `abortEncryption` instead of dropping the session map without wiping it, and still aborts every live decryption session. Each crypto session captures the vault generation and rechecks its map identity and generation after awaited hashing, key derivation, encryption, decryption, and Merkle work, so an in-flight operation cannot return plaintext or repopulate the key cache after lock. Lifecycle errors remain distinct from authentication failures. Functional cancellation tests and lock-lifecycle source regressions protect transfer, zeroization, and in-flight lock paths.
 
 **Confidence:** Confirmed
 
@@ -885,6 +901,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-053 [P2] Shared plan verification re-decodes and re-hashes material
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Plan opening now creates one verified-plan material object containing the decoded bootstrap, decoded wrappers, raw wrapper bytes, and binary wrapper hashes. Owner/shared key opening reuses it without decoding bootstrap records again or constructing base64 commitment sets; fixed hashes are compared as bytes. Source regressions protect both properties, and Luna's cycle review passed the implementation.
+
 **Confidence:** Confirmed
 
 **Evidence:** The worker decodes bootstrap/wrappers in the main plan-opening path, then shared-key opening decodes bootstrap again and converts committed hashes into base64 strings and sets.
@@ -897,6 +917,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-054 [P2] Large subtree sharing requires opening every node individually before wrapper generation
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Share preparation fetches exact owner-authorized metadata plans in sequential pages of 100 through a typed share-preparation query that does not expand listing ancestry or fall through to shared-plan loading. The worker validates the complete hierarchy, opens at most four siblings concurrently, pins only active ancestors, evicts completed keys, hashes each node's wrappers, and immediately transfers each completed chunk to the client while retaining only 32-byte commitment hashes. The client validates and deterministically assembles transferred chunks and exposes live completed/total progress. The protocol and route now support a bounded 50,000-node share with up to 100,000 wrappers, a dedicated 64 MiB publication bound, 5,000-row database insert batches, borrowed Merkle-proof slices, and migration 022 for existing commitment constraints. Browser and Rust regressions build the full 100,000-leaf commitment; Rust also decodes 100,000 valid scoped wrappers and verifies a proof. Luna's cycle review passed the result. Live PostgreSQL preparation and migration execution remain unverified because Docker is unavailable in this environment.
+
 **Confidence:** Confirmed
 
 **Evidence:** The worker requires each node key in `nodeKeys`; share preparation resolves encrypted node metadata/keys in parent order.
@@ -908,6 +932,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Share a 50,000-node tree and measure API calls, heap, and time-to-first-publication progress.
 
 ## PERF-055 [P2] Unlock material can return a multi-megabyte account-state blob
+
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Unlock responses now contain only a compact account-state manifest and never select or serialize the encrypted account-state payload. A separate authenticated raw-binary endpoint lazy-loads the ciphertext with revision and length headers. New writes and fresh schemas cap account state at 16 KiB; migration 021 adds the cap as a not-valid constraint so legacy oversized rows remain unlockable and lazy-readable. Frontend and Rust regressions cover the manifest-only unlock path, raw transport, schema, and migration chain. Luna's cycle review passed the implementation. Live PostgreSQL migration execution remains unverified because Docker is unavailable in this environment.
 
 **Confidence:** Confirmed
 
@@ -937,6 +965,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-057 [P2] Every replica polls multiple mostly empty queues every ten seconds
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Queue and expiry workers now double their idle interval up to five minutes, reset to their original 1- or 10-second cadence after work, and wake immediately from PostgreSQL `LISTEN/NOTIFY` hints. Each empty pass reads the exact next due timestamp and caps its sleep at that deadline, so scheduled work retains the original poll-cadence bound; listener failures force safety polling until the subscription recovers. Multipart and counter global scans use distinct PostgreSQL advisory locks so only one replica performs each scan. At a ten-second baseline, the deterministic steady-state model drops from 8,640 claim queries per replica/day to at most 576 claim-plus-next-due queries/day (15× fewer); focused notification and deadline tests, 136 passing Rust tests with 15 database-dependent tests ignored, strict Clippy, and the frontend gates passed. The migration could not be exercised against live PostgreSQL in this environment.
+
 **Confidence:** Confirmed
 
 **Evidence:** The maintenance loop issues several claim/expiry queries on each tick even when there is no work.
@@ -948,6 +980,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Measure no-work queries per day per replica and reduce them by at least an order of magnitude without increasing queue age.
 
 ## PERF-058 [P1] S3 deletion, abort, and orphan actions are largely sequential
+
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Storage deletion jobs now send object-only S3 work through one `DeleteObjects` request per claimed batch and preserve per-object retry handling for partial provider failures. Multipart abort-plus-delete jobs, expired encrypted-upload cleanup, and orphaned multipart aborts run through one unordered executor bounded by `AERALYTH_STORAGE_MAINTENANCE_CONCURRENCY`, which defaults to eight and clamps to 1–32. Database acknowledgement remains per job and follows successful provider cleanup. A deterministic 40-task regression reached exactly four simultaneous operations under a limit of four, completed every task, and returned to zero active work; strict Clippy and the storage test suite passed.
 
 **Confidence:** Confirmed
 
@@ -961,6 +997,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-059 [P2] Leases and retries are not aligned with operation duration or poll cadence
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** User deletion, object deletion, and upload-completion claims now receive unique database lease tokens; every completion/retry path is fenced by that token so a stale worker cannot acknowledge newer ownership. S3 calls have a 60-second total operation timeout, 20-second attempt timeout, and three SDK attempts beneath a five-minute job lease; multipart discovery/abort sequences heartbeat the lease every 60 seconds. Retries use exponential full jitter with a ten-second floor and one-hour cap, and claims exclude jobs dead-lettered after 12 attempts. Deterministic tests cover the jitter bounds and source contracts for token fencing, heartbeat, SDK timeout, and dead-letter behavior; 136 Rust tests passed, 15 database-dependent tests were ignored, and strict Clippy passed. Live multi-replica fault injection remains unavailable without the PostgreSQL/S3 test services.
+
 **Confidence:** Confirmed
 
 **Evidence:** Jobs use fixed lock windows; retry delays can be shorter than the ten-second loop and lack full jitter.
@@ -972,6 +1012,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Inject slow/time-out responses and prove no concurrent worker processes the same non-idempotent phase.
 
 ## PERF-060 [P1] Global multipart reconciliation occupies an application-pool connection across a provider sweep
+
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Startup now creates a separately sized database pool with `PoolRole::Maintenance` and passes only that pool into the supervised storage-maintenance runtime. The request-serving `AppState` retains the request pool, so the advisory lock, provider pagination, intent queries, and orphan abort sweep cannot consume a request-pool connection. Pool metrics distinguish both roles, and a source regression test requires two independent `Database::create` calls and rejects cloning the request pool into maintenance. Lease renewal and ownership for slow jobs remain tracked separately by PERF-059.
 
 **Confidence:** Confirmed
 
@@ -985,6 +1029,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-061 [P2] Orphan reconciliation stops too much work on individual provider failures
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Orphan aborts now run through the shared bounded provider executor, record each failed item, continue all sibling outcomes and subsequent provider pages, then return one aggregate error containing a bounded set of samples. Prometheus output includes `aeralyth_maintenance_item_failures_total` for item-level reconciliation failures, while the aggregate maintenance error preserves diagnostic samples in logs. The production abort-page helper is exercised with an injected selected failure across two pages; all five items run, the later page completes, and the actual metric renders one failure. The backend remains at 136 passing Rust tests with 15 database-dependent tests ignored, and strict Clippy, TypeScript, Biome, worker bundles, and 215 frontend tests passed.
+
 **Confidence:** Confirmed
 
 **Evidence:** The sweep's serial error propagation can prevent later multipart uploads in a page from being examined.
@@ -996,6 +1044,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Inject failures for selected keys and confirm the rest of the page is still reconciled.
 
 ## PERF-062 [P2] Bucket lifecycle policy is not used as a cleanup backstop
+
+**Status:** Complete to the provider boundary — implemented and verified on 2026-08-24; Railway support is externally unavailable.
+
+**Verification:** Compatible S3 providers can now opt in with `AERALYTH_S3_ABORT_INCOMPLETE_MULTIPART_DAYS`. Startup reads the existing bucket lifecycle configuration, leaves unrelated rules intact, idempotently installs or updates Aeralyth's `users/`-scoped `AbortIncompleteMultipartUpload` rule, and refuses ages that are not safely beyond every configured upload/grace window. A confirmed backstop reduces the application-wide multipart listing sweep from hourly to daily while retaining state repair. The configuration recognizes both Railway's actual `storage.railway.app` S3 endpoint and its bucket public hosts, and rejects lifecycle opt-in there because Railway's current Storage Buckets documentation says bucket lifecycle configuration is not yet supported; Railway therefore retains the hourly application sweep. Unit regressions prove endpoint recognition, rule scope/preservation/idempotency, abort age, and provider-backed scheduling. Live provider mutation and outage cleanup could not be exercised without a compatible credentialed test bucket, and cannot be exercised against Railway until the provider adds the API.
 
 **Confidence:** Confirmed
 
@@ -1009,6 +1061,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-063 [P2] Hourly counter reconciliation scans and rewrites broad data
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Counter repair now runs daily after a 30-minute startup delay, holds one advisory-leader transaction, and keyset-scans owners in 500-row partitions. File counts are aggregated once per owner page; shared counts are derived from the active file rows rather than trusting denormalized flags, and vault share insertion now persists a flag derived from the locked root's actual type. A materialized drift set compares all maintained values first, so a no-drift page performs no counter-row insert or update and does not change `updated_at`. Existing user and admin counter rows are repaired only when their PostgreSQL `xmin` still matches the version observed with the source snapshot; a concurrent trigger update changes that version and fences out the stale repair. Missing rows use `ON CONFLICT DO NOTHING`, so a concurrent trigger-created row is never overwritten. Prometheus counters report rows inspected and repaired. Source regressions require keyset bounds, file-derived shared counts, the drift-first predicate, `xmin` fencing, insert-only conflict handling, vault-root flag derivation, daily scheduling, one leader connection, and metrics. The new queries have an ignored live-PostgreSQL prepare test because PostgreSQL/Docker is unavailable in this environment; all 142 runnable backend tests, locked compilation, strict Clippy, and formatting pass.
+
 **Confidence:** Confirmed
 
 **Evidence:** The maintenance worker periodically reconstructs user file counters from large tables, and the migration SQL contains a similar global rebuild.
@@ -1021,7 +1077,11 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-064 [P2] AWS SDK timeout and retry behavior is not explicitly bounded
 
-**Confidence:** Plan-dependent
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** S3 access now uses separate user-request and maintenance clients. User-facing operations have explicit 3-second connect, 10-second read, 15-second per-attempt, and 30-second total timeouts with standard retries capped at two attempts. Background cleanup has explicit 5-second connect, 20-second read/per-attempt, and 60-second total timeouts with standard retries capped at three attempts. Multipart listing/abort, object deletion, bulk deletion, lifecycle management, and upload-finalization metadata checks use the maintenance policy; upload planning, completion, metadata reads, and download/presign work use the request policy. An SDK interceptor emits `aeralyth_s3_retry_attempts_total{policy=...}` for every attempt after the first. Unit tests inspect every timeout and retry cap, construct a real before-transmit interceptor context and config bag, and invoke the production interceptor hook for attempt numbers one through three to prove the metric excludes the initial attempt. All 142 runnable backend tests, locked compilation, strict Clippy, and formatting pass. Live DNS/connect/slow-read/429/5xx injection remains unavailable without a controllable S3 endpoint.
+
+**Confidence:** Confirmed
 
 **Evidence:** Storage creation relies mainly on SDK defaults; route-level request timeouts are not configured.
 
@@ -1032,6 +1092,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Fault-inject DNS, connect, slow-read, 429, and 5xx responses and verify bounded tail latency.
 
 ## PERF-065 [P1] Upload abort performs provider cleanup synchronously in the request
+
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Legacy and encrypted abort response paths now await only database work and return `202 Accepted`; neither handler awaits multipart abort nor object deletion, and legacy temporary-file removal runs outside the response task. The encrypted path atomically moves the upload to terminal `aborted` state and inserts or refreshes its durable `storage_deletion_jobs` row in one statement, which releases the existing quota reservation through the terminal-state ledger trigger. Multipart cleanup is available immediately, while single-object cleanup is held until any issued write URL expires. If cancellation wins during provider initialization, the initialization transition atomically attaches the late multipart ID to the cleanup job. A cleanup worker locks and rechecks that ID before acknowledging its claimed snapshot; if the ID changed, it releases the job for another pass. Ambiguous multipart-creation failures terminalize and queue the upload, and jobs with a missing provider ID discover and abort exact-key multipart sessions before deleting the object. Publication locks and revalidates the upload row before writing node metadata, so abort either wins and blocks publication or waits until publication makes cleanup ineligible. The shared legacy transition also enters terminal state before queueing cleanup. Backend source regressions require the queue, initialization-race, claimed-job recheck, exact-key discovery, and publication-lock paths and reject provider calls in either request handler; strict Clippy and focused backend tests pass.
 
 **Confidence:** Confirmed
 
@@ -1044,6 +1108,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Cancellation response latency should remain bounded during provider slowness.
 
 ## PERF-066 [P2] Local file streaming allocates a new 64 KiB vector for every chunk
+
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Legacy authenticated and share-link local downloads now use one shared `tokio_util::io::ReaderStream` adapter with a 64 KiB working capacity instead of allocating and zeroing a new vector in every `stream::unfold` iteration. `ReaderStream` retires its reader after EOF or the first I/O error; a backend regression test injects a failing reader and proves that the stream emits exactly one error before terminating.
 
 **Confidence:** Confirmed
 
@@ -1089,6 +1157,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-069 [P1] The crypto worker copies plaintext/ciphertext repeatedly per 4 MiB chunk
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Encryption now uses the transferred plaintext buffer directly whenever a chunk needs no padding and allocates a padded buffer only for the short final chunk. Decryption transfers the WebCrypto output buffer directly for every full plaintext chunk and slices only the final padded range. Ciphertext leaf hashing now feeds the nine-byte domain/index prefix and ciphertext into libsodium's incremental SHA-256 state separately, removing the 4 MiB aggregate concatenation while preserving the protocol digest. A full-size 4 MiB-plus-tag vector matches the existing WebCrypto protocol hash, and a worker wiring regression requires the direct-buffer and incremental-hash paths.
+
 **Confidence:** Confirmed
 
 **Evidence:** Encryption pads/copies plaintext, converts to another ArrayBuffer for WebCrypto, concatenates prefixes for hashing, and copies again for digesting.
@@ -1116,6 +1188,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Profile a large download with 64 KiB network chunks. Total JS copy bytes should be near ciphertext size, not tens of times larger.
 
 ## PERF-071 [P1] Download fallback retains the full plaintext in memory
+
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Browsers without the File System Access save picker now stream decrypted chunks into a temporary OPFS file, create the compatibility download from the completed file handle, and remove the temporary entry after releasing its object URL. If neither disk-backed path is available, plaintext larger than 128 MiB is rejected with a compatibility error before the network request or crypto session starts. Regression tests exercise the OPFS write/close/export/cleanup lifecycle and the pre-I/O large-file rejection boundary.
 
 **Confidence:** Confirmed
 
@@ -1145,6 +1221,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-073 [P1] Legacy file uploads are serialized at file level
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Legacy uploads now use a weighted three-slot file scheduler: files up to 8 MiB may run three-at-a-time, while larger files take all slots and remain exclusive. Every legacy multipart upload in the operation shares one four-slot part semaphore, so file concurrency cannot multiply active PUTs, and the scheduler aborts sibling work while preserving the initiating error. Behavioral tests prove the three-file ceiling, large-file exclusivity, sibling cancellation, ordered results, and production wiring to the shared multipart budget.
+
 **Confidence:** Confirmed
 
 **Evidence:** The dashboard intentionally uploads selected files one after another, although multipart parts within one file use concurrency four.
@@ -1156,6 +1236,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Upload 1,000 small files and compare elapsed time, API load, and peak memory. Throughput should improve without multiplying active parts per file.
 
 ## PERF-074 [P1] Part checksums require full Blob/ArrayBuffer materialization
+
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Legacy single and multipart checksums now run in a dedicated generated worker using Noble's incremental SHA-256 over sequential Blob streams sliced to a hard 1 MiB ceiling. The main thread sends immutable Blob handles and retains no full checksum ArrayBuffer; cancellation propagates by request ID. Encrypted uploads continue hashing their already-owned exact part buffers directly without the former clone. An 8 MiB-plus vector matches Web Crypto byte-for-byte while proving every observed stream chunk is at most 1 MiB, and worker generation, TypeScript, all 185 frontend tests, and repository-wide Biome pass.
 
 **Confidence:** Confirmed
 
@@ -1169,6 +1253,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-075 [P2] Upload retry logic retries errors indiscriminately and reuses potentially expired URLs
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Legacy XHR and encrypted `fetch` object uploads now share one retry policy. Network failures, 408, 429, and selected 5xx responses retry with full jitter; `Retry-After` seconds and dates override jitter; permanent 4xx responses fail immediately. Recognizable expired-token and signature-mismatch 403 responses obtain a new single or multipart presigned URL before retrying. Retry timers remove their abort listener on both resolve and abort. Fault-injection tests cover every status class, network failure, jitter, both `Retry-After` forms, signature refresh, unrelated 403 rejection, encrypted URL rewiring, and timer cleanup.
+
 **Confidence:** Confirmed
 
 **Evidence:** Client retry loops treat most failures similarly and retry the same signed URL.
@@ -1180,6 +1268,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Fault-inject each HTTP class and assert the expected retry/presign behavior.
 
 ## PERF-076 [P2] Progress reporting can trigger excessive React and worker-message updates
+
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Upload part progress is aggregated in maps outside React and only the newest aggregate snapshot is published once per animation frame; start, file-complete, final, and failure cleanup remain immediate. Retry progress retains each part's high-water mark instead of double-counting bytes after a reset. ZIP compression emits its start and final snapshots immediately while throttling library callbacks and file boundaries to 100 ms, with error/cancel messages still immediate. Synthetic 10,000-event tests prove one React-facing frame snapshot and bounded worker emissions while preserving the latest final value.
 
 **Confidence:** Confirmed
 
@@ -1193,9 +1285,13 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-077 [P1] Browser folder and repository ZIP downloads retain all source files and the final archive
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Folder and repository downloads now feed one source stream at a time into a `ZipWriter` backed by an OPFS temporary file, and encrypted downloads expose a backpressured plaintext stream rather than a complete `Blob`. The no-OPFS fallback rejects more than 32 MiB of source data and caps ZIP output at 48 MiB. Backend folder and repository manifests now use the same 2 GiB limit as the browser path. Automated tests cover valid streamed ZIP output, OPFS lifecycle cleanup, cancellation, bounded fallback rejection, sequential source consumption, and encrypted version checks. Matched 100 MiB/1 GiB/2 GiB browser heap measurements remain scheduled for the final audit benchmark phase.
+
 **Confidence:** Confirmed
 
-**Evidence:** The folder and repository clients download up to four complete files concurrently into `Blob`/`File` objects, retain every source, then create the complete ZIP Blob. Their in-memory fallback is now defensively capped at 128 MiB of source data and 160 MiB of ZIP output, but peak memory still scales with the full archive.
+**Evidence:** The original folder and repository clients downloaded up to four complete files concurrently into `Blob`/`File` objects, retained every source, then created the complete ZIP Blob. The remaining in-memory fallback is now defensively capped at 32 MiB of source data and 48 MiB of ZIP output when OPFS is unavailable.
 
 **Impact:** Peak browser memory can still exceed source size plus archive size near the bounded fallback limit, especially on memory-constrained devices.
 
@@ -1221,6 +1317,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-079 [P2] Repository archive path construction repeatedly walks parents and uses `unshift`
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Repository archive manifests already arrive in depth-sorted parent-before-child order. The browser now memoizes every normalized full path and constructs a child with one parent-map lookup plus one append; the parent-chain loop, per-entry visited set, and `unshift` are removed. A 50,000-entry fixture with 500 branches at the supported depth of 100 performs exactly 49,500 parent lookups and produces the expected deepest path, demonstrating linear work without a timing-dependent assertion.
+
 **Confidence:** Confirmed
 
 **Evidence:** For every entry, `buildArchivePath` walks the parent chain and prepends segments.
@@ -1232,6 +1332,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Benchmark path construction on broad and deep 50,000-entry trees.
 
 ## PERF-080 [P2] ZIP compression uses one fixed level for all content and emits unthrottled progress
+
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** ZIP writers no longer set one global compression level. A shared policy selects STORE for known compressed archives, media, fonts, PDFs, WASM, and opaque binary content; balanced folder/repository downloads use level 6 for compressible text while upload ZIPs explicitly choose the speed-first level-1 mode. File MIME types and normalized paths drive every production ZIP entry. Upload-worker progress and file boundaries remain capped at 100 ms, and folder/repository archive callbacks now publish only the newest snapshot per animation frame. Policy regressions cover compressed/media/binary formats, text, SVG, and the speed mode; progress coalescer tests cover 10,000-event bursts.
 
 **Confidence:** Confirmed
 
@@ -1245,6 +1349,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-081 [P2] Share contexts are fetched and decrypted repeatedly for files with the same parent
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Each encrypted folder upload now owns an explicit share-sync batch. Newly published siblings share a parent-scoped context key, so the client performs one active-context request per distinct parent and the worker imports each immutable `(shareId, epoch, wrapperId, ciphertext)` set once. Concurrent worker loads share one promise. Changed fingerprints replace cached material; fetch/decrypt failures, publication fence or rotation errors, vault lock, and the queued batch terminator invalidate both client and worker caches. Replacement nodes use a node-scoped key because they may themselves be a share root. Locking also advances a client synchronization generation, aborts active context/publication requests, evicts batch caches immediately, and the worker checks its vault-session generation after every asynchronous directory-crypto stage. Tests prove sibling request/cache-key reuse, fence-error refetch and worker eviction, concurrent immutable-load deduplication, changed/failed-value reload, and a deferred lock race that cannot publish material after lock.
+
 **Confidence:** Confirmed
 
 **Evidence:** The encrypted uploader asks for active share contexts while preparing entries and reloads context keys rather than reusing a batch-scoped immutable result.
@@ -1256,6 +1364,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Uploading many siblings should fetch/decrypt each distinct share context once.
 
 ## PERF-082 [P1] Encrypted folder creation is a complete publication workflow per folder
+
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** The client prepares parent-ordered encrypted folder records and publishes them in batches of 100. The backend decodes and verifies each bounded batch off Actix workers, validates parent ordering and ownership, then performs set-wise file, record, wrapper, head, and share-sync writes in one transaction with retry-safe exact replay handling. A runtime fixture imports 10,000 folders as 100 branches at the supported 100-level maximum and observes exactly 100 publication calls of 100 records; a separate test rejects level 101 before encryption. Backend tests guard set-wise SQL, partial-replay rejection, and transactional share-ancestry truncation detection.
 
 **Confidence:** Confirmed
 
@@ -1269,6 +1381,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-083 [P2] Encrypted multipart resume information is returned but the client cannot resume safely
 
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** Encrypted uploads now use an explicit non-resumable policy. Vault upload plans no longer contain `existingParts`, and both duplicate-init paths avoid the provider `ListParts` call. An in-session initialization retry reuses the same intent but starts deterministically at part one, replacing any same-number S3 parts. New, adopted, presigned, and failed-completion vault intents all use the same one-hour idle lease instead of 24 hours. Client cancellation still calls the authenticated abort route immediately, while the existing bounded maintenance worker claims an abandoned intent after that lease. Before terminalizing it, cleanup directly aborts a known provider upload ID and discovers every exact-key provider session, covering a crash after multipart creation but before the ID is durably stored without waiting for the low-frequency global sweep. Backend regressions enforce the response shape, absence of client-facing provider part listing, the complete absence of the legacy 24-hour vault lease, discovery-before-terminalization, and the existing indexed cleanup path.
+
 **Confidence:** Confirmed
 
 **Evidence:** The server lists existing parts, while the encrypted client rejects or cannot reconstruct an abandoned crypto session and key state.
@@ -1280,6 +1396,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Interrupt and restart a large upload. Either it securely resumes verified parts, or cleanup is immediate and the API does not advertise unusable state.
 
 ## PERF-084 [P2] Worker dispatch has no per-session ordering guard for future pipelining
+
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** A keyed promise queue now wraps all counter-dependent encryption and decryption transitions: chunk, finalize, and abort. Requests for one session execute in worker-message order even when the client sends them concurrently; a rejection does not poison later cleanup. Different session IDs retain full concurrency, so network PUTs and independent file crypto can still overlap. Runtime tests deliberately enqueue four same-session chunk indices at once, prove deterministic `0..3` state transitions, prove cross-session progress while the first session is blocked, cover recovery after a rejected operation, and simulate a vault lock while plaintext waits behind active same-session work. The missing-session path wipes that transferred worker-owned plaintext before rejecting. A worker wiring regression checks all six transition types and the wipe guard.
 
 **Confidence:** Confirmed
 
@@ -1293,6 +1413,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-085 [P3] The vault worker bundle is manually emitted under a stable public filename
 
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** Worker builds now emit into a private staging directory, calculate SHA-256 over each finished bundle, and publish only content-named files such as `/workers/vault.<sha256>.worker.js`. The generated TypeScript manifest contains the hash-named URL without a query-string cache key, old generated versions are removed during the next build, and both Next.js and the production Caddy proxy apply `public, max-age=31536000, immutable` only to the dedicated worker directory. Tests recompute every emitted file hash, reject stable construction URLs, and guard both deployment layers. A production webpack build succeeded, and a request to its standalone server returned HTTP 200 with the exact immutable cache header for the 795,680-byte vault worker. `VaultCryptoClient` still constructs the vault worker only through `getClient`, so users without an enabled/resumable vault do not load it.
+
 **Confidence:** Confirmed
 
 **Evidence:** Build scripts bundle large crypto dependencies into `public/vault.worker.js` and reference a stable path.
@@ -1304,6 +1428,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Inspect transferred bytes and cache status across reloads and deployments.
 
 ## PERF-086 [P2] Health checks always consume a database connection
+
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** `/health`, `/health/live`, `/api/health`, and `/api/health/live` now return a dependency-free liveness document without application state, pool inspection, or a database query. `/health/ready` and `/api/health/ready` retain the PostgreSQL and pool checks, but a shared two-second single-flight cache collapses concurrent probes to one ping. Railway and the production startup gate now target readiness explicitly, while the high-frequency load default remains dependency-free liveness. Rust tests prove liveness contains no database access and repeated readiness calls reuse one result within the TTL; deployment regressions pin the new readiness path.
 
 **Confidence:** Confirmed
 
@@ -1317,6 +1445,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-087 [P2] Profile avatars disable caching despite versioned URLs
 
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** Both current-user and admin avatar queries now load the same image-version timestamp used by their existing `?v=` URLs. A matching version receives `private, max-age=31536000, immutable` plus a strong version ETag, so repeat renders can use the browser's private cache without another authenticated database/body request. Missing or stale version parameters use `private, no-cache` to prevent a stable URL from being poisoned with immutable content, and matching `If-None-Match` returns `304` without an image body. Shared runtime tests cover immutable, conditional, and unversioned behavior.
+
 **Confidence:** Confirmed
 
 **Evidence:** Profile/admin avatar routes return `Cache-Control: private, no-store`, while callers include a version query parameter based on update time.
@@ -1328,6 +1460,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Repeated page loads with the same version should generate no avatar body transfer and ideally no backend hit.
 
 ## PERF-088 [P2] Profile multipart data is processed before CSRF validation
+
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** The hydrated client now sends the session CSRF token in `x-csrf-token`, and the profile handler authenticates and validates that header before its first `payload.next()` call. The native multipart fallback remains supported: its small hidden CSRF token is the first form part, and the handler rejects a missing disposition or any other first field without polling its contents. A dedicated no-drain reader rejects the token as soon as it crosses 512 bytes; only a validated token permits later fields or image bytes to be read. Invalid authenticated uploads therefore cannot force image buffering, while all existing per-field and 2 MiB limits remain intact. Backend source-order/no-drain and frontend header/first-part wiring regressions lock both paths in place.
 
 **Confidence:** Confirmed
 
@@ -1341,6 +1477,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-089 [P1] No route-level load shedding or expensive-operation concurrency limits are present
 
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Configurable global and per-user admission limits now cover upload control, recursive operations, storage-provider calls, CPU-heavy vault validation, password work, and database pools. Saturation fails fast with bounded `429`/`503` responses and `Retry-After` instead of creating unbounded waiters. Recursive admission is acquired before the first recursive query across vault sharing/rotation/metadata paths, share-link access/download/removal, legacy folder navigation/download/editor upload, repository detail, archive and tree mutations; ordinary root listings and normal parallel legacy upload initialization remain outside the recursive limiter. Unit and source-order regressions cover direct shedding, per-user isolation, bounded async queues, retry headers, and endpoint admission ordering. The full Rust suite, strict Clippy, frontend suite, TypeScript, and Biome passed after the final coverage fixes.
+
 **Confidence:** Confirmed
 
 **Evidence:** Actix is configured with logging and a global JSON limit, but no explicit semaphores/rate limits for share publication, recursive jobs, completion reconciliation, or login.
@@ -1352,6 +1492,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Run mixed-load tests and verify lightweight routes retain their latency target while expensive queues saturate.
 
 ## PERF-090 [P2] No explicit HTTP/request timeout policy is defined
+
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** The public Caddy listener now explicitly bounds header reads at 10 seconds, body reads at 10 minutes, response writes at 30 minutes, keep-alive idle time at two minutes, request headers at 64 KiB, and graceful drain at 30 seconds. Actix independently pins its header, disconnect, keep-alive, and shutdown lifetimes. Large-body limits remain deliberately generous because object transfer can be slow, while existing database checkout/create/recycle deadlines and separate request/maintenance S3 connect/read/attempt/operation deadlines bound dependencies more tightly. No blanket future timeout wraps handler execution, avoiding cancellation after a mutation may already have committed; durable mutation state machines and request IDs retain safe retry semantics. Source and deployment regressions pin every boundary.
 
 **Confidence:** Confirmed
 
@@ -1365,6 +1509,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-091 [P2] Response compression is not enabled in the Rust application
 
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** Production compression is applied once at Caddy rather than duplicated in Actix. The explicit response matcher uses zstd or gzip only for responses of at least 1 KiB whose content types are text, JSON, JavaScript, manifest JSON, SVG, or WebAssembly. It intentionally excludes `application/octet-stream`, Aeralyth's binary vault-publication CBOR, images, and generic object/ciphertext bodies. A deployment regression verifies both the compressible allowlist and the encrypted/object exclusions.
+
 **Confidence:** Confirmed
 
 **Evidence:** `main.rs` installs `Logger` but not Actix `Compress`; large file lists, repository manifests, and base64 metadata therefore rely entirely on upstream behavior.
@@ -1377,6 +1525,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-092 [P2] Required-E2EE mode performs a global distinct count at startup
 
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** Required-E2EE startup now asks two short-circuiting `EXISTS ... LIMIT 1` questions using the exact predicates of the partial file-migration and incomplete-vault-migration indexes. It no longer unions histories, deduplicates node IDs, or computes a diagnostic count before accepting traffic; the refusal message reports the actionable state without requiring a total. A regression forbids `COUNT`, `DISTINCT`, and `UNION` and pins both indexed predicates.
+
 **Confidence:** Confirmed
 
 **Evidence:** `main.rs` counts distinct pending nodes from legacy files and incomplete migrations before accepting traffic.
@@ -1388,6 +1540,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Startup query time should remain flat as encrypted history grows.
 
 ## PERF-093 [P2] Request logging records high-frequency upload control calls
+
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** Request logging already uses structured tracing and matched route templates. Successful liveness/readiness probes now generate no request log, and successful legacy/vault multipart presign and status templates use an independent sequence sampled at one tenth the configured normal success frequency, so probe volume cannot distort application sampling. Every 4xx, 5xx, and slow request remains unsampled and complete. Logged fields are limited to request ID, method, route template, status, duration, and checkout count; tokens, raw paths, bodies, and cryptographic material are never included. Runtime tests prove route classification, excluded-probe counters, independent high-volume sampling, and unsampled-error behavior.
 
 **Confidence:** Confirmed
 
@@ -1417,6 +1573,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-095 [P3] Release compilation is not tuned for maximum runtime performance
 
+**Status:** Complete — implemented and compile-verified on 2026-08-25.
+
+**Verification:** The backend release profile now enables thin LTO and one codegen unit after the algorithmic and protocol findings were addressed. Panic behavior remains unwinding so a handler panic does not trade server availability for a small binary optimization. `cargo build --release --locked` completed successfully with the tuned profile. Per the decision to omit final benchmarks, no quantitative runtime gain is claimed for these compiler flags.
+
 **Confidence:** Tuning
 
 **Evidence:** `backend/Cargo.toml` has no custom release profile.
@@ -1428,6 +1588,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Use identical load tests and CPU profiles for default versus tuned builds.
 
 ## PERF-096 [P3] Hex encoding allocates repeatedly in share-link listing
+
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** Share-token hashing now allocates one exact 64-character output string, then writes lowercase nibbles through a fixed 16-byte lookup table. The per-byte `format!` string allocation and iterator collection are gone. A known SHA-256 vector regression verifies byte-for-byte output compatibility, while a source guard pins the preallocation and rejects a return to per-byte formatting.
 
 **Confidence:** Confirmed
 
@@ -1441,6 +1605,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-097 [P2] Repository and share metadata responses are broadly `no-store`
 
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** Authenticated repository lists/details and authorized share metadata now emit representation-based strong ETags with `private, no-cache`, returning `304` only after the current authentication or grant has been revalidated. Repository/share mutations and file downloads retain explicit `private, no-store` responses. Actix response tests cover unchanged and changed representations, and Luna's cycle review confirmed the authorization and revocation ordering.
+
 **Confidence:** Confirmed
 
 **Evidence:** Several private/shared responses disable all caching even when records have immutable hashes or explicit versions.
@@ -1452,6 +1620,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Repeated unchanged navigation should return 304 or use a local immutable cache without weakening revocation.
 
 ## PERF-098 [P2] Repository archive manifest materializes up to 50,001 rows into one JSON response
+
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** Repository manifests now return at most 1,000 parent-first entries per cursor page from a repeatable-read snapshot, bind every continuation to the repository tree version and snapshot start, reject changes between pages, and derive caps/totals from the server-side snapshot rather than trusting the cursor. The ZIP client consumes each bounded page before fetching the next and no longer allocates the complete manifest response. Regression tests prove the bounded SQL contract, duplicate/incomplete detection, cursor requests, and page-consumption ordering; the focused browser archive suite passes 13 tests.
 
 **Confidence:** Confirmed
 
@@ -1465,6 +1637,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-099 [P2] Repository summary/create/update reloads data after mutation
 
+**Status:** Complete — implemented and verified on 2026-08-25.
+
+**Verification:** Repository import/create-empty/update operations now return their complete owner, root, vault-head, count, and version summary from the mutation CTE itself. The post-mutation summary reload helper was removed, active-root validation and existing-name conflict behavior remain in place, and source/query-contract tests prevent the extra reload from returning. The accepted cycle passed 157 Rust tests, Clippy, rustfmt, TypeScript, Biome, and the repository archive suites.
+
 **Confidence:** Confirmed
 
 **Evidence:** Repository create/update routes validate or mutate, then call `get_repository_summary` as another query.
@@ -1476,6 +1652,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Repository mutation SQL count should drop without changing conflict semantics.
 
 ## PERF-100 [P2] Invitation and admin creation paths use check-then-act round trips
+
+**Status:** Complete. Implemented and verified on 2026-08-25.
+
+**Verification:** Invitation creation now resolves existing users, active duplicate invitations, and expired pending-invitation reuse in one partial-indexed `INSERT ... ON CONFLICT` statement. Direct user creation hashes the password outside the database, inserts once under the case-insensitive uniqueness constraint, and accepts matching pending invitations in a dependent CTE only when the insert succeeds. Source guards keep each handler to one post-validation database query. Live PostgreSQL prepare, execution, and two-client concurrency tests pass with exactly one invitation or user winner and one pending or accepted invitation row.
 
 **Confidence:** Confirmed
 
@@ -1504,6 +1684,10 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 **Validation:** Automated unit, PostgreSQL, migration-contract, and production-route checks assert that a new URL differs, the old URL is rejected, owner reconstruction returns only the current URL, and a legacy writer cannot overwrite a versioned token.
 
 ## PERF-102 [P1] Encrypted listings fetch and decrypt one full download plan per row in series
+
+**Status:** Complete — implemented and verified on 2026-08-24.
+
+**Verification:** Encrypted listings and repository names now use one set-authorized metadata-plan service with 100-target/8 MiB continuation bounds, at most three N-independent plan-data statements, no S3 URL work, ordered ancestor opening, and four-way sibling decryption. Owner/shared response projections include exact cryptographic revision and authorization context. Shared navigation always revalidates the live grant, never coalesces validation flights, and cannot render cached plaintext before that result. Network and worker crypto operations are cooperatively canceled on obsolete navigation; locking clears all presentation, manifest, flight, and evictable-key state. Main-thread plan/manifest accounting and the worker's paired manifest/node-key budget are capped at 1,024 logical nodes and 16 MiB with pin-safe eviction. Automated regressions cover five sequential requests for 500 rows, encoded-size continuation, cancellation, revocation, progressive results, cache bounds, lock races, and absence of serialized full-plan calls. The full frontend suite passes 209 tests in 44 files and the Rust suite passes 127 tests with 14 database-fixture tests ignored; TypeScript, Biome, generated workers, rustfmt, and strict Clippy are green. The dynamic mixed-share PostgreSQL query is included in the ignored prepare fixture, but live preparation remains unexecuted because Docker is unavailable in this environment.
 
 **Confidence:** Confirmed
 

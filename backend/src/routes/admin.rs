@@ -1,4 +1,4 @@
-use actix_web::http::header::{CACHE_CONTROL, CONTENT_TYPE, LOCATION};
+use actix_web::http::header::LOCATION;
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -7,10 +7,66 @@ use crate::auth::{AuthUser, require_admin, require_admin_user, require_csrf};
 use crate::state::AppState;
 use crate::timestamps;
 
+use super::avatar;
+
 const INVITATION_LIFETIME_DAYS: i64 = 7;
 const ADMIN_USER_MUTATION_LOCK_ID: i64 = 4_132_591_101;
 const DEFAULT_ADMIN_PAGE_SIZE: usize = 50;
 const MAX_ADMIN_PAGE_SIZE: usize = 100;
+const CREATE_INVITATION_QUERY: &str = r#"
+    WITH decision AS MATERIALIZED (
+      SELECT EXISTS (
+               SELECT 1
+               FROM users
+               WHERE lower(username) = lower($1)
+             ) AS user_exists
+    ), inserted AS (
+      INSERT INTO invitations (
+        id, invited_username, role, token_hash, created_by, expires_at
+      )
+      SELECT gen_random_uuid()::text,
+             $1,
+             $2,
+             encode(digest($3::text, 'sha256'), 'hex'),
+             $4,
+             now() + ($5::bigint * interval '1 day')
+      FROM decision
+      WHERE NOT decision.user_exists
+      ON CONFLICT (lower(invited_username)) WHERE status = 'pending'
+      DO UPDATE SET
+        invited_username = EXCLUDED.invited_username,
+        role = EXCLUDED.role,
+        token_hash = EXCLUDED.token_hash,
+        created_by = EXCLUDED.created_by,
+        expires_at = EXCLUDED.expires_at,
+        accepted_at = NULL,
+        created_at = now()
+      WHERE invitations.expires_at <= now()
+      RETURNING id
+    )
+    SELECT decision.user_exists,
+           NOT decision.user_exists
+             AND NOT EXISTS (SELECT 1 FROM inserted) AS invitation_exists,
+           EXISTS (SELECT 1 FROM inserted) AS inserted
+    FROM decision
+"#;
+const CREATE_USER_QUERY: &str = r#"
+    WITH inserted AS (
+      INSERT INTO users (id, username, password_hash, role, status)
+      VALUES (gen_random_uuid()::text, $1, $2, $3, 'active')
+      ON CONFLICT DO NOTHING
+      RETURNING username
+    ), accepted_invitations AS (
+      UPDATE invitations
+      SET status = 'accepted', accepted_at = now()
+      WHERE lower(invited_username) = lower($1)
+        AND status = 'pending'
+        AND EXISTS (SELECT 1 FROM inserted)
+      RETURNING id
+    )
+    SELECT EXISTS (SELECT 1 FROM inserted) AS inserted,
+           (SELECT count(*) FROM accepted_invitations) AS accepted_invitations
+"#;
 const UPDATE_USER_ROLE_QUERY: &str = "
     WITH mutation_lock AS MATERIALIZED (
       SELECT pg_advisory_xact_lock($1)
@@ -416,65 +472,12 @@ pub async fn create_invitation(
         return Ok(redirect("/users?invite=invalid-role"));
     };
 
-    let existing_user = state
-        .db
-        .query_opt(
-            "SELECT id FROM users WHERE lower(username) = lower($1) LIMIT 1",
-            &[&username],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    if existing_user.is_some() {
-        return Ok(redirect("/users?invite=user-exists"));
-    }
-
-    expire_invitations_for_username(&state, &username).await?;
-
-    let existing_invite = state
-        .db
-        .query_opt(
-            "
-                SELECT id
-                FROM invitations
-                WHERE lower(invited_username) = lower($1)
-                  AND status = 'pending'
-                  AND expires_at > now()
-                LIMIT 1
-            ",
-            &[&username],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    if existing_invite.is_some() {
-        return Ok(redirect("/users?invite=invite-exists"));
-    }
-
     let token = create_token()?;
     let expires_after_days = INVITATION_LIFETIME_DAYS;
-
-    state
+    let outcome = state
         .db
-        .execute(
-            "
-                INSERT INTO invitations (
-                  id,
-                  invited_username,
-                  role,
-                  token_hash,
-                  created_by,
-                  expires_at
-                )
-                VALUES (
-                  gen_random_uuid()::text,
-                  $1,
-                  $2,
-                  encode(digest($3::text, 'sha256'), 'hex'),
-                  $4,
-                  now() + ($5::bigint * interval '1 day')
-                )
-            ",
+        .query_one(
+            CREATE_INVITATION_QUERY,
             &[
                 &username,
                 &role,
@@ -485,6 +488,12 @@ pub async fn create_invitation(
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
+    if outcome.get("user_exists") {
+        return Ok(redirect("/users?invite=user-exists"));
+    }
+    if !outcome.get::<_, bool>("inserted") {
+        return Ok(redirect("/users?invite=invite-exists"));
+    }
 
     Ok(redirect(format!("/users?invite=created&token={token}")))
 }
@@ -510,57 +519,20 @@ pub async fn create_user(
         return Ok(redirect("/users?user=weak-password"));
     }
 
-    let existing_user = state
-        .db
-        .query_opt(
-            "SELECT id FROM users WHERE lower(username) = lower($1) LIMIT 1",
-            &[&username],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    if existing_user.is_some() {
-        return Ok(redirect("/users?user=user-exists"));
-    }
-
     state.db.release_request_connection().await;
     let password_hash =
         state.passwords.hash(password).await.map_err(|_| {
             error::ErrorServiceUnavailable("password service temporarily unavailable")
         })?;
 
-    state
+    let outcome = state
         .db
-        .execute(
-            "
-                INSERT INTO users (id, username, password_hash, role, status)
-                VALUES (
-                  gen_random_uuid()::text,
-                  $1,
-                  $2,
-                  $3,
-                  'active'
-                )
-            ",
-            &[&username, &password_hash, &role],
-        )
+        .query_one(CREATE_USER_QUERY, &[&username, &password_hash, &role])
         .await
         .map_err(error::ErrorInternalServerError)?;
-
-    state
-        .db
-        .execute(
-            "
-                UPDATE invitations
-                SET status = 'accepted',
-                    accepted_at = now()
-                WHERE lower(invited_username) = lower($1)
-                  AND status = 'pending'
-            ",
-            &[&username],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    if !outcome.get::<_, bool>("inserted") {
+        return Ok(redirect("/users?user=user-exists"));
+    }
 
     Ok(redirect("/users?user=created"))
 }
@@ -764,7 +736,9 @@ pub async fn user_avatar(
         .db
         .query_opt(
             "
-                SELECT profile_image_bytes, profile_image_mime_type
+                SELECT profile_image_bytes, profile_image_mime_type,
+                       COALESCE(profile_image_updated_at, updated_at)
+                         AS profile_image_version_at
                 FROM users
                 WHERE id = $1
                   AND profile_image_bytes IS NOT NULL
@@ -783,14 +757,14 @@ pub async fn user_avatar(
         return Ok(HttpResponse::NotFound().finish());
     };
     let mime_type: Option<String> = row.get("profile_image_mime_type");
+    let version = timestamps::version_micros(row.get("profile_image_version_at"));
 
-    Ok(HttpResponse::Ok()
-        .insert_header((
-            CONTENT_TYPE,
-            mime_type.unwrap_or_else(|| "application/octet-stream".to_owned()),
-        ))
-        .insert_header((CACHE_CONTROL, "private, no-store"))
-        .body(bytes))
+    Ok(avatar::response(
+        &request,
+        bytes,
+        mime_type.unwrap_or_else(|| "application/octet-stream".to_owned()),
+        &version,
+    ))
 }
 
 pub async fn rotate_invitation(
@@ -1237,25 +1211,6 @@ fn admin_mutation_failure(outcome: &AdminMutationOutcome) -> Result<Option<HttpR
     Ok(None)
 }
 
-async fn expire_invitations_for_username(state: &AppState, username: &str) -> Result<()> {
-    state
-        .db
-        .execute(
-            "
-                UPDATE invitations
-                SET status = 'expired'
-                WHERE lower(invited_username) = lower($1)
-                  AND status = 'pending'
-                  AND expires_at <= now()
-            ",
-            &[&username],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    Ok(())
-}
-
 async fn expire_invitations_for_id(state: &AppState, invitation_id: &str) -> Result<()> {
     state
         .db
@@ -1337,7 +1292,8 @@ fn redirect(location: impl AsRef<str>) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        ADMIN_USER_MUTATION_LOCK_ID, DELETE_USER_QUERY, UPDATE_USER_QUERY, UPDATE_USER_ROLE_QUERY,
+        ADMIN_USER_MUTATION_LOCK_ID, CREATE_INVITATION_QUERY, CREATE_USER_QUERY, DELETE_USER_QUERY,
+        INVITATION_LIFETIME_DAYS, UPDATE_USER_QUERY, UPDATE_USER_ROLE_QUERY,
         UPDATE_USER_STATUS_QUERY, admin_mutation_outcome, literal_ilike_pattern,
     };
 
@@ -1407,6 +1363,46 @@ mod tests {
         }
     }
 
+    #[test]
+    fn admin_creation_paths_are_one_atomic_statement_after_validation() {
+        assert!(CREATE_INVITATION_QUERY.contains("WITH decision AS"));
+        assert!(
+            CREATE_INVITATION_QUERY
+                .contains("ON CONFLICT (lower(invited_username)) WHERE status = 'pending'")
+        );
+        assert!(CREATE_INVITATION_QUERY.contains("DO UPDATE SET"));
+        assert!(CREATE_INVITATION_QUERY.contains("WHERE invitations.expires_at <= now()"));
+        assert!(CREATE_INVITATION_QUERY.contains("user_exists"));
+        assert!(CREATE_INVITATION_QUERY.contains("invitation_exists"));
+        assert!(CREATE_USER_QUERY.contains("WITH inserted AS"));
+        assert!(CREATE_USER_QUERY.contains("ON CONFLICT DO NOTHING"));
+        assert!(CREATE_USER_QUERY.contains("accepted_invitations"));
+
+        let source = include_str!("admin.rs");
+        for (start, end, query_name) in [
+            (
+                "pub async fn create_invitation(",
+                "pub async fn create_user(",
+                "CREATE_INVITATION_QUERY",
+            ),
+            (
+                "pub async fn create_user(",
+                "pub async fn update_user_role(",
+                "CREATE_USER_QUERY",
+            ),
+        ] {
+            let handler = source
+                .split_once(start)
+                .and_then(|(_, tail)| tail.split_once(end))
+                .map(|(handler, _)| handler)
+                .expect("admin creation handler should remain inspectable");
+            assert_eq!(handler.matches(".query_one(").count(), 1);
+            assert!(handler.contains(query_name));
+            assert!(!handler.contains(".query_opt("));
+            assert!(!handler.contains(".execute("));
+        }
+    }
+
     #[actix_web::test]
     #[ignore = "requires an initialized PostgreSQL test database"]
     async fn database_query_contracts_prepare() {
@@ -1421,6 +1417,8 @@ mod tests {
         });
 
         for query in [
+            CREATE_INVITATION_QUERY,
+            CREATE_USER_QUERY,
             UPDATE_USER_ROLE_QUERY,
             UPDATE_USER_STATUS_QUERY,
             UPDATE_USER_QUERY,
@@ -1431,6 +1429,152 @@ mod tests {
                 .await
                 .expect("admin mutation query should prepare");
         }
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn concurrent_duplicate_creation_has_one_deterministic_winner() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (client_a, connection_a) =
+            tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+                .await
+                .expect("connect first PostgreSQL client");
+        let (client_b, connection_b) =
+            tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+                .await
+                .expect("connect second PostgreSQL client");
+        actix_web::rt::spawn(async move {
+            connection_a.await.expect("first connection stays healthy");
+        });
+        actix_web::rt::spawn(async move {
+            connection_b.await.expect("second connection stays healthy");
+        });
+
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("clock is after the Unix epoch")
+            .as_nanos();
+        let admin_id = format!("usr_perf_create_admin_{suffix}");
+        let admin_username = format!("perf_create_admin_{suffix}");
+        let invitation_username = format!("perf_invite_{suffix}");
+        let user_username = format!("perf_user_{suffix}");
+        client_a
+            .execute(
+                "INSERT INTO users (id, username, password_hash, role, status)
+                 VALUES ($1, $2, 'not-a-login-hash', 'admin', 'active')",
+                &[&admin_id, &admin_username],
+            )
+            .await
+            .expect("admin fixture inserts");
+
+        let role = "user";
+        let lifetime_days = INVITATION_LIFETIME_DAYS;
+        let token_a = format!("invite-a-{suffix}");
+        let token_b = format!("invite-b-{suffix}");
+        let invite_params_a: [&(dyn tokio_postgres::types::ToSql + Sync); 5] = [
+            &invitation_username,
+            &role,
+            &token_a,
+            &admin_id,
+            &lifetime_days,
+        ];
+        let invite_params_b: [&(dyn tokio_postgres::types::ToSql + Sync); 5] = [
+            &invitation_username,
+            &role,
+            &token_b,
+            &admin_id,
+            &lifetime_days,
+        ];
+        let (invite_a, invite_b) = futures_util::try_join!(
+            client_a.query_one(CREATE_INVITATION_QUERY, &invite_params_a),
+            client_b.query_one(CREATE_INVITATION_QUERY, &invite_params_b),
+        )
+        .expect("concurrent invitation statements complete");
+        let invite_rows = [invite_a, invite_b];
+        assert_eq!(
+            invite_rows
+                .iter()
+                .filter(|row| row.get::<_, bool>("inserted"))
+                .count(),
+            1
+        );
+        assert!(invite_rows.iter().all(|row| {
+            row.get::<_, bool>("inserted") || row.get::<_, bool>("invitation_exists")
+        }));
+        let pending_invitations: i64 = client_a
+            .query_one(
+                "SELECT count(*) FROM invitations
+                 WHERE lower(invited_username) = lower($1)
+                   AND status = 'pending'",
+                &[&invitation_username],
+            )
+            .await
+            .expect("pending invitation count loads")
+            .get(0);
+        assert_eq!(pending_invitations, 1);
+
+        let setup_token = format!("user-invite-{suffix}");
+        let setup_invitation = client_a
+            .query_one(
+                CREATE_INVITATION_QUERY,
+                &[
+                    &user_username,
+                    &role,
+                    &setup_token,
+                    &admin_id,
+                    &lifetime_days,
+                ],
+            )
+            .await
+            .expect("user invitation fixture inserts");
+        assert!(setup_invitation.get::<_, bool>("inserted"));
+
+        let user_params_a: [&(dyn tokio_postgres::types::ToSql + Sync); 3] =
+            [&user_username, &"hash-a", &role];
+        let user_params_b: [&(dyn tokio_postgres::types::ToSql + Sync); 3] =
+            [&user_username, &"hash-b", &role];
+        let (user_a, user_b) = futures_util::try_join!(
+            client_a.query_one(CREATE_USER_QUERY, &user_params_a),
+            client_b.query_one(CREATE_USER_QUERY, &user_params_b),
+        )
+        .expect("concurrent user statements complete");
+        assert_eq!(
+            [user_a, user_b]
+                .iter()
+                .filter(|row| row.get::<_, bool>("inserted"))
+                .count(),
+            1
+        );
+        let accepted_invitations: i64 = client_a
+            .query_one(
+                "SELECT count(*) FROM invitations
+                 WHERE lower(invited_username) = lower($1)
+                   AND status = 'accepted'",
+                &[&user_username],
+            )
+            .await
+            .expect("accepted invitation count loads")
+            .get(0);
+        assert_eq!(accepted_invitations, 1);
+
+        client_a
+            .execute(
+                "DELETE FROM invitations WHERE created_by = $1",
+                &[&admin_id],
+            )
+            .await
+            .expect("invitation fixtures clean up");
+        client_a
+            .execute(
+                "DELETE FROM users WHERE lower(username) = lower($1)",
+                &[&user_username],
+            )
+            .await
+            .expect("user fixture cleans up");
+        client_a
+            .execute("DELETE FROM users WHERE id = $1", &[&admin_id])
+            .await
+            .expect("admin fixture cleans up");
     }
 
     #[actix_web::test]

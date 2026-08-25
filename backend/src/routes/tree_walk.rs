@@ -58,6 +58,7 @@ pub(crate) struct TreeWalkScope<'a> {
 #[derive(Clone)]
 pub(crate) struct TreeWalkNode {
     pub id: String,
+    pub parent_id: Option<String>,
     pub depth: i32,
 }
 
@@ -93,6 +94,7 @@ where
     let root_entry_type: String = root.get("entry_type");
     let mut nodes = vec![TreeWalkNode {
         id: root_id.clone(),
+        parent_id: None,
         depth: 0,
     }];
     let mut visited = HashSet::from([root_id.clone()]);
@@ -143,7 +145,11 @@ where
                 if entry_type == "folder" && depth < 100 {
                     frontier.push_back((id.clone(), depth));
                 }
-                nodes.push(TreeWalkNode { id, depth });
+                nodes.push(TreeWalkNode {
+                    id,
+                    parent_id: Some(parent_id),
+                    depth,
+                });
                 if nodes.len() > scope.max_nodes {
                     return Ok(Some(TreeWalk {
                         nodes,
@@ -244,11 +250,19 @@ mod tests {
                 .count()
                 >= 3
         );
-        let share_links = include_str!("share_links.rs");
+        let share_links = include_str!("share_links.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("share-link production source should remain inspectable");
         assert_eq!(share_links.matches("walk_subtree(").count(), 1);
         assert!(share_links.contains(".isolation_level(IsolationLevel::RepeatableRead)"));
-        let repositories = include_str!("repositories.rs");
-        assert_eq!(repositories.matches("walk_subtree(").count(), 1);
+        let repositories = include_str!("repositories.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .expect("repository production source should remain inspectable");
+        assert_eq!(repositories.matches("walk_subtree(").count(), 0);
+        assert!(repositories.contains("REPOSITORY_ARCHIVE_PAGE_QUERY"));
+        assert!(repositories.contains("LIMIT $9"));
         assert!(repositories.contains(".isolation_level(IsolationLevel::RepeatableRead)"));
         let vault = include_str!("vault.rs");
         assert_eq!(

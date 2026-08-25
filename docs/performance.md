@@ -27,7 +27,8 @@ Run the API load check against a local server with:
 npm run perf:http
 ```
 
-The default check sends 250 requests to `http://127.0.0.1:8080/health` at
+The default check sends 250 dependency-free liveness requests to
+`http://127.0.0.1:8080/health` at
 concurrency 20 and fails above 250 ms p95 latency or any HTTP error. It refuses
 remote hosts unless `AERALYTH_PERF_ALLOW_REMOTE=1` is explicit. Adjust controlled
 test runs through `AERALYTH_PERF_URL`, `AERALYTH_PERF_REQUESTS`,
@@ -37,6 +38,9 @@ test runs through `AERALYTH_PERF_URL`, `AERALYTH_PERF_REQUESTS`,
 Latency thresholds are matched-run guardrails, not a claim that every device or
 network has the same absolute speed. Compare the same scenario, data size,
 browser, backend build, and storage endpoint before and after a change.
+
+Use `/health/ready` when the check must include PostgreSQL. Readiness results are
+cached for two seconds so concurrent probes share one database ping.
 
 ## Runtime metrics and request tracing
 
@@ -57,7 +61,11 @@ tokens from becoming labels. Current coverage includes:
 - process uptime and build information.
 
 Every response includes `x-request-id` and `server-timing`. Successful request
-logs are sampled; slow requests and failures are retained. Configure
+logs are sampled; successful health probes are excluded and successful multipart
+presign/status controls use one tenth the normal sampling frequency. Every 4xx,
+5xx, and slow request is retained. Logs contain matched route templates and
+aggregate byte/count data, never URL tokens, request bodies, or cryptographic
+payloads. Configure
 `AERALYTH_REQUEST_SUCCESS_SAMPLE_RATE` (default 100),
 `AERALYTH_REQUEST_SLOW_MS` (default 500), and `AERALYTH_STRUCTURED_LOGS`.
 Production defaults to JSON logs.

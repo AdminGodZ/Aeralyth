@@ -277,6 +277,8 @@ CREATE TABLE IF NOT EXISTS storage_deletion_jobs (
   attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
   available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   locked_until TIMESTAMPTZ,
+  lease_token TEXT,
+  dead_lettered_at TIMESTAMPTZ,
   last_error TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -314,6 +316,8 @@ CREATE TABLE IF NOT EXISTS user_deletion_jobs (
   attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
   available_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   locked_until TIMESTAMPTZ,
+  lease_token TEXT,
+  dead_lettered_at TIMESTAMPTZ,
   last_error TEXT,
   created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -779,9 +783,11 @@ CREATE INDEX IF NOT EXISTS file_uploads_global_expiry_idx
   ON file_uploads(expires_at, id)
   WHERE status IN ('initializing', 'pending', 'aborting');
 CREATE INDEX IF NOT EXISTS storage_deletion_jobs_available_idx
-  ON storage_deletion_jobs(available_at, locked_until, id);
+  ON storage_deletion_jobs(available_at, locked_until, id)
+  WHERE dead_lettered_at IS NULL;
 CREATE INDEX IF NOT EXISTS user_deletion_jobs_available_idx
-  ON user_deletion_jobs(available_at, locked_until, created_at);
+  ON user_deletion_jobs(available_at, locked_until, created_at)
+  WHERE dead_lettered_at IS NULL;
 CREATE INDEX IF NOT EXISTS files_active_browse_name_idx
   ON files (owner_id, parent_id, ((CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END)), lower(original_name), id)
   WHERE state = 'active';

@@ -1,4 +1,3 @@
-import { detectedCryptoConcurrency } from "@/features/vault/bounded-async";
 import { isVaultNodeId } from "@/features/vault/node-id";
 import type {
   VaultDownloadPlan,
@@ -25,6 +24,7 @@ import {
 
 export type VaultMetadataResolutionOptions = {
   signal?: AbortSignal;
+  requireServerValidation?: boolean;
   onCached?(results: VaultCachedMetadataResult[]): void;
   onPriority?(results: VaultMetadataOpenResult[]): void;
 };
@@ -39,38 +39,54 @@ type ResolverContext = {
   ): Promise<unknown>;
 };
 
-const METADATA_DECRYPTION_CONCURRENCY = detectedCryptoConcurrency(30);
+type PlanFlight = {
+  promise: Promise<{ plans: VaultMetadataPlan[]; requestCount: number }>;
+  controller: AbortController;
+  consumers: number;
+};
+
+const METADATA_DECRYPTION_CONCURRENCY = 4;
+const METADATA_PLAN_BATCH_SIZE = 100;
 const METADATA_FIRST_VIEWPORT_COUNT = 24;
-const METADATA_MEMORY_CACHE_LIMIT = 1_000;
+const METADATA_MEMORY_CACHE_LIMIT = 1_024;
+const METADATA_MEMORY_CACHE_BYTES = 16 * 1024 * 1024;
 const FOLDER_REFERENCE_CACHE_LIMIT = 200;
 
 export class VaultMetadataResolver {
   private session = 0;
   private readonly metadata = new Map<string, VaultCachedMetadataResult>();
   private readonly plans = new Map<string, VaultMetadataPlan>();
-  private readonly planFlights = new Map<
-    string,
-    Promise<{ plans: VaultMetadataPlan[] }>
-  >();
+  private readonly planFlights = new Map<string, PlanFlight>();
   private readonly folderFlights = new Map<string, Promise<void>>();
   private readonly prefetchedFolders = new Set<string>();
   private readonly folderReferences = new Map<
     string,
     VaultMetadataReference[]
   >();
+  private readonly cacheAccounting = new Map<
+    string,
+    { bytes: number; touched: number }
+  >();
+  private cacheBytes = 0;
+  private cacheClock = 0;
+  private validationFlight = 0;
 
   clear(): void {
     this.session += 1;
     this.metadata.clear();
     this.plans.clear();
+    for (const flight of this.planFlights.values()) flight.controller.abort();
     this.planFlights.clear();
     this.folderFlights.clear();
     this.prefetchedFolders.clear();
     this.folderReferences.clear();
+    this.cacheAccounting.clear();
+    this.cacheBytes = 0;
+    this.cacheClock = 0;
   }
 
   remember(result: VaultCachedMetadataResult): void {
-    rememberRevision(this.metadata, result);
+    this.rememberMetadata(result);
   }
 
   rememberFolder(
@@ -117,13 +133,13 @@ export class VaultMetadataResolver {
     const persistentCandidates: VaultMetadataReference[] = [];
     for (const reference of orderedReferences) {
       const key = revisionKey(reference.nodeId, reference.recordHash);
-      const cached = this.metadata.get(key);
+      const cached = options.requireServerValidation
+        ? undefined
+        : this.getMetadata(key);
       if (
         cached &&
         toBase64Url(cached.manifest.generationId) === reference.generationId
       ) {
-        this.metadata.delete(key);
-        this.metadata.set(key, cached);
         resolved.set(key, cached);
       } else {
         persistentCandidates.push(reference);
@@ -131,7 +147,7 @@ export class VaultMetadataResolver {
     }
 
     const persistentHits =
-      persistentCandidates.length === 0
+      persistentCandidates.length === 0 || options.requireServerValidation
         ? []
         : await context.client.getCachedMetadata(
             persistentCandidates,
@@ -179,34 +195,43 @@ export class VaultMetadataResolver {
     }
 
     const batchRequestStartedAt = vaultPerformanceNow();
-    const cachedPlans = misses.flatMap((reference) => {
-      const plan = this.plans.get(
-        revisionKey(reference.nodeId, reference.recordHash),
-      );
-      return plan && metadataPlanMatchesReference(plan, reference)
-        ? [plan]
-        : [];
-    });
+    const cachedPlans = options.requireServerValidation
+      ? []
+      : misses.flatMap((reference) => {
+          const plan = this.getPlan(
+            revisionKey(reference.nodeId, reference.recordHash),
+          );
+          return plan && metadataPlanMatchesReference(plan, reference)
+            ? [plan]
+            : [];
+        });
     const uncachedReferences = misses.filter((reference) => {
-      const plan = this.plans.get(
+      if (options.requireServerValidation) return true;
+      const plan = this.getPlan(
         revisionKey(reference.nodeId, reference.recordHash),
       );
       return !plan || !metadataPlanMatchesReference(plan, reference);
     });
-    const fetchedPlans =
-      uncachedReferences.length === 0
-        ? []
-        : (
-            await waitForOperation(
-              this.loadPlans(context.csrfToken, uncachedReferences, session),
-              options.signal,
-            )
-          ).plans;
+    let fetched = { plans: [] as VaultMetadataPlan[], requestCount: 0 };
+    if (uncachedReferences.length > 0) {
+      const lease = this.loadPlans(
+        context.csrfToken,
+        uncachedReferences,
+        session,
+        options.requireServerValidation === true,
+      );
+      try {
+        fetched = await waitForOperation(lease.promise, options.signal);
+      } finally {
+        lease.release();
+      }
+    }
+    const fetchedPlans = fetched.plans;
     this.assertSession(session);
     recordVaultMetadataPerformance("batch_request", batchRequestStartedAt, {
       nodeCount: uncachedReferences.length,
       planCacheHits: cachedPlans.length,
-      networkRequests: uncachedReferences.length > 0 ? 1 : 0,
+      networkRequests: fetched.requestCount,
     });
 
     const expectedByNode = new Map(
@@ -398,7 +423,9 @@ export class VaultMetadataResolver {
         });
         if (!cachedReferences) this.rememberFolder(folderId, view, references);
         if (references.length > 0) {
-          await this.resolve(references, context);
+          await this.resolve(references, context, {
+            requireServerValidation: view === "shared",
+          });
         }
         this.assertSession(session);
         this.prefetchedFolders.add(key);
@@ -420,30 +447,101 @@ export class VaultMetadataResolver {
     csrfToken: string,
     references: VaultMetadataReference[],
     session: number,
-  ): Promise<{ plans: VaultMetadataPlan[] }> {
-    const requestKey = references
+    requireServerValidation: boolean,
+  ): {
+    promise: Promise<{ plans: VaultMetadataPlan[]; requestCount: number }>;
+    release(): void;
+  } {
+    const revisionSet = references
       .map((reference) => revisionKey(reference.nodeId, reference.recordHash))
       .sort()
       .join("|");
-    const existing = this.planFlights.get(requestKey);
-    if (existing) return existing;
-    const request = getVaultMetadataPlans(
-      csrfToken,
-      references.map((reference) => reference.nodeId),
-    ).then((response) => {
-      if (session === this.session) {
-        for (const plan of response.plans) rememberRevision(this.plans, plan);
+    this.validationFlight += 1;
+    const requestKey = requireServerValidation
+      ? `validated:${session}:${this.validationFlight}:${revisionSet}`
+      : revisionSet;
+    const existing = requireServerValidation
+      ? undefined
+      : this.planFlights.get(requestKey);
+    if (existing) {
+      existing.consumers += 1;
+      return this.planLease(requestKey, existing);
+    }
+    const controller = new AbortController();
+    const request = (async () => {
+      const plans: VaultMetadataPlan[] = [];
+      let requestCount = 0;
+      for (
+        let offset = 0;
+        offset < references.length;
+        offset += METADATA_PLAN_BATCH_SIZE
+      ) {
+        this.assertSession(session);
+        const nodeIds = references
+          .slice(offset, offset + METADATA_PLAN_BATCH_SIZE)
+          .map((reference) => reference.nodeId);
+        let continuation: number | undefined;
+        do {
+          const response = await getVaultMetadataPlans(
+            csrfToken,
+            nodeIds,
+            continuation,
+            controller.signal,
+          );
+          requestCount += 1;
+          plans.push(...response.plans);
+          if (
+            response.continuation !== undefined &&
+            (!Number.isSafeInteger(response.continuation) ||
+              response.continuation <= (continuation ?? -1))
+          ) {
+            throw new Error("The metadata plan continuation is invalid.");
+          }
+          continuation = response.continuation;
+        } while (continuation !== undefined);
       }
-      return response;
-    });
-    this.planFlights.set(requestKey, request);
+      if (session === this.session) {
+        for (const plan of plans) this.rememberPlan(plan);
+      }
+      return { plans, requestCount };
+    })();
+    const flight: PlanFlight = {
+      promise: request,
+      controller,
+      consumers: 1,
+    };
+    this.planFlights.set(requestKey, flight);
     const clearFlight = () => {
-      if (this.planFlights.get(requestKey) === request) {
+      if (this.planFlights.get(requestKey) === flight) {
         this.planFlights.delete(requestKey);
       }
     };
     void request.then(clearFlight, clearFlight);
-    return request;
+    return this.planLease(requestKey, flight);
+  }
+
+  private planLease(
+    requestKey: string,
+    flight: PlanFlight,
+  ): {
+    promise: Promise<{ plans: VaultMetadataPlan[]; requestCount: number }>;
+    release(): void;
+  } {
+    let released = false;
+    return {
+      promise: flight.promise,
+      release: () => {
+        if (released) return;
+        released = true;
+        flight.consumers -= 1;
+        if (
+          flight.consumers === 0 &&
+          this.planFlights.get(requestKey) === flight
+        ) {
+          flight.controller.abort();
+        }
+      },
+    };
   }
 
   private assertSession(session: number): void {
@@ -452,6 +550,97 @@ export class VaultMetadataResolver {
         "The vault was locked during this operation.",
         "VAULT_LOCKED",
       );
+    }
+  }
+
+  private getMetadata(key: string): VaultCachedMetadataResult | undefined {
+    const value = this.metadata.get(key);
+    if (value) this.touchCache("metadata", key);
+    return value;
+  }
+
+  private getPlan(key: string): VaultMetadataPlan | undefined {
+    const value = this.plans.get(key);
+    if (value) this.touchCache("plan", key);
+    return value;
+  }
+
+  private rememberMetadata(value: VaultCachedMetadataResult): void {
+    this.rememberCacheValue(
+      "metadata",
+      this.metadata,
+      value,
+      estimateMetadataBytes(value),
+    );
+  }
+
+  private rememberPlan(value: VaultMetadataPlan): void {
+    this.rememberCacheValue(
+      "plan",
+      this.plans,
+      value,
+      estimateMetadataPlanBytes(value),
+    );
+  }
+
+  private rememberCacheValue<
+    Value extends { nodeId: string; recordHash: string },
+  >(
+    kind: "metadata" | "plan",
+    cache: Map<string, Value>,
+    value: Value,
+    bytes: number,
+  ): void {
+    const key = revisionKey(value.nodeId, value.recordHash);
+    for (const existingKey of cache.keys()) {
+      if (existingKey !== key && existingKey.startsWith(`${value.nodeId}:`)) {
+        this.evictCacheValue(kind, existingKey);
+      }
+    }
+    this.evictCacheValue(kind, key);
+    cache.set(key, value);
+    const accountingKey = cacheAccountingKey(kind, key);
+    this.cacheClock += 1;
+    this.cacheAccounting.set(accountingKey, {
+      bytes,
+      touched: this.cacheClock,
+    });
+    this.cacheBytes += bytes;
+    this.trimCaches();
+  }
+
+  private touchCache(kind: "metadata" | "plan", key: string): void {
+    const accounting = this.cacheAccounting.get(cacheAccountingKey(kind, key));
+    if (accounting) accounting.touched = this.cacheClock += 1;
+  }
+
+  private evictCacheValue(kind: "metadata" | "plan", key: string): void {
+    const accountingKey = cacheAccountingKey(kind, key);
+    const accounting = this.cacheAccounting.get(accountingKey);
+    if (accounting) {
+      this.cacheBytes -= accounting.bytes;
+      this.cacheAccounting.delete(accountingKey);
+    }
+    (kind === "metadata" ? this.metadata : this.plans).delete(key);
+  }
+
+  private trimCaches(): void {
+    while (
+      this.cacheAccounting.size > METADATA_MEMORY_CACHE_LIMIT ||
+      this.cacheBytes > METADATA_MEMORY_CACHE_BYTES
+    ) {
+      let oldestKey: string | undefined;
+      let oldestTouch = Number.POSITIVE_INFINITY;
+      for (const [key, value] of this.cacheAccounting) {
+        if (value.touched < oldestTouch) {
+          oldestTouch = value.touched;
+          oldestKey = key;
+        }
+      }
+      if (!oldestKey) break;
+      const separator = oldestKey.indexOf(":");
+      const kind = oldestKey.slice(0, separator) as "metadata" | "plan";
+      this.evictCacheValue(kind, oldestKey.slice(separator + 1));
     }
   }
 }
@@ -528,23 +717,40 @@ function sameMetadataReferences(
   );
 }
 
-function rememberRevision<Value extends { nodeId: string; recordHash: string }>(
-  cache: Map<string, Value>,
-  value: Value,
-): void {
-  const key = revisionKey(value.nodeId, value.recordHash);
-  for (const existingKey of cache.keys()) {
-    if (existingKey !== key && existingKey.startsWith(`${value.nodeId}:`)) {
-      cache.delete(existingKey);
-    }
-  }
-  cache.delete(key);
-  cache.set(key, value);
-  while (cache.size > METADATA_MEMORY_CACHE_LIMIT) {
-    const oldest = cache.keys().next().value;
-    if (typeof oldest !== "string") break;
-    cache.delete(oldest);
-  }
+function cacheAccountingKey(
+  kind: "metadata" | "plan",
+  revision: string,
+): string {
+  return `${kind}:${revision}`;
+}
+
+function estimateMetadataBytes(result: VaultCachedMetadataResult): number {
+  const manifest = result.manifest;
+  return (
+    256 +
+    result.nodeId.length * 2 +
+    result.recordHash.length * 2 +
+    manifest.name.length * 2 +
+    (manifest.mimeType?.length ?? 0) * 2 +
+    (manifest.parentId?.length ?? 0) * 2 +
+    manifest.generationId.byteLength
+  );
+}
+
+function estimateMetadataPlanBytes(plan: VaultMetadataPlan): number {
+  return (
+    512 +
+    plan.nodeId.length * 2 +
+    plan.generationId.length * 2 +
+    plan.ciphertextMerkleRoot.length * 2 +
+    plan.bootstrapCbor.length * 2 +
+    plan.bootstrapSignature.length * 2 +
+    plan.encryptedManifest.length * 2 +
+    plan.wrappers.reduce((total, wrapper) => total + wrapper.length * 2, 0) +
+    plan.signerEd25519PublicKey.length * 2 +
+    plan.recordHash.length * 2 +
+    (plan.share === null ? 0 : JSON.stringify(plan.share).length * 2)
+  );
 }
 
 function waitForOperation<Value>(

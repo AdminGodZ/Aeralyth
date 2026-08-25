@@ -1,4 +1,5 @@
 import type {
+  VaultAccountStateManifest,
   VaultActiveShareContext,
   VaultDownloadPlan,
   VaultMetadataPlan,
@@ -8,11 +9,13 @@ import type {
   VaultRewrapPayload,
   VaultSetupPayload,
   VaultShareNodeSnapshot,
+  VaultSharePreparationPlan,
   VaultUnlockMaterial,
 } from "@/features/vault/protocol";
 import { fromBase64Url, toArrayBuffer } from "@/features/vault/protocol";
 import {
   encodeCreateSharePublication,
+  encodeFolderBatchPublication,
   encodeNodePublication,
   encodePublishEpochPublication,
   encodeShareDirectoryPublication,
@@ -51,11 +54,6 @@ export type VaultUploadPlan = {
   nodeId: string;
   mode: "none" | "single" | "multipart";
   partSizeBytes: number | null;
-  existingParts: Array<{
-    partNumber: number;
-    etag: string;
-    checksumSha256: string | null;
-  }>;
 };
 
 export type VaultUploadUrl = {
@@ -78,6 +76,7 @@ export type VaultPublishResponse = {
 
 export type VaultShareSyncJob = {
   nodeId: string;
+  contextCacheKey?: string;
   entryType: "file" | "folder";
   generationNumber: number;
   generationId: string;
@@ -165,6 +164,35 @@ export function getUnlockMaterial(
   signal?: AbortSignal,
 ): Promise<VaultUnlockMaterial> {
   return vaultRequest("/api/vault/unlock-material", { signal });
+}
+
+export async function getVaultAccountState(
+  manifest: VaultAccountStateManifest,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
+  const response = await fetch("/api/vault/account-state", {
+    credentials: "same-origin",
+    signal,
+  });
+  if (!response.ok) {
+    throw new VaultApiError(
+      (await response.text()) || "The vault account state is unavailable.",
+      response.status,
+    );
+  }
+  if (
+    response.headers.get("x-vault-account-state-record-id") !==
+      manifest.recordId ||
+    Number(response.headers.get("x-vault-account-state-version")) !==
+      manifest.version
+  ) {
+    throw new Error("The vault account-state revision changed.");
+  }
+  const ciphertext = new Uint8Array(await response.arrayBuffer());
+  if (ciphertext.length !== manifest.ciphertextBytes) {
+    throw new Error("The vault account-state length changed.");
+  }
+  return ciphertext;
 }
 
 export function setupVault(
@@ -265,6 +293,30 @@ export function publishVaultUpload(
   );
 }
 
+export async function publishVaultFoldersBatch(
+  csrfToken: string,
+  records: VaultNodeRecord[],
+  signal?: AbortSignal,
+): Promise<{ folders: VaultPublishResponse[] }> {
+  const payload = encodeFolderBatchPublication(records);
+  try {
+    return await vaultBinaryMutation(
+      "/api/vault/folders/batch",
+      csrfToken,
+      payload,
+      signal,
+    );
+  } catch (error) {
+    if (signal?.aborted || error instanceof VaultApiError) throw error;
+    return vaultBinaryMutation(
+      "/api/vault/folders/batch",
+      csrfToken,
+      payload,
+      signal,
+    );
+  }
+}
+
 export function getShareSyncJobs(
   signal?: AbortSignal,
 ): Promise<{ jobs: VaultShareSyncJob[] }> {
@@ -316,14 +368,55 @@ export function getVaultDownloadPlan(
 export function getVaultMetadataPlans(
   csrfToken: string,
   nodeIds: readonly string[],
+  continuation?: number,
   signal?: AbortSignal,
-): Promise<{ plans: VaultMetadataPlan[] }> {
+  purpose?: "sharePreparation",
+): Promise<{ plans: VaultMetadataPlan[]; continuation?: number }> {
   return vaultMutation(
     "/api/vault/nodes/metadata-plans",
     csrfToken,
-    { nodeIds },
+    {
+      nodeIds,
+      ...(continuation === undefined ? {} : { continuation }),
+      ...(purpose ? { purpose } : {}),
+    },
     signal,
   );
+}
+
+export async function getVaultSharePreparationPlans(
+  csrfToken: string,
+  nodes: readonly VaultShareNodeSnapshot[],
+  signal?: AbortSignal,
+): Promise<VaultSharePreparationPlan[]> {
+  const plans = new Map<string, VaultMetadataPlan>();
+  for (let offset = 0; offset < nodes.length; offset += 100) {
+    const page = nodes.slice(offset, offset + 100);
+    let continuation: number | undefined;
+    do {
+      const response = await getVaultMetadataPlans(
+        csrfToken,
+        page.map((node) => node.nodeId),
+        continuation,
+        signal,
+        "sharePreparation",
+      );
+      for (const plan of response.plans) plans.set(plan.nodeId, plan);
+      continuation = response.continuation;
+    } while (continuation !== undefined);
+  }
+  return nodes.map((snapshot) => {
+    const metadata = plans.get(snapshot.nodeId);
+    if (
+      !metadata ||
+      metadata.recordVersion !== snapshot.recordVersion ||
+      metadata.recordHash !== snapshot.recordHash ||
+      metadata.generationId !== snapshot.generationId
+    ) {
+      throw new Error("The share-preparation metadata snapshot changed.");
+    }
+    return { snapshot, metadata };
+  });
 }
 
 export async function getVaultFolderMetadataReferences(

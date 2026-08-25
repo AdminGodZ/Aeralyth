@@ -236,6 +236,9 @@ export type RepositoryRoot = {
   name: string;
   e2eeState: "legacy" | "staged" | "encrypted";
   updatedAt: string;
+  vaultGenerationId: string | null;
+  vaultRecordVersion: number | null;
+  vaultRecordHash: string | null;
 };
 
 export type RepositorySummary = {
@@ -269,12 +272,18 @@ export type RepositoryEntry = {
   sizeBytes: number;
   e2eeState: "legacy" | "staged" | "encrypted";
   updatedAt: string;
+  vaultGenerationId: string | null;
+  vaultRecordVersion: number | null;
+  vaultRecordHash: string | null;
 };
 
 export type RepositoryBreadcrumb = {
   id: string;
   name: string;
   e2eeState: "legacy" | "staged" | "encrypted";
+  vaultGenerationId: string | null;
+  vaultRecordVersion: number | null;
+  vaultRecordHash: string | null;
 };
 
 export type RepositoryDetailData = {
@@ -297,10 +306,17 @@ export type RepositoryArchiveManifest = {
   totalBytes: number;
 };
 
+export type RepositoryArchiveManifestPage = RepositoryArchiveManifest & {
+  snapshotVersion: number;
+  totalEntries: number;
+  totalFiles: number;
+  totalEncryptedEntries: number;
+  nextCursor: string | null;
+  hasMore: boolean;
+};
+
 export type RepositoryArchiveEntry = RepositoryEntry & {
   contentVersion: string;
-  vaultGenerationId: string | null;
-  vaultRecordHash: string | null;
 };
 
 export type FolderArchiveEntry = RepositoryArchiveEntry & {
@@ -721,7 +737,8 @@ function isRepositoryDetailData(
       (breadcrumb) =>
         typeof breadcrumb.id === "string" &&
         typeof breadcrumb.name === "string" &&
-        isE2eeState(breadcrumb.e2eeState),
+        isE2eeState(breadcrumb.e2eeState) &&
+        isNullableVaultMetadataReference(breadcrumb),
     ) &&
     Array.isArray(data.entries) &&
     data.entries.every(isRepositoryEntry) &&
@@ -752,7 +769,8 @@ function isRepositorySummary(value: unknown): value is RepositorySummary {
     typeof repository.root.id === "string" &&
     typeof repository.root.name === "string" &&
     typeof repository.root.updatedAt === "string" &&
-    isE2eeState(repository.root.e2eeState)
+    isE2eeState(repository.root.e2eeState) &&
+    isNullableVaultMetadataReference(repository.root)
   );
 }
 
@@ -770,7 +788,23 @@ function isRepositoryEntry(value: unknown): value is RepositoryEntry {
     (typeof entry.parentId === "string" || entry.parentId === null) &&
     typeof entry.sizeBytes === "number" &&
     typeof entry.updatedAt === "string" &&
-    isE2eeState(entry.e2eeState)
+    isE2eeState(entry.e2eeState) &&
+    isNullableVaultMetadataReference(entry)
+  );
+}
+
+function isNullableVaultMetadataReference(value: {
+  vaultGenerationId?: unknown;
+  vaultRecordVersion?: unknown;
+  vaultRecordHash?: unknown;
+}): boolean {
+  return (
+    (typeof value.vaultGenerationId === "string" ||
+      value.vaultGenerationId === null) &&
+    (typeof value.vaultRecordVersion === "number" ||
+      value.vaultRecordVersion === null) &&
+    (typeof value.vaultRecordHash === "string" ||
+      value.vaultRecordHash === null)
   );
 }
 

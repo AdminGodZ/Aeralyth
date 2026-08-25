@@ -89,7 +89,7 @@ api_pid=$!
 HOSTNAME=127.0.0.1 PORT="${frontend_port}" node /app/frontend/server.js &
 frontend_pid=$!
 
-if ! wait_for_service "API" "http://127.0.0.1:${api_port}/health" "${api_pid}"; then
+if ! wait_for_service "API" "http://127.0.0.1:${api_port}/health/ready" "${api_pid}"; then
   stop_children
   exit 1
 fi

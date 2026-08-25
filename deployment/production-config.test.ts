@@ -46,7 +46,9 @@ describe("Railway production deployment", () => {
 
   it("routes API traffic directly to Actix and everything else to Next", () => {
     const caddyfile = read("deployment/Caddyfile");
-    const apiMatcher = caddyfile.indexOf("@api path /api/* /health /metrics");
+    const apiMatcher = caddyfile.indexOf(
+      "@api path /api/* /health /health/* /metrics",
+    );
     const apiTarget = caddyfile.indexOf(
       "reverse_proxy 127.0.0.1:{$AERALYTH_API_PORT:8081}",
     );
@@ -72,15 +74,38 @@ describe("Railway production deployment", () => {
     expect(caddyfile).not.toContain("reverse_proxy 127.0.0.1:8080");
   });
 
-  it("forces browser workers to revalidate after every deployment", () => {
+  it("bounds public HTTP lifetimes without imposing a short large-body deadline", () => {
     const caddyfile = read("deployment/Caddyfile");
+    expect(caddyfile).toContain("read_header 10s");
+    expect(caddyfile).toContain("read_body 10m");
+    expect(caddyfile).toContain("write 30m");
+    expect(caddyfile).toContain("idle 2m");
+    expect(caddyfile).toContain("max_header_size 64KB");
+    expect(caddyfile).toContain("grace_period 30s");
+  });
+
+  it("compresses text responses but excludes encrypted and object bodies", () => {
+    const caddyfile = read("deployment/Caddyfile");
+    const encode = caddyfile
+      .split("encode zstd gzip {")[1]
+      ?.split("@workers path")[0];
+    expect(encode).toBeTruthy();
+    expect(encode).toContain("minimum_length 1024");
+    expect(encode).toContain("application/json*");
+    expect(encode).toContain("text/*");
+    expect(encode).not.toContain("application/octet-stream");
+    expect(encode).not.toContain("application/vnd.aeralyth");
+  });
+
+  it("serves content-named browser workers with immutable caching", () => {
+    const caddyfile = read("deployment/Caddyfile");
+    expect(caddyfile).toContain("@workers path /workers/*");
     expect(caddyfile).toContain(
-      "@workers path /vault.worker.js /folder-zip.worker.js",
+      '>Cache-Control "public, max-age=31536000, immutable"',
     );
     expect(caddyfile).toContain(
-      '>Cache-Control "private, no-cache, max-age=0, must-revalidate"',
+      '>CDN-Cache-Control "public, max-age=31536000, immutable"',
     );
-    expect(caddyfile).toContain('>CDN-Cache-Control "no-store"');
   });
 
   it("blocks activation unless migrations and health checks succeed", () => {
@@ -101,7 +126,7 @@ describe("Railway production deployment", () => {
     expect(config.deploy.preDeployCommand).toEqual([
       "/app/scripts/migrate-production.sh",
     ]);
-    expect(config.deploy.healthcheckPath).toBe("/health");
+    expect(config.deploy.healthcheckPath).toBe("/health/ready");
     expect(config.deploy.restartPolicyType).toBe("ON_FAILURE");
     expect(config.deploy.overlapSeconds).toBe(0);
     expect(config.deploy.drainingSeconds).toBe(30);
@@ -117,7 +142,7 @@ describe("Railway production deployment", () => {
     expect(workflow).toContain("Railway deployment config");
     expect(workflow).toContain("npm run validate:railway");
     expect(workflow).toContain(
-      "git diff --exit-code -- public/vault.worker.js public/folder-zip.worker.js src/generated/worker-assets.ts",
+      "git diff --exit-code -- src/generated/worker-assets.ts",
     );
     expect(workflow).toContain("npm run db:test:production-preflight-fresh");
     expect(workflow).toContain("-e AERALYTH_ENV=production");
@@ -129,12 +154,15 @@ describe("Railway production deployment", () => {
     expect(workflow).toContain('--publish "18081:' + "$" + '{public_port}"');
     expect(workflow).toContain("smoke_port 8080 8081");
     expect(workflow).toContain("smoke_port 8081 18080");
-    expect(workflow).toContain("verify_worker /vault.worker.js");
-    expect(workflow).toContain("verify_worker /folder-zip.worker.js");
+    expect(workflow).toMatch(/verify_worker "\$\{vault_worker_path\}"/u);
+    expect(workflow).toMatch(/verify_worker "\$\{zip_worker_path\}"/u);
+    expect(workflow).toMatch(/verify_worker "\$\{checksum_worker_path\}"/u);
     expect(workflow).toContain(
-      "cache-control: private, no-cache, max-age=0, must-revalidate",
+      "cache-control: public, max-age=31536000, immutable",
     );
-    expect(workflow).toContain("cdn-cache-control: no-store");
+    expect(workflow).toContain(
+      "cdn-cache-control: public, max-age=31536000, immutable",
+    );
   });
 
   it("refuses a fresh production database with the local seed password", () => {

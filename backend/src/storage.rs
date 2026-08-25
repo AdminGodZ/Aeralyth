@@ -6,15 +6,28 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_config::BehaviorVersion;
+use aws_config::retry::RetryConfig;
+use aws_config::timeout::TimeoutConfig;
 use aws_credential_types::Credentials;
+use aws_sdk_s3::config::interceptors::BeforeTransmitInterceptorContextRef;
+use aws_sdk_s3::config::{ConfigBag, Intercept, RuntimeComponents};
+use aws_sdk_s3::error::ProvideErrorMetadata;
 use aws_sdk_s3::presigning::PresigningConfig;
-use aws_sdk_s3::types::{ChecksumAlgorithm, ChecksumMode, CompletedMultipartUpload, CompletedPart};
+use aws_sdk_s3::types::{
+    AbortIncompleteMultipartUpload, BucketLifecycleConfiguration, ChecksumAlgorithm, ChecksumMode,
+    CompletedMultipartUpload, CompletedPart, Delete, ExpirationStatus, LifecycleRule,
+    LifecycleRuleFilter, ObjectIdentifier,
+};
+use aws_smithy_runtime_api::box_error::BoxError;
+use aws_smithy_runtime_api::client::retries::RequestAttempts;
 use aws_types::region::Region;
 use futures_util::future::{Either, select};
+use futures_util::{StreamExt, stream};
 use serde::Serialize;
-use tokio::sync::watch;
+use tokio::sync::{broadcast, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep};
+use tokio_postgres::{AsyncMessage, NoTls};
 
 use crate::config::Config;
 use crate::db::Database;
@@ -27,12 +40,29 @@ use crate::upload_completion::{
 };
 
 const MULTIPART_RECONCILIATION_LOCK_ID: i64 = 4_133_797_884_291_001;
+const COUNTER_RECONCILIATION_LOCK_ID: i64 = 4_133_797_884_291_002;
 const STORAGE_OBJECT_PREFIX: &str = "users/";
 const USER_DELETION_BATCH_SIZE: i64 = 500;
 const USER_DELETION_BATCHES_PER_TICK: usize = 32;
 const SESSION_EXPIRY_BATCH_SIZE: i64 = 1_000;
 const SESSION_EXPIRY_BATCHES_PER_TICK: usize = 4;
 const MAINTENANCE_RESTART_DELAY: Duration = Duration::from_secs(1);
+const S3_REQUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
+const S3_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const S3_REQUEST_OPERATION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
+const S3_REQUEST_OPERATION_TIMEOUT: Duration = Duration::from_secs(30);
+const S3_MAINTENANCE_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+const S3_MAINTENANCE_READ_TIMEOUT: Duration = Duration::from_secs(20);
+const S3_MAINTENANCE_OPERATION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
+const S3_MAINTENANCE_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
+const MULTIPART_LIFECYCLE_RULE_ID: &str = "aeralyth-abort-incomplete-multipart";
+const LIFECYCLE_BACKED_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+const COUNTER_RECONCILIATION_BATCH_SIZE: i64 = 500;
+const STORAGE_JOB_LEASE_SECONDS: i64 = 5 * 60;
+const STORAGE_JOB_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
+const MAINTENANCE_DEAD_LETTER_ATTEMPTS: i32 = 12;
+const RETRY_DELAY_FLOOR_SECONDS: i64 = 10;
+const RETRY_DELAY_CAP_SECONDS: i64 = 60 * 60;
 const CLAIM_EXPIRED_VAULT_UPLOADS_QUERY: &str = "
     WITH claimed AS (
       SELECT id
@@ -78,10 +108,210 @@ const CLAIM_EXPIRED_FILE_UPLOADS_QUERY: &str = "
       uploads.status,
       uploads.checksum_sha256
 ";
+const CLAIM_STORAGE_DELETION_JOBS_QUERY: &str = "
+    WITH claimed AS (
+      SELECT id
+      FROM storage_deletion_jobs
+      WHERE available_at <= now()
+        AND dead_lettered_at IS NULL
+        AND (locked_until IS NULL OR locked_until < now())
+      ORDER BY id
+      LIMIT 25
+      FOR UPDATE SKIP LOCKED
+    ), claimed_jobs AS (
+      UPDATE storage_deletion_jobs AS jobs
+      SET locked_until = now() + ($1::bigint * interval '1 second'),
+          lease_token = gen_random_uuid()::text
+      FROM claimed
+      WHERE jobs.id = claimed.id
+      RETURNING
+        jobs.id,
+        jobs.object_key,
+        jobs.multipart_upload_id,
+        jobs.attempts,
+        jobs.lease_token
+    )
+    SELECT
+      claimed_jobs.*,
+      EXISTS (
+        SELECT 1
+        FROM vault_uploads
+        WHERE vault_uploads.object_key = claimed_jobs.object_key
+          AND vault_uploads.upload_mode = 'multipart'
+          AND vault_uploads.status IN ('aborting', 'aborted')
+          AND vault_uploads.multipart_upload_id IS NULL
+      ) AS discover_multipart
+    FROM claimed_jobs
+";
 const COMPLETE_MIGRATION_CLEANUP_QUERY: &str = "
     UPDATE vault_migrations
     SET state = 'complete', updated_at = now()
     WHERE legacy_object_key = $1 AND state = 'cleanup_queued'
+";
+const RECONCILE_USER_COUNTERS_PAGE_QUERY: &str = "
+    WITH owners AS MATERIALIZED (
+      SELECT id
+      FROM users
+      WHERE id > $1
+      ORDER BY id
+      LIMIT $2
+    ), file_counts AS MATERIALIZED (
+      SELECT
+        files.owner_id,
+        count(*) FILTER (
+          WHERE files.state = 'active' AND files.entry_type = 'file'
+        )::bigint AS total_files,
+        count(*) FILTER (
+          WHERE files.state = 'active' AND files.entry_type = 'folder'
+        )::bigint AS total_folders,
+        count(*) FILTER (
+          WHERE files.state = 'trashed' AND files.entry_type = 'file'
+        )::bigint AS trashed_files,
+        count(*) FILTER (
+          WHERE files.state = 'active' AND files.favorite
+        )::bigint AS favorite_files,
+        COALESCE(sum(files.size_bytes) FILTER (
+          WHERE files.entry_type = 'file'
+        ), 0)::bigint AS used_bytes
+      FROM files
+      INNER JOIN owners ON owners.id = files.owner_id
+      GROUP BY files.owner_id
+    ), shared_counts AS MATERIALIZED (
+      SELECT
+        file_shares.recipient_id AS owner_id,
+        count(*)::bigint AS shared_files
+      FROM file_shares
+      INNER JOIN owners ON owners.id = file_shares.recipient_id
+      INNER JOIN files AS shared_files ON shared_files.id = file_shares.file_id
+      WHERE shared_files.state = 'active'
+        AND shared_files.entry_type = 'file'
+      GROUP BY file_shares.recipient_id
+    ), expected AS MATERIALIZED (
+      SELECT
+        owners.id AS owner_id,
+        COALESCE(file_counts.total_files, 0)::bigint AS total_files,
+        COALESCE(file_counts.total_folders, 0)::bigint AS total_folders,
+        COALESCE(file_counts.total_files, 0)::bigint AS active_files,
+        COALESCE(file_counts.trashed_files, 0)::bigint AS trashed_files,
+        COALESCE(file_counts.favorite_files, 0)::bigint AS favorite_files,
+        COALESCE(shared_counts.shared_files, 0)::bigint AS shared_files,
+        COALESCE(file_counts.used_bytes, 0)::bigint AS used_bytes
+      FROM owners
+      LEFT JOIN file_counts ON file_counts.owner_id = owners.id
+      LEFT JOIN shared_counts ON shared_counts.owner_id = owners.id
+    ), drifted AS MATERIALIZED (
+      SELECT expected.*, counters.xmin AS counter_xmin
+      FROM expected
+      LEFT JOIN user_file_counters AS counters
+        ON counters.owner_id = expected.owner_id
+      WHERE counters.owner_id IS NULL
+         OR ROW(
+              counters.total_files,
+              counters.total_folders,
+              counters.active_files,
+              counters.trashed_files,
+              counters.favorite_files,
+              counters.shared_files,
+              counters.used_bytes
+            ) IS DISTINCT FROM ROW(
+              expected.total_files,
+              expected.total_folders,
+              expected.active_files,
+              expected.trashed_files,
+              expected.favorite_files,
+              expected.shared_files,
+              expected.used_bytes
+            )
+    ), updated AS (
+      UPDATE user_file_counters AS counters
+      SET total_files = drifted.total_files,
+          total_folders = drifted.total_folders,
+          active_files = drifted.active_files,
+          trashed_files = drifted.trashed_files,
+          favorite_files = drifted.favorite_files,
+          shared_files = drifted.shared_files,
+          used_bytes = drifted.used_bytes,
+          updated_at = now()
+      FROM drifted
+      WHERE counters.owner_id = drifted.owner_id
+        AND counters.xmin = drifted.counter_xmin
+      RETURNING counters.owner_id
+    ), inserted AS (
+      INSERT INTO user_file_counters (
+        owner_id,
+        total_files,
+        total_folders,
+        active_files,
+        trashed_files,
+        favorite_files,
+        shared_files,
+        used_bytes,
+        updated_at
+      )
+      SELECT
+        owner_id,
+        total_files,
+        total_folders,
+        active_files,
+        trashed_files,
+        favorite_files,
+        shared_files,
+        used_bytes,
+        now()
+      FROM drifted
+      WHERE counter_xmin IS NULL
+      ON CONFLICT (owner_id) DO NOTHING
+      RETURNING owner_id
+    )
+    SELECT
+      (SELECT count(*)::bigint FROM owners) AS scanned,
+      (
+        (SELECT count(*)::bigint FROM updated)
+        + (SELECT count(*)::bigint FROM inserted)
+      ) AS updated,
+      (SELECT max(id) FROM owners) AS next_owner_id
+";
+const RECONCILE_ADMIN_COUNTERS_QUERY: &str = "
+    WITH expected AS (
+      SELECT
+        (SELECT count(*)::bigint FROM users WHERE status <> 'deleting') AS total_users,
+        (SELECT count(*)::bigint FROM users WHERE status = 'active') AS active_users,
+        (
+          SELECT count(*)::bigint
+          FROM users
+          WHERE status = 'active' AND role = 'admin'
+        ) AS active_admins,
+        (
+          SELECT count(*)::bigint
+          FROM invitations
+          WHERE status = 'pending'
+        ) AS pending_invitations
+    ), drifted AS MATERIALIZED (
+      SELECT expected.*, counters.xmin AS counter_xmin
+      FROM admin_directory_counters AS counters
+      CROSS JOIN expected
+      WHERE counters.singleton = TRUE
+        AND ROW(
+          counters.total_users,
+          counters.active_users,
+          counters.active_admins,
+          counters.pending_invitations
+        ) IS DISTINCT FROM ROW(
+          expected.total_users,
+          expected.active_users,
+          expected.active_admins,
+          expected.pending_invitations
+        )
+    )
+    UPDATE admin_directory_counters AS counters
+    SET total_users = drifted.total_users,
+        active_users = drifted.active_users,
+        active_admins = drifted.active_admins,
+        pending_invitations = drifted.pending_invitations,
+        updated_at = now()
+    FROM drifted
+    WHERE counters.singleton = TRUE
+      AND counters.xmin = drifted.counter_xmin
 ";
 const USER_DELETION_PHASES: &[&str] = &[
     "file_uploads",
@@ -129,6 +359,165 @@ struct MaintenanceSchedule {
     worker: MaintenanceWorker,
     initial_delay: Duration,
     interval: Duration,
+    maximum_interval: Duration,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum S3RequestPolicy {
+    Request,
+    Maintenance,
+}
+
+impl S3RequestPolicy {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Request => "request",
+            Self::Maintenance => "maintenance",
+        }
+    }
+
+    fn timeout_config(self) -> TimeoutConfig {
+        let (connect, read, attempt, operation) = match self {
+            Self::Request => (
+                S3_REQUEST_CONNECT_TIMEOUT,
+                S3_REQUEST_READ_TIMEOUT,
+                S3_REQUEST_OPERATION_ATTEMPT_TIMEOUT,
+                S3_REQUEST_OPERATION_TIMEOUT,
+            ),
+            Self::Maintenance => (
+                S3_MAINTENANCE_CONNECT_TIMEOUT,
+                S3_MAINTENANCE_READ_TIMEOUT,
+                S3_MAINTENANCE_OPERATION_ATTEMPT_TIMEOUT,
+                S3_MAINTENANCE_OPERATION_TIMEOUT,
+            ),
+        };
+        TimeoutConfig::builder()
+            .connect_timeout(connect)
+            .read_timeout(read)
+            .operation_attempt_timeout(attempt)
+            .operation_timeout(operation)
+            .build()
+    }
+
+    fn retry_config(self) -> RetryConfig {
+        RetryConfig::standard().with_max_attempts(match self {
+            Self::Request => 2,
+            Self::Maintenance => 3,
+        })
+    }
+}
+
+#[derive(Clone)]
+struct S3RetryMetricsInterceptor {
+    metrics: Metrics,
+    policy: S3RequestPolicy,
+}
+
+impl fmt::Debug for S3RetryMetricsInterceptor {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("S3RetryMetricsInterceptor")
+            .field("policy", &self.policy)
+            .finish_non_exhaustive()
+    }
+}
+
+impl S3RetryMetricsInterceptor {
+    fn record_attempt(&self, attempts: u32) {
+        if attempts > 1 {
+            self.metrics.record_s3_retry_attempt(self.policy.label());
+        }
+    }
+}
+
+impl Intercept for S3RetryMetricsInterceptor {
+    fn name(&self) -> &'static str {
+        "S3RetryMetricsInterceptor"
+    }
+
+    fn read_before_attempt(
+        &self,
+        _context: &BeforeTransmitInterceptorContextRef<'_>,
+        _runtime_components: &RuntimeComponents,
+        cfg: &mut ConfigBag,
+    ) -> Result<(), BoxError> {
+        if let Some(attempts) = cfg.load::<RequestAttempts>() {
+            self.record_attempt(attempts.attempts());
+        }
+        Ok(())
+    }
+}
+
+fn multipart_lifecycle_rule(days: u64) -> Result<LifecycleRule, StorageError> {
+    let days = i32::try_from(days)
+        .map_err(|_| storage_message("multipart lifecycle age exceeds S3 limits"))?;
+    LifecycleRule::builder()
+        .id(MULTIPART_LIFECYCLE_RULE_ID)
+        .filter(
+            LifecycleRuleFilter::builder()
+                .prefix(STORAGE_OBJECT_PREFIX)
+                .build(),
+        )
+        .status(ExpirationStatus::Enabled)
+        .abort_incomplete_multipart_upload(
+            AbortIncompleteMultipartUpload::builder()
+                .days_after_initiation(days)
+                .build(),
+        )
+        .build()
+        .map_err(storage_error)
+}
+
+fn merge_multipart_lifecycle_rule(
+    mut rules: Vec<LifecycleRule>,
+    desired: LifecycleRule,
+) -> (Vec<LifecycleRule>, bool) {
+    if rules.iter().any(|rule| rule == &desired) {
+        return (rules, false);
+    }
+    rules.retain(|rule| rule.id() != Some(MULTIPART_LIFECYCLE_RULE_ID));
+    rules.push(desired);
+    (rules, true)
+}
+
+async fn ensure_multipart_lifecycle_backstop(
+    client: &aws_sdk_s3::Client,
+    bucket: &str,
+    days: u64,
+) -> Result<(), StorageError> {
+    let rules = match client
+        .get_bucket_lifecycle_configuration()
+        .bucket(bucket)
+        .send()
+        .await
+    {
+        Ok(configuration) => configuration.rules().to_vec(),
+        Err(error)
+            if error
+                .as_service_error()
+                .and_then(ProvideErrorMetadata::code)
+                == Some("NoSuchLifecycleConfiguration") =>
+        {
+            Vec::new()
+        }
+        Err(error) => return Err(storage_error(error)),
+    };
+    let (rules, changed) = merge_multipart_lifecycle_rule(rules, multipart_lifecycle_rule(days)?);
+    if !changed {
+        return Ok(());
+    }
+    let lifecycle_configuration = BucketLifecycleConfiguration::builder()
+        .set_rules(Some(rules))
+        .build()
+        .map_err(storage_error)?;
+    client
+        .put_bucket_lifecycle_configuration()
+        .bucket(bucket)
+        .lifecycle_configuration(lifecycle_configuration)
+        .send()
+        .await
+        .map_err(storage_error)?;
+    Ok(())
 }
 
 const MAINTENANCE_SCHEDULES: &[MaintenanceSchedule] = &[
@@ -136,48 +525,68 @@ const MAINTENANCE_SCHEDULES: &[MaintenanceSchedule] = &[
         worker: MaintenanceWorker::UserDeletion,
         initial_delay: Duration::from_secs(0),
         interval: Duration::from_secs(10),
+        maximum_interval: Duration::from_secs(5 * 60),
     },
     MaintenanceSchedule {
         worker: MaintenanceWorker::StorageDeletion,
         initial_delay: Duration::from_secs(1),
         interval: Duration::from_secs(10),
+        maximum_interval: Duration::from_secs(5 * 60),
     },
     MaintenanceSchedule {
         worker: MaintenanceWorker::UploadFinalization,
         initial_delay: Duration::from_secs(0),
         interval: Duration::from_secs(1),
+        maximum_interval: Duration::from_secs(5 * 60),
     },
     MaintenanceSchedule {
         worker: MaintenanceWorker::LegacyUploadExpiry,
         initial_delay: Duration::from_secs(2),
         interval: Duration::from_secs(10),
+        maximum_interval: Duration::from_secs(5 * 60),
     },
     MaintenanceSchedule {
         worker: MaintenanceWorker::VaultUploadExpiry,
         initial_delay: Duration::from_secs(3),
         interval: Duration::from_secs(10),
+        maximum_interval: Duration::from_secs(5 * 60),
     },
     MaintenanceSchedule {
         worker: MaintenanceWorker::InvitationExpiry,
         initial_delay: Duration::from_secs(4),
         interval: Duration::from_secs(10),
+        maximum_interval: Duration::from_secs(5 * 60),
     },
     MaintenanceSchedule {
         worker: MaintenanceWorker::SessionExpiry,
         initial_delay: Duration::from_secs(5),
         interval: Duration::from_secs(10),
+        maximum_interval: Duration::from_secs(5 * 60),
     },
     MaintenanceSchedule {
         worker: MaintenanceWorker::MultipartReconciliation,
         initial_delay: Duration::from_secs(0),
         interval: Duration::from_secs(60 * 60),
+        maximum_interval: Duration::from_secs(60 * 60),
     },
     MaintenanceSchedule {
         worker: MaintenanceWorker::CounterReconciliation,
-        initial_delay: Duration::from_secs(5),
-        interval: Duration::from_secs(60 * 60),
+        initial_delay: Duration::from_secs(30 * 60),
+        interval: Duration::from_secs(24 * 60 * 60),
+        maximum_interval: Duration::from_secs(24 * 60 * 60),
     },
 ];
+
+fn effective_maintenance_schedule(
+    mut schedule: MaintenanceSchedule,
+    lifecycle_backstop_enabled: bool,
+) -> MaintenanceSchedule {
+    if schedule.worker == MaintenanceWorker::MultipartReconciliation && lifecycle_backstop_enabled {
+        schedule.interval = LIFECYCLE_BACKED_RECONCILIATION_INTERVAL;
+        schedule.maximum_interval = LIFECYCLE_BACKED_RECONCILIATION_INTERVAL;
+    }
+    schedule
+}
 
 #[derive(Clone)]
 pub enum Storage {
@@ -186,12 +595,14 @@ pub enum Storage {
     },
     S3 {
         client: aws_sdk_s3::Client,
+        maintenance_client: aws_sdk_s3::Client,
         bucket: String,
         legacy_root: PathBuf,
         presign_seconds: u64,
         multipart_threshold_bytes: u64,
         multipart_part_bytes: u64,
         multipart_orphan_grace_seconds: u64,
+        lifecycle_backstop_enabled: bool,
     },
 }
 
@@ -278,7 +689,7 @@ enum MultipartReconciliationAction {
 }
 
 impl Storage {
-    pub async fn create(config: &Config) -> Result<Self, StorageError> {
+    pub async fn create(config: &Config, metrics: Metrics) -> Result<Self, StorageError> {
         if config.storage_backend == "local" {
             let root = PathBuf::from(&config.storage_path);
             tokio::fs::create_dir_all(&root)
@@ -306,19 +717,52 @@ impl Storage {
             .load()
             .await;
         let s3_config = aws_sdk_s3::config::Builder::from(&shared_config)
+            .endpoint_url(endpoint.clone())
+            .force_path_style(config.s3_force_path_style)
+            .timeout_config(S3RequestPolicy::Request.timeout_config())
+            .retry_config(S3RequestPolicy::Request.retry_config())
+            .interceptor(S3RetryMetricsInterceptor {
+                metrics: metrics.clone(),
+                policy: S3RequestPolicy::Request,
+            })
+            .build();
+        let maintenance_s3_config = aws_sdk_s3::config::Builder::from(&shared_config)
             .endpoint_url(endpoint)
             .force_path_style(config.s3_force_path_style)
+            .timeout_config(S3RequestPolicy::Maintenance.timeout_config())
+            .retry_config(S3RequestPolicy::Maintenance.retry_config())
+            .interceptor(S3RetryMetricsInterceptor {
+                metrics,
+                policy: S3RequestPolicy::Maintenance,
+            })
             .build();
+        let client = aws_sdk_s3::Client::from_conf(s3_config);
+        let maintenance_client = aws_sdk_s3::Client::from_conf(maintenance_s3_config);
+        if let Some(days) = config.s3_abort_incomplete_multipart_days {
+            ensure_multipart_lifecycle_backstop(&maintenance_client, &bucket, days).await?;
+        }
 
         Ok(Self::S3 {
-            client: aws_sdk_s3::Client::from_conf(s3_config),
+            client,
+            maintenance_client,
             bucket,
             legacy_root: PathBuf::from(&config.storage_path),
             presign_seconds: config.storage_presign_seconds,
             multipart_threshold_bytes: config.storage_multipart_threshold_bytes,
             multipart_part_bytes: config.storage_multipart_part_bytes,
             multipart_orphan_grace_seconds: config.storage_multipart_orphan_grace_seconds,
+            lifecycle_backstop_enabled: config.s3_abort_incomplete_multipart_days.is_some(),
         })
+    }
+
+    fn lifecycle_backstop_enabled(&self) -> bool {
+        matches!(
+            self,
+            Self::S3 {
+                lifecycle_backstop_enabled: true,
+                ..
+            }
+        )
     }
 
     pub fn backend_name(&self) -> &'static str {
@@ -579,14 +1023,19 @@ impl Storage {
         key_marker: Option<&str>,
         upload_id_marker: Option<&str>,
     ) -> Result<MultipartUploadPage, StorageError> {
-        let Self::S3 { client, bucket, .. } = self else {
+        let Self::S3 {
+            maintenance_client,
+            bucket,
+            ..
+        } = self
+        else {
             return Ok(MultipartUploadPage {
                 uploads: Vec::new(),
                 next_key_marker: None,
                 next_upload_id_marker: None,
             });
         };
-        let output = client
+        let output = maintenance_client
             .list_multipart_uploads()
             .bucket(bucket)
             .prefix(prefix)
@@ -626,6 +1075,54 @@ impl Storage {
             next_key_marker: is_truncated.then_some(next_key_marker).flatten(),
             next_upload_id_marker: is_truncated.then_some(next_upload_id_marker).flatten(),
         })
+    }
+
+    pub async fn abort_multipart_uploads_for_key(
+        &self,
+        object_key: &str,
+    ) -> Result<(), StorageError> {
+        let mut key_marker: Option<String> = None;
+        let mut upload_id_marker: Option<String> = None;
+
+        loop {
+            let page = self
+                .multipart_upload_page(
+                    object_key,
+                    key_marker.as_deref(),
+                    upload_id_marker.as_deref(),
+                )
+                .await?;
+            let outcomes = stream::iter(
+                page.uploads
+                    .into_iter()
+                    .filter(|upload| upload.object_key == object_key),
+            )
+            .map(|upload| async move {
+                self.abort_multipart(&upload.object_key, &upload.upload_id)
+                    .await
+            })
+            .buffer_unordered(8)
+            .collect::<Vec<_>>()
+            .await;
+            for outcome in outcomes {
+                outcome?;
+            }
+
+            let next_key_marker = page.next_key_marker;
+            let next_upload_id_marker = page.next_upload_id_marker;
+            if next_key_marker.is_none() {
+                break;
+            }
+            if next_key_marker == key_marker && next_upload_id_marker == upload_id_marker {
+                return Err(storage_message(
+                    "S3 multipart listing did not advance its pagination markers",
+                ));
+            }
+            key_marker = next_key_marker;
+            upload_id_marker = next_upload_id_marker;
+        }
+
+        Ok(())
     }
 
     pub fn multipart_orphan_grace_seconds(&self) -> Option<u64> {
@@ -697,11 +1194,16 @@ impl Storage {
         object_key: &str,
         multipart_upload_id: &str,
     ) -> Result<(), StorageError> {
-        let Self::S3 { client, bucket, .. } = self else {
+        let Self::S3 {
+            maintenance_client,
+            bucket,
+            ..
+        } = self
+        else {
             return Ok(());
         };
 
-        let result = client
+        let result = maintenance_client
             .abort_multipart_upload()
             .bucket(bucket)
             .key(object_key)
@@ -722,6 +1224,23 @@ impl Storage {
     }
 
     pub async fn object_metadata(&self, object_key: &str) -> Result<ObjectMetadata, StorageError> {
+        self.object_metadata_with_policy(object_key, S3RequestPolicy::Request)
+            .await
+    }
+
+    async fn maintenance_object_metadata(
+        &self,
+        object_key: &str,
+    ) -> Result<ObjectMetadata, StorageError> {
+        self.object_metadata_with_policy(object_key, S3RequestPolicy::Maintenance)
+            .await
+    }
+
+    async fn object_metadata_with_policy(
+        &self,
+        object_key: &str,
+        policy: S3RequestPolicy,
+    ) -> Result<ObjectMetadata, StorageError> {
         match self {
             Self::Local { .. } => {
                 let path = self
@@ -734,7 +1253,16 @@ impl Storage {
                     etag: None,
                 })
             }
-            Self::S3 { client, bucket, .. } => {
+            Self::S3 {
+                client,
+                maintenance_client,
+                bucket,
+                ..
+            } => {
+                let client = match policy {
+                    S3RequestPolicy::Request => client,
+                    S3RequestPolicy::Maintenance => maintenance_client,
+                };
                 let output = client
                     .head_object()
                     .bucket(bucket)
@@ -813,7 +1341,7 @@ impl Storage {
                 }
             }
             Self::S3 {
-                client,
+                maintenance_client,
                 bucket,
                 legacy_root,
                 ..
@@ -829,7 +1357,7 @@ impl Storage {
                     return Ok(());
                 }
 
-                client
+                maintenance_client
                     .delete_object()
                     .bucket(bucket)
                     .key(object_key)
@@ -841,22 +1369,139 @@ impl Storage {
 
         Ok(())
     }
+
+    fn supports_bulk_delete(&self, object_key: &str) -> bool {
+        matches!(self, Self::S3 { .. }) && object_key.starts_with(STORAGE_OBJECT_PREFIX)
+    }
+
+    pub async fn delete_objects(&self, object_keys: &[String]) -> Vec<Result<(), StorageError>> {
+        if object_keys.is_empty() {
+            return Vec::new();
+        }
+        if object_keys.len() > 1_000
+            || !object_keys.iter().all(|key| self.supports_bulk_delete(key))
+        {
+            let message = if object_keys.len() > 1_000 {
+                "S3 bulk deletion accepts at most 1,000 objects"
+            } else {
+                "the object batch is not eligible for S3 bulk deletion"
+            };
+            return object_keys
+                .iter()
+                .map(|_| Err(storage_message(message)))
+                .collect();
+        }
+        let Self::S3 {
+            maintenance_client,
+            bucket,
+            ..
+        } = self
+        else {
+            unreachable!("bulk deletion eligibility requires S3 storage");
+        };
+        let identifiers = object_keys
+            .iter()
+            .map(|key| ObjectIdentifier::builder().key(key).build())
+            .collect::<Result<Vec<_>, _>>();
+        let identifiers = match identifiers {
+            Ok(identifiers) => identifiers,
+            Err(error) => {
+                let message = error.to_string();
+                return object_keys
+                    .iter()
+                    .map(|_| Err(storage_message(message.clone())))
+                    .collect();
+            }
+        };
+        let request = match Delete::builder()
+            .set_objects(Some(identifiers))
+            .quiet(true)
+            .build()
+        {
+            Ok(request) => request,
+            Err(error) => {
+                let message = error.to_string();
+                return object_keys
+                    .iter()
+                    .map(|_| Err(storage_message(message.clone())))
+                    .collect();
+            }
+        };
+        let output = match maintenance_client
+            .delete_objects()
+            .bucket(bucket)
+            .delete(request)
+            .send()
+            .await
+        {
+            Ok(output) => output,
+            Err(error) => {
+                let message = error.to_string();
+                return object_keys
+                    .iter()
+                    .map(|_| Err(storage_message(message.clone())))
+                    .collect();
+            }
+        };
+        let mut failures = HashMap::new();
+        let mut unscoped_failure = None;
+        for error in output.errors() {
+            let message = format!(
+                "S3 bulk deletion failed{}{}",
+                error
+                    .code()
+                    .map(|code| format!(" with {code}"))
+                    .unwrap_or_default(),
+                error
+                    .message()
+                    .map(|message| format!(": {message}"))
+                    .unwrap_or_default(),
+            );
+            if let Some(key) = error.key() {
+                failures.insert(key.to_owned(), message);
+            } else {
+                unscoped_failure = Some(message);
+            }
+        }
+
+        object_keys
+            .iter()
+            .map(|key| {
+                failures
+                    .get(key)
+                    .or(unscoped_failure.as_ref())
+                    .map_or_else(|| Ok(()), |message| Err(storage_message(message.clone())))
+            })
+            .collect()
+    }
 }
 
 pub async fn run_maintenance(
     db: Database,
     storage: Storage,
     metrics: Metrics,
+    database_url: String,
     shutdown: watch::Receiver<bool>,
+    storage_concurrency: usize,
 ) {
+    let (notifications, _) = broadcast::channel::<String>(256);
     let mut supervisors = JoinSet::new();
+    supervisors.spawn(supervise_maintenance_notifications(
+        database_url,
+        notifications.clone(),
+        shutdown.clone(),
+    ));
     for schedule in MAINTENANCE_SCHEDULES.iter().copied() {
+        let schedule =
+            effective_maintenance_schedule(schedule, storage.lifecycle_backstop_enabled());
         supervisors.spawn(supervise_maintenance_worker(
             schedule,
             db.clone(),
             storage.clone(),
             metrics.clone(),
             shutdown.clone(),
+            storage_concurrency,
+            notifications.clone(),
         ));
     }
 
@@ -867,12 +1512,120 @@ pub async fn run_maintenance(
     }
 }
 
+async fn supervise_maintenance_notifications(
+    database_url: String,
+    notifications: broadcast::Sender<String>,
+    shutdown: watch::Receiver<bool>,
+) {
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        let connection_result = select(
+            Box::pin(wait_for_shutdown(shutdown.clone())),
+            Box::pin(tokio_postgres::connect(&database_url, NoTls)),
+        )
+        .await;
+        let Either::Right((connection_result, _)) = connection_result else {
+            return;
+        };
+        let (client, connection) = match connection_result {
+            Ok(connected) => connected,
+            Err(error) => {
+                log::error!("maintenance notification listener could not connect: {error}");
+                let _ = notifications.send("__all__".to_owned());
+                if wait_for_restart_or_shutdown(shutdown.clone()).await {
+                    return;
+                }
+                continue;
+            }
+        };
+        let (message_sender, mut message_receiver) = mpsc::channel(256);
+        let connection_task = tokio::spawn(async move {
+            let mut messages = stream::poll_fn({
+                let mut connection = connection;
+                move |context| connection.poll_message(context)
+            });
+            while let Some(message) = messages.next().await {
+                if message_sender.send(message).await.is_err() {
+                    break;
+                }
+            }
+        });
+        let listen_result = select(
+            Box::pin(wait_for_shutdown(shutdown.clone())),
+            Box::pin(client.batch_execute("LISTEN aeralyth_maintenance")),
+        )
+        .await;
+        let listen_result = match listen_result {
+            Either::Left(_) => {
+                connection_task.abort();
+                return;
+            }
+            Either::Right((listen_result, _)) => listen_result,
+        };
+        if let Err(error) = listen_result {
+            connection_task.abort();
+            log::error!("maintenance notification listener could not subscribe: {error}");
+            let _ = notifications.send("__all__".to_owned());
+            if wait_for_restart_or_shutdown(shutdown.clone()).await {
+                return;
+            }
+            continue;
+        }
+
+        loop {
+            let next = select(
+                Box::pin(wait_for_shutdown(shutdown.clone())),
+                Box::pin(message_receiver.recv()),
+            )
+            .await;
+            match next {
+                Either::Left(_) => {
+                    connection_task.abort();
+                    return;
+                }
+                Either::Right((Some(Ok(AsyncMessage::Notification(notification))), _)) => {
+                    let _ = notifications.send(notification.payload().to_owned());
+                }
+                Either::Right((Some(Ok(_)), _)) => {}
+                Either::Right((Some(Err(error)), _)) => {
+                    log::error!("maintenance notification listener failed: {error}");
+                    let _ = notifications.send("__all__".to_owned());
+                    break;
+                }
+                Either::Right((None, _)) => {
+                    let _ = notifications.send("__all__".to_owned());
+                    break;
+                }
+            }
+        }
+        connection_task.abort();
+        if wait_for_restart_or_shutdown(shutdown.clone()).await {
+            return;
+        }
+    }
+}
+
+async fn wait_for_restart_or_shutdown(shutdown: watch::Receiver<bool>) -> bool {
+    matches!(
+        select(
+            Box::pin(wait_for_shutdown(shutdown)),
+            Box::pin(sleep(MAINTENANCE_RESTART_DELAY)),
+        )
+        .await,
+        Either::Left(_)
+    )
+}
+
 async fn supervise_maintenance_worker(
     schedule: MaintenanceSchedule,
     db: Database,
     storage: Storage,
     metrics: Metrics,
     shutdown: watch::Receiver<bool>,
+    storage_concurrency: usize,
+    notifications: broadcast::Sender<String>,
 ) {
     loop {
         if *shutdown.borrow() {
@@ -885,6 +1638,8 @@ async fn supervise_maintenance_worker(
             storage.clone(),
             metrics.clone(),
             shutdown.clone(),
+            storage_concurrency,
+            notifications.subscribe(),
         ));
         let outcome = worker.await;
         if *shutdown.borrow() {
@@ -922,35 +1677,161 @@ async fn run_maintenance_worker(
     storage: Storage,
     metrics: Metrics,
     shutdown: watch::Receiver<bool>,
+    storage_concurrency: usize,
+    notifications: broadcast::Receiver<String>,
 ) {
-    run_periodic_task(
+    run_adaptive_task(
+        schedule.worker,
         schedule.initial_delay,
         schedule.interval,
+        schedule.maximum_interval,
         shutdown,
+        notifications,
         move || {
             let db = db.clone();
             let storage = storage.clone();
             let metrics = metrics.clone();
             async move {
                 let started = Instant::now();
-                let outcome = schedule.worker.run(&db, &storage).await;
-                metrics.record_maintenance(
-                    schedule.worker.label(),
-                    started.elapsed(),
-                    outcome.is_ok(),
-                );
-                if let Err(error) = outcome {
-                    log::error!(
-                        "{} maintenance worker failed: {error}",
-                        schedule.worker.label()
-                    );
-                }
+                let outcome = schedule
+                    .worker
+                    .run(&db, &storage, &metrics, storage_concurrency)
+                    .await;
+                let success = outcome.is_ok();
+                let iteration = match outcome {
+                    Ok(true) => MaintenanceIteration::worked(),
+                    Ok(false) => match schedule.worker.next_due_delay(&db).await {
+                        Ok(next_due) => MaintenanceIteration {
+                            did_work: false,
+                            next_due,
+                        },
+                        Err(error) => {
+                            log::error!(
+                                "{} maintenance next-due query failed: {error}",
+                                schedule.worker.label()
+                            );
+                            MaintenanceIteration::worked()
+                        }
+                    },
+                    Err(error) => {
+                        log::error!(
+                            "{} maintenance worker failed: {error}",
+                            schedule.worker.label()
+                        );
+                        MaintenanceIteration::worked()
+                    }
+                };
+                metrics.record_maintenance(schedule.worker.label(), started.elapsed(), success);
+                iteration
             }
         },
     )
     .await;
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct MaintenanceIteration {
+    did_work: bool,
+    next_due: Option<Duration>,
+}
+
+impl MaintenanceIteration {
+    const fn worked() -> Self {
+        Self {
+            did_work: true,
+            next_due: None,
+        }
+    }
+}
+
+async fn run_adaptive_task<Operation, OperationFuture>(
+    worker: MaintenanceWorker,
+    initial_delay: Duration,
+    base_interval: Duration,
+    maximum_interval: Duration,
+    shutdown: watch::Receiver<bool>,
+    mut notifications: broadcast::Receiver<String>,
+    mut operation: Operation,
+) where
+    Operation: FnMut() -> OperationFuture,
+    OperationFuture: Future<Output = MaintenanceIteration>,
+{
+    if *shutdown.borrow() {
+        return;
+    }
+
+    let mut idle_interval = base_interval;
+    let mut next_delay = initial_delay;
+    loop {
+        let wake = select(
+            Box::pin(wait_for_shutdown(shutdown.clone())),
+            Box::pin(select(
+                Box::pin(sleep(next_delay)),
+                Box::pin(wait_for_maintenance_notification(
+                    &mut notifications,
+                    worker,
+                )),
+            )),
+        )
+        .await;
+        let Either::Right((wake_source, _)) = wake else {
+            break;
+        };
+        if matches!(wake_source, Either::Right(_)) {
+            idle_interval = base_interval;
+        }
+
+        let operation_result = select(
+            Box::pin(wait_for_shutdown(shutdown.clone())),
+            Box::pin(operation()),
+        )
+        .await;
+        let iteration = match operation_result {
+            Either::Left(_) => break,
+            Either::Right((iteration, _)) => iteration,
+        };
+        (idle_interval, next_delay) =
+            adaptive_maintenance_delay(idle_interval, base_interval, maximum_interval, iteration);
+    }
+}
+
+fn adaptive_maintenance_delay(
+    idle_interval: Duration,
+    base_interval: Duration,
+    maximum_interval: Duration,
+    iteration: MaintenanceIteration,
+) -> (Duration, Duration) {
+    let idle_interval = if iteration.did_work {
+        base_interval
+    } else {
+        idle_interval
+            .checked_mul(2)
+            .unwrap_or(maximum_interval)
+            .min(maximum_interval)
+    };
+    let next_delay = iteration.next_due.map_or(idle_interval, |due| {
+        idle_interval.min(due.max(base_interval))
+    });
+    (idle_interval, next_delay)
+}
+
+async fn wait_for_maintenance_notification(
+    notifications: &mut broadcast::Receiver<String>,
+    worker: MaintenanceWorker,
+) {
+    loop {
+        match notifications.recv().await {
+            Ok(payload) if worker.accepts_notification(&payload) => return,
+            Ok(_) => {}
+            Err(broadcast::error::RecvError::Lagged(_)) => return,
+            Err(broadcast::error::RecvError::Closed) => {
+                std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 async fn run_periodic_task<Operation, OperationFuture>(
     initial_delay: Duration,
     period: Duration,
@@ -1014,28 +1895,88 @@ impl MaintenanceWorker {
         }
     }
 
+    fn accepts_notification(self, table: &str) -> bool {
+        if table == "__all__" {
+            return true;
+        }
+        match self {
+            Self::UserDeletion => matches!(table, "user_deletion_jobs"),
+            Self::StorageDeletion => matches!(table, "storage_deletion_jobs"),
+            Self::UploadFinalization | Self::LegacyUploadExpiry => {
+                matches!(table, "file_uploads")
+            }
+            Self::VaultUploadExpiry => matches!(table, "vault_uploads"),
+            Self::InvitationExpiry => matches!(table, "invitations"),
+            Self::SessionExpiry => matches!(table, "sessions"),
+            Self::MultipartReconciliation | Self::CounterReconciliation => false,
+        }
+    }
+
+    async fn next_due_delay(
+        self,
+        db: &Database,
+    ) -> Result<Option<Duration>, Box<dyn StdError + Send + Sync>> {
+        let due_expression = match self {
+            Self::UserDeletion => {
+                "SELECT MIN(GREATEST(available_at, COALESCE(locked_until, available_at))) AS next_at FROM user_deletion_jobs WHERE dead_lettered_at IS NULL"
+            }
+            Self::StorageDeletion => {
+                "SELECT MIN(GREATEST(available_at, COALESCE(locked_until, available_at))) AS next_at FROM storage_deletion_jobs WHERE dead_lettered_at IS NULL"
+            }
+            Self::UploadFinalization => {
+                "SELECT MIN(GREATEST(completion_available_at, COALESCE(completion_locked_until, completion_available_at))) AS next_at FROM file_uploads WHERE status = 'completing' AND completion_dead_lettered_at IS NULL"
+            }
+            Self::LegacyUploadExpiry => {
+                "SELECT MIN(expires_at) AS next_at FROM file_uploads WHERE status IN ('initializing', 'pending', 'aborting')"
+            }
+            Self::VaultUploadExpiry => {
+                "SELECT MIN(expires_at) AS next_at FROM vault_uploads WHERE status IN ('initializing', 'pending', 'completing', 'aborting')"
+            }
+            Self::InvitationExpiry => {
+                "SELECT MIN(expires_at) AS next_at FROM invitations WHERE status = 'pending'"
+            }
+            Self::SessionExpiry => "SELECT MIN(expires_at) AS next_at FROM sessions",
+            Self::MultipartReconciliation | Self::CounterReconciliation => return Ok(None),
+        };
+        let row = db.query_one(due_expression, &[]).await?;
+        let next_at: Option<SystemTime> = row.get("next_at");
+        Ok(next_at.map(|next_at| {
+            next_at
+                .duration_since(SystemTime::now())
+                .unwrap_or_default()
+        }))
+    }
+
     async fn run(
         self,
         db: &Database,
         storage: &Storage,
-    ) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        metrics: &Metrics,
+        storage_concurrency: usize,
+    ) -> Result<bool, Box<dyn StdError + Send + Sync>> {
         match self {
             Self::UserDeletion => process_user_deletion_jobs(db).await,
-            Self::StorageDeletion => process_deletion_jobs(db, storage).await,
+            Self::StorageDeletion => process_deletion_jobs(db, storage, storage_concurrency).await,
             Self::UploadFinalization => reconcile_file_upload_completions(db, storage).await,
             Self::LegacyUploadExpiry => expire_abandoned_uploads(db, storage).await,
-            Self::VaultUploadExpiry => expire_abandoned_vault_uploads(db, storage).await,
+            Self::VaultUploadExpiry => {
+                expire_abandoned_vault_uploads(db, storage, storage_concurrency).await
+            }
             Self::InvitationExpiry => expire_invitations_batch(db).await,
             Self::SessionExpiry => expire_sessions_batches(db).await,
             Self::MultipartReconciliation => {
-                reconcile_orphaned_multipart_uploads(db, storage).await
+                reconcile_orphaned_multipart_uploads(db, storage, metrics, storage_concurrency)
+                    .await
             }
-            Self::CounterReconciliation => reconcile_counters(db).await,
+            Self::CounterReconciliation => reconcile_counters(db, metrics).await,
         }
     }
 }
 
-async fn process_user_deletion_jobs(db: &Database) -> Result<(), Box<dyn StdError + Send + Sync>> {
+async fn process_user_deletion_jobs(
+    db: &Database,
+) -> Result<bool, Box<dyn StdError + Send + Sync>> {
+    let mut did_work = false;
     for _ in 0..USER_DELETION_BATCHES_PER_TICK {
         let claimed = db
             .query_opt(
@@ -1044,68 +1985,77 @@ async fn process_user_deletion_jobs(db: &Database) -> Result<(), Box<dyn StdErro
                       SELECT user_id
                       FROM user_deletion_jobs
                       WHERE available_at <= now()
+                        AND dead_lettered_at IS NULL
                         AND (locked_until IS NULL OR locked_until < now())
                       ORDER BY created_at, user_id
                       LIMIT 1
                       FOR UPDATE SKIP LOCKED
                     )
                     UPDATE user_deletion_jobs AS jobs
-                    SET locked_until = now() + interval '2 minutes',
+                    SET locked_until = now() + ($1::bigint * interval '1 second'),
+                        lease_token = gen_random_uuid()::text,
                         updated_at = now()
                     FROM candidate
                     WHERE jobs.user_id = candidate.user_id
-                    RETURNING jobs.user_id, jobs.phase
+                    RETURNING jobs.user_id, jobs.phase, jobs.attempts, jobs.lease_token
                 ",
-                &[],
+                &[&STORAGE_JOB_LEASE_SECONDS],
             )
             .await?;
         let Some(claimed) = claimed else {
             break;
         };
+        did_work = true;
         let user_id: String = claimed.get("user_id");
         let phase: String = claimed.get("phase");
+        let attempts: i32 = claimed.get("attempts");
+        let lease_token: String = claimed.get("lease_token");
 
-        if let Err(error) = process_user_deletion_batch(db, &user_id, &phase).await {
+        if let Err(error) = process_user_deletion_batch(db, &user_id, &phase, &lease_token).await {
             let error_message = error.to_string().chars().take(500).collect::<String>();
-            let attempts = db
-                .query_opt(
-                    "SELECT attempts FROM user_deletion_jobs WHERE user_id = $1",
-                    &[&user_id],
-                )
-                .await?
-                .map(|row| row.get::<_, i32>("attempts"))
-                .unwrap_or_default();
             let delay_seconds = retry_delay_seconds(attempts);
             db.execute(
                 "
                     UPDATE user_deletion_jobs
                     SET attempts = attempts + 1,
-                        available_at = now() + ($2::bigint * interval '1 second'),
+                        available_at = now() + ($3::bigint * interval '1 second'),
                         locked_until = NULL,
-                        last_error = $3,
+                        lease_token = NULL,
+                        dead_lettered_at = CASE
+                          WHEN attempts + 1 >= $4 THEN now()
+                          ELSE dead_lettered_at
+                        END,
+                        last_error = $5,
                         updated_at = now()
-                    WHERE user_id = $1
+                    WHERE user_id = $1 AND lease_token = $2
                 ",
-                &[&user_id, &delay_seconds, &error_message],
+                &[
+                    &user_id,
+                    &lease_token,
+                    &delay_seconds,
+                    &MAINTENANCE_DEAD_LETTER_ATTEMPTS,
+                    &error_message,
+                ],
             )
             .await?;
             return Err(error);
         }
     }
 
-    Ok(())
+    Ok(did_work)
 }
 
 async fn process_user_deletion_batch(
     db: &Database,
     user_id: &str,
     claimed_phase: &str,
+    lease_token: &str,
 ) -> Result<(), Box<dyn StdError + Send + Sync>> {
     let mut client = db.get().await?;
     let transaction = client.transaction().await?;
     let Some(job) = transaction
         .query_opt(
-            "SELECT phase FROM user_deletion_jobs WHERE user_id = $1 FOR UPDATE",
+            "SELECT phase, lease_token FROM user_deletion_jobs WHERE user_id = $1 FOR UPDATE",
             &[&user_id],
         )
         .await?
@@ -1114,11 +2064,16 @@ async fn process_user_deletion_batch(
         return Ok(());
     };
     let phase: String = job.get("phase");
+    let current_lease_token: Option<String> = job.get("lease_token");
+    if current_lease_token.as_deref() != Some(lease_token) {
+        transaction.commit().await?;
+        return Ok(());
+    }
     if phase != claimed_phase {
         transaction
             .execute(
-                "UPDATE user_deletion_jobs SET locked_until = NULL WHERE user_id = $1",
-                &[&user_id],
+                "UPDATE user_deletion_jobs SET locked_until = NULL, lease_token = NULL WHERE user_id = $1 AND lease_token = $2",
+                &[&user_id, &lease_token],
             )
             .await?;
         transaction.commit().await?;
@@ -1168,8 +2123,8 @@ async fn process_user_deletion_batch(
         if residual_objects {
             transaction
                 .execute(
-                    "UPDATE user_deletion_jobs SET phase = 'file_uploads', locked_until = NULL, updated_at = now() WHERE user_id = $1",
-                    &[&user_id],
+                    "UPDATE user_deletion_jobs SET phase = 'file_uploads', locked_until = NULL, lease_token = NULL, updated_at = now() WHERE user_id = $1 AND lease_token = $2",
+                    &[&user_id, &lease_token],
                 )
                 .await?;
         } else {
@@ -1201,11 +2156,12 @@ async fn process_user_deletion_batch(
                     attempts = 0,
                     available_at = now(),
                     locked_until = NULL,
+                    lease_token = NULL,
                     last_error = NULL,
                     updated_at = now()
-                WHERE user_id = $1
+                WHERE user_id = $1 AND lease_token = $4
             ",
-            &[&user_id, &next_phase, &affected],
+            &[&user_id, &next_phase, &affected, &lease_token],
         )
         .await?;
     transaction.commit().await?;
@@ -1513,17 +2469,37 @@ fn user_deletion_statement(phase: &str) -> Option<&'static str> {
     }
 }
 
+struct ExpiredVaultUpload {
+    id: String,
+    object_key: Option<String>,
+    multipart_upload_id: Option<String>,
+    write_expires_at: Option<SystemTime>,
+}
+
 async fn expire_abandoned_vault_uploads(
     db: &Database,
     storage: &Storage,
-) -> Result<(), Box<dyn StdError + Send + Sync>> {
-    let uploads = db.query(CLAIM_EXPIRED_VAULT_UPLOADS_QUERY, &[]).await?;
+    storage_concurrency: usize,
+) -> Result<bool, Box<dyn StdError + Send + Sync>> {
+    let uploads = db
+        .query(CLAIM_EXPIRED_VAULT_UPLOADS_QUERY, &[])
+        .await?
+        .into_iter()
+        .map(|upload| ExpiredVaultUpload {
+            id: upload.get("id"),
+            object_key: upload.get("object_key"),
+            multipart_upload_id: upload.get("multipart_upload_id"),
+            write_expires_at: upload.get("write_expires_at"),
+        })
+        .collect::<Vec<_>>();
 
-    for upload in uploads {
-        let id: String = upload.get("id");
-        let object_key: Option<String> = upload.get("object_key");
-        let multipart_upload_id: Option<String> = upload.get("multipart_upload_id");
-        let write_expires_at: Option<SystemTime> = upload.get("write_expires_at");
+    let outcomes = run_bounded_storage_tasks(uploads, storage_concurrency, |upload| async move {
+        let ExpiredVaultUpload {
+            id,
+            object_key,
+            multipart_upload_id,
+            write_expires_at,
+        } = upload;
 
         if write_expires_at.is_some_and(|expires_at| expires_at > SystemTime::now()) {
             db.execute(
@@ -1531,7 +2507,7 @@ async fn expire_abandoned_vault_uploads(
                 &[&id],
             )
             .await?;
-            continue;
+            return Ok::<(), Box<dyn StdError + Send + Sync>>(());
         }
 
         let cleanup = async {
@@ -1543,6 +2519,11 @@ async fn expire_abandoned_vault_uploads(
                     .await?;
             }
             if let Some(object_key) = object_key.as_deref() {
+                // A provider upload can exist before its ID is durably written to the
+                // intent. Discover and abort every exact-key session before the intent
+                // becomes terminal so that this crash window cannot defer cleanup to
+                // the low-frequency global reconciliation sweep.
+                storage.abort_multipart_uploads_for_key(object_key).await?;
                 storage.delete_object(object_key).await?;
             }
             Ok::<(), StorageError>(())
@@ -1561,17 +2542,25 @@ async fn expire_abandoned_vault_uploads(
                 log::warn!("encrypted upload {id} cleanup will retry: {error}");
             }
         }
+        Ok::<(), Box<dyn StdError + Send + Sync>>(())
+    })
+    .await;
+    let did_work = !outcomes.is_empty();
+    for outcome in outcomes {
+        outcome?;
     }
 
-    Ok(())
+    Ok(did_work)
 }
 
 async fn reconcile_orphaned_multipart_uploads(
     db: &Database,
     storage: &Storage,
-) -> Result<(), Box<dyn StdError + Send + Sync>> {
+    metrics: &Metrics,
+    storage_concurrency: usize,
+) -> Result<bool, Box<dyn StdError + Send + Sync>> {
     let Some(grace_seconds) = storage.multipart_orphan_grace_seconds() else {
-        return Ok(());
+        return Ok(false);
     };
     let client = db.get().await?;
     let lock_row = client
@@ -1583,10 +2572,17 @@ async fn reconcile_orphaned_multipart_uploads(
     let lock_acquired: bool = lock_row.get(0);
 
     if !lock_acquired {
-        return Ok(());
+        return Ok(false);
     }
 
-    let sweep_result = sweep_orphaned_multipart_uploads(&client, storage, grace_seconds).await;
+    let sweep_result = sweep_orphaned_multipart_uploads(
+        &client,
+        storage,
+        metrics,
+        grace_seconds,
+        storage_concurrency,
+    )
+    .await;
     let unlock_result = client
         .query_one(
             "SELECT pg_advisory_unlock($1)",
@@ -1601,19 +2597,22 @@ async fn reconcile_orphaned_multipart_uploads(
         }
     }
 
-    sweep_result
+    sweep_result.map(|()| true)
 }
 
 async fn sweep_orphaned_multipart_uploads(
     client: &deadpool_postgres::Client,
     storage: &Storage,
+    metrics: &Metrics,
     grace_seconds: u64,
+    storage_concurrency: usize,
 ) -> Result<(), Box<dyn StdError + Send + Sync>> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
     let cutoff = now.saturating_sub(grace_seconds);
     let cutoff = i64::try_from(cutoff).unwrap_or(i64::MAX);
     let mut key_marker: Option<String> = None;
     let mut upload_id_marker: Option<String> = None;
+    let mut failures = ReconciliationFailures::default();
 
     loop {
         let page = storage
@@ -1670,6 +2669,7 @@ async fn sweep_orphaned_multipart_uploads(
                 });
         }
 
+        let mut aborts = Vec::new();
         for upload in page.uploads {
             if upload.initiated_epoch_seconds > cutoff {
                 continue;
@@ -1695,7 +2695,7 @@ async fn sweep_orphaned_multipart_uploads(
                         "UPDATE file_uploads SET multipart_upload_id = $1, status = 'pending', expires_at = now() + interval '24 hours' WHERE object_key = $2 AND status = 'initializing' AND multipart_upload_id IS NULL AND expires_at > now()"
                     }
                     MultipartIntentSource::Vault => {
-                        "UPDATE vault_uploads SET multipart_upload_id = $1, status = 'pending', expires_at = now() + interval '24 hours' WHERE object_key = $2 AND status = 'initializing' AND multipart_upload_id IS NULL AND expires_at > now()"
+                        "UPDATE vault_uploads SET multipart_upload_id = $1, status = 'pending', expires_at = now() + interval '1 hour' WHERE object_key = $2 AND status = 'initializing' AND multipart_upload_id IS NULL AND expires_at > now()"
                     }
                 };
                 let adopted = client
@@ -1741,15 +2741,27 @@ async fn sweep_orphaned_multipart_uploads(
                 continue;
             }
 
-            storage
-                .abort_multipart(&upload.object_key, &upload.upload_id)
-                .await?;
-            log::warn!(
-                "aborted orphaned multipart upload {} for {}",
-                upload.upload_id,
-                upload.object_key
-            );
+            aborts.push(upload);
         }
+
+        run_reconciliation_abort_page(
+            aborts,
+            storage_concurrency,
+            metrics,
+            &mut failures,
+            |upload| async move {
+                storage
+                    .abort_multipart(&upload.object_key, &upload.upload_id)
+                    .await?;
+                log::warn!(
+                    "aborted orphaned multipart upload {} for {}",
+                    upload.upload_id,
+                    upload.object_key
+                );
+                Ok::<(), StorageError>(())
+            },
+        )
+        .await;
 
         let next_key_marker = page.next_key_marker;
         let next_upload_id_marker = page.next_upload_id_marker;
@@ -1768,7 +2780,34 @@ async fn sweep_orphaned_multipart_uploads(
         upload_id_marker = next_upload_id_marker;
     }
 
-    Ok(())
+    failures.finish()
+}
+
+#[derive(Default)]
+struct ReconciliationFailures {
+    count: usize,
+    samples: Vec<String>,
+}
+
+impl ReconciliationFailures {
+    fn record(&mut self, message: String) {
+        self.count = self.count.saturating_add(1);
+        if self.samples.len() < 5 {
+            self.samples.push(message.chars().take(300).collect());
+        }
+    }
+
+    fn finish(self) -> Result<(), Box<dyn StdError + Send + Sync>> {
+        if self.count == 0 {
+            return Ok(());
+        }
+        Err(std::io::Error::other(format!(
+            "multipart reconciliation completed with {} item failures: {}",
+            self.count,
+            self.samples.join(" | ")
+        ))
+        .into())
+    }
 }
 
 fn multipart_reconciliation_action(
@@ -1820,106 +2859,266 @@ fn intent_source_matches_key(source: MultipartIntentSource, object_key: &str) ->
     }
 }
 
-async fn process_deletion_jobs(
-    db: &Database,
-    storage: &Storage,
-) -> Result<(), Box<dyn StdError + Send + Sync>> {
-    let jobs = db
-        .query(
-            "
-                WITH claimed AS (
-                  SELECT id
-                  FROM storage_deletion_jobs
-                  WHERE available_at <= now()
-                    AND (locked_until IS NULL OR locked_until < now())
-                  ORDER BY id
-                  LIMIT 25
-                  FOR UPDATE SKIP LOCKED
-                )
-                UPDATE storage_deletion_jobs AS jobs
-                SET locked_until = now() + interval '2 minutes'
-                FROM claimed
-                WHERE jobs.id = claimed.id
-                RETURNING
-                  jobs.id,
-                  jobs.object_key,
-                  jobs.multipart_upload_id,
-                  jobs.attempts
-            ",
-            &[],
-        )
-        .await?;
+async fn run_bounded_storage_tasks<Items, Item, Operation, OperationFuture, Output>(
+    items: Items,
+    concurrency: usize,
+    operation: Operation,
+) -> Vec<Output>
+where
+    Items: IntoIterator<Item = Item>,
+    Operation: FnMut(Item) -> OperationFuture,
+    OperationFuture: Future<Output = Output>,
+{
+    stream::iter(items)
+        .map(operation)
+        .buffer_unordered(concurrency.max(1))
+        .collect()
+        .await
+}
 
-    for job in jobs {
-        let id: i64 = job.get("id");
-        let object_key: String = job.get("object_key");
-        let multipart_upload_id: Option<String> = job.get("multipart_upload_id");
-        let attempts: i32 = job.get("attempts");
-
-        let deletion_result = async {
-            if let Some(multipart_upload_id) = multipart_upload_id.as_deref() {
-                storage
-                    .abort_multipart(&object_key, multipart_upload_id)
-                    .await?;
-            }
-            storage.delete_object(&object_key).await
+async fn run_reconciliation_abort_page<Items, Item, Operation, OperationFuture, Error>(
+    items: Items,
+    concurrency: usize,
+    metrics: &Metrics,
+    failures: &mut ReconciliationFailures,
+    operation: Operation,
+) where
+    Items: IntoIterator<Item = Item>,
+    Operation: FnMut(Item) -> OperationFuture,
+    OperationFuture: Future<Output = Result<(), Error>>,
+    Error: fmt::Display,
+{
+    let outcomes = run_bounded_storage_tasks(items, concurrency, operation).await;
+    for outcome in outcomes {
+        if let Err(error) = outcome {
+            metrics.record_maintenance_item_failure("multipart reconciliation abort");
+            failures.record(error.to_string());
         }
-        .await;
+    }
+}
 
-        match deletion_result {
-            Ok(()) => {
-                let mut client = db.get().await?;
-                let transaction = client.transaction().await?;
-                transaction
-                    .execute(
-                        "UPDATE file_uploads SET status = 'aborted' WHERE object_key = $1 AND status = 'aborting'",
-                        &[&object_key],
-                    )
-                    .await?;
-                transaction
-                    .execute(
-                        "UPDATE vault_uploads SET status = 'aborted' WHERE object_key = $1 AND status = 'aborting'",
-                        &[&object_key],
-                    )
-                    .await?;
-                transaction
-                    .execute(COMPLETE_MIGRATION_CLEANUP_QUERY, &[&object_key])
-                    .await?;
-                transaction
-                    .execute("DELETE FROM storage_deletion_jobs WHERE id = $1", &[&id])
-                    .await?;
-                transaction.commit().await?;
-            }
-            Err(error) => {
-                let delay_seconds = retry_delay_seconds(attempts);
-                let error_message = error.to_string().chars().take(500).collect::<String>();
-                db.execute(
-                    "
-                        UPDATE storage_deletion_jobs
-                        SET attempts = attempts + 1,
-                            available_at = now() + ($2::bigint * interval '1 second'),
-                            locked_until = NULL,
-                            last_error = $3
-                        WHERE id = $1
-                    ",
-                    &[&id, &delay_seconds, &error_message],
+struct StorageDeletionJob {
+    id: i64,
+    object_key: String,
+    multipart_upload_id: Option<String>,
+    discover_multipart: bool,
+    attempts: i32,
+    lease_token: String,
+}
+
+async fn finish_storage_deletion_job(
+    db: &Database,
+    job: StorageDeletionJob,
+    deletion_result: Result<(), StorageError>,
+) -> Result<(), Box<dyn StdError + Send + Sync>> {
+    let StorageDeletionJob {
+        id,
+        object_key,
+        multipart_upload_id,
+        attempts,
+        lease_token,
+        ..
+    } = job;
+    match deletion_result {
+        Ok(()) => {
+            let mut client = db.get().await?;
+            let transaction = client.transaction().await?;
+            let current = transaction
+                .query_opt(
+                    "SELECT multipart_upload_id FROM storage_deletion_jobs WHERE id = $1 AND lease_token = $2 FOR UPDATE",
+                    &[&id, &lease_token],
                 )
                 .await?;
+            let Some(current) = current else {
+                return Ok(());
+            };
+            let current_multipart_upload_id: Option<String> = current.get("multipart_upload_id");
+            if current_multipart_upload_id != multipart_upload_id {
+                transaction
+                    .execute(
+                        "UPDATE storage_deletion_jobs SET available_at = now(), locked_until = NULL, lease_token = NULL WHERE id = $1 AND lease_token = $2",
+                        &[&id, &lease_token],
+                    )
+                    .await?;
+                transaction.commit().await?;
+                return Ok(());
+            }
+            transaction
+                .execute(
+                    "UPDATE file_uploads SET status = 'aborted' WHERE object_key = $1 AND status = 'aborting'",
+                    &[&object_key],
+                )
+                .await?;
+            transaction
+                .execute(
+                    "UPDATE vault_uploads SET status = 'aborted' WHERE object_key = $1 AND status = 'aborting'",
+                    &[&object_key],
+                )
+                .await?;
+            transaction
+                .execute(COMPLETE_MIGRATION_CLEANUP_QUERY, &[&object_key])
+                .await?;
+            transaction
+                .execute(
+                    "DELETE FROM storage_deletion_jobs WHERE id = $1 AND lease_token = $2",
+                    &[&id, &lease_token],
+                )
+                .await?;
+            transaction.commit().await?;
+        }
+        Err(error) => {
+            let delay_seconds = retry_delay_seconds(attempts);
+            let error_message = error.to_string().chars().take(500).collect::<String>();
+            db.execute(
+                "
+                    UPDATE storage_deletion_jobs
+                    SET attempts = attempts + 1,
+                        available_at = now() + ($3::bigint * interval '1 second'),
+                        locked_until = NULL,
+                        lease_token = NULL,
+                        dead_lettered_at = CASE
+                          WHEN attempts + 1 >= $4 THEN now()
+                          ELSE dead_lettered_at
+                        END,
+                        last_error = $5
+                    WHERE id = $1 AND lease_token = $2
+                ",
+                &[
+                    &id,
+                    &lease_token,
+                    &delay_seconds,
+                    &MAINTENANCE_DEAD_LETTER_ATTEMPTS,
+                    &error_message,
+                ],
+            )
+            .await?;
+        }
+    }
+    Ok(())
+}
+
+async fn run_with_storage_job_lease<OperationFuture>(
+    db: &Database,
+    job_id: i64,
+    lease_token: &str,
+    operation: OperationFuture,
+) -> Result<(), StorageError>
+where
+    OperationFuture: Future<Output = Result<(), StorageError>>,
+{
+    let mut operation = Box::pin(operation);
+    let mut heartbeat = interval_at(
+        Instant::now() + STORAGE_JOB_HEARTBEAT_INTERVAL,
+        STORAGE_JOB_HEARTBEAT_INTERVAL,
+    );
+    heartbeat.set_missed_tick_behavior(MissedTickBehavior::Skip);
+
+    loop {
+        match select(operation, Box::pin(heartbeat.tick())).await {
+            Either::Left((outcome, _)) => return outcome,
+            Either::Right((_, pending_operation)) => {
+                operation = pending_operation;
+                let renewed = db
+                    .execute(
+                        "
+                            UPDATE storage_deletion_jobs
+                            SET locked_until = now() + ($3::bigint * interval '1 second')
+                            WHERE id = $1
+                              AND lease_token = $2
+                              AND dead_lettered_at IS NULL
+                        ",
+                        &[&job_id, &lease_token, &STORAGE_JOB_LEASE_SECONDS],
+                    )
+                    .await
+                    .map_err(|error| {
+                        storage_message(format!("could not renew storage deletion lease: {error}"))
+                    })?;
+                if renewed != 1 {
+                    return Err(storage_message("storage deletion lease ownership was lost"));
+                }
             }
         }
     }
+}
 
-    Ok(())
+async fn process_deletion_jobs(
+    db: &Database,
+    storage: &Storage,
+    storage_concurrency: usize,
+) -> Result<bool, Box<dyn StdError + Send + Sync>> {
+    let jobs = db
+        .query(
+            CLAIM_STORAGE_DELETION_JOBS_QUERY,
+            &[&STORAGE_JOB_LEASE_SECONDS],
+        )
+        .await?
+        .into_iter()
+        .map(|job| StorageDeletionJob {
+            id: job.get("id"),
+            object_key: job.get("object_key"),
+            multipart_upload_id: job.get("multipart_upload_id"),
+            discover_multipart: job.get("discover_multipart"),
+            attempts: job.get("attempts"),
+            lease_token: job.get("lease_token"),
+        })
+        .collect::<Vec<_>>();
+
+    let did_work = !jobs.is_empty();
+    let (bulk_jobs, individual_jobs): (Vec<_>, Vec<_>) = jobs.into_iter().partition(|job| {
+        !job.discover_multipart
+            && job.multipart_upload_id.is_none()
+            && storage.supports_bulk_delete(&job.object_key)
+    });
+    let bulk_keys = bulk_jobs
+        .iter()
+        .map(|job| job.object_key.clone())
+        .collect::<Vec<_>>();
+    let bulk_results = storage.delete_objects(&bulk_keys).await;
+    let bulk_outcomes = run_bounded_storage_tasks(
+        bulk_jobs.into_iter().zip(bulk_results),
+        storage_concurrency,
+        |(job, result)| finish_storage_deletion_job(db, job, result),
+    )
+    .await;
+    let individual_outcomes =
+        run_bounded_storage_tasks(individual_jobs, storage_concurrency, |job| async move {
+            let object_key = job.object_key.clone();
+            let multipart_upload_id = job.multipart_upload_id.clone();
+            let discover_multipart = job.discover_multipart;
+            let deletion_result =
+                run_with_storage_job_lease(db, job.id, &job.lease_token, async move {
+                    if discover_multipart {
+                        storage.abort_multipart_uploads_for_key(&object_key).await?;
+                    } else if let Some(multipart_upload_id) = multipart_upload_id.as_deref() {
+                        storage
+                            .abort_multipart(&object_key, multipart_upload_id)
+                            .await?;
+                    }
+                    storage.delete_object(&object_key).await
+                })
+                .await;
+            finish_storage_deletion_job(db, job, deletion_result).await
+        })
+        .await;
+    for outcome in bulk_outcomes.into_iter().chain(individual_outcomes) {
+        outcome?;
+    }
+
+    Ok(did_work)
 }
 
 async fn reconcile_file_upload_completions(
     db: &Database,
     storage: &Storage,
-) -> Result<(), Box<dyn StdError + Send + Sync>> {
+) -> Result<bool, Box<dyn StdError + Send + Sync>> {
     let uploads = claim_file_upload_completions(db, 25).await?;
+    let did_work = !uploads.is_empty();
 
     for upload in uploads {
-        let metadata = match storage.object_metadata(&upload.object_key).await {
+        let metadata = match storage
+            .maintenance_object_metadata(&upload.object_key)
+            .await
+        {
             Ok(metadata) => metadata,
             Err(error) if error.is_not_found() && upload.expires_at <= SystemTime::now() => {
                 transition_file_upload_to_cleanup(
@@ -1929,12 +3128,13 @@ async fn reconcile_file_upload_completions(
                     &upload.object_key,
                     upload.multipart_upload_id.as_deref(),
                     &["completing"],
+                    Some(&upload.completion_lease_token),
                 )
                 .await?;
                 continue;
             }
             Err(error) => {
-                let delay = completion_retry_delay_seconds(upload.completion_attempts, &upload.id);
+                let delay = completion_retry_delay_seconds(upload.completion_attempts);
                 log::warn!(
                     "upload completion {} will retry in {delay}s: {error}",
                     upload.id
@@ -1943,6 +3143,7 @@ async fn reconcile_file_upload_completions(
                     db,
                     &upload.id,
                     &upload.owner_id,
+                    &upload.completion_lease_token,
                     &error.to_string(),
                     delay,
                 )
@@ -1959,6 +3160,7 @@ async fn reconcile_file_upload_completions(
                 &upload.object_key,
                 upload.multipart_upload_id.as_deref(),
                 &["completing"],
+                Some(&upload.completion_lease_token),
             )
             .await?;
             continue;
@@ -1979,11 +3181,12 @@ async fn reconcile_file_upload_completions(
                     &upload.object_key,
                     upload.multipart_upload_id.as_deref(),
                     &["completing"],
+                    Some(&upload.completion_lease_token),
                 )
                 .await?;
             }
             Err(error) => {
-                let delay = completion_retry_delay_seconds(upload.completion_attempts, &upload.id);
+                let delay = completion_retry_delay_seconds(upload.completion_attempts);
                 log::warn!(
                     "upload completion {} database finalization will retry in {delay}s: {error}",
                     upload.id
@@ -1992,6 +3195,7 @@ async fn reconcile_file_upload_completions(
                     db,
                     &upload.id,
                     &upload.owner_id,
+                    &upload.completion_lease_token,
                     &error.to_string(),
                     delay,
                 )
@@ -2000,14 +3204,15 @@ async fn reconcile_file_upload_completions(
         }
     }
 
-    Ok(())
+    Ok(did_work)
 }
 
 async fn expire_abandoned_uploads(
     db: &Database,
     _storage: &Storage,
-) -> Result<(), Box<dyn StdError + Send + Sync>> {
+) -> Result<bool, Box<dyn StdError + Send + Sync>> {
     let uploads = db.query(CLAIM_EXPIRED_FILE_UPLOADS_QUERY, &[]).await?;
+    let did_work = !uploads.is_empty();
 
     for upload in uploads {
         let id: String = upload.get("id");
@@ -2055,12 +3260,13 @@ async fn expire_abandoned_uploads(
         transaction.commit().await?;
     }
 
-    Ok(())
+    Ok(did_work)
 }
 
-async fn expire_invitations_batch(db: &Database) -> Result<(), Box<dyn StdError + Send + Sync>> {
-    db.execute(
-        "
+async fn expire_invitations_batch(db: &Database) -> Result<bool, Box<dyn StdError + Send + Sync>> {
+    let affected = db
+        .execute(
+            "
             WITH expired AS (
               SELECT id
               FROM invitations
@@ -2074,14 +3280,15 @@ async fn expire_invitations_batch(db: &Database) -> Result<(), Box<dyn StdError 
             FROM expired
             WHERE invitations.id = expired.id
         ",
-        &[],
-    )
-    .await?;
+            &[],
+        )
+        .await?;
 
-    Ok(())
+    Ok(affected > 0)
 }
 
-async fn expire_sessions_batches(db: &Database) -> Result<(), Box<dyn StdError + Send + Sync>> {
+async fn expire_sessions_batches(db: &Database) -> Result<bool, Box<dyn StdError + Send + Sync>> {
+    let mut did_work = false;
     for _ in 0..SESSION_EXPIRY_BATCHES_PER_TICK {
         let deleted = db
             .execute(
@@ -2101,100 +3308,93 @@ async fn expire_sessions_batches(db: &Database) -> Result<(), Box<dyn StdError +
                 &[&SESSION_EXPIRY_BATCH_SIZE],
             )
             .await?;
+        did_work |= deleted > 0;
 
         if deleted < SESSION_EXPIRY_BATCH_SIZE as u64 {
             break;
         }
     }
 
-    Ok(())
+    Ok(did_work)
 }
 
 fn retry_delay_seconds(attempts: i32) -> i64 {
-    let exponent = u32::try_from(attempts.clamp(0, 8)).unwrap_or(0);
-    i64::from(2_i32.pow(exponent)).min(300)
+    let mut sample = [0_u8; 8];
+    if getrandom::fill(&mut sample).is_err() {
+        let fallback = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos()
+            .to_le_bytes();
+        sample.copy_from_slice(&fallback[..8]);
+    }
+    retry_delay_seconds_from_sample(attempts, u64::from_le_bytes(sample))
 }
 
-async fn reconcile_counters(db: &Database) -> Result<(), Box<dyn StdError + Send + Sync>> {
-    db.execute(
-        "
-            INSERT INTO user_file_counters (
-              owner_id,
-              total_files,
-              total_folders,
-              active_files,
-              trashed_files,
-              favorite_files,
-              shared_files,
-              used_bytes,
-              updated_at
-            )
-            SELECT
-              users.id,
-              count(files.id) FILTER (
-                WHERE files.state = 'active' AND files.entry_type = 'file'
-              ),
-              count(files.id) FILTER (
-                WHERE files.state = 'active' AND files.entry_type = 'folder'
-              ),
-              count(files.id) FILTER (
-                WHERE files.state = 'active' AND files.entry_type = 'file'
-              ),
-              count(files.id) FILTER (
-                WHERE files.state = 'trashed' AND files.entry_type = 'file'
-              ),
-              count(files.id) FILTER (
-                WHERE files.state = 'active' AND files.favorite
-              ),
-              (
-                SELECT count(*)
-                FROM file_shares
-                WHERE file_shares.recipient_id = users.id
-                  AND file_shares.counts_toward_shared
-              ),
-              COALESCE(sum(files.size_bytes) FILTER (
-                WHERE files.entry_type = 'file'
-              ), 0)::bigint,
-              now()
-            FROM users
-            LEFT JOIN files ON files.owner_id = users.id
-            GROUP BY users.id
-            ON CONFLICT (owner_id) DO UPDATE SET
-              total_files = EXCLUDED.total_files,
-              total_folders = EXCLUDED.total_folders,
-              active_files = EXCLUDED.active_files,
-              trashed_files = EXCLUDED.trashed_files,
-              favorite_files = EXCLUDED.favorite_files,
-              shared_files = EXCLUDED.shared_files,
-              used_bytes = EXCLUDED.used_bytes,
-              updated_at = now()
-        ",
-        &[],
-    )
-    .await?;
-    db.execute(
-        "
-            UPDATE admin_directory_counters
-            SET total_users = (SELECT count(*) FROM users WHERE status <> 'deleting'),
-                active_users = (
-                  SELECT count(*) FROM users WHERE status = 'active'
-                ),
-                active_admins = (
-                  SELECT count(*)
-                  FROM users
-                  WHERE status = 'active' AND role = 'admin'
-                ),
-                pending_invitations = (
-                  SELECT count(*) FROM invitations WHERE status = 'pending'
-                ),
-                updated_at = now()
-            WHERE singleton = TRUE
-        ",
-        &[],
-    )
-    .await?;
+fn retry_delay_seconds_from_sample(attempts: i32, sample: u64) -> i64 {
+    let exponent = u32::try_from(attempts.clamp(0, 16)).unwrap_or_default();
+    let ceiling = RETRY_DELAY_FLOOR_SECONDS
+        .saturating_mul(1_i64.checked_shl(exponent).unwrap_or(i64::MAX))
+        .min(RETRY_DELAY_CAP_SECONDS);
+    let window = u64::try_from(ceiling - RETRY_DELAY_FLOOR_SECONDS).unwrap_or_default();
+    RETRY_DELAY_FLOOR_SECONDS + i64::try_from(sample % (window + 1)).unwrap_or_default()
+}
 
-    Ok(())
+async fn reconcile_counters(
+    db: &Database,
+    metrics: &Metrics,
+) -> Result<bool, Box<dyn StdError + Send + Sync>> {
+    let mut client = db.get().await?;
+    let transaction = client.transaction().await?;
+    let lock_acquired: bool = transaction
+        .query_one(
+            "SELECT pg_try_advisory_xact_lock($1)",
+            &[&COUNTER_RECONCILIATION_LOCK_ID],
+        )
+        .await?
+        .get(0);
+    if !lock_acquired {
+        transaction.rollback().await?;
+        return Ok(false);
+    }
+    let mut last_owner_id = String::new();
+    let mut rows_scanned = 0_u64;
+    let mut rows_updated = 0_u64;
+    loop {
+        let row = transaction
+            .query_one(
+                RECONCILE_USER_COUNTERS_PAGE_QUERY,
+                &[&last_owner_id, &COUNTER_RECONCILIATION_BATCH_SIZE],
+            )
+            .await?;
+        let scanned: i64 = row.get("scanned");
+        let updated: i64 = row.get("updated");
+        rows_scanned = rows_scanned.saturating_add(u64::try_from(scanned).unwrap_or_default());
+        rows_updated = rows_updated.saturating_add(u64::try_from(updated).unwrap_or_default());
+        if scanned < COUNTER_RECONCILIATION_BATCH_SIZE {
+            break;
+        }
+        let Some(next_owner_id) = row.get::<_, Option<String>>("next_owner_id") else {
+            return Err(
+                storage_message("counter reconciliation page omitted its owner cursor").into(),
+            );
+        };
+        if next_owner_id <= last_owner_id {
+            return Err(
+                storage_message("counter reconciliation owner cursor did not advance").into(),
+            );
+        }
+        last_owner_id = next_owner_id;
+    }
+    let admin_updated = transaction
+        .execute(RECONCILE_ADMIN_COUNTERS_QUERY, &[])
+        .await?;
+    rows_scanned = rows_scanned.saturating_add(1);
+    rows_updated = rows_updated.saturating_add(admin_updated);
+    transaction.commit().await?;
+    metrics.record_counter_reconciliation(rows_scanned, rows_updated);
+
+    Ok(rows_updated > 0)
 }
 
 fn required(value: Option<String>, label: &str) -> Result<String, StorageError> {
@@ -2251,7 +3451,18 @@ mod tests {
         atomic::{AtomicUsize, Ordering},
     };
 
+    use aws_smithy_runtime_api::client::interceptors::context::{Input, InterceptorContext};
+    use aws_smithy_runtime_api::client::runtime_components::RuntimeComponentsBuilder;
+    use aws_smithy_runtime_api::http::Request as SmithyRequest;
+
     use super::*;
+
+    fn source_between<'a>(source: &'a str, start: &str, end: &str) -> &'a str {
+        let start = source.find(start).expect("start marker should exist");
+        let remainder = &source[start..];
+        let end = remainder.find(end).expect("end marker should exist");
+        &remainder[..end]
+    }
 
     #[test]
     fn upload_expiry_claims_stay_aligned_with_global_partial_indexes() {
@@ -2276,6 +3487,27 @@ mod tests {
         assert!(auth_schema.contains("file_uploads_global_expiry_idx"));
         let vault_schema = include_str!("../../database/init/002_e2ee.sql");
         assert!(vault_schema.contains("vault_uploads_global_expiry_idx"));
+    }
+
+    #[test]
+    fn vault_expiry_discovers_unknown_provider_sessions_before_terminalizing() {
+        let source = include_str!("storage.rs");
+        let expiry = source_between(
+            source,
+            "async fn expire_abandoned_vault_uploads(",
+            "async fn reconcile_orphaned_multipart_uploads(",
+        );
+        let discovery = expiry
+            .find("abort_multipart_uploads_for_key(object_key)")
+            .expect("vault expiry must discover provider sessions after a crash window");
+        let deletion = expiry
+            .find("delete_object(object_key)")
+            .expect("vault expiry must remove an uploaded object");
+        let terminal = expiry
+            .find("SET status = 'aborted'")
+            .expect("vault expiry must eventually terminalize its intent");
+
+        assert!(discovery < deletion && deletion < terminal);
     }
 
     #[test]
@@ -2335,6 +3567,346 @@ mod tests {
             .await
             .expect("the active task should stop on shutdown")
             .expect("the active task should not panic");
+    }
+
+    #[test]
+    fn empty_maintenance_queues_back_off_by_more_than_tenfold_without_due_time_drift() {
+        let base = Duration::from_secs(10);
+        let maximum = Duration::from_secs(5 * 60);
+        let mut idle = base;
+        let mut delay = base;
+        for _ in 0..8 {
+            (idle, delay) = adaptive_maintenance_delay(
+                idle,
+                base,
+                maximum,
+                MaintenanceIteration {
+                    did_work: false,
+                    next_due: None,
+                },
+            );
+        }
+        assert_eq!(delay, maximum);
+        let fixed_queries_per_day = 86_400 / base.as_secs();
+        let adaptive_queries_per_day = 2 * 86_400 / maximum.as_secs();
+        assert!(fixed_queries_per_day >= adaptive_queries_per_day * 10);
+
+        let (_, due_delay) = adaptive_maintenance_delay(
+            maximum,
+            base,
+            maximum,
+            MaintenanceIteration {
+                did_work: false,
+                next_due: Some(Duration::ZERO),
+            },
+        );
+        assert_eq!(due_delay, base);
+    }
+
+    #[actix_web::test]
+    async fn maintenance_notifications_reset_idle_backoff_immediately() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (notification_tx, notification_rx) = broadcast::channel(4);
+        let runs = Arc::new(AtomicUsize::new(0));
+        let runs_for_task = Arc::clone(&runs);
+        let task = tokio::spawn(run_adaptive_task(
+            MaintenanceWorker::StorageDeletion,
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            Duration::from_secs(300),
+            shutdown_rx,
+            notification_rx,
+            move || {
+                let runs = Arc::clone(&runs_for_task);
+                let shutdown_tx = shutdown_tx.clone();
+                async move {
+                    runs.fetch_add(1, Ordering::SeqCst);
+                    let _ = shutdown_tx.send(true);
+                    MaintenanceIteration::worked()
+                }
+            },
+        ));
+
+        notification_tx
+            .send("storage_deletion_jobs".to_owned())
+            .expect("the adaptive worker should be listening");
+        tokio::time::timeout(Duration::from_millis(250), task)
+            .await
+            .expect("the notification should bypass the idle delay")
+            .expect("the adaptive worker should not panic");
+        assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn maintenance_retry_policy_is_fenced_jittered_and_dead_lettered() {
+        assert_eq!(retry_delay_seconds_from_sample(0, 0), 10);
+        assert_eq!(retry_delay_seconds_from_sample(1, 10), 20);
+        assert!(retry_delay_seconds_from_sample(100, u64::MAX) <= 3_600);
+
+        let source = include_str!("storage.rs");
+        assert!(source.contains("lease_token = gen_random_uuid()::text"));
+        assert!(source.contains("AND lease_token = $2"));
+        assert!(source.contains("run_with_storage_job_lease("));
+        assert!(source.contains("STORAGE_JOB_HEARTBEAT_INTERVAL"));
+        assert!(source.contains("MAINTENANCE_DEAD_LETTER_ATTEMPTS"));
+        assert_eq!(
+            S3RequestPolicy::Maintenance.retry_config().max_attempts(),
+            3
+        );
+        assert_eq!(
+            S3RequestPolicy::Maintenance
+                .timeout_config()
+                .operation_timeout(),
+            Some(Duration::from_secs(60))
+        );
+        assert!(CLAIM_STORAGE_DELETION_JOBS_QUERY.contains("), claimed_jobs AS ("));
+        assert!(!CLAIM_STORAGE_DELETION_JOBS_QUERY.contains(")\n    ), claimed_jobs"));
+    }
+
+    #[test]
+    fn s3_request_and_maintenance_policies_bound_every_timeout_and_retry() {
+        let request = S3RequestPolicy::Request.timeout_config();
+        assert_eq!(request.connect_timeout(), Some(Duration::from_secs(3)));
+        assert_eq!(request.read_timeout(), Some(Duration::from_secs(10)));
+        assert_eq!(
+            request.operation_attempt_timeout(),
+            Some(Duration::from_secs(15))
+        );
+        assert_eq!(request.operation_timeout(), Some(Duration::from_secs(30)));
+        assert_eq!(S3RequestPolicy::Request.retry_config().max_attempts(), 2);
+
+        let maintenance = S3RequestPolicy::Maintenance.timeout_config();
+        assert_eq!(maintenance.connect_timeout(), Some(Duration::from_secs(5)));
+        assert_eq!(maintenance.read_timeout(), Some(Duration::from_secs(20)));
+        assert_eq!(
+            maintenance.operation_attempt_timeout(),
+            Some(Duration::from_secs(20))
+        );
+        assert_eq!(
+            maintenance.operation_timeout(),
+            Some(Duration::from_secs(60))
+        );
+        assert_eq!(
+            S3RequestPolicy::Maintenance.retry_config().max_attempts(),
+            3
+        );
+    }
+
+    #[test]
+    fn s3_retry_interceptor_counts_only_attempts_after_the_first() {
+        let config = Config::from_env().expect("test configuration should load");
+        let metrics = Metrics::new(&config);
+        let interceptor = S3RetryMetricsInterceptor {
+            metrics: metrics.clone(),
+            policy: S3RequestPolicy::Request,
+        };
+        let mut context = InterceptorContext::new(Input::erase(()));
+        context.set_request(SmithyRequest::empty());
+        let context = BeforeTransmitInterceptorContextRef::from(&context);
+        let runtime_components = RuntimeComponentsBuilder::for_tests()
+            .build()
+            .expect("test runtime components should build");
+        let mut config_bag = ConfigBag::base();
+        for attempts in [1, 2, 3] {
+            config_bag
+                .interceptor_state()
+                .store_put(RequestAttempts::new(attempts));
+            interceptor
+                .read_before_attempt(&context, &runtime_components, &mut config_bag)
+                .expect("retry metrics must not affect request execution");
+        }
+        let rendered = metrics.render(&[]);
+        assert!(rendered.contains("aeralyth_s3_retry_attempts_total{policy=\"request\"} 2"));
+    }
+
+    #[test]
+    fn lifecycle_backstop_is_scoped_safe_and_reduces_global_sweeps() {
+        let rule = multipart_lifecycle_rule(7).expect("the lifecycle rule should build");
+        assert_eq!(rule.id(), Some(MULTIPART_LIFECYCLE_RULE_ID));
+        assert_eq!(rule.status(), &ExpirationStatus::Enabled);
+        assert_eq!(
+            rule.filter().and_then(LifecycleRuleFilter::prefix),
+            Some(STORAGE_OBJECT_PREFIX)
+        );
+        assert_eq!(
+            rule.abort_incomplete_multipart_upload()
+                .and_then(AbortIncompleteMultipartUpload::days_after_initiation),
+            Some(7)
+        );
+        let unrelated = LifecycleRule::builder()
+            .id("retain-existing-rule")
+            .filter(LifecycleRuleFilter::builder().prefix("archive/").build())
+            .status(ExpirationStatus::Disabled)
+            .build()
+            .expect("the unrelated lifecycle rule should build");
+        let (merged, changed) =
+            merge_multipart_lifecycle_rule(vec![unrelated.clone()], rule.clone());
+        assert!(changed);
+        assert!(merged.contains(&unrelated));
+        assert!(merged.contains(&rule));
+        let (idempotent, changed) = merge_multipart_lifecycle_rule(merged.clone(), rule);
+        assert!(!changed);
+        assert_eq!(idempotent, merged);
+        let base = MAINTENANCE_SCHEDULES
+            .iter()
+            .copied()
+            .find(|schedule| schedule.worker == MaintenanceWorker::MultipartReconciliation)
+            .expect("multipart reconciliation schedule should exist");
+        assert_eq!(base.interval, Duration::from_secs(60 * 60));
+        assert_eq!(
+            effective_maintenance_schedule(base, true).interval,
+            LIFECYCLE_BACKED_RECONCILIATION_INTERVAL
+        );
+        assert_eq!(
+            effective_maintenance_schedule(base, false).interval,
+            base.interval
+        );
+    }
+
+    #[test]
+    fn counter_reconciliation_detects_drift_in_owner_pages_before_writing() {
+        assert!(RECONCILE_USER_COUNTERS_PAGE_QUERY.contains("WHERE id > $1"));
+        assert!(RECONCILE_USER_COUNTERS_PAGE_QUERY.contains("LIMIT $2"));
+        assert!(RECONCILE_USER_COUNTERS_PAGE_QUERY.contains("shared_counts AS MATERIALIZED"));
+        assert!(RECONCILE_USER_COUNTERS_PAGE_QUERY.contains("shared_files.entry_type = 'file'"));
+        assert!(!RECONCILE_USER_COUNTERS_PAGE_QUERY.contains("file_shares.counts_toward_shared"));
+        assert!(RECONCILE_USER_COUNTERS_PAGE_QUERY.contains("drifted AS MATERIALIZED"));
+        assert!(RECONCILE_USER_COUNTERS_PAGE_QUERY.contains("IS DISTINCT FROM"));
+        assert!(RECONCILE_USER_COUNTERS_PAGE_QUERY.contains("FROM drifted"));
+        assert!(
+            RECONCILE_USER_COUNTERS_PAGE_QUERY.contains("counters.xmin = drifted.counter_xmin")
+        );
+        assert!(RECONCILE_USER_COUNTERS_PAGE_QUERY.contains("ON CONFLICT (owner_id) DO NOTHING"));
+        assert!(RECONCILE_ADMIN_COUNTERS_QUERY.contains("IS DISTINCT FROM"));
+        assert!(RECONCILE_ADMIN_COUNTERS_QUERY.contains("counters.xmin = drifted.counter_xmin"));
+
+        let schedule = MAINTENANCE_SCHEDULES
+            .iter()
+            .find(|schedule| schedule.worker == MaintenanceWorker::CounterReconciliation)
+            .expect("counter reconciliation schedule should exist");
+        assert_eq!(schedule.interval, Duration::from_secs(24 * 60 * 60));
+    }
+
+    #[test]
+    fn partitioned_counter_reconciliation_uses_one_leader_connection() {
+        let source = include_str!("storage.rs");
+        let reconciliation = source_between(source, "async fn reconcile_counters(", "fn required(");
+        assert!(reconciliation.contains("pg_try_advisory_xact_lock"));
+        assert!(reconciliation.contains("transaction\n            .query_one("));
+        assert!(reconciliation.contains("RECONCILE_USER_COUNTERS_PAGE_QUERY"));
+        assert!(reconciliation.contains("RECONCILE_ADMIN_COUNTERS_QUERY"));
+        assert!(reconciliation.contains("record_counter_reconciliation"));
+        assert!(!reconciliation.contains("db.execute("));
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn storage_deletion_claim_query_prepares_in_postgres() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (client, connection) = tokio_postgres::connect(&database_url, NoTls)
+            .await
+            .expect("postgres should be available");
+        tokio::spawn(async move {
+            connection
+                .await
+                .expect("postgres connection should remain healthy");
+        });
+        client
+            .prepare(CLAIM_STORAGE_DELETION_JOBS_QUERY)
+            .await
+            .expect("the storage deletion claim query should prepare");
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn counter_reconciliation_queries_prepare_in_postgres() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (client, connection) = tokio_postgres::connect(&database_url, NoTls)
+            .await
+            .expect("postgres should be available");
+        tokio::spawn(async move {
+            connection
+                .await
+                .expect("postgres connection should remain healthy");
+        });
+        client
+            .prepare(RECONCILE_USER_COUNTERS_PAGE_QUERY)
+            .await
+            .expect("the partitioned user counter query should prepare");
+        client
+            .prepare(RECONCILE_ADMIN_COUNTERS_QUERY)
+            .await
+            .expect("the admin drift query should prepare");
+    }
+
+    #[actix_web::test]
+    async fn reconciliation_continues_after_selected_provider_failures_across_pages() {
+        let config = Config::from_env().expect("test configuration should load");
+        let metrics = Metrics::new(&config);
+        let attempted = Arc::new(AtomicUsize::new(0));
+        let mut failures = ReconciliationFailures::default();
+
+        for page in [vec![1, 2, 3], vec![4, 5]] {
+            let attempted_for_page = Arc::clone(&attempted);
+            run_reconciliation_abort_page(page, 2, &metrics, &mut failures, move |item| {
+                let attempted = Arc::clone(&attempted_for_page);
+                async move {
+                    attempted.fetch_add(1, Ordering::SeqCst);
+                    if item == 2 {
+                        Err("selected provider failure")
+                    } else {
+                        Ok(())
+                    }
+                }
+            })
+            .await;
+        }
+
+        assert_eq!(attempted.load(Ordering::SeqCst), 5);
+        let rendered = metrics.render(&[]);
+        assert!(rendered.contains(
+            "aeralyth_maintenance_item_failures_total{worker=\"multipart reconciliation abort\"} 1"
+        ));
+        let error = failures
+            .finish()
+            .expect_err("selected failures must be reported");
+        let message = error.to_string();
+        assert!(message.contains("1 item failures"));
+        assert!(message.contains("selected provider failure"));
+
+        let source = include_str!("storage.rs");
+        let sweep = source_between(
+            source,
+            "async fn sweep_orphaned_multipart_uploads(",
+            "#[derive(Default)]\nstruct ReconciliationFailures",
+        );
+        assert!(sweep.contains("run_reconciliation_abort_page("));
+        assert!(sweep.contains("key_marker = next_key_marker"));
+    }
+
+    #[actix_web::test]
+    async fn storage_provider_work_uses_the_configured_concurrency_bound() {
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let active_for_tasks = Arc::clone(&active);
+        let peak_for_tasks = Arc::clone(&peak);
+
+        let completed = run_bounded_storage_tasks(0..40, 4, move |item| {
+            let active = Arc::clone(&active_for_tasks);
+            let peak = Arc::clone(&peak_for_tasks);
+            async move {
+                let current = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(current, Ordering::SeqCst);
+                sleep(Duration::from_millis(2)).await;
+                active.fetch_sub(1, Ordering::SeqCst);
+                item
+            }
+        })
+        .await;
+
+        assert_eq!(completed.len(), 40);
+        assert_eq!(peak.load(Ordering::SeqCst), 4);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
     }
 
     fn intent(

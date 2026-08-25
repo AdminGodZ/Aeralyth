@@ -1,21 +1,22 @@
 use std::collections::{BTreeMap, HashMap};
 
 use actix_web::http::header::{
-    ACCEPT, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION,
+    ACCEPT, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION,
 };
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use futures_util::{StreamExt, future::try_join_all, stream};
+use futures_util::{StreamExt, future::try_join_all};
 use serde::{Deserialize, Serialize};
 use tokio::fs::{File as AsyncFile, OpenOptions};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio_postgres::IsolationLevel;
 
 use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
 use crate::db::{query_cached, query_one_cached, query_opt_cached};
+use crate::routes::local_file_stream::local_file_stream;
 use crate::routes::share_links::{
     EditorShareGrant, editor_grant_from_header, editor_parent, validate_editor_replacement,
 };
@@ -24,7 +25,7 @@ use crate::routes::tree_walk::{
     walk_subtree,
 };
 use crate::routes::upload_reservations::{reservation_amount, reserve_upload_capacity};
-use crate::state::AppState;
+use crate::state::{AppState, LoadShedError};
 use crate::storage::UploadedPart;
 use crate::timestamps;
 use crate::upload_completion::{
@@ -35,7 +36,7 @@ use crate::upload_completion::{
 
 const MAX_UPLOAD_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_FOLDER_ARCHIVE_ENTRIES: usize = 50_000;
-const MAX_FOLDER_ARCHIVE_BYTES: i64 = 128 * 1024 * 1024;
+const MAX_FOLDER_ARCHIVE_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 const UPLOAD_LENGTH_HEADER: &str = "x-aeralyth-upload-length";
 const UPLOAD_OFFSET_HEADER: &str = "x-aeralyth-upload-offset";
 const DEFAULT_PAGE_SIZE: usize = 50;
@@ -399,6 +400,23 @@ pub async fn list_files(
         "updated"
     }));
     let direction = normalize_sort_direction(query.direction.as_deref(), sort);
+    let _recursive_permit = if query
+        .folder
+        .as_deref()
+        .is_some_and(|folder_id| !folder_id.trim().is_empty())
+        && matches!(view, "files" | "shared")
+    {
+        Some(
+            state
+                .recursive_operation_limiter
+                .try_acquire(&user.id)
+                .map_err(|()| {
+                    LoadShedError::service_unavailable("recursive operation capacity is full")
+                })?,
+        )
+    } else {
+        None
+    };
     let folder_context = match view {
         "files" => resolve_owned_folder_context(&state, &user, query.folder.as_deref()).await?,
         "shared" => resolve_shared_folder_context(&state, &user, query.folder.as_deref()).await?,
@@ -457,6 +475,15 @@ pub async fn create_folder_manifest(
         return Ok(HttpResponse::Conflict()
             .body("plaintext folder manifests are disabled; use the encrypted vault upload API"));
     }
+    state.db.release_request_connection().await;
+    let _upload_permit = state
+        .upload_control_limiter
+        .try_acquire(&actor.owner_id)
+        .map_err(|()| LoadShedError::too_many_requests("upload control capacity is full"))?;
+    let _recursive_permit = state
+        .recursive_operation_limiter
+        .try_acquire(&actor.owner_id)
+        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
     let body = parse_json_body::<FolderManifestRequest>(&request, body, FOLDER_MANIFEST_JSON_LIMIT)
         .await?;
     if body.relative_paths.is_empty() || body.relative_paths.len() > MAX_FOLDER_MANIFEST_PATHS {
@@ -592,6 +619,22 @@ pub async fn init_upload(
     body: web::Payload,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
+    let _upload_permit = state
+        .upload_control_limiter
+        .try_acquire(&actor.owner_id)
+        .map_err(|()| LoadShedError::too_many_requests("upload control capacity is full"))?;
+    let _recursive_permit = if actor.editor_grant.is_some() {
+        Some(
+            state
+                .recursive_operation_limiter
+                .try_acquire(&actor.owner_id)
+                .map_err(|()| {
+                    LoadShedError::service_unavailable("recursive operation capacity is full")
+                })?,
+        )
+    } else {
+        None
+    };
 
     if state.config.e2ee_mode.is_enabled() {
         return Ok(HttpResponse::Conflict()
@@ -676,9 +719,14 @@ pub async fn init_upload(
         let existing_parts =
             if let Some(multipart_upload_id) = existing.multipart_upload_id.as_deref() {
                 state
-                    .storage
-                    .uploaded_parts(&existing.object_key, multipart_upload_id)
-                    .await
+                    .storage_operations
+                    .run(
+                        &actor.owner_id,
+                        state
+                            .storage
+                            .uploaded_parts(&existing.object_key, multipart_upload_id),
+                    )
+                    .await?
                     .map_err(error::ErrorBadGateway)?
             } else {
                 Vec::new()
@@ -876,14 +924,17 @@ pub async fn init_upload(
     state.db.release_request_connection().await;
 
     let prepared = match state
-        .storage
-        .prepare_upload(
-            &upload_id,
-            &object_key,
-            Some(&content_type),
-            body.size_bytes,
+        .storage_operations
+        .run(
+            &actor.owner_id,
+            state.storage.prepare_upload(
+                &upload_id,
+                &object_key,
+                Some(&content_type),
+                body.size_bytes,
+            ),
         )
-        .await
+        .await?
     {
         Ok(prepared) => prepared,
         Err(storage_error) => {
@@ -916,6 +967,7 @@ pub async fn init_upload(
             &object_key,
             prepared.multipart_upload_id.as_deref(),
             &["initializing"],
+            None,
         )
         .await;
         return Err(error::ErrorInternalServerError(
@@ -941,6 +993,7 @@ pub async fn init_upload(
                 &object_key,
                 prepared.multipart_upload_id.as_deref(),
                 &["initializing"],
+                None,
             )
             .await;
             return Ok(HttpResponse::Conflict().body("upload initialization was canceled"));
@@ -954,6 +1007,7 @@ pub async fn init_upload(
                 &object_key,
                 prepared.multipart_upload_id.as_deref(),
                 &["initializing"],
+                None,
             )
             .await;
             return Err(error::ErrorInternalServerError(database_error));
@@ -978,6 +1032,10 @@ pub async fn upload_content(
     mut payload: web::Payload,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
+    let _upload_permit = state
+        .upload_control_limiter
+        .try_acquire(&actor.owner_id)
+        .map_err(|()| LoadShedError::too_many_requests("upload control capacity is full"))?;
     let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
         return Ok(HttpResponse::NotFound().finish());
     };
@@ -1204,6 +1262,10 @@ pub async fn presign_upload_content(
     body: web::Payload,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
+    let _upload_permit = state
+        .upload_control_limiter
+        .try_acquire(&actor.owner_id)
+        .map_err(|()| LoadShedError::too_many_requests("upload control capacity is full"))?;
     let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
         return Ok(HttpResponse::NotFound().finish());
     };
@@ -1243,9 +1305,17 @@ pub async fn presign_upload_content(
         .as_deref()
         .unwrap_or("application/octet-stream");
     let url = state
-        .storage
-        .presign_single_upload(&upload.object_key, content_type, &checksum, content_length)
-        .await
+        .storage_operations
+        .run(
+            &actor.owner_id,
+            state.storage.presign_single_upload(
+                &upload.object_key,
+                content_type,
+                &checksum,
+                content_length,
+            ),
+        )
+        .await?
         .map_err(error::ErrorBadGateway)?;
 
     Ok(HttpResponse::Ok().json(UploadUrlResponse {
@@ -1261,6 +1331,10 @@ pub async fn presign_upload_part(
     body: web::Payload,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
+    let _upload_permit = state
+        .upload_control_limiter
+        .try_acquire(&actor.owner_id)
+        .map_err(|()| LoadShedError::too_many_requests("upload control capacity is full"))?;
     let (upload_id, part_number) = path.into_inner();
     let Some(upload) = get_upload(&state, &actor, &upload_id).await? else {
         return Ok(HttpResponse::NotFound().finish());
@@ -1297,15 +1371,18 @@ pub async fn presign_upload_part(
         .as_deref()
         .ok_or_else(|| error::ErrorInternalServerError("multipart upload id missing"))?;
     let url = state
-        .storage
-        .presign_upload_part(
-            &upload.object_key,
-            multipart_upload_id,
-            part_number,
-            &checksum,
-            content_length,
+        .storage_operations
+        .run(
+            &actor.owner_id,
+            state.storage.presign_upload_part(
+                &upload.object_key,
+                multipart_upload_id,
+                part_number,
+                &checksum,
+                content_length,
+            ),
         )
-        .await
+        .await?
         .map_err(error::ErrorBadGateway)?;
 
     Ok(HttpResponse::Ok().json(UploadUrlResponse {
@@ -1321,6 +1398,10 @@ pub async fn presign_upload_parts(
     body: web::Payload,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
+    let _upload_permit = state
+        .upload_control_limiter
+        .try_acquire(&actor.owner_id)
+        .map_err(|()| LoadShedError::too_many_requests("upload control capacity is full"))?;
     let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
         return Ok(HttpResponse::NotFound().finish());
     };
@@ -1370,17 +1451,23 @@ pub async fn presign_upload_parts(
         .multipart_upload_id
         .as_deref()
         .ok_or_else(|| error::ErrorInternalServerError("multipart upload id missing"))?;
-    let urls = try_join_all(parts.iter().map(|(part_number, checksum, length)| {
-        state.storage.presign_upload_part(
-            &upload.object_key,
-            multipart_upload_id,
-            *part_number,
-            checksum,
-            *length,
-        )
+    let urls = try_join_all(parts.iter().map(|(part_number, checksum, length)| async {
+        state
+            .storage_operations
+            .run(
+                &actor.owner_id,
+                state.storage.presign_upload_part(
+                    &upload.object_key,
+                    multipart_upload_id,
+                    *part_number,
+                    checksum,
+                    *length,
+                ),
+            )
+            .await?
+            .map_err(error::ErrorBadGateway)
     }))
-    .await
-    .map_err(error::ErrorBadGateway)?;
+    .await?;
     let parts = parts
         .into_iter()
         .zip(urls)
@@ -1403,7 +1490,11 @@ pub async fn complete_upload(
     body: web::Payload,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
-    let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
+    let _upload_permit = state
+        .upload_control_limiter
+        .try_acquire(&actor.owner_id)
+        .map_err(|()| LoadShedError::too_many_requests("upload control capacity is full"))?;
+    let Some(mut upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
         return Ok(HttpResponse::NotFound().finish());
     };
     if upload.status == "completed" {
@@ -1458,22 +1549,25 @@ pub async fn complete_upload(
 
     let claimed = state
         .db
-        .execute(
+        .query_opt(
             "
                 UPDATE file_uploads
                 SET status = 'completing',
                     expires_at = now() + interval '5 minutes',
                     completion_available_at = now(),
-                    completion_locked_until = now() + interval '2 minutes',
+                    completion_locked_until = now() + interval '5 minutes',
+                    completion_lease_token = gen_random_uuid()::text,
+                    completion_dead_lettered_at = NULL,
                     completion_last_error = NULL
                 WHERE id = $1 AND owner_id = $2 AND status = 'pending'
+                RETURNING completion_lease_token
             ",
             &[&upload.id, &upload.owner_id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    if claimed == 0 {
+    let Some(claimed) = claimed else {
         let Some(current) = get_upload(&state, &actor, &upload.id).await? else {
             return Ok(HttpResponse::NotFound().finish());
         };
@@ -1485,7 +1579,8 @@ pub async fn complete_upload(
         } else {
             Ok(HttpResponse::Conflict().json(upload_complete_response(&current, &current.status)))
         };
-    }
+    };
+    upload.completion_lease_token = claimed.get("completion_lease_token");
     state.db.release_request_connection().await;
 
     let metadata = if upload.mode == "multipart" {
@@ -1495,18 +1590,21 @@ pub async fn complete_upload(
             .ok_or_else(|| error::ErrorInternalServerError("multipart upload id missing"))?;
 
         match state
-            .storage
-            .complete_multipart(
-                &upload.object_key,
-                multipart_upload_id,
-                &completed_parts,
-                expected_size,
+            .storage_operations
+            .run(
+                &actor.owner_id,
+                state.storage.complete_multipart(
+                    &upload.object_key,
+                    multipart_upload_id,
+                    &completed_parts,
+                    expected_size,
+                ),
             )
-            .await
+            .await?
         {
             Ok(metadata) => metadata,
             Err(complete_error) => {
-                let delay = completion_retry_delay_seconds(upload.completion_attempts, &upload.id);
+                let delay = completion_retry_delay_seconds(upload.completion_attempts);
                 log::warn!(
                     "multipart completion for {} is uncertain and will be reconciled in {delay}s: {}",
                     upload.id,
@@ -1516,6 +1614,7 @@ pub async fn complete_upload(
                     &state.db,
                     &upload.id,
                     &upload.owner_id,
+                    &upload.completion_lease_token,
                     &complete_error.to_string(),
                     delay,
                 )
@@ -1527,10 +1626,17 @@ pub async fn complete_upload(
             }
         }
     } else {
-        match state.storage.object_metadata(&upload.object_key).await {
+        match state
+            .storage_operations
+            .run(
+                &actor.owner_id,
+                state.storage.object_metadata(&upload.object_key),
+            )
+            .await?
+        {
             Ok(metadata) => metadata,
             Err(metadata_error) => {
-                let delay = completion_retry_delay_seconds(upload.completion_attempts, &upload.id);
+                let delay = completion_retry_delay_seconds(upload.completion_attempts);
                 log::warn!(
                     "could not verify completing upload {}; background finalization will retry in {delay}s: {}",
                     upload.id,
@@ -1540,6 +1646,7 @@ pub async fn complete_upload(
                     &state.db,
                     &upload.id,
                     &upload.owner_id,
+                    &upload.completion_lease_token,
                     &metadata_error.to_string(),
                     delay,
                 )
@@ -1560,6 +1667,7 @@ pub async fn complete_upload(
             &upload.object_key,
             upload.multipart_upload_id.as_deref(),
             &["completing"],
+            Some(&upload.completion_lease_token),
         )
         .await?;
         return Err(error::ErrorBadRequest(
@@ -1591,6 +1699,7 @@ pub async fn complete_upload(
                 &upload.object_key,
                 upload.multipart_upload_id.as_deref(),
                 &["completing"],
+                Some(&upload.completion_lease_token),
             )
             .await?;
             return Err(error::ErrorConflict(
@@ -1709,6 +1818,10 @@ pub async fn folder_archive_manifest(
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
+    let _recursive_permit = state
+        .recursive_operation_limiter
+        .try_acquire(&user.id)
+        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
     let root_id = path.into_inner();
     let mut client = state
         .db
@@ -1793,7 +1906,7 @@ pub async fn folder_archive_manifest(
                 total_bytes = total_bytes.saturating_add(entry.size_bytes.max(0));
                 if total_bytes > MAX_FOLDER_ARCHIVE_BYTES {
                     return Ok(HttpResponse::PayloadTooLarge()
-                        .body("This folder is larger than the 128 MB browser ZIP safety limit."));
+                        .body("This folder is larger than the 2 GB browser ZIP safety limit."));
                 }
             }
             let rank = i32::from(entry.entry_type != "folder");
@@ -1837,6 +1950,10 @@ pub async fn abort_upload(
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
+    let _upload_permit = state
+        .upload_control_limiter
+        .try_acquire(&actor.owner_id)
+        .map_err(|()| LoadShedError::too_many_requests("upload control capacity is full"))?;
     let Some(upload) = get_upload(&state, &actor, &path.into_inner()).await? else {
         return Ok(HttpResponse::NoContent().finish());
     };
@@ -1849,15 +1966,25 @@ pub async fn abort_upload(
             &upload.object_key,
             upload.multipart_upload_id.as_deref(),
             &["initializing", "pending"],
+            None,
         )
         .await?;
         if let Some(object_path) = state.storage.local_path(&upload.object_key) {
             let temporary_path = object_path.with_extension(format!("part-{}", upload.id));
-            let _ = tokio::fs::remove_file(temporary_path).await;
+            tokio::spawn(async move {
+                if let Err(error) = tokio::fs::remove_file(&temporary_path).await
+                    && error.kind() != std::io::ErrorKind::NotFound
+                {
+                    log::warn!(
+                        "could not remove aborted local upload {}: {error}",
+                        temporary_path.display()
+                    );
+                }
+            });
         }
     }
 
-    Ok(HttpResponse::NoContent().finish())
+    Ok(HttpResponse::Accepted().finish())
 }
 
 pub async fn download(
@@ -1867,6 +1994,10 @@ pub async fn download(
     query: web::Query<DownloadQuery>,
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
+    let _recursive_permit = state
+        .recursive_operation_limiter
+        .try_acquire(&user.id)
+        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
     let expected_version = query
         .version
         .as_deref()
@@ -1879,12 +2010,18 @@ pub async fn download(
     state.db.release_request_connection().await;
 
     if let Some(download_url) = state
-        .storage
-        .download_url(&file.storage_name, &file.original_name)
-        .await
+        .storage_operations
+        .run(
+            &user.id,
+            state
+                .storage
+                .download_url(&file.storage_name, &file.original_name),
+        )
+        .await?
         .map_err(error::ErrorBadGateway)?
     {
         return Ok(HttpResponse::Found()
+            .insert_header((CACHE_CONTROL, "private, no-store"))
             .insert_header((LOCATION, download_url))
             .finish());
     }
@@ -1901,26 +2038,10 @@ pub async fn download(
         .await
         .map_err(error::ErrorInternalServerError)?
         .len();
-    let stream = stream::unfold(stored_file, |mut stored_file| async {
-        let mut buffer = vec![0_u8; 64 * 1024];
-
-        match stored_file.read(&mut buffer).await {
-            Ok(0) => None,
-            Ok(bytes_read) => {
-                buffer.truncate(bytes_read);
-                Some((
-                    Ok::<web::Bytes, actix_web::Error>(web::Bytes::from(buffer)),
-                    stored_file,
-                ))
-            }
-            Err(read_error) => Some((
-                Err(error::ErrorInternalServerError(read_error)),
-                stored_file,
-            )),
-        }
-    });
+    let stream = local_file_stream(stored_file);
 
     Ok(HttpResponse::Ok()
+        .insert_header((CACHE_CONTROL, "private, no-store"))
         .insert_header((
             CONTENT_TYPE,
             file.mime_type
@@ -2099,6 +2220,10 @@ pub async fn trash(
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
+    let _recursive_permit = state
+        .recursive_operation_limiter
+        .try_acquire(&user.id)
+        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
     let wants_json = request_wants_json(&request);
     let file_id = path.into_inner();
     let mut client = state
@@ -2156,6 +2281,10 @@ pub async fn restore(
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
+    let _recursive_permit = state
+        .recursive_operation_limiter
+        .try_acquire(&user.id)
+        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
     let file_id = path.into_inner();
     let mut client = state
         .db
@@ -2245,6 +2374,10 @@ pub async fn delete(
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
+    let _recursive_permit = state
+        .recursive_operation_limiter
+        .try_acquire(&user.id)
+        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
     let file_id = path.into_inner();
     let mut client = state
         .db
@@ -3194,7 +3327,8 @@ async fn get_upload(
                   share_link_id,
                   replacement_file_id,
                   expires_at,
-                  completion_attempts
+                  completion_attempts,
+                  COALESCE(completion_lease_token, '') AS completion_lease_token
                 FROM file_uploads
                 WHERE id = $1
                   AND owner_id = $2
@@ -3246,7 +3380,8 @@ async fn find_resumable_upload(
                   share_link_id,
                   replacement_file_id,
                   expires_at,
-                  completion_attempts
+                  completion_attempts,
+                  COALESCE(completion_lease_token, '') AS completion_lease_token
                 FROM file_uploads
                 WHERE owner_id = $1
                   AND parent_id IS NOT DISTINCT FROM $2
@@ -3322,6 +3457,7 @@ async fn enqueue_upload_cleanup(
     object_key: &str,
     multipart_upload_id: Option<&str>,
     from_statuses: &[&str],
+    lease_token: Option<&str>,
 ) -> Result<bool> {
     transition_file_upload_to_cleanup(
         &state.db,
@@ -3330,6 +3466,7 @@ async fn enqueue_upload_cleanup(
         object_key,
         multipart_upload_id,
         from_statuses,
+        lease_token,
     )
     .await
     .map_err(error::ErrorInternalServerError)
@@ -3551,7 +3688,7 @@ mod tests {
     #[test]
     fn folder_archive_stays_bounded_and_uses_the_batched_tree_walker() {
         assert_eq!(MAX_FOLDER_ARCHIVE_ENTRIES, 50_000);
-        assert_eq!(MAX_FOLDER_ARCHIVE_BYTES, 128 * 1024 * 1024);
+        assert_eq!(MAX_FOLDER_ARCHIVE_BYTES, 2 * 1024 * 1024 * 1024);
         let source = include_str!("files.rs");
         let handler = source
             .split_once("pub async fn folder_archive_manifest")
@@ -3568,6 +3705,61 @@ mod tests {
         assert!(handler.contains("child_state: Some(\"active\")"));
         assert!(FOLDER_ARCHIVE_ENTRIES_QUERY.contains("current_generation_id"));
         assert!(FOLDER_ARCHIVE_ENTRIES_QUERY.contains("heads.record_hash"));
+    }
+
+    #[test]
+    fn folder_manifest_sheds_upload_and_recursive_work_before_planning() {
+        let source = include_str!("files.rs");
+        let handler = source
+            .split_once("pub async fn create_folder_manifest(")
+            .and_then(|(_, tail)| tail.split_once("pub async fn init_upload("))
+            .map(|(handler, _)| handler)
+            .expect("folder manifest handler source should remain inspectable");
+
+        assert!(handler.contains("upload_control_limiter"));
+        assert!(handler.contains("recursive_operation_limiter"));
+        let admission = handler
+            .find("recursive_operation_limiter")
+            .expect("recursive admission should be present");
+        let planning = handler
+            .find("plan_folder_manifest")
+            .expect("folder planning should be present");
+        assert!(admission < planning);
+    }
+
+    #[test]
+    fn recursive_listing_download_and_editor_upload_paths_are_admitted_first() {
+        let source = include_str!("files.rs");
+        for (start, end, recursive_call) in [
+            (
+                "pub async fn list_files(",
+                "pub async fn storage(",
+                "resolve_owned_folder_context(",
+            ),
+            (
+                "pub async fn init_upload(",
+                "pub async fn upload_content(",
+                "editor_parent(",
+            ),
+            (
+                "pub async fn download(",
+                "pub async fn share(",
+                "get_download_file(",
+            ),
+        ] {
+            let handler = source
+                .split_once(start)
+                .and_then(|(_, tail)| tail.split_once(end))
+                .map(|(handler, _)| handler)
+                .expect("recursive legacy handler source should remain inspectable");
+            let admission = handler
+                .find("recursive_operation_limiter")
+                .unwrap_or_else(|| panic!("{start} admission should be present"));
+            let recursive_query = handler
+                .find(recursive_call)
+                .unwrap_or_else(|| panic!("{start} should contain {recursive_call}"));
+            assert!(admission < recursive_query, "{start} must shed first");
+        }
     }
 
     #[test]

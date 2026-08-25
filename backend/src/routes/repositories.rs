@@ -1,5 +1,4 @@
-use std::collections::HashMap;
-
+use actix_web::http::header::CACHE_CONTROL;
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
@@ -7,28 +6,265 @@ use tokio_postgres::{IsolationLevel, Row};
 
 use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
 use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
-use crate::routes::tree_walk::{TREE_MUTATION_BATCH_SIZE, TreeWalkScope, walk_subtree};
-use crate::state::AppState;
+use crate::state::{AppState, LoadShedError};
 use crate::timestamps;
+
+use super::conditional;
 
 const MAX_REPOSITORY_ENTRIES: i64 = 500;
 const REPOSITORY_LIST_PAGE_SIZE: usize = 100;
+const REPOSITORY_ARCHIVE_PAGE_SIZE: usize = 1_000;
 const MAX_REPOSITORY_ARCHIVE_ENTRIES: i64 = 50_000;
-const MAX_REPOSITORY_ARCHIVE_BYTES: i64 = 128 * 1024 * 1024;
+const MAX_REPOSITORY_ARCHIVE_BYTES: i64 = 2 * 1024 * 1024 * 1024;
 const MAX_REPOSITORY_DESCRIPTION_CHARS: usize = 350;
 const MAX_REPOSITORY_NAME_CHARS: usize = 100;
 const REPOSITORY_JSON_LIMIT: usize = 16 * 1024;
-const REPOSITORY_ARCHIVE_ENTRIES_QUERY: &str = r#"
-    SELECT files.id, files.original_name, files.mime_type,
-           files.entry_type, files.parent_id, files.size_bytes,
-           files.e2ee_state, files.updated_at,
-           files.current_generation_id AS vault_generation_id,
-           heads.record_hash AS vault_record_hash
-    FROM files
-    LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
-    WHERE files.owner_id = $2
-      AND files.state = 'active'
-      AND files.id = ANY($1::text[])
+const REPOSITORY_ARCHIVE_TOTALS_QUERY: &str = r#"
+    WITH RECURSIVE repository AS MATERIALIZED (
+      SELECT repositories.root_file_id
+      FROM repositories
+      INNER JOIN files AS roots ON roots.id = repositories.root_file_id
+      WHERE repositories.id = $1
+        AND repositories.owner_id = $2
+        AND repositories.tree_version = $3
+        AND roots.owner_id = repositories.owner_id
+        AND roots.entry_type = 'folder'
+        AND roots.state = 'active'
+      LIMIT 1
+    ),
+    tree AS (
+      SELECT roots.id, roots.entry_type, roots.size_bytes,
+             roots.e2ee_state, ARRAY[roots.id]::text[] AS visited_ids,
+             0::integer AS depth
+      FROM files AS roots
+      INNER JOIN repository ON repository.root_file_id = roots.id
+
+      UNION ALL
+
+      SELECT children.id, children.entry_type, children.size_bytes,
+             children.e2ee_state, tree.visited_ids || children.id,
+             tree.depth + 1
+      FROM files AS children
+      INNER JOIN tree ON children.parent_id = tree.id
+      WHERE children.owner_id = $2
+        AND children.state = 'active'
+        AND tree.depth < 100
+        AND NOT children.id = ANY(tree.visited_ids)
+    )
+    SELECT count(*) FILTER (WHERE depth > 0)::bigint AS total_entries,
+           count(*) FILTER (WHERE depth > 0 AND entry_type = 'file')::bigint
+             AS total_files,
+           COALESCE(sum(GREATEST(size_bytes, 0)) FILTER (
+             WHERE depth > 0 AND entry_type = 'file'
+           ), 0)::bigint AS total_bytes,
+           count(*) FILTER (WHERE depth > 0 AND e2ee_state = 'encrypted')::bigint
+             AS total_encrypted_entries
+    FROM tree
+"#;
+const REPOSITORY_ARCHIVE_PAGE_QUERY: &str = r#"
+    WITH RECURSIVE repository AS MATERIALIZED (
+      SELECT repositories.root_file_id
+      FROM repositories
+      INNER JOIN files AS roots ON roots.id = repositories.root_file_id
+      WHERE repositories.id = $1
+        AND repositories.owner_id = $2
+        AND repositories.tree_version = $3
+        AND roots.owner_id = repositories.owner_id
+        AND roots.entry_type = 'folder'
+        AND roots.state = 'active'
+      LIMIT 1
+    ),
+    tree AS (
+      SELECT roots.id, ARRAY[roots.id]::text[] AS visited_ids, 0::integer AS depth
+      FROM files AS roots
+      INNER JOIN repository ON repository.root_file_id = roots.id
+
+      UNION ALL
+
+      SELECT children.id, tree.visited_ids || children.id, tree.depth + 1
+      FROM files AS children
+      INNER JOIN tree ON children.parent_id = tree.id
+      WHERE children.owner_id = $2
+        AND children.state = 'active'
+        AND tree.depth < 100
+        AND NOT children.id = ANY(tree.visited_ids)
+    ),
+    archive_entries AS MATERIALIZED (
+      SELECT files.id, files.original_name, files.mime_type,
+             files.entry_type, files.parent_id, files.size_bytes,
+             files.e2ee_state, files.updated_at,
+             files.current_generation_id AS vault_generation_id,
+             heads.record_version AS vault_record_version,
+             heads.record_hash AS vault_record_hash,
+             tree.depth,
+             CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END AS cursor_rank,
+             lower(files.original_name) AS cursor_name,
+             count(*) FILTER (WHERE tree.depth > 0) OVER ()
+               AS total_entries,
+             count(*) FILTER (
+               WHERE tree.depth > 0 AND files.entry_type = 'file'
+             ) OVER () AS total_files,
+             COALESCE(sum(GREATEST(files.size_bytes, 0)) FILTER (
+               WHERE tree.depth > 0 AND files.entry_type = 'file'
+             ) OVER (), 0)::bigint AS total_bytes,
+             count(*) FILTER (
+               WHERE tree.depth > 0 AND files.e2ee_state = 'encrypted'
+             ) OVER () AS total_encrypted_entries,
+             bool_or(files.updated_at > $4::text::timestamptz) OVER ()
+               AS changed_since_snapshot
+      FROM tree
+      INNER JOIN files ON files.id = tree.id
+      LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
+    )
+    SELECT *
+    FROM archive_entries
+    WHERE depth > 0
+      AND (
+        $5::integer IS NULL
+        OR depth > $5
+        OR (depth = $5 AND cursor_rank > $6)
+        OR (
+          depth = $5 AND cursor_rank = $6
+          AND (
+            cursor_name > $7
+            OR (cursor_name = $7 AND id > $8)
+          )
+        )
+      )
+    ORDER BY depth, cursor_rank, cursor_name, id
+    LIMIT $9
+"#;
+const REPOSITORY_SUMMARY_QUERY: &str = r#"
+    SELECT
+      repositories.id,
+      repositories.description,
+      owners.username AS owner_username,
+      roots.id AS root_id,
+      roots.original_name AS root_name,
+      roots.e2ee_state AS root_e2ee_state,
+      roots.updated_at AS root_updated_at,
+      roots.current_generation_id AS root_vault_generation_id,
+      root_heads.record_version AS root_vault_record_version,
+      root_heads.record_hash AS root_vault_record_hash,
+      repositories.created_at,
+      repositories.updated_at,
+      repositories.total_files,
+      repositories.total_folders,
+      repositories.tree_version,
+      repositories.counts_version
+    FROM repositories
+    INNER JOIN users AS owners ON owners.id = repositories.owner_id
+    INNER JOIN files AS roots ON roots.id = repositories.root_file_id
+    LEFT JOIN vault_node_heads AS root_heads ON root_heads.node_id = roots.id
+    WHERE repositories.id = $1
+      AND repositories.owner_id = $2
+      AND roots.owner_id = repositories.owner_id
+      AND roots.entry_type = 'folder'
+      AND roots.state = 'active'
+    LIMIT 1
+"#;
+const CREATE_REPOSITORY_QUERY: &str = r#"
+    WITH root AS MATERIALIZED (
+      SELECT files.id AS root_id, files.original_name AS root_name,
+             files.e2ee_state AS root_e2ee_state,
+             files.updated_at AS root_updated_at,
+             files.current_generation_id AS root_vault_generation_id,
+             owners.username AS owner_username
+      FROM files
+      INNER JOIN users AS owners ON owners.id = files.owner_id
+      WHERE files.id = $2
+        AND files.owner_id = $1
+        AND files.entry_type = 'folder'
+        AND files.state = 'active'
+      LIMIT 1
+    ),
+    mutation AS (
+      INSERT INTO repositories (id, owner_id, root_file_id, description)
+      SELECT 'repo_' || replace(gen_random_uuid()::text, '-', ''), $1, root.root_id, $3
+      FROM root
+      ON CONFLICT (owner_id, root_file_id)
+      DO UPDATE SET
+        root_file_id = EXCLUDED.root_file_id,
+        description = COALESCE(EXCLUDED.description, repositories.description),
+        updated_at = now()
+      RETURNING *
+    )
+    SELECT mutation.id, mutation.description, root.owner_username,
+           root.root_id, root.root_name, root.root_e2ee_state,
+           root.root_updated_at, root.root_vault_generation_id,
+           heads.record_version AS root_vault_record_version,
+           heads.record_hash AS root_vault_record_hash,
+           mutation.created_at, mutation.updated_at,
+           mutation.total_files, mutation.total_folders,
+           mutation.tree_version, mutation.counts_version
+    FROM mutation
+    INNER JOIN root ON root.root_id = mutation.root_file_id
+    LEFT JOIN vault_node_heads AS heads ON heads.node_id = root.root_id
+"#;
+const CREATE_EMPTY_REPOSITORY_QUERY: &str = r#"
+    WITH root AS (
+      INSERT INTO files (
+        id, owner_id, original_name, storage_name, size_bytes, entry_type, parent_id
+      )
+      VALUES (
+        gen_random_uuid()::text, $1, $2,
+        'folder_' || replace(gen_random_uuid()::text, '-', ''), 0, 'folder', NULL
+      )
+      RETURNING id AS root_id, original_name AS root_name,
+                e2ee_state AS root_e2ee_state, updated_at AS root_updated_at,
+                current_generation_id AS root_vault_generation_id
+    ),
+    mutation AS (
+      INSERT INTO repositories (id, owner_id, root_file_id, description)
+      SELECT 'repo_' || replace(gen_random_uuid()::text, '-', ''), $1, root.root_id, $3
+      FROM root
+      RETURNING *
+    )
+    SELECT mutation.id, mutation.description, owners.username AS owner_username,
+           root.root_id, root.root_name, root.root_e2ee_state,
+           root.root_updated_at, root.root_vault_generation_id,
+           heads.record_version AS root_vault_record_version,
+           heads.record_hash AS root_vault_record_hash,
+           mutation.created_at, mutation.updated_at,
+           mutation.total_files, mutation.total_folders,
+           mutation.tree_version, mutation.counts_version
+    FROM mutation
+    INNER JOIN root ON root.root_id = mutation.root_file_id
+    INNER JOIN users AS owners ON owners.id = mutation.owner_id
+    LEFT JOIN vault_node_heads AS heads ON heads.node_id = root.root_id
+"#;
+const UPDATE_REPOSITORY_QUERY: &str = r#"
+    WITH mutation AS (
+      UPDATE repositories
+      SET description = $1, updated_at = now()
+      WHERE id = $2 AND owner_id = $3
+        AND EXISTS (
+          SELECT 1
+          FROM files AS roots
+          WHERE roots.id = repositories.root_file_id
+            AND roots.owner_id = repositories.owner_id
+            AND roots.entry_type = 'folder'
+            AND roots.state = 'active'
+        )
+      RETURNING *
+    )
+    SELECT mutation.id, mutation.description, owners.username AS owner_username,
+           roots.id AS root_id, roots.original_name AS root_name,
+           roots.e2ee_state AS root_e2ee_state,
+           roots.updated_at AS root_updated_at,
+           roots.current_generation_id AS root_vault_generation_id,
+           heads.record_version AS root_vault_record_version,
+           heads.record_hash AS root_vault_record_hash,
+           mutation.created_at, mutation.updated_at,
+           mutation.total_files, mutation.total_folders,
+           mutation.tree_version, mutation.counts_version
+    FROM mutation
+    INNER JOIN users AS owners ON owners.id = mutation.owner_id
+    INNER JOIN files AS roots ON roots.id = mutation.root_file_id
+      AND roots.owner_id = mutation.owner_id
+      AND roots.entry_type = 'folder'
+      AND roots.state = 'active'
+    LEFT JOIN vault_node_heads AS heads ON heads.node_id = roots.id
 "#;
 const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
     WITH RECURSIVE repository AS MATERIALIZED (
@@ -44,6 +280,9 @@ const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
         roots.original_name AS root_name,
         roots.e2ee_state AS root_e2ee_state,
         roots.updated_at AS root_updated_at_value,
+        roots.current_generation_id AS root_vault_generation_id,
+        root_heads.record_version AS root_vault_record_version,
+        root_heads.record_hash AS root_vault_record_hash,
         repositories.created_at AS created_at_value,
         repositories.updated_at AS updated_at_value,
         COALESCE(NULLIF(btrim($3::text), ''), repositories.root_file_id)
@@ -51,6 +290,7 @@ const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
       FROM repositories
       INNER JOIN users AS owners ON owners.id = repositories.owner_id
       INNER JOIN files AS roots ON roots.id = repositories.root_file_id
+      LEFT JOIN vault_node_heads AS root_heads ON root_heads.node_id = roots.id
       WHERE repositories.id = $1
         AND repositories.owner_id = $2
         AND roots.owner_id = repositories.owner_id
@@ -64,6 +304,7 @@ const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
         folder.original_name,
         folder.parent_id,
         folder.e2ee_state,
+        folder.current_generation_id,
         repository.root_file_id,
         ARRAY[folder.id]::text[] AS visited_ids,
         0::integer AS depth
@@ -80,6 +321,7 @@ const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
         parent.original_name,
         parent.parent_id,
         parent.e2ee_state,
+        parent.current_generation_id,
         child.root_file_id,
         child.visited_ids || parent.id,
         child.depth + 1
@@ -99,6 +341,9 @@ const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
       repository.root_name,
       repository.root_e2ee_state,
       repository.root_updated_at_value AS root_updated_at,
+      repository.root_vault_generation_id,
+      repository.root_vault_record_version,
+      repository.root_vault_record_hash,
       repository.created_at_value AS created_at,
       repository.updated_at_value AS updated_at,
       repository.total_files,
@@ -114,42 +359,50 @@ const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
       ancestors.id AS breadcrumb_id,
       ancestors.original_name AS breadcrumb_name,
       ancestors.e2ee_state AS breadcrumb_e2ee_state,
+      ancestors.current_generation_id AS breadcrumb_vault_generation_id,
+      breadcrumb_heads.record_version AS breadcrumb_vault_record_version,
+      breadcrumb_heads.record_hash AS breadcrumb_vault_record_hash,
       COALESCE(ancestors.id <> repository.root_file_id, FALSE) AS include_breadcrumb
     FROM repository
     LEFT JOIN ancestors ON TRUE
+    LEFT JOIN vault_node_heads AS breadcrumb_heads ON breadcrumb_heads.node_id = ancestors.id
     ORDER BY ancestors.depth DESC
 "#;
 
 const REPOSITORY_CHILDREN_QUERY: &str = r#"
     SELECT
-      id,
-      original_name,
-      mime_type,
-      entry_type,
-      parent_id,
-      size_bytes,
-      e2ee_state,
-      updated_at,
-      CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END AS cursor_rank,
-      lower(original_name) AS cursor_name
+      files.id,
+      files.original_name,
+      files.mime_type,
+      files.entry_type,
+      files.parent_id,
+      files.size_bytes,
+      files.e2ee_state,
+      files.updated_at,
+      files.current_generation_id AS vault_generation_id,
+      heads.record_version AS vault_record_version,
+      heads.record_hash AS vault_record_hash,
+      CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END AS cursor_rank,
+      lower(files.original_name) AS cursor_name
     FROM files
-    WHERE owner_id = $1
-      AND parent_id = $2
-      AND state = 'active'
+    LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
+    WHERE files.owner_id = $1
+      AND files.parent_id = $2
+      AND files.state = 'active'
       AND (
         $3::integer IS NULL
-        OR CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END > $3
+        OR CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END > $3
         OR (
-          CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END = $3
+          CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END = $3
           AND (
-            lower(original_name) > $4
-            OR (lower(original_name) = $4 AND id > $5)
+            lower(files.original_name) > $4
+            OR (lower(files.original_name) = $4 AND files.id > $5)
           )
         )
       )
-    ORDER BY CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END,
-             lower(original_name),
-             id
+    ORDER BY CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END,
+             lower(files.original_name),
+             files.id
     LIMIT $6
 "#;
 
@@ -223,6 +476,11 @@ pub(crate) struct RepositoryQuery {
 }
 
 #[derive(Deserialize)]
+pub(crate) struct RepositoryArchiveQuery {
+    cursor: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub(crate) struct RepositoryListQuery {
     cursor: Option<String>,
 }
@@ -240,6 +498,18 @@ struct RepositoryEntryCursor {
     scope: String,
     repository_id: String,
     folder_id: String,
+    rank: i32,
+    name: String,
+    id: String,
+}
+
+#[derive(Deserialize, Serialize)]
+struct RepositoryArchiveCursor {
+    scope: String,
+    repository_id: String,
+    snapshot_version: i64,
+    snapshot_started_at: String,
+    depth: i32,
     rank: i32,
     name: String,
     id: String,
@@ -268,10 +538,16 @@ struct RepositoryDetailResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct RepositoryArchiveManifestResponse {
+struct RepositoryArchiveManifestPageResponse {
     repository: RepositorySummary,
     entries: Vec<RepositoryArchiveEntry>,
+    snapshot_version: i64,
     total_bytes: i64,
+    total_entries: i64,
+    total_files: i64,
+    total_encrypted_entries: i64,
+    next_cursor: Option<String>,
+    has_more: bool,
 }
 
 #[derive(Serialize)]
@@ -280,8 +556,6 @@ struct RepositoryArchiveEntry {
     #[serde(flatten)]
     entry: RepositoryEntry,
     content_version: String,
-    vault_generation_id: Option<String>,
-    vault_record_hash: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -318,6 +592,9 @@ struct RepositoryRoot {
     name: String,
     e2ee_state: String,
     updated_at: String,
+    vault_generation_id: Option<String>,
+    vault_record_version: Option<i64>,
+    vault_record_hash: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -326,6 +603,9 @@ struct RepositoryBreadcrumb {
     id: String,
     name: String,
     e2ee_state: String,
+    vault_generation_id: Option<String>,
+    vault_record_version: Option<i64>,
+    vault_record_hash: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -339,6 +619,9 @@ struct RepositoryEntry {
     size_bytes: i64,
     e2ee_state: String,
     updated_at: String,
+    vault_generation_id: Option<String>,
+    vault_record_version: Option<i64>,
+    vault_record_hash: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -385,6 +668,9 @@ pub async fn list(
                   roots.original_name AS root_name,
                   roots.e2ee_state AS root_e2ee_state,
                   roots.updated_at AS root_updated_at,
+                  roots.current_generation_id AS root_vault_generation_id,
+                  root_heads.record_version AS root_vault_record_version,
+                  root_heads.record_hash AS root_vault_record_hash,
                   repositories.created_at,
                   repositories.updated_at,
                   repositories.total_files,
@@ -396,6 +682,7 @@ pub async fn list(
                 FROM repositories
                 INNER JOIN users AS owners ON owners.id = repositories.owner_id
                 INNER JOIN files AS roots ON roots.id = repositories.root_file_id
+                LEFT JOIN vault_node_heads AS root_heads ON root_heads.node_id = roots.id
                 WHERE repositories.owner_id = $1
                   AND roots.owner_id = repositories.owner_id
                   AND roots.entry_type = 'folder'
@@ -442,11 +729,14 @@ pub async fn list(
         None
     };
 
-    Ok(HttpResponse::Ok().json(RepositoriesResponse {
-        repositories: rows.iter().map(repository_summary_from_row).collect(),
-        next_cursor,
-        has_more,
-    }))
+    conditional::private_json(
+        &request,
+        &RepositoriesResponse {
+            repositories: rows.iter().map(repository_summary_from_row).collect(),
+            next_cursor,
+            has_more,
+        },
+    )
 }
 
 pub async fn create(
@@ -464,49 +754,22 @@ pub async fn create(
     }
     let description = normalize_description(body.description.as_deref())?;
 
-    let root = state
-        .db
-        .query_opt(
-            "
-                SELECT id
-                FROM files
-                WHERE id = $1
-                  AND owner_id = $2
-                  AND entry_type = 'folder'
-                  AND state = 'active'
-                LIMIT 1
-            ",
-            &[&root_folder_id, &owner.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    if root.is_none() {
-        return Ok(HttpResponse::NotFound().body("repository folder not found"));
-    }
-
     let row = state
         .db
-        .query_one(
-            "
-                INSERT INTO repositories (id, owner_id, root_file_id, description)
-                VALUES ('repo_' || replace(gen_random_uuid()::text, '-', ''), $1, $2, $3)
-                ON CONFLICT (owner_id, root_file_id)
-                DO UPDATE SET
-                  root_file_id = EXCLUDED.root_file_id,
-                  description = COALESCE(EXCLUDED.description, repositories.description),
-                  updated_at = now()
-                RETURNING id
-            ",
+        .query_opt(
+            CREATE_REPOSITORY_QUERY,
             &[&owner.id, &root_folder_id, &description],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let repository_id: String = row.get("id");
-    let repository = get_repository_summary(&state, &owner, &repository_id)
-        .await?
-        .ok_or_else(|| error::ErrorInternalServerError("repository could not be loaded"))?;
+    let Some(row) = row else {
+        return Ok(HttpResponse::NotFound().body("repository folder not found"));
+    };
+    let repository = repository_summary_from_row(&row);
 
-    Ok(HttpResponse::Created().json(repository))
+    Ok(HttpResponse::Created()
+        .insert_header((CACHE_CONTROL, "private, no-store"))
+        .json(repository))
 }
 
 pub async fn create_empty(
@@ -568,55 +831,22 @@ pub async fn create_empty(
             .body("A top-level folder with this name already exists. Import it instead."));
     }
 
-    let root = transaction
-        .query_one(
-            "
-                INSERT INTO files (
-                  id,
-                  owner_id,
-                  original_name,
-                  storage_name,
-                  size_bytes,
-                  entry_type,
-                  parent_id
-                )
-                VALUES (
-                  gen_random_uuid()::text,
-                  $1,
-                  $2,
-                  'folder_' || replace(gen_random_uuid()::text, '-', ''),
-                  0,
-                  'folder',
-                  NULL
-                )
-                RETURNING id
-            ",
-            &[&owner.id, &name],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let root_folder_id: String = root.get("id");
     let repository = transaction
         .query_one(
-            "
-                INSERT INTO repositories (id, owner_id, root_file_id, description)
-                VALUES ('repo_' || replace(gen_random_uuid()::text, '-', ''), $1, $2, $3)
-                RETURNING id
-            ",
-            &[&owner.id, &root_folder_id, &description],
+            CREATE_EMPTY_REPOSITORY_QUERY,
+            &[&owner.id, &name, &description],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let repository_id: String = repository.get("id");
+    let repository = repository_summary_from_row(&repository);
     transaction
         .commit()
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    let repository = get_repository_summary(&state, &owner, &repository_id)
-        .await?
-        .ok_or_else(|| error::ErrorInternalServerError("repository could not be loaded"))?;
-    Ok(HttpResponse::Created().json(repository))
+    Ok(HttpResponse::Created()
+        .insert_header((CACHE_CONTROL, "private, no-store"))
+        .json(repository))
 }
 
 pub async fn update(
@@ -634,24 +864,18 @@ pub async fn update(
     let updated = state
         .db
         .query_opt(
-            "
-                UPDATE repositories
-                SET description = $1,
-                    updated_at = now()
-                WHERE id = $2 AND owner_id = $3
-                RETURNING id
-            ",
+            UPDATE_REPOSITORY_QUERY,
             &[&description, &repository_id, &owner.id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    if updated.is_none() {
+    let Some(updated) = updated else {
         return Ok(HttpResponse::NotFound().finish());
-    }
-    let repository = get_repository_summary(&state, &owner, &repository_id)
-        .await?
-        .ok_or_else(|| error::ErrorInternalServerError("repository could not be loaded"))?;
-    Ok(HttpResponse::Ok().json(repository))
+    };
+    let repository = repository_summary_from_row(&updated);
+    Ok(HttpResponse::Ok()
+        .insert_header((CACHE_CONTROL, "private, no-store"))
+        .json(repository))
 }
 
 pub async fn detail(
@@ -661,6 +885,10 @@ pub async fn detail(
     query: web::Query<RepositoryQuery>,
 ) -> Result<HttpResponse> {
     let owner = require_principal(&state, &request).await?;
+    let _recursive_permit = state
+        .recursive_operation_limiter
+        .try_acquire(&owner.id)
+        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
     let repository_id = path.into_inner();
     let requested_folder_id = query
         .folder
@@ -725,36 +953,48 @@ pub async fn detail(
         context.repository.total_folders = summary.total_folders;
     }
 
-    Ok(HttpResponse::Ok().json(RepositoryDetailResponse {
-        summary: RepositoryTreeSummary {
-            total_files: context.repository.total_files,
-            total_folders: context.repository.total_folders,
+    conditional::private_json(
+        &request,
+        &RepositoryDetailResponse {
+            summary: RepositoryTreeSummary {
+                total_files: context.repository.total_files,
+                total_folders: context.repository.total_folders,
+            },
+            repository: context.repository,
+            current_folder_id: context.current_folder_id,
+            breadcrumbs: context.breadcrumbs,
+            entries: entry_page
+                .rows
+                .into_iter()
+                .map(repository_entry_from_row)
+                .collect(),
+            entries_truncated: entry_page.has_more,
+            next_cursor: entry_page.next_cursor,
+            has_more: entry_page.has_more,
         },
-        repository: context.repository,
-        current_folder_id: context.current_folder_id,
-        breadcrumbs: context.breadcrumbs,
-        entries: entry_page
-            .rows
-            .into_iter()
-            .map(repository_entry_from_row)
-            .collect(),
-        entries_truncated: entry_page.has_more,
-        next_cursor: entry_page.next_cursor,
-        has_more: entry_page.has_more,
-    }))
+    )
 }
 
 pub async fn archive_manifest(
     state: web::Data<AppState>,
     request: HttpRequest,
     path: web::Path<String>,
+    query: web::Query<RepositoryArchiveQuery>,
 ) -> Result<HttpResponse> {
     let owner = require_principal(&state, &request).await?;
+    let _recursive_permit = state
+        .recursive_operation_limiter
+        .try_acquire(&owner.id)
+        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
     let repository_id = path.into_inner();
-    let Some(repository) = get_repository_summary(&state, &owner, &repository_id).await? else {
-        return Ok(HttpResponse::NotFound().finish());
-    };
-    let root_folder_id = repository.root.id.clone();
+    let cursor = decode_cursor::<RepositoryArchiveCursor>(query.cursor.as_deref())?;
+    if cursor.as_ref().is_some_and(|cursor| {
+        cursor.scope != "repository-archive" || cursor.repository_id != repository_id
+    }) {
+        return Err(error::ErrorBadRequest(
+            "archive cursor does not match repository",
+        ));
+    }
     let mut client = state
         .db
         .get()
@@ -767,97 +1007,152 @@ pub async fn archive_manifest(
         .start()
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let max_nodes = usize::try_from(MAX_REPOSITORY_ARCHIVE_ENTRIES)
-        .unwrap_or(usize::MAX)
-        .saturating_add(1);
-    let Some(tree) = walk_subtree(
-        &transaction,
-        TreeWalkScope {
-            owner_id: &owner.id,
-            root_id: &root_folder_id,
-            root_state: Some("active"),
-            child_state: Some("active"),
-            e2ee_state: None,
-            max_nodes,
-        },
-    )
-    .await
-    .map_err(error::ErrorInternalServerError)?
+    let Some(repository_row) = transaction
+        .query_opt(REPOSITORY_SUMMARY_QUERY, &[&repository_id, &owner.id])
+        .await
+        .map_err(error::ErrorInternalServerError)?
     else {
         return Ok(HttpResponse::NotFound().finish());
     };
-    if tree.truncated {
+    let repository = repository_summary_from_row(&repository_row);
+    let snapshot_version = cursor
+        .as_ref()
+        .map(|cursor| cursor.snapshot_version)
+        .unwrap_or(repository.tree_version);
+    if snapshot_version != repository.tree_version {
+        return Ok(HttpResponse::Conflict()
+            .body("The repository changed while its archive manifest was being read."));
+    }
+    let snapshot_started_at = if let Some(cursor) = cursor.as_ref() {
+        cursor.snapshot_started_at.clone()
+    } else {
+        let row = transaction
+            .query_one("SELECT transaction_timestamp() AS snapshot_started_at", &[])
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        timestamps::cursor(row.get("snapshot_started_at"))
+    };
+    let cursor_depth = cursor.as_ref().map(|cursor| cursor.depth);
+    let cursor_rank = cursor.as_ref().map(|cursor| cursor.rank);
+    let cursor_name = cursor.as_ref().map(|cursor| cursor.name.clone());
+    let cursor_id = cursor.as_ref().map(|cursor| cursor.id.clone());
+    let limit = row_limit(REPOSITORY_ARCHIVE_PAGE_SIZE)?;
+    let mut rows = transaction
+        .query(
+            REPOSITORY_ARCHIVE_PAGE_QUERY,
+            &[
+                &repository_id,
+                &owner.id,
+                &snapshot_version,
+                &snapshot_started_at,
+                &cursor_depth,
+                &cursor_rank,
+                &cursor_name,
+                &cursor_id,
+                &limit,
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    if rows
+        .first()
+        .is_some_and(|row| row.get("changed_since_snapshot"))
+    {
+        return Ok(HttpResponse::Conflict()
+            .body("The repository changed while its archive manifest was being read."));
+    }
+    let (total_entries, total_files, total_bytes, total_encrypted_entries) =
+        if let Some(row) = rows.first() {
+            (
+                row.get("total_entries"),
+                row.get("total_files"),
+                row.get("total_bytes"),
+                row.get("total_encrypted_entries"),
+            )
+        } else if cursor.is_none() {
+            let totals = transaction
+                .query_one(
+                    REPOSITORY_ARCHIVE_TOTALS_QUERY,
+                    &[&repository_id, &owner.id, &snapshot_version],
+                )
+                .await
+                .map_err(error::ErrorInternalServerError)?;
+            (
+                totals.get("total_entries"),
+                totals.get("total_files"),
+                totals.get("total_bytes"),
+                totals.get("total_encrypted_entries"),
+            )
+        } else {
+            return Err(error::ErrorBadRequest("archive cursor is invalid"));
+        };
+    if total_entries < 0
+        || total_files < 0
+        || total_files > total_entries
+        || total_encrypted_entries < 0
+        || total_encrypted_entries > total_entries
+    {
+        return Err(error::ErrorInternalServerError(
+            "archive manifest totals are invalid",
+        ));
+    }
+    if total_entries > MAX_REPOSITORY_ARCHIVE_ENTRIES {
         return Ok(HttpResponse::PayloadTooLarge()
             .body("This repository has too many entries to download as one ZIP archive."));
     }
-    let depths = tree
-        .nodes
-        .iter()
-        .map(|node| (node.id.as_str(), node.depth))
-        .collect::<HashMap<_, _>>();
-    let descendant_ids = tree
-        .nodes
-        .iter()
-        .skip(1)
-        .map(|node| node.id.as_str())
-        .collect::<Vec<_>>();
-    let mut ordered_entries = Vec::with_capacity(descendant_ids.len());
-    for ids in descendant_ids.chunks(TREE_MUTATION_BATCH_SIZE) {
-        let rows = transaction
-            .query(REPOSITORY_ARCHIVE_ENTRIES_QUERY, &[&ids, &owner.id])
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-        for row in rows {
-            let id: String = row.get("id");
-            let content_version = timestamps::cursor(row.get("updated_at"));
-            let vault_generation_id = row
-                .get::<_, Option<Vec<u8>>>("vault_generation_id")
-                .map(|value| URL_SAFE_NO_PAD.encode(value));
-            let vault_record_hash = row
-                .get::<_, Option<Vec<u8>>>("vault_record_hash")
-                .map(|value| URL_SAFE_NO_PAD.encode(value));
-            let entry = repository_entry_from_row(row);
-            let rank = i32::from(entry.entry_type != "folder");
-            ordered_entries.push((
-                depths.get(id.as_str()).copied().unwrap_or_default(),
-                rank,
-                entry.name.to_lowercase(),
-                id,
-                RepositoryArchiveEntry {
-                    entry,
-                    content_version,
-                    vault_generation_id,
-                    vault_record_hash,
-                },
-            ));
-        }
+    if total_bytes > MAX_REPOSITORY_ARCHIVE_BYTES {
+        return Ok(HttpResponse::PayloadTooLarge()
+            .body("This repository is larger than the 2 GB browser ZIP safety limit."));
     }
+    let has_more = rows.len() > REPOSITORY_ARCHIVE_PAGE_SIZE;
+    rows.truncate(REPOSITORY_ARCHIVE_PAGE_SIZE);
+    let next_cursor = if has_more {
+        rows.last()
+            .map(|row| {
+                encode_cursor(&RepositoryArchiveCursor {
+                    scope: "repository-archive".to_owned(),
+                    repository_id: repository_id.clone(),
+                    snapshot_version,
+                    snapshot_started_at: snapshot_started_at.clone(),
+                    depth: row.get("depth"),
+                    rank: row.get("cursor_rank"),
+                    name: row.get("cursor_name"),
+                    id: row.get("id"),
+                })
+            })
+            .transpose()?
+    } else {
+        None
+    };
+    let entries = rows
+        .into_iter()
+        .map(|row| {
+            let content_version = timestamps::cursor(row.get("updated_at"));
+            RepositoryArchiveEntry {
+                entry: repository_entry_from_row(row),
+                content_version,
+            }
+        })
+        .collect();
     transaction
         .commit()
         .await
         .map_err(error::ErrorInternalServerError)?;
-    ordered_entries.sort_unstable_by(|left, right| {
-        (&left.0, &left.1, &left.2, &left.3).cmp(&(&right.0, &right.1, &right.2, &right.3))
-    });
-    let entries = ordered_entries
-        .into_iter()
-        .map(|(_, _, _, _, entry)| entry)
-        .collect::<Vec<_>>();
-    let total_bytes = entries
-        .iter()
-        .filter(|entry| entry.entry.entry_type == "file")
-        .map(|entry| entry.entry.size_bytes.max(0))
-        .fold(0_i64, i64::saturating_add);
-    if total_bytes > MAX_REPOSITORY_ARCHIVE_BYTES {
-        return Ok(HttpResponse::PayloadTooLarge()
-            .body("This repository is larger than the 128 MB browser ZIP safety limit."));
-    }
 
-    Ok(HttpResponse::Ok().json(RepositoryArchiveManifestResponse {
-        repository,
-        entries,
-        total_bytes,
-    }))
+    conditional::private_json(
+        &request,
+        &RepositoryArchiveManifestPageResponse {
+            repository,
+            entries,
+            snapshot_version,
+            total_bytes,
+            total_entries,
+            total_files,
+            total_encrypted_entries,
+            next_cursor,
+            has_more,
+        },
+    )
 }
 
 async fn get_repository_detail_context(
@@ -886,6 +1181,11 @@ async fn get_repository_detail_context(
                 id: row.get("breadcrumb_id"),
                 name: row.get("breadcrumb_name"),
                 e2ee_state: row.get("breadcrumb_e2ee_state"),
+                vault_generation_id: encode_optional_bytes(
+                    row.get("breadcrumb_vault_generation_id"),
+                ),
+                vault_record_version: row.get("breadcrumb_vault_record_version"),
+                vault_record_hash: encode_optional_bytes(row.get("breadcrumb_vault_record_hash")),
             })
             .collect()
     } else {
@@ -972,47 +1272,6 @@ async fn refresh_repository_totals(
     }))
 }
 
-async fn get_repository_summary(
-    state: &AppState,
-    owner: &SessionPrincipal,
-    repository_id: &str,
-) -> Result<Option<RepositorySummary>> {
-    let row = state
-        .db
-        .query_opt(
-            "
-                SELECT
-                  repositories.id,
-                  repositories.description,
-                  owners.username AS owner_username,
-                  roots.id AS root_id,
-                  roots.original_name AS root_name,
-                  roots.e2ee_state AS root_e2ee_state,
-                  roots.updated_at AS root_updated_at,
-                  repositories.created_at,
-                  repositories.updated_at,
-                  repositories.total_files,
-                  repositories.total_folders,
-                  repositories.tree_version,
-                  repositories.counts_version
-                FROM repositories
-                INNER JOIN users AS owners ON owners.id = repositories.owner_id
-                INNER JOIN files AS roots ON roots.id = repositories.root_file_id
-                WHERE repositories.id = $1
-                  AND repositories.owner_id = $2
-                  AND roots.owner_id = repositories.owner_id
-                  AND roots.entry_type = 'folder'
-                  AND roots.state = 'active'
-                LIMIT 1
-            ",
-            &[&repository_id, &owner.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-
-    Ok(row.as_ref().map(repository_summary_from_row))
-}
-
 fn repository_summary_from_row(row: &Row) -> RepositorySummary {
     RepositorySummary {
         id: row.get("id"),
@@ -1024,6 +1283,9 @@ fn repository_summary_from_row(row: &Row) -> RepositorySummary {
             name: row.get("root_name"),
             e2ee_state: row.get("root_e2ee_state"),
             updated_at: timestamps::api(row.get("root_updated_at")),
+            vault_generation_id: encode_optional_bytes(row.get("root_vault_generation_id")),
+            vault_record_version: row.get("root_vault_record_version"),
+            vault_record_hash: encode_optional_bytes(row.get("root_vault_record_hash")),
         },
         created_at: timestamps::api(row.get("created_at")),
         updated_at: timestamps::api(row.get("updated_at")),
@@ -1044,7 +1306,14 @@ fn repository_entry_from_row(row: Row) -> RepositoryEntry {
         size_bytes: row.get("size_bytes"),
         e2ee_state: row.get("e2ee_state"),
         updated_at: timestamps::api(row.get("updated_at")),
+        vault_generation_id: encode_optional_bytes(row.get("vault_generation_id")),
+        vault_record_version: row.get("vault_record_version"),
+        vault_record_hash: encode_optional_bytes(row.get("vault_record_hash")),
     }
+}
+
+fn encode_optional_bytes(value: Option<Vec<u8>>) -> Option<String> {
+    value.map(|bytes| URL_SAFE_NO_PAD.encode(bytes))
 }
 
 fn normalize_repository_name(value: &str) -> Result<String> {
@@ -1092,17 +1361,30 @@ async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<
 #[cfg(test)]
 mod tests {
     use super::{
-        MAX_REPOSITORY_ARCHIVE_BYTES, REFRESH_REPOSITORY_TOTALS_QUERY,
-        REPOSITORY_ARCHIVE_ENTRIES_QUERY, REPOSITORY_DETAIL_CONTEXT_QUERY, normalize_description,
-        normalize_repository_name,
+        CREATE_EMPTY_REPOSITORY_QUERY, CREATE_REPOSITORY_QUERY, MAX_REPOSITORY_ARCHIVE_BYTES,
+        REFRESH_REPOSITORY_TOTALS_QUERY, REPOSITORY_ARCHIVE_PAGE_QUERY,
+        REPOSITORY_ARCHIVE_TOTALS_QUERY, REPOSITORY_DETAIL_CONTEXT_QUERY, REPOSITORY_SUMMARY_QUERY,
+        UPDATE_REPOSITORY_QUERY, normalize_description, normalize_repository_name,
     };
 
     #[test]
     fn browser_repository_archive_fallback_is_memory_bounded() {
-        assert_eq!(MAX_REPOSITORY_ARCHIVE_BYTES, 128 * 1024 * 1024);
-        assert!(include_str!("repositories.rs").contains("128 MB browser ZIP safety limit"));
-        assert!(REPOSITORY_ARCHIVE_ENTRIES_QUERY.contains("current_generation_id"));
-        assert!(REPOSITORY_ARCHIVE_ENTRIES_QUERY.contains("heads.record_hash"));
+        assert_eq!(MAX_REPOSITORY_ARCHIVE_BYTES, 2 * 1024 * 1024 * 1024);
+        assert!(include_str!("repositories.rs").contains("2 GB browser ZIP safety limit"));
+        assert!(REPOSITORY_ARCHIVE_PAGE_QUERY.contains("current_generation_id"));
+        assert!(REPOSITORY_ARCHIVE_PAGE_QUERY.contains("heads.record_hash"));
+        assert!(REPOSITORY_ARCHIVE_PAGE_QUERY.contains("changed_since_snapshot"));
+        assert!(REPOSITORY_ARCHIVE_PAGE_QUERY.contains("LIMIT $9"));
+        assert!(REPOSITORY_ARCHIVE_TOTALS_QUERY.contains("total_entries"));
+
+        let source = include_str!("repositories.rs");
+        let handler = source
+            .split_once("pub async fn archive_manifest(")
+            .and_then(|(_, tail)| tail.split_once("async fn get_repository_detail_context("))
+            .map(|(handler, _)| handler)
+            .expect("archive handler should remain inspectable");
+        assert!(!handler.contains("walk_subtree("));
+        assert!(!handler.contains("Vec::with_capacity"));
     }
 
     #[test]
@@ -1125,6 +1407,13 @@ mod tests {
         assert!(detail.contains("get_repository_detail_context("));
         assert!(detail.contains("futures_util::try_join!("));
         assert!(!detail.contains("folder_is_in_repository("));
+        let admission = detail
+            .find("recursive_operation_limiter")
+            .expect("repository detail admission should be present");
+        let recursive_query = detail
+            .find("get_repository_detail_context(")
+            .expect("repository detail query should be present");
+        assert!(admission < recursive_query);
     }
 
     #[test]
@@ -1135,6 +1424,29 @@ mod tests {
             REFRESH_REPOSITORY_TOTALS_QUERY
                 .contains("repositories.tree_version = repository_snapshot.tree_version")
         );
+    }
+
+    #[test]
+    fn repository_mutations_return_complete_summaries_without_reload_queries() {
+        for query in [
+            CREATE_REPOSITORY_QUERY,
+            CREATE_EMPTY_REPOSITORY_QUERY,
+            UPDATE_REPOSITORY_QUERY,
+        ] {
+            assert!(query.contains("RETURNING *"));
+            assert!(query.contains("owner_username"));
+            assert!(query.contains("root_vault_record_hash"));
+            assert!(query.contains("tree_version"));
+        }
+
+        let source = include_str!("repositories.rs");
+        let mutations = source
+            .split_once("pub async fn create(")
+            .and_then(|(_, tail)| tail.split_once("pub async fn detail("))
+            .map(|(handlers, _)| handlers)
+            .expect("repository mutation handlers should remain inspectable");
+        assert!(!mutations.contains("get_repository_summary("));
+        assert!(mutations.contains("repository_summary_from_row("));
     }
 
     #[actix_web::test]
@@ -1151,8 +1463,13 @@ mod tests {
         });
 
         for query in [
-            REPOSITORY_ARCHIVE_ENTRIES_QUERY,
+            REPOSITORY_ARCHIVE_PAGE_QUERY,
+            REPOSITORY_ARCHIVE_TOTALS_QUERY,
             REPOSITORY_DETAIL_CONTEXT_QUERY,
+            REPOSITORY_SUMMARY_QUERY,
+            CREATE_REPOSITORY_QUERY,
+            CREATE_EMPTY_REPOSITORY_QUERY,
+            UPDATE_REPOSITORY_QUERY,
             super::REPOSITORY_CHILDREN_QUERY,
             REFRESH_REPOSITORY_TOTALS_QUERY,
         ] {

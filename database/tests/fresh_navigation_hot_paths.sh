@@ -84,7 +84,10 @@ docker compose exec -T postgres psql \
 for migration in \
   018_share_link_token_rotation.sql \
   019_share_link_rollout_compatibility.sql \
-  020_share_link_legacy_writer_guard.sql
+  020_share_link_legacy_writer_guard.sql \
+  021_compact_account_state.sql \
+  022_large_share_commitments.sql \
+  023_maintenance_coordination.sql
 do
   docker compose exec -T postgres psql \
     -q \

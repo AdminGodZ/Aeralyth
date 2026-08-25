@@ -1,8 +1,11 @@
 mod admin;
 mod auth;
+mod avatar;
+mod conditional;
 mod files;
 mod health;
 mod invitations;
+mod local_file_stream;
 mod metrics;
 mod pagination;
 mod profile;
@@ -16,11 +19,15 @@ use actix_web::web;
 
 pub fn configure(config: &mut web::ServiceConfig) {
     config
-        .route("/health", web::get().to(health::health))
+        .route("/health", web::get().to(health::live))
+        .route("/health/live", web::get().to(health::live))
+        .route("/health/ready", web::get().to(health::ready))
         .route("/metrics", web::get().to(metrics::metrics))
         .service(
             web::scope("/api")
-                .route("/health", web::get().to(health::health))
+                .route("/health", web::get().to(health::live))
+                .route("/health/live", web::get().to(health::live))
+                .route("/health/ready", web::get().to(health::ready))
                 .route("/metrics", web::get().to(metrics::metrics))
                 .service(
                     web::scope("/auth")
@@ -145,6 +152,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
                         .route("", web::get().to(vault::status))
                         .route("/setup", web::post().to(vault::setup))
                         .route("/unlock-material", web::get().to(vault::unlock_material))
+                        .route("/account-state", web::get().to(vault::account_state))
                         .route("/rewrap", web::post().to(vault::rewrap))
                         .route("/migrations/claim", web::post().to(vault::claim_migration))
                         .route("/identities/{username}", web::get().to(vault::identity))
@@ -165,6 +173,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
                         .route(
                             "/uploads/{id}/publish",
                             web::post().to(vault::publish_upload),
+                        )
+                        .route(
+                            "/folders/batch",
+                            web::post().to(vault::publish_folders_batch),
                         )
                         .route("/uploads/{id}", web::delete().to(vault::abort_upload))
                         .route(
