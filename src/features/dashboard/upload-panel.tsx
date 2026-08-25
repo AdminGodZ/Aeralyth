@@ -43,7 +43,7 @@ import {
   type LegacyFolderManifest,
   legacyUploadTarget,
   needsLegacyFolderManifest,
-  validateLegacyFolderManifest,
+  resolveLegacyFolderManifest,
 } from "@/features/dashboard/legacy-folder-manifest";
 import { scheduleLegacyUploads } from "@/features/dashboard/legacy-upload-scheduler";
 import { sha256BlobBase64 } from "@/features/dashboard/upload-checksum-client";
@@ -467,25 +467,23 @@ function useUploadPanelController({
         return;
       }
 
-      const folderManifest = needsLegacyFolderManifest(
-        files.map(({ relativePath }) => relativePath),
-      )
-        ? await requestJson<LegacyFolderManifest>(
-            "/api/files/folder-manifests",
-            {
-              method: "POST",
-              headers: {
-                "Content-Type": "application/json",
-                ...requestAuthHeaders,
-              },
-              body: JSON.stringify({
-                relativePaths: files.map(({ relativePath }) => relativePath),
-                parentId: parentFolderId ?? null,
+      const relativePaths = files.map(({ relativePath }) => relativePath);
+      const folderManifest = needsLegacyFolderManifest(relativePaths)
+        ? await resolveLegacyFolderManifest(
+            relativePaths,
+            (batchRelativePaths) =>
+              requestJson<LegacyFolderManifest>("/api/files/folder-manifests", {
+                method: "POST",
+                headers: {
+                  "Content-Type": "application/json",
+                  ...requestAuthHeaders,
+                },
+                body: JSON.stringify({
+                  relativePaths: batchRelativePaths,
+                  parentId: parentFolderId ?? null,
+                }),
+                signal: controller.signal,
               }),
-              signal: controller.signal,
-            },
-          ).then((manifest) =>
-            validateLegacyFolderManifest(manifest, files.length),
           )
         : null;
       let rootFolderId: string | null = folderManifest?.rootFolderId ?? null;

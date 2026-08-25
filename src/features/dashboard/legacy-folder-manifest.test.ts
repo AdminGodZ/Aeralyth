@@ -4,8 +4,10 @@ import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  LEGACY_FOLDER_MANIFEST_BATCH_SIZE,
   legacyUploadTarget,
   needsLegacyFolderManifest,
+  resolveLegacyFolderManifest,
   validateLegacyFolderManifest,
 } from "@/features/dashboard/legacy-folder-manifest";
 
@@ -27,6 +29,36 @@ describe("legacy folder manifests", () => {
     expect(
       needsLegacyFolderManifest(["project/readme.md", "project/src/app.ts"]),
     ).toBe(true);
+  });
+
+  it("resolves large manifests through bounded sequential batches", async () => {
+    const relativePaths = Array.from(
+      { length: LEGACY_FOLDER_MANIFEST_BATCH_SIZE * 5 },
+      (_, index) => `project/file-${String(index)}.txt`,
+    );
+    const batches: string[][] = [];
+
+    const manifest = await resolveLegacyFolderManifest(
+      relativePaths,
+      async (batchRelativePaths) => {
+        batches.push([...batchRelativePaths]);
+        const batchNumber = batches.length;
+        return {
+          parentIds: batchRelativePaths.map(
+            (_, index) => `folder-${String(batchNumber)}-${String(index)}`,
+          ),
+          rootFolderId: batchNumber === 2 ? "project-folder" : null,
+        };
+      },
+    );
+
+    expect(batches.map((batch) => batch.length)).toEqual([
+      1000, 1000, 1000, 1000, 1000,
+    ]);
+    expect(batches.flat()).toEqual(relativePaths);
+    expect(manifest.parentIds).toHaveLength(relativePaths.length);
+    expect(manifest.parentIds[1000]).toBe("folder-2-0");
+    expect(manifest.rootFolderId).toBe("project-folder");
   });
 
   it("sends only the basename after the manifest resolves its parent", () => {

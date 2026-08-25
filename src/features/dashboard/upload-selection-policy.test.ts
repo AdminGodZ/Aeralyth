@@ -13,7 +13,7 @@ describe("upload selection policy", () => {
   it("enforces the safety cap against the effective upload set", () => {
     expect(getUploadSelectionCountError(MAX_SELECTION_FILES, false)).toBeNull();
     expect(getUploadSelectionCountError(MAX_SELECTION_FILES + 1, false)).toBe(
-      "Choose no more than 1,000 files at once.",
+      "Choose no more than 5,000 files at once.",
     );
   });
 
@@ -264,7 +264,7 @@ describe("upload selection policy", () => {
       prepared.excludedFiles,
     );
 
-    expect(finalized.error).toBe("Choose no more than 1,000 files at once.");
+    expect(finalized.error).toBe("Choose no more than 5,000 files at once.");
   });
 
   it("still requires exactly one file for a shared-file replacement", () => {

@@ -5,8 +5,39 @@ export type LegacyFolderManifest = {
   rootFolderId: string | null;
 };
 
+export const LEGACY_FOLDER_MANIFEST_BATCH_SIZE = 1000;
+
 export function needsLegacyFolderManifest(relativePaths: readonly string[]) {
   return relativePaths.some((path) => normalizeUploadPath(path).includes("/"));
+}
+
+export async function resolveLegacyFolderManifest(
+  relativePaths: readonly string[],
+  requestBatch: (
+    batchRelativePaths: readonly string[],
+  ) => Promise<LegacyFolderManifest>,
+): Promise<LegacyFolderManifest> {
+  const parentIds: Array<string | null> = [];
+  let rootFolderId: string | null = null;
+
+  for (
+    let start = 0;
+    start < relativePaths.length;
+    start += LEGACY_FOLDER_MANIFEST_BATCH_SIZE
+  ) {
+    const batchRelativePaths = relativePaths.slice(
+      start,
+      start + LEGACY_FOLDER_MANIFEST_BATCH_SIZE,
+    );
+    const manifest = validateLegacyFolderManifest(
+      await requestBatch(batchRelativePaths),
+      batchRelativePaths.length,
+    );
+    parentIds.push(...manifest.parentIds);
+    rootFolderId ??= manifest.rootFolderId;
+  }
+
+  return { parentIds, rootFolderId };
 }
 
 export function validateLegacyFolderManifest(

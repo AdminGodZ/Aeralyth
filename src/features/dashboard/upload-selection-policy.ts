@@ -4,7 +4,7 @@ import {
 } from "@/features/dashboard/gitignore-filter";
 
 export const MAX_UPLOAD_BYTES = 2 * 1024 * 1024 * 1024;
-export const MAX_SELECTION_FILES = 1000;
+export const MAX_SELECTION_FILES = 5000;
 
 type UploadSelectionLike = {
   file: {
