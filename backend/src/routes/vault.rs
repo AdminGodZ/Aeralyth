@@ -62,7 +62,7 @@ const OWNED_METADATA_PLANS_QUERY: &str = "
       FROM requested
       INNER JOIN files ON files.id = requested.node_id
       WHERE files.owner_id = $2
-        AND files.state = 'active'
+        AND files.state IN ('active', 'trashed')
         AND files.e2ee_state = 'encrypted'
 
       UNION ALL
@@ -72,7 +72,7 @@ const OWNED_METADATA_PLANS_QUERY: &str = "
       FROM owned_tree AS child
       INNER JOIN files AS parent ON parent.id = child.parent_id
       WHERE parent.owner_id = $2
-        AND parent.state = 'active'
+        AND parent.state IN ('active', 'trashed')
         AND parent.e2ee_state = 'encrypted'
         AND child.depth < 100
         AND NOT parent.id = ANY(child.visited_ids)
@@ -2269,10 +2269,7 @@ pub async fn publish_upload(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let mut body = parse_node_publication(&state, &user.id, &request, body, true).await?;
     let requested_parts = std::mem::take(&mut body.parts);
     let upload_mode = upload.mode.clone();
@@ -2310,10 +2307,7 @@ pub async fn publish_folders_batch(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let bytes = read_publication_body(&request, body, VAULT_PUBLISH_JSON_LIMIT).await?;
     let publication = run_publication_decode(&state, &user.id, move || {
         vault_wire::decode_folder_batch(bytes).map_err(|failure| (400_u16, failure.to_string()))
@@ -2339,10 +2333,7 @@ pub async fn publish_record(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let body = parse_node_publication(&state, &user.id, &request, body, false).await?;
     let decoded = decode_and_verify_node_record(&state, &user, body).await?;
     let node_id = path.into_inner();
@@ -2456,11 +2447,7 @@ pub async fn metadata_plans(
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     require_header_csrf(&state, &request).await?;
-    state.db.release_request_connection().await;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let body =
         parse_json_body::<MetadataPlansRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT).await?;
     if body.node_ids.is_empty() || body.node_ids.len() > MAX_METADATA_PLAN_REQUEST_NODES {
@@ -2705,13 +2692,7 @@ pub async fn download_plan(
         .await
         .map_err(error::ErrorInternalServerError)?;
     let Some(row) = row else {
-        state.db.release_request_connection().await;
-        let _recursive_permit = state
-            .recursive_operation_limiter
-            .try_acquire(&user.id)
-            .map_err(|()| {
-                LoadShedError::service_unavailable("recursive operation capacity is full")
-            })?;
+        let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
         return shared_download_plan(&state, &user, &node_id).await;
     };
     let record_version: i64 = row.get("record_version");
@@ -2857,11 +2838,7 @@ pub async fn share_plan(
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
-    state.db.release_request_connection().await;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let node_id = path.into_inner();
     validate_node_id(&node_id)?;
     let mut client = state
@@ -2902,11 +2879,7 @@ pub async fn share_contexts(
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
-    state.db.release_request_connection().await;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let node_id = path.into_inner();
     validate_node_id(&node_id)?;
     let rows = state
@@ -3012,10 +2985,7 @@ pub async fn publish_share_directory(
         .upload_control_limiter
         .try_acquire(&principal.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&principal.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&principal.id).await?;
     let body = parse_share_directory_publication(&state, &principal.id, &request, body).await?;
     let node_id = path.into_inner();
     validate_node_id(&node_id)?;
@@ -3338,10 +3308,7 @@ pub async fn create_share(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let mut body = parse_create_share_publication(&state, &user.id, &request, body).await?;
     validate_prefixed_id(&body.share_id, "shr_", "share id")?;
     validate_node_id(&body.root_node_id)?;
@@ -3675,11 +3642,7 @@ pub async fn pending_epoch_rotation(
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
-    state.db.release_request_connection().await;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let share_id = path.into_inner();
     let mut client = state
         .db
@@ -3774,10 +3737,7 @@ pub async fn begin_epoch_rotation(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let body =
         parse_json_body::<BeginEpochRotationRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT)
             .await?;
@@ -4064,10 +4024,7 @@ pub async fn publish_epoch_rotation(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let mut body = parse_publish_epoch_publication(&state, &user.id, &request, body).await?;
     let (share_id, pending_epoch) = path.into_inner();
     let requested_snapshot_hash: [u8; 32] = body
@@ -8160,6 +8117,19 @@ mod tests {
     }
 
     #[test]
+    fn owned_metadata_plans_reveal_trashed_nodes_without_enabling_share_preparation() {
+        assert_eq!(
+            OWNED_METADATA_PLANS_QUERY
+                .matches("state IN ('active', 'trashed')")
+                .count(),
+            2,
+            "listing metadata must include a trashed node and its encrypted ancestors"
+        );
+        assert!(OWNED_SHARE_PREPARATION_PLANS_QUERY.contains("files.state = 'active'"));
+        assert!(!OWNED_SHARE_PREPARATION_PLANS_QUERY.contains("'trashed'"));
+    }
+
+    #[test]
     fn share_authorization_version_matches_the_browser_protocol_vector() {
         let version =
             share_authorization_version("shr_test", 2, "usr_recipient", 4, 7, &[9_u8; 32]);
@@ -8426,8 +8396,8 @@ mod tests {
         ] {
             let handler = source_between(production, start, end);
             assert!(
-                handler.contains("recursive_operation_limiter"),
-                "{start} must shed recursive work before it starts"
+                handler.contains("acquire_recursive_operation"),
+                "{start} must admit recursive work before it starts"
             );
         }
 
@@ -8437,7 +8407,7 @@ mod tests {
             "async fn load_epoch_publication_snapshot(",
         );
         assert!(
-            !snapshot_helper.contains("recursive_operation_limiter"),
+            !snapshot_helper.contains("acquire_recursive_operation"),
             "the create-share handler owns the permit across both subtree snapshots"
         );
     }
@@ -9082,6 +9052,17 @@ mod tests {
                    'perf-share/root', 0, 'folder', 'encrypted', 1,
                    decode(repeat('31', 16), 'hex')
                  );
+                 INSERT INTO files (
+                   id, owner_id, original_name, storage_name, size_bytes, entry_type,
+                   parent_id, state, e2ee_state, current_generation_number,
+                   current_generation_id
+                 ) VALUES
+                   ('fil_perf_trash_parent', 'usr_perf_share_owner', 'trashed-parent',
+                    'perf-trash/parent', 0, 'folder', NULL, 'trashed', 'encrypted', 1,
+                    decode(repeat('51', 16), 'hex')),
+                   ('fil_perf_trash_child', 'usr_perf_share_owner', 'trashed-child',
+                    'perf-trash/child', 0, 'folder', 'fil_perf_trash_parent', 'trashed',
+                    'encrypted', 1, decode(repeat('52', 16), 'hex'));
                  INSERT INTO vault_node_records (
                    node_id, owner_id, record_version, record_hash,
                    bootstrap_cbor, bootstrap_signature, encrypted_manifest,
@@ -9092,12 +9073,32 @@ mod tests {
                    decode(repeat('34', 64), 'hex'), decode(repeat('35', 16), 'hex'),
                    decode(repeat('36', 32), 'hex'), 1
                  );
+                 INSERT INTO vault_node_records (
+                   node_id, owner_id, record_version, record_hash,
+                   bootstrap_cbor, bootstrap_signature, encrypted_manifest,
+                   manifest_hash, signer_key_version
+                 ) VALUES
+                   ('fil_perf_trash_parent', 'usr_perf_share_owner', 1,
+                    decode(repeat('53', 32), 'hex'), decode(repeat('54', 128), 'hex'),
+                    decode(repeat('55', 64), 'hex'), decode(repeat('56', 16), 'hex'),
+                    decode(repeat('57', 32), 'hex'), 1),
+                   ('fil_perf_trash_child', 'usr_perf_share_owner', 1,
+                    decode(repeat('58', 32), 'hex'), decode(repeat('59', 128), 'hex'),
+                    decode(repeat('5a', 64), 'hex'), decode(repeat('5b', 16), 'hex'),
+                    decode(repeat('5c', 32), 'hex'), 1);
                  INSERT INTO vault_node_heads (
                    node_id, owner_id, record_version, record_hash
                  ) VALUES (
                    'fil_perf_share_root', 'usr_perf_share_owner', 1,
                    decode(repeat('32', 32), 'hex')
                  );
+                 INSERT INTO vault_node_heads (
+                   node_id, owner_id, record_version, record_hash
+                 ) VALUES
+                   ('fil_perf_trash_parent', 'usr_perf_share_owner', 1,
+                    decode(repeat('53', 32), 'hex')),
+                   ('fil_perf_trash_child', 'usr_perf_share_owner', 1,
+                    decode(repeat('58', 32), 'hex'));
                  INSERT INTO vault_shares (
                    id, owner_id, root_node_id, active_epoch, status, record_version,
                    record_hash
@@ -9137,6 +9138,37 @@ mod tests {
             )
             .await
             .expect("shared-download fixture should insert");
+
+        let trashed_node_ids = vec!["fil_perf_trash_child".to_owned()];
+        let metadata_rows = snapshot_client
+            .query(
+                OWNED_METADATA_PLANS_QUERY,
+                &[&trashed_node_ids, &"usr_perf_share_owner"],
+            )
+            .await
+            .expect("trashed encrypted metadata query should execute");
+        assert_eq!(metadata_rows.len(), 2);
+        assert_eq!(
+            metadata_rows[0].get::<_, &str>("id"),
+            "fil_perf_trash_parent"
+        );
+        assert_eq!(metadata_rows[0].get::<_, i32>("depth"), 1);
+        assert_eq!(
+            metadata_rows[1].get::<_, &str>("id"),
+            "fil_perf_trash_child"
+        );
+        assert_eq!(metadata_rows[1].get::<_, i32>("depth"), 0);
+        assert!(
+            snapshot_client
+                .query(
+                    OWNED_SHARE_PREPARATION_PLANS_QUERY,
+                    &[&trashed_node_ids, &"usr_perf_share_owner"],
+                )
+                .await
+                .expect("share preparation query should execute")
+                .is_empty(),
+            "trashed metadata must not become shareable"
+        );
 
         let transaction = snapshot_client
             .transaction()

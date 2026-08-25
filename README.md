@@ -129,6 +129,8 @@ AERALYTH_UPLOAD_CONTROL_CONCURRENCY=8
 AERALYTH_UPLOAD_CONTROL_PER_USER=3
 AERALYTH_RECURSIVE_OPERATION_CONCURRENCY=2
 AERALYTH_RECURSIVE_OPERATION_PER_USER=1
+AERALYTH_RECURSIVE_OPERATION_QUEUE_CAPACITY=8
+AERALYTH_RECURSIVE_OPERATION_PER_USER_QUEUE_CAPACITY=4
 AERALYTH_STORAGE_OPERATION_CONCURRENCY=16
 AERALYTH_STORAGE_OPERATION_PER_USER=8
 AERALYTH_STORAGE_OPERATION_QUEUE_CAPACITY=32
@@ -147,7 +149,9 @@ connections stay pooled, while maximum-lifetime recycling is staggered by the
 configured jitter. Password hashing and verification run in the bounded Rust
 worker queue instead of consuming PostgreSQL connections. Upload control,
 recursive tree work, and storage-provider calls have separate bounded admission
-budgets so saturation cannot create unbounded waiters behind lightweight routes.
+budgets. Recursive and provider queues absorb ordinary overlap while still
+shedding excess work before it can create unbounded waiters behind lightweight
+routes.
 
 `AERALYTH_COOKIE_SECURE` defaults to `false` for debug builds and `true` for
 release builds.

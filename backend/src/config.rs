@@ -47,6 +47,8 @@ pub struct Config {
     pub upload_control_per_user: usize,
     pub recursive_operation_concurrency: usize,
     pub recursive_operation_per_user: usize,
+    pub recursive_operation_queue_capacity: usize,
+    pub recursive_operation_per_user_queue_capacity: usize,
     pub storage_operation_concurrency: usize,
     pub storage_operation_per_user: usize,
     pub storage_operation_queue_capacity: usize,
@@ -131,6 +133,18 @@ impl Config {
             1,
             1,
             recursive_operation_concurrency,
+        );
+        let recursive_operation_queue_capacity = env_usize(
+            "AERALYTH_RECURSIVE_OPERATION_QUEUE_CAPACITY",
+            recursive_operation_concurrency.saturating_mul(4),
+            recursive_operation_concurrency,
+            128,
+        );
+        let recursive_operation_per_user_queue_capacity = env_usize(
+            "AERALYTH_RECURSIVE_OPERATION_PER_USER_QUEUE_CAPACITY",
+            recursive_operation_per_user.saturating_mul(4),
+            recursive_operation_per_user,
+            recursive_operation_queue_capacity,
         );
         let storage_operation_concurrency =
             env_usize("AERALYTH_STORAGE_OPERATION_CONCURRENCY", 16, 1, 128);
@@ -307,6 +321,8 @@ impl Config {
             upload_control_per_user,
             recursive_operation_concurrency,
             recursive_operation_per_user,
+            recursive_operation_queue_capacity,
+            recursive_operation_per_user_queue_capacity,
             storage_operation_concurrency,
             storage_operation_per_user,
             storage_operation_queue_capacity,

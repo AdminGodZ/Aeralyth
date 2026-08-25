@@ -15,9 +15,12 @@ if [[ "${#migrations[@]}" -eq 0 ]]; then
   exit 1
 fi
 
+migration_pgoptions="${PGOPTIONS:+${PGOPTIONS} }-c client_min_messages=warning"
+
 for migration in "${migrations[@]}"; do
   echo "Applying $(basename -- "${migration}")"
-  psql "${DATABASE_URL}" -X -v ON_ERROR_STOP=1 -f "${migration}"
+  PGOPTIONS="${migration_pgoptions}" \
+    psql "${DATABASE_URL}" -X -v ON_ERROR_STOP=1 -f "${migration}"
 done
 
 production_environment=false
@@ -27,6 +30,7 @@ esac
 
 if [[ "${production_environment}" == "true" || -n "${RAILWAY_PROJECT_ID:-}" ]]; then
   echo "Running production data preflight"
-  psql "${DATABASE_URL}" -X -v ON_ERROR_STOP=1 \
+  PGOPTIONS="${migration_pgoptions}" \
+    psql "${DATABASE_URL}" -X -v ON_ERROR_STOP=1 \
     -f "${project_root}/database/production/preflight.sql"
 fi

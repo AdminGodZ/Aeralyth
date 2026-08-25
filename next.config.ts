@@ -3,6 +3,7 @@ import type { NextConfig } from "next";
 import { nextApiRewrites } from "./deployment/api-routing";
 
 const nextConfig: NextConfig = {
+  allowedDevOrigins: ["127.0.0.1"],
   devIndicators: false,
   output: "standalone",
   async headers() {

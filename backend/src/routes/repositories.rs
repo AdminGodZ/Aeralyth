@@ -6,7 +6,7 @@ use tokio_postgres::{IsolationLevel, Row};
 
 use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
 use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
-use crate::state::{AppState, LoadShedError};
+use crate::state::AppState;
 use crate::timestamps;
 
 use super::conditional;
@@ -885,10 +885,7 @@ pub async fn detail(
     query: web::Query<RepositoryQuery>,
 ) -> Result<HttpResponse> {
     let owner = require_principal(&state, &request).await?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&owner.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&owner.id).await?;
     let repository_id = path.into_inner();
     let requested_folder_id = query
         .folder
@@ -982,10 +979,7 @@ pub async fn archive_manifest(
     query: web::Query<RepositoryArchiveQuery>,
 ) -> Result<HttpResponse> {
     let owner = require_principal(&state, &request).await?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&owner.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&owner.id).await?;
     let repository_id = path.into_inner();
     let cursor = decode_cursor::<RepositoryArchiveCursor>(query.cursor.as_deref())?;
     if cursor.as_ref().is_some_and(|cursor| {
@@ -1408,7 +1402,7 @@ mod tests {
         assert!(detail.contains("futures_util::try_join!("));
         assert!(!detail.contains("folder_is_in_repository("));
         let admission = detail
-            .find("recursive_operation_limiter")
+            .find("acquire_recursive_operation")
             .expect("repository detail admission should be present");
         let recursive_query = detail
             .find("get_repository_detail_context(")

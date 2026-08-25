@@ -175,7 +175,7 @@ function ReadyRepositoryDetail({
             <div className="flex flex-wrap items-center gap-3 sm:justify-end">
               <span className="inline-flex items-center gap-2 text-sm text-muted-foreground">
                 <History className="size-4" aria-hidden="true" />
-                Imported {formatRepositoryDate(data.repository.createdAt)}
+                Created {formatRepositoryDate(data.repository.createdAt)}
               </span>
               {repositoryNamePresentation.status === "pending" ? (
                 <Button type="button" disabled className="rounded-md">
@@ -223,7 +223,7 @@ function ReadyRepositoryDetail({
                     {data.repository.ownerUsername}
                   </span>
                   <span className="hidden truncate text-muted-foreground sm:inline">
-                    imported this project folder
+                    updated this repository
                   </span>
                 </div>
                 <span className="shrink-0 text-xs text-muted-foreground">

@@ -158,20 +158,20 @@ export class VaultApiError extends Error {
   }
 }
 
-const VAULT_RECURSIVE_MUTATION_ATTEMPTS = 4;
-const VAULT_RECURSIVE_MUTATION_RETRY_BASE_MS = 250;
-const vaultRecursiveMutationSlots = new WeightedSemaphore(1);
+const VAULT_RECURSIVE_OPERATION_ATTEMPTS = 4;
+const VAULT_RECURSIVE_OPERATION_RETRY_BASE_MS = 250;
+const vaultRecursiveOperationSlots = new WeightedSemaphore(1);
 
-async function runVaultRecursiveMutation<T>(
+async function runVaultRecursiveOperation<T>(
   operation: () => Promise<T>,
   signal?: AbortSignal,
 ): Promise<T> {
-  const release = await vaultRecursiveMutationSlots.acquire(1, signal);
+  const release = await vaultRecursiveOperationSlots.acquire(1, signal);
   try {
     let lastError: unknown;
     for (
       let attempt = 0;
-      attempt < VAULT_RECURSIVE_MUTATION_ATTEMPTS;
+      attempt < VAULT_RECURSIVE_OPERATION_ATTEMPTS;
       attempt += 1
     ) {
       try {
@@ -182,7 +182,7 @@ async function runVaultRecursiveMutation<T>(
           signal?.aborted ||
           !(error instanceof VaultApiError) ||
           ![429, 503].includes(error.status) ||
-          attempt + 1 >= VAULT_RECURSIVE_MUTATION_ATTEMPTS
+          attempt + 1 >= VAULT_RECURSIVE_OPERATION_ATTEMPTS
         ) {
           throw error;
         }
@@ -210,7 +210,10 @@ function vaultCapacityRetryDelay(error: VaultApiError, attempt: number) {
       return Math.max(0, retryAt - Date.now());
     }
   }
-  return Math.min(2_000, VAULT_RECURSIVE_MUTATION_RETRY_BASE_MS * 2 ** attempt);
+  return Math.min(
+    2_000,
+    VAULT_RECURSIVE_OPERATION_RETRY_BASE_MS * 2 ** attempt,
+  );
 }
 
 function waitForVaultCapacity(
@@ -366,7 +369,7 @@ export function publishVaultUpload(
   signal?: AbortSignal,
 ): Promise<VaultPublishResponse> {
   const payload = encodeNodePublication(parts, record);
-  return runVaultRecursiveMutation(
+  return runVaultRecursiveOperation(
     () =>
       vaultBinaryMutation(
         `/api/vault/uploads/${encodeURIComponent(uploadId)}/publish`,
@@ -384,7 +387,7 @@ export async function publishVaultFoldersBatch(
   signal?: AbortSignal,
 ): Promise<{ folders: VaultPublishResponse[] }> {
   const payload = encodeFolderBatchPublication(records);
-  return runVaultRecursiveMutation(async () => {
+  return runVaultRecursiveOperation(async () => {
     try {
       return await vaultBinaryMutation(
         "/api/vault/folders/batch",
@@ -421,7 +424,7 @@ export async function publishShareDirectory(
   signal?: AbortSignal,
 ): Promise<void> {
   const publication = encodeShareDirectoryPublication(payload);
-  await runVaultRecursiveMutation(
+  await runVaultRecursiveOperation(
     () =>
       vaultBinaryMutation(
         `/api/vault/share-sync-jobs/${encodeURIComponent(job.nodeId)}`,
@@ -451,9 +454,13 @@ export function getVaultDownloadPlan(
   nodeId: string,
   signal?: AbortSignal,
 ): Promise<VaultDownloadPlan> {
-  return vaultRequest(
-    `/api/vault/nodes/${encodeURIComponent(nodeId)}/download-plan`,
-    { signal },
+  return runVaultRecursiveOperation(
+    () =>
+      vaultRequest(
+        `/api/vault/nodes/${encodeURIComponent(nodeId)}/download-plan`,
+        { signal },
+      ),
+    signal,
   );
 }
 
@@ -464,14 +471,18 @@ export function getVaultMetadataPlans(
   signal?: AbortSignal,
   purpose?: "sharePreparation",
 ): Promise<{ plans: VaultMetadataPlan[]; continuation?: number }> {
-  return vaultMutation(
-    "/api/vault/nodes/metadata-plans",
-    csrfToken,
-    {
-      nodeIds,
-      ...(continuation === undefined ? {} : { continuation }),
-      ...(purpose ? { purpose } : {}),
-    },
+  return runVaultRecursiveOperation(
+    () =>
+      vaultMutation(
+        "/api/vault/nodes/metadata-plans",
+        csrfToken,
+        {
+          nodeIds,
+          ...(continuation === undefined ? {} : { continuation }),
+          ...(purpose ? { purpose } : {}),
+        },
+        signal,
+      ),
     signal,
   );
 }
@@ -516,15 +527,19 @@ export async function getVaultFolderMetadataReferences(
   view: "files" | "shared",
   signal?: AbortSignal,
 ): Promise<VaultMetadataReference[]> {
-  const response = await vaultRequest<{ entries?: unknown }>(
-    `/api/files?${new URLSearchParams({
-      view,
-      folder: folderId,
-      sort: "name",
-      direction: "asc",
-      limit: "100",
-    })}`,
-    { signal },
+  const response = await runVaultRecursiveOperation(
+    () =>
+      vaultRequest<{ entries?: unknown }>(
+        `/api/files?${new URLSearchParams({
+          view,
+          folder: folderId,
+          sort: "name",
+          direction: "asc",
+          limit: "100",
+        })}`,
+        { signal },
+      ),
+    signal,
   );
   if (!Array.isArray(response.entries)) {
     throw new Error("The folder metadata prefetch response is invalid.");
@@ -583,9 +598,13 @@ export function getVaultSharePlan(
   nodeId: string,
   signal?: AbortSignal,
 ): Promise<{ nodes: VaultShareNodeSnapshot[] }> {
-  return vaultRequest(
-    `/api/vault/nodes/${encodeURIComponent(nodeId)}/share-plan`,
-    { signal },
+  return runVaultRecursiveOperation(
+    () =>
+      vaultRequest(
+        `/api/vault/nodes/${encodeURIComponent(nodeId)}/share-plan`,
+        { signal },
+      ),
+    signal,
   );
 }
 
@@ -593,9 +612,13 @@ export function getActiveShareContexts(
   nodeId: string,
   signal?: AbortSignal,
 ): Promise<VaultActiveShareContext[]> {
-  return vaultRequest(
-    `/api/vault/nodes/${encodeURIComponent(nodeId)}/share-contexts`,
-    { signal },
+  return runVaultRecursiveOperation(
+    () =>
+      vaultRequest(
+        `/api/vault/nodes/${encodeURIComponent(nodeId)}/share-contexts`,
+        { signal },
+      ),
+    signal,
   );
 }
 
@@ -604,10 +627,10 @@ export function createVaultShare(
   payload: VaultSharePayload,
   signal?: AbortSignal,
 ): Promise<VaultShareMutation> {
-  return vaultBinaryMutation(
-    "/api/vault/shares",
-    csrfToken,
-    encodeCreateSharePublication(payload),
+  const publication = encodeCreateSharePublication(payload);
+  return runVaultRecursiveOperation(
+    () =>
+      vaultBinaryMutation("/api/vault/shares", csrfToken, publication, signal),
     signal,
   );
 }
@@ -632,10 +655,14 @@ export function beginVaultEpochRotation(
   revokedRecipientId: string,
   signal?: AbortSignal,
 ): Promise<VaultEpochRotationPlan> {
-  return vaultMutation(
-    `/api/vault/shares/${encodeURIComponent(shareId)}/epochs`,
-    csrfToken,
-    { revokedRecipientId },
+  return runVaultRecursiveOperation(
+    () =>
+      vaultMutation(
+        `/api/vault/shares/${encodeURIComponent(shareId)}/epochs`,
+        csrfToken,
+        { revokedRecipientId },
+        signal,
+      ),
     signal,
   );
 }
@@ -644,9 +671,13 @@ export function getPendingVaultEpochRotation(
   shareId: string,
   signal?: AbortSignal,
 ): Promise<VaultEpochRotationPlan> {
-  return vaultRequest(
-    `/api/vault/shares/${encodeURIComponent(shareId)}/epochs/pending`,
-    { signal },
+  return runVaultRecursiveOperation(
+    () =>
+      vaultRequest(
+        `/api/vault/shares/${encodeURIComponent(shareId)}/epochs/pending`,
+        { signal },
+      ),
+    signal,
   );
 }
 
@@ -665,13 +696,18 @@ export function publishVaultEpochRotation(
   },
   signal?: AbortSignal,
 ): Promise<VaultShareMutation> {
-  return vaultBinaryMutation(
-    `/api/vault/shares/${encodeURIComponent(shareId)}/epochs/${epoch}/publish`,
-    csrfToken,
-    encodePublishEpochPublication({
-      ...payload,
-      fenceSnapshotHash: fromBase64Url(payload.fenceSnapshotHash),
-    }),
+  const publication = encodePublishEpochPublication({
+    ...payload,
+    fenceSnapshotHash: fromBase64Url(payload.fenceSnapshotHash),
+  });
+  return runVaultRecursiveOperation(
+    () =>
+      vaultBinaryMutation(
+        `/api/vault/shares/${encodeURIComponent(shareId)}/epochs/${epoch}/publish`,
+        csrfToken,
+        publication,
+        signal,
+      ),
     signal,
   );
 }

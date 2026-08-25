@@ -21,7 +21,8 @@ use tracing::Instrument;
 
 use config::E2eeMode;
 use state::{
-    AppState, AsyncOperationService, MutationLimiter, ReadinessCache, VaultValidationService,
+    AppState, AsyncOperationService, MutationLimiter, QueuedMutationLimiter, ReadinessCache,
+    VaultValidationService,
 };
 
 const HTTP_HEADER_TIMEOUT: Duration = Duration::from_secs(10);
@@ -127,9 +128,11 @@ async fn main() -> std::io::Result<()> {
             config.upload_control_concurrency,
             config.upload_control_per_user,
         ),
-        recursive_operation_limiter: MutationLimiter::new(
+        recursive_operation_limiter: QueuedMutationLimiter::new(
             config.recursive_operation_concurrency,
             config.recursive_operation_per_user,
+            config.recursive_operation_queue_capacity,
+            config.recursive_operation_per_user_queue_capacity,
         ),
         storage_operations: AsyncOperationService::new(
             config.storage_operation_concurrency,

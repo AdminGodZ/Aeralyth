@@ -25,7 +25,7 @@ pub struct AppState {
     pub login_rate_limiter: LoginRateLimiter,
     pub storage: Storage,
     pub upload_control_limiter: MutationLimiter,
-    pub recursive_operation_limiter: MutationLimiter,
+    pub recursive_operation_limiter: QueuedMutationLimiter,
     pub storage_operations: AsyncOperationService,
     pub vault_validation: VaultValidationService,
 }
@@ -81,6 +81,17 @@ pub struct MutationLimiter {
 pub struct MutationPermit {
     _user: OwnedSemaphorePermit,
     _global: OwnedSemaphorePermit,
+}
+
+#[derive(Clone)]
+pub struct QueuedMutationLimiter {
+    limiter: MutationLimiter,
+    admission: MutationLimiter,
+}
+
+pub struct QueuedMutationPermit {
+    _admission: MutationPermit,
+    _worker: MutationPermit,
 }
 
 #[derive(Clone)]
@@ -202,6 +213,48 @@ impl VaultValidationService {
     }
 }
 
+impl QueuedMutationLimiter {
+    pub fn new(
+        worker_count: usize,
+        per_user: usize,
+        queue_capacity: usize,
+        per_user_queue_capacity: usize,
+    ) -> Self {
+        assert!(
+            worker_count > 0
+                && per_user > 0
+                && queue_capacity >= worker_count
+                && per_user_queue_capacity >= per_user
+                && per_user_queue_capacity <= queue_capacity
+        );
+        Self {
+            limiter: MutationLimiter::new(worker_count, per_user.min(worker_count)),
+            admission: MutationLimiter::new(queue_capacity, per_user_queue_capacity),
+        }
+    }
+
+    pub async fn acquire(&self, user_id: &str) -> Result<QueuedMutationPermit, LoadShedError> {
+        let admission = self.admission.try_acquire(user_id).map_err(|()| {
+            LoadShedError::service_unavailable("recursive operation capacity is full")
+        })?;
+        let worker = self.limiter.acquire(user_id).await;
+        Ok(QueuedMutationPermit {
+            _admission: admission,
+            _worker: worker,
+        })
+    }
+}
+
+impl AppState {
+    pub async fn acquire_recursive_operation(
+        &self,
+        user_id: &str,
+    ) -> Result<QueuedMutationPermit, LoadShedError> {
+        self.db.release_request_connection().await;
+        self.recursive_operation_limiter.acquire(user_id).await
+    }
+}
+
 impl AsyncOperationService {
     pub fn new(
         worker_count: usize,
@@ -304,8 +357,8 @@ mod tests {
     use actix_web::ResponseError;
 
     use super::{
-        AsyncOperationService, LoadShedError, MutationLimiter, VaultValidationError,
-        VaultValidationService,
+        AsyncOperationService, LoadShedError, MutationLimiter, QueuedMutationLimiter,
+        VaultValidationError, VaultValidationService,
     };
 
     #[actix_web::test]
@@ -344,6 +397,51 @@ mod tests {
             actix_web::http::StatusCode::TOO_MANY_REQUESTS
         );
         assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+    }
+
+    #[actix_web::test]
+    async fn queued_mutation_limiter_waits_for_normal_overlap_and_sheds_excess() {
+        let limiter = QueuedMutationLimiter::new(1, 1, 2, 2);
+        let active = limiter.acquire("user-a").await.unwrap();
+        let waiting_limiter = limiter.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let waiting = actix_web::rt::spawn(async move {
+            started_tx.send(()).unwrap();
+            waiting_limiter.acquire("user-a").await.unwrap()
+        });
+        started_rx.await.unwrap();
+
+        let rejected = match limiter.acquire("user-a").await {
+            Err(error) => error,
+            Ok(_) => panic!("a third same-user operation must exceed the bounded queue"),
+        };
+        assert_eq!(
+            rejected.error_response().status(),
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+
+        drop(active);
+        tokio::time::timeout(Duration::from_millis(250), waiting)
+            .await
+            .expect("one bounded waiter should receive the released worker slot")
+            .unwrap();
+    }
+
+    #[test]
+    fn recursive_queue_does_not_hold_a_request_database_connection_while_waiting() {
+        let source = include_str!("state.rs");
+        let helper = source
+            .split_once("pub async fn acquire_recursive_operation(")
+            .and_then(|(_, tail)| tail.split_once("impl AsyncOperationService"))
+            .map(|(helper, _)| helper)
+            .expect("recursive acquisition helper source should remain inspectable");
+        let release = helper
+            .find("release_request_connection")
+            .expect("the request-scoped database connection must be released");
+        let wait = helper
+            .find("recursive_operation_limiter.acquire")
+            .expect("the bounded recursive queue must be acquired");
+        assert!(release < wait);
     }
 
     #[actix_web::test]

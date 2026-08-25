@@ -15,7 +15,7 @@ use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
 use crate::routes::tree_walk::{
     MAX_TREE_MUTATION_NODES, TreeWalkScope, update_tree_state, walk_subtree,
 };
-use crate::state::{AppState, LoadShedError};
+use crate::state::AppState;
 use crate::timestamps;
 
 use super::conditional;
@@ -711,10 +711,7 @@ pub async fn access(
     let token = path.into_inner();
     validate_token(&token)?;
     let admission_key = sha256_hex(&token);
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&admission_key)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&admission_key).await?;
     let requested_folder_id = query
         .folder
         .as_deref()
@@ -771,10 +768,7 @@ pub async fn download(
     let (token, file_id) = path.into_inner();
     validate_token(&token)?;
     let admission_key = sha256_hex(&token);
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&admission_key)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&admission_key).await?;
     let context = get_share_download_context(&state, &token, &file_id).await?;
     authorize_share_recipient(&state, &request, &context.grant).await?;
     let Some(file) = context.file.filter(|_| context.node_authorized) else {
@@ -845,10 +839,7 @@ pub async fn remove_entry(
             "the share root cannot be removed through its link",
         ));
     }
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&grant.owner_id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&grant.owner_id).await?;
     require_shared_node(&state, &grant, &file_id, None).await?;
     let mut client = state
         .db
@@ -1393,7 +1384,7 @@ mod tests {
         assert!(!access.contains("resolve_grant("));
         assert!(!access.contains("require_shared_node("));
         let admission = access
-            .find("recursive_operation_limiter")
+            .find("acquire_recursive_operation")
             .expect("share access admission should be present");
         let recursive_query = access
             .find("get_share_access_context(")
@@ -1417,7 +1408,7 @@ mod tests {
         assert!(!download.contains("require_shared_node("));
         assert!(!download.contains("query_opt("));
         let admission = download
-            .find("recursive_operation_limiter")
+            .find("acquire_recursive_operation")
             .expect("share download admission should be present");
         let recursive_query = download
             .find("get_share_download_context(")
@@ -1435,7 +1426,7 @@ mod tests {
             .expect("share removal source should remain inspectable");
 
         let admission = remove
-            .find("recursive_operation_limiter")
+            .find("acquire_recursive_operation")
             .expect("share removal admission should be present");
         let recursive_query = remove
             .find("require_shared_node(")

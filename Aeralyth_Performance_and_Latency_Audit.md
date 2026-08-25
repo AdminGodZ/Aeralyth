@@ -1477,9 +1477,9 @@ Browser network chunk sizes vary, so the download-copy figure is an example rath
 
 ## PERF-089 [P1] No route-level load shedding or expensive-operation concurrency limits are present
 
-**Status:** Complete — implemented and verified on 2026-08-24.
+**Status:** Complete — implemented on 2026-08-24; production-log queue follow-up verified on 2026-08-25.
 
-**Verification:** Configurable global and per-user admission limits now cover upload control, recursive operations, storage-provider calls, CPU-heavy vault validation, password work, and database pools. Saturation fails fast with bounded `429`/`503` responses and `Retry-After` instead of creating unbounded waiters. Recursive admission is acquired before the first recursive query across vault sharing/rotation/metadata paths, share-link access/download/removal, legacy folder navigation/download/editor upload, repository detail, archive and tree mutations; ordinary root listings and normal parallel legacy upload initialization remain outside the recursive limiter. Unit and source-order regressions cover direct shedding, per-user isolation, bounded async queues, retry headers, and endpoint admission ordering. The full Rust suite, strict Clippy, frontend suite, TypeScript, and Biome passed after the final coverage fixes.
+**Verification:** Configurable global and per-user admission limits now cover upload control, recursive operations, storage-provider calls, CPU-heavy vault validation, password work, and database pools. Upload saturation fails fast with `429`; bounded recursive and provider queues absorb ordinary overlap, then shed excess work with `503` and `Retry-After` instead of creating unbounded waiters. Recursive admission is acquired before the first recursive query across vault sharing/rotation/metadata paths, share-link access/download/removal, legacy folder navigation/download/editor upload, repository detail, archive and tree mutations; ordinary root listings and normal parallel legacy upload initialization remain outside the recursive limiter. Unit and source-order regressions cover direct shedding, queued overlap, per-user isolation, bounded async queues, retry headers, and endpoint admission ordering. The full Rust suite, strict Clippy, frontend suite, TypeScript, and Biome passed after the final coverage fixes.
 
 **Confidence:** Confirmed
 

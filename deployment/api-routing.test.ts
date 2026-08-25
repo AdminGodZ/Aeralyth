@@ -8,6 +8,10 @@ afterEach(() => {
 });
 
 describe("API ingress routing", () => {
+  it("allows the loopback host used by local browser checks", () => {
+    expect(nextConfig.allowedDevOrigins).toContain("127.0.0.1");
+  });
+
   it("keeps the convenient Next proxy in development", () => {
     expect(nextApiRewrites({ NODE_ENV: "development" })).toEqual([
       {

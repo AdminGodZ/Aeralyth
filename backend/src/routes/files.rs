@@ -406,14 +406,7 @@ pub async fn list_files(
         .is_some_and(|folder_id| !folder_id.trim().is_empty())
         && matches!(view, "files" | "shared")
     {
-        Some(
-            state
-                .recursive_operation_limiter
-                .try_acquire(&user.id)
-                .map_err(|()| {
-                    LoadShedError::service_unavailable("recursive operation capacity is full")
-                })?,
-        )
+        Some(state.acquire_recursive_operation(&user.id).await?)
     } else {
         None
     };
@@ -480,10 +473,7 @@ pub async fn create_folder_manifest(
         .upload_control_limiter
         .try_acquire(&actor.owner_id)
         .map_err(|()| LoadShedError::too_many_requests("upload control capacity is full"))?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&actor.owner_id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&actor.owner_id).await?;
     let body = parse_json_body::<FolderManifestRequest>(&request, body, FOLDER_MANIFEST_JSON_LIMIT)
         .await?;
     if body.relative_paths.is_empty() || body.relative_paths.len() > MAX_FOLDER_MANIFEST_PATHS {
@@ -624,14 +614,7 @@ pub async fn init_upload(
         .try_acquire(&actor.owner_id)
         .map_err(|()| LoadShedError::too_many_requests("upload control capacity is full"))?;
     let _recursive_permit = if actor.editor_grant.is_some() {
-        Some(
-            state
-                .recursive_operation_limiter
-                .try_acquire(&actor.owner_id)
-                .map_err(|()| {
-                    LoadShedError::service_unavailable("recursive operation capacity is full")
-                })?,
-        )
+        Some(state.acquire_recursive_operation(&actor.owner_id).await?)
     } else {
         None
     };
@@ -1818,10 +1801,7 @@ pub async fn folder_archive_manifest(
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let root_id = path.into_inner();
     let mut client = state
         .db
@@ -1994,10 +1974,7 @@ pub async fn download(
     query: web::Query<DownloadQuery>,
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let expected_version = query
         .version
         .as_deref()
@@ -2220,10 +2197,7 @@ pub async fn trash(
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let wants_json = request_wants_json(&request);
     let file_id = path.into_inner();
     let mut client = state
@@ -2281,10 +2255,7 @@ pub async fn restore(
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let file_id = path.into_inner();
     let mut client = state
         .db
@@ -2374,10 +2345,7 @@ pub async fn delete(
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
-    let _recursive_permit = state
-        .recursive_operation_limiter
-        .try_acquire(&user.id)
-        .map_err(|()| LoadShedError::service_unavailable("recursive operation capacity is full"))?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let file_id = path.into_inner();
     let mut client = state
         .db
@@ -3708,7 +3676,7 @@ mod tests {
     }
 
     #[test]
-    fn folder_manifest_sheds_upload_and_recursive_work_before_planning() {
+    fn folder_manifest_bounds_upload_and_recursive_work_before_planning() {
         let source = include_str!("files.rs");
         let handler = source
             .split_once("pub async fn create_folder_manifest(")
@@ -3717,9 +3685,9 @@ mod tests {
             .expect("folder manifest handler source should remain inspectable");
 
         assert!(handler.contains("upload_control_limiter"));
-        assert!(handler.contains("recursive_operation_limiter"));
+        assert!(handler.contains("acquire_recursive_operation"));
         let admission = handler
-            .find("recursive_operation_limiter")
+            .find("acquire_recursive_operation")
             .expect("recursive admission should be present");
         let planning = handler
             .find("plan_folder_manifest")
@@ -3753,12 +3721,15 @@ mod tests {
                 .map(|(handler, _)| handler)
                 .expect("recursive legacy handler source should remain inspectable");
             let admission = handler
-                .find("recursive_operation_limiter")
+                .find("acquire_recursive_operation")
                 .unwrap_or_else(|| panic!("{start} admission should be present"));
             let recursive_query = handler
                 .find(recursive_call)
                 .unwrap_or_else(|| panic!("{start} should contain {recursive_call}"));
-            assert!(admission < recursive_query, "{start} must shed first");
+            assert!(
+                admission < recursive_query,
+                "{start} must acquire recursive capacity first"
+            );
         }
     }
 

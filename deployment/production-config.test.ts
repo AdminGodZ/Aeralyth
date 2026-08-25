@@ -171,6 +171,7 @@ describe("Railway production deployment", () => {
     expect(migrations).toContain("[0-9][0-9][0-9]_*.sql");
     expect(migrations).toContain("database/production/preflight.sql");
     expect(migrations).toContain("[Pp][Rr][Oo][Dd][Uu][Cc][Tt][Ii][Oo][Nn]");
+    expect(migrations).toContain("client_min_messages=warning");
     expect(preflight).toContain(
       "production requires a restored active administrator account",
     );
