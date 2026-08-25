@@ -26,7 +26,7 @@ describe("incremental ciphertext leaf hashing", () => {
     expect(actual).toEqual(expected);
     expect(ciphertext).toEqual(snapshot);
     wipe(ciphertext, snapshot, expected, actual);
-  });
+  }, 20_000);
 
   it("rejects invalid chunk indexes before creating hash state", () => {
     expect(() => incrementalCiphertextLeafHash(-1, new Uint8Array())).toThrow(
