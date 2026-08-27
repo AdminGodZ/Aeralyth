@@ -19,4 +19,18 @@ describe("profile settings form security", () => {
       form?.indexOf('name="profile_image"') ?? -1,
     );
   });
+
+  it("autosaves changed fields through one serialized queue", () => {
+    const source = readFileSync(
+      resolve(import.meta.dirname, "profile-settings-form.tsx"),
+      "utf8",
+    );
+
+    expect(source).toContain("while (pendingUpdateRef.current)");
+    expect(source).toContain("mergeSettingsUpdates(");
+    expect(source).toContain("queueSettingsUpdate({ displayName: value })");
+    expect(source).toContain("queueSettingsUpdate({ themePreference: value })");
+    expect(source).toContain("onColorChange={onAccentColorChange}");
+    expect(source).not.toContain("Save changes");
+  });
 });

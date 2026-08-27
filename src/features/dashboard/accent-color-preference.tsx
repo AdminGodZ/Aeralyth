@@ -16,12 +16,14 @@ type AccentColorPreferenceProps = {
   initialColor?: string | null;
   inputName?: string;
   labelId?: string;
+  onColorChange?: (value: string) => void;
 };
 
 export function AccentColorPreference({
   initialColor,
   inputName,
   labelId,
+  onColorChange,
 }: AccentColorPreferenceProps) {
   const valueId = useId();
   const normalizedInitialColor =
@@ -47,11 +49,13 @@ export function AccentColorPreference({
 
     setAccentColor(nextColor);
     applyAccentColor(nextColor);
+    onColorChange?.(nextColor);
   }
 
   function resetAccentColor() {
     setAccentColor(DEFAULT_ACCENT_COLOR);
     applyAccentColor(DEFAULT_ACCENT_COLOR);
+    onColorChange?.(DEFAULT_ACCENT_COLOR);
   }
 
   return (

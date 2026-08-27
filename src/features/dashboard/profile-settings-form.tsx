@@ -1,16 +1,16 @@
 "use client";
 
 import {
+  Check,
   KeyRound,
   LoaderCircle,
   Monitor,
   Moon,
   Pencil,
-  RotateCcw,
-  Save,
   Sun,
-  Undo2,
+  Trash2,
 } from "lucide-react";
+import { useRouter } from "next/navigation";
 import { useTheme } from "next-themes";
 import {
   type ChangeEvent,
@@ -62,10 +62,22 @@ type ProfileSettingsFormProps = {
   csrfToken: string;
 };
 
+type SaveState = "idle" | "saving" | "saved" | "error";
+
+type ProfileSettingsUpdate = {
+  displayName?: string;
+  themePreference?: CurrentUser["themePreference"];
+  accentColor?: string;
+  folderZipPromptEnabled?: boolean;
+  vaultAutoLockMinutes?: number;
+  profileImage?: File | null;
+};
+
 export function ProfileSettingsForm({
   currentUser,
   csrfToken,
 }: ProfileSettingsFormProps) {
+  const router = useRouter();
   const fileInputId = useId();
   const displayNameId = useId();
   const themeLabelId = useId();
@@ -73,11 +85,18 @@ export function ProfileSettingsForm({
   const folderZipPromptId = useId();
   const vaultAutoLockId = useId();
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const saveInFlightRef = useRef(false);
+  const pendingUpdateRef = useRef<ProfileSettingsUpdate | null>(null);
   const { setTheme } = useTheme();
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [removeImage, setRemoveImage] = useState(false);
-  const [isSaving, setIsSaving] = useState(false);
+  const [saveState, setSaveState] = useState<SaveState>("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
+  // These values are editable form drafts, not rendered copies of immutable props.
+  // react-doctor-disable-next-line react-doctor/no-derived-useState
+  const [displayNameDraft, setDisplayNameDraft] = useState(
+    currentUser.displayName ?? "",
+  );
   // This is an editable form draft, not a rendered copy of immutable props.
   // react-doctor-disable-next-line react-doctor/no-derived-useState
   const [themePreference, setThemePreference] = useState(
@@ -89,7 +108,7 @@ export function ProfileSettingsForm({
   const [vaultAutoLockMinutes, setVaultAutoLockMinutes] = useState(() =>
     normalizeVaultAutoLockMinutes(currentUser.vaultAutoLockMinutes),
   );
-  const displayName = currentUser.displayName?.trim() || currentUser.username;
+  const profileName = displayNameDraft.trim() || currentUser.username;
   const avatarUrl = removeImage
     ? null
     : previewUrl || currentUser.profileImageUrl;
@@ -140,6 +159,7 @@ export function ProfileSettingsForm({
     // react-doctor-disable-next-line react-doctor/no-create-object-url-without-revoke
     setPreviewUrl(URL.createObjectURL(file));
     setRemoveImage(false);
+    queueSettingsUpdate({ profileImage: file });
   }
 
   function resetProfileImage() {
@@ -154,57 +174,120 @@ export function ProfileSettingsForm({
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
-  }
 
-  function restoreProfileImage() {
-    setRemoveImage(false);
+    queueSettingsUpdate({ profileImage: null });
   }
 
   function updateThemePreference(value: string) {
     if (value === "system" || value === "light" || value === "dark") {
       setThemePreference(value);
+      queueSettingsUpdate({ themePreference: value });
     }
   }
 
-  async function saveSettings(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault();
+  function updateDisplayName(event: ChangeEvent<HTMLInputElement>) {
+    const value = event.currentTarget.value;
+    setDisplayNameDraft(value);
+    queueSettingsUpdate({ displayName: value });
+  }
 
-    if (isSaving) {
+  function updateAccentColor(value: string) {
+    queueSettingsUpdate({ accentColor: value });
+  }
+
+  function updateFolderZipPromptEnabled(value: boolean) {
+    setFolderZipPromptEnabled(value);
+    queueSettingsUpdate({ folderZipPromptEnabled: value });
+  }
+
+  function updateVaultAutoLockMinutes(value: number) {
+    const normalizedValue = normalizeVaultAutoLockMinutes(value);
+    setVaultAutoLockMinutes(normalizedValue);
+    queueSettingsUpdate({ vaultAutoLockMinutes: normalizedValue });
+  }
+
+  function queueSettingsUpdate(update: ProfileSettingsUpdate) {
+    pendingUpdateRef.current = mergeSettingsUpdates(
+      pendingUpdateRef.current,
+      update,
+    );
+    setSaveState("saving");
+    setSaveError(null);
+    void drainSettingsQueue();
+  }
+
+  async function drainSettingsQueue() {
+    if (saveInFlightRef.current) {
       return;
     }
 
-    const form = event.currentTarget;
-    setIsSaving(true);
-    setSaveError(null);
+    saveInFlightRef.current = true;
+    let shouldRefreshProfile = false;
+    let queueError: string | null = null;
 
     try {
-      const response = await fetch(form.action, {
-        method: "POST",
-        headers: { "x-csrf-token": csrfToken },
-        body: new FormData(form),
-        credentials: "same-origin",
-      });
-      const result = new URL(response.url).searchParams.get("profile");
+      while (pendingUpdateRef.current) {
+        const update = pendingUpdateRef.current;
+        pendingUpdateRef.current = null;
 
-      if (!response.ok || result !== "updated") {
-        throw new Error(getProfileSaveError(result));
+        try {
+          await saveSettings(update);
+
+          if (
+            update.profileImage instanceof File &&
+            fileInputRef.current?.files?.[0] === update.profileImage
+          ) {
+            fileInputRef.current.value = "";
+          }
+
+          if (update.vaultAutoLockMinutes !== undefined) {
+            window.dispatchEvent(
+              new CustomEvent(VAULT_AUTO_LOCK_CHANGE_EVENT, {
+                detail: update.vaultAutoLockMinutes,
+              }),
+            );
+          }
+
+          if (
+            update.displayName !== undefined ||
+            update.profileImage !== undefined
+          ) {
+            shouldRefreshProfile = true;
+          }
+        } catch (error) {
+          queueError =
+            error instanceof Error
+              ? error.message
+              : "Settings could not be saved.";
+        }
       }
-
-      if (fileInputRef.current) {
-        fileInputRef.current.value = "";
-      }
-
-      window.dispatchEvent(
-        new CustomEvent(VAULT_AUTO_LOCK_CHANGE_EVENT, {
-          detail: vaultAutoLockMinutes,
-        }),
-      );
-    } catch (error) {
-      setSaveError(
-        error instanceof Error ? error.message : "Settings could not be saved.",
-      );
     } finally {
-      setIsSaving(false);
+      saveInFlightRef.current = false;
+
+      if (shouldRefreshProfile) {
+        router.refresh();
+      }
+
+      if (queueError) {
+        setSaveError(queueError);
+        setSaveState("error");
+      } else {
+        setSaveState("saved");
+      }
+    }
+  }
+
+  async function saveSettings(update: ProfileSettingsUpdate) {
+    const response = await fetch("/api/profile", {
+      method: "POST",
+      headers: { "x-csrf-token": csrfToken },
+      body: createProfileSettingsFormData(csrfToken, update),
+      credentials: "same-origin",
+    });
+    const result = new URL(response.url).searchParams.get("profile");
+
+    if (!response.ok || result !== "updated") {
+      throw new Error(getProfileSaveError(result));
     }
   }
 
@@ -220,20 +303,21 @@ export function ProfileSettingsForm({
       vaultAutoLockId={vaultAutoLockId}
       fileInputRef={fileInputRef}
       avatarUrl={avatarUrl}
-      displayName={displayName}
+      profileName={profileName}
+      displayNameDraft={displayNameDraft}
       removeImage={removeImage}
-      isSaving={isSaving}
+      saveState={saveState}
       saveError={saveError}
       themePreference={themePreference}
       folderZipPromptEnabled={folderZipPromptEnabled}
       vaultAutoLockMinutes={vaultAutoLockMinutes}
-      onSave={saveSettings}
       onFileChange={handleFileChange}
       onResetProfileImage={resetProfileImage}
-      onRestoreProfileImage={restoreProfileImage}
+      onDisplayNameChange={updateDisplayName}
       onThemePreferenceChange={updateThemePreference}
-      onFolderZipPromptEnabledChange={setFolderZipPromptEnabled}
-      onVaultAutoLockMinutesChange={setVaultAutoLockMinutes}
+      onAccentColorChange={updateAccentColor}
+      onFolderZipPromptEnabledChange={updateFolderZipPromptEnabled}
+      onVaultAutoLockMinutesChange={updateVaultAutoLockMinutes}
     />
   );
 }
@@ -249,18 +333,19 @@ function ProfileSettingsFormView({
   vaultAutoLockId,
   fileInputRef,
   avatarUrl,
-  displayName,
+  profileName,
+  displayNameDraft,
   removeImage,
-  isSaving,
+  saveState,
   saveError,
   themePreference,
   folderZipPromptEnabled,
   vaultAutoLockMinutes,
-  onSave,
   onFileChange,
   onResetProfileImage,
-  onRestoreProfileImage,
+  onDisplayNameChange,
   onThemePreferenceChange,
+  onAccentColorChange,
   onFolderZipPromptEnabledChange,
   onVaultAutoLockMinutesChange,
 }: {
@@ -274,18 +359,19 @@ function ProfileSettingsFormView({
   vaultAutoLockId: string;
   fileInputRef: RefObject<HTMLInputElement | null>;
   avatarUrl: string | null;
-  displayName: string;
+  profileName: string;
+  displayNameDraft: string;
   removeImage: boolean;
-  isSaving: boolean;
+  saveState: SaveState;
   saveError: string | null;
   themePreference: CurrentUser["themePreference"];
   folderZipPromptEnabled: boolean;
   vaultAutoLockMinutes: number;
-  onSave(event: FormEvent<HTMLFormElement>): Promise<void>;
   onFileChange(event: ChangeEvent<HTMLInputElement>): void;
   onResetProfileImage(): void;
-  onRestoreProfileImage(): void;
+  onDisplayNameChange(event: ChangeEvent<HTMLInputElement>): void;
   onThemePreferenceChange(value: string): void;
+  onAccentColorChange(value: string): void;
   onFolderZipPromptEnabledChange(value: boolean): void;
   onVaultAutoLockMinutesChange(
     value: ReturnType<typeof normalizeVaultAutoLockMinutes>,
@@ -297,7 +383,7 @@ function ProfileSettingsFormView({
       method="post"
       encType="multipart/form-data"
       className="w-full"
-      onSubmit={onSave}
+      onSubmit={preventSettingsSubmit}
     >
       <input type="hidden" name="csrf_token" value={csrfToken} />
       <input
@@ -331,7 +417,7 @@ function ProfileSettingsFormView({
               <Avatar className="size-24 bg-primary/10">
                 {avatarUrl ? <AvatarImage src={avatarUrl} alt="" /> : null}
                 <AvatarFallback className="bg-primary/10 text-xl font-semibold text-primary">
-                  {getInitials(displayName)}
+                  {getInitials(profileName)}
                 </AvatarFallback>
               </Avatar>
               <span className="pointer-events-none absolute inset-0 z-10 flex items-center justify-center rounded-full bg-background/60 opacity-0 transition-opacity group-hover/photo:opacity-100 group-focus-visible/photo:opacity-100">
@@ -339,31 +425,17 @@ function ProfileSettingsFormView({
               </span>
             </Button>
 
-            {avatarUrl || (removeImage && currentUser.profileImageUrl) ? (
+            {avatarUrl ? (
               <Button
                 type="button"
                 variant="secondary"
                 size="icon"
                 className="absolute -bottom-1 -right-1 z-20 shadow-sm"
-                onClick={
-                  removeImage ? onRestoreProfileImage : onResetProfileImage
-                }
-                aria-label={
-                  removeImage
-                    ? "Undo profile image reset"
-                    : "Reset profile image"
-                }
-                title={
-                  removeImage
-                    ? "Undo profile image reset"
-                    : "Reset profile image"
-                }
+                onClick={onResetProfileImage}
+                aria-label="Remove profile image"
+                title="Remove profile image"
               >
-                {removeImage ? (
-                  <Undo2 className="size-4" aria-hidden="true" />
-                ) : (
-                  <RotateCcw className="size-4" aria-hidden="true" />
-                )}
+                <Trash2 className="size-4" aria-hidden="true" />
               </Button>
             ) : null}
           </div>
@@ -385,10 +457,11 @@ function ProfileSettingsFormView({
             <Input
               id={displayNameId}
               name="display_name"
-              defaultValue={currentUser.displayName ?? ""}
+              value={displayNameDraft}
               placeholder={currentUser.username}
               maxLength={80}
               className="h-10"
+              onChange={onDisplayNameChange}
             />
             <p className="text-xs text-muted-foreground">
               PNG, JPG, WebP, or GIF. Maximum 2 MB.
@@ -432,6 +505,7 @@ function ProfileSettingsFormView({
         accentLabelId={accentLabelId}
         themePreference={themePreference}
         onThemePreferenceChange={onThemePreferenceChange}
+        onAccentColorChange={onAccentColorChange}
       />
 
       <Separator />
@@ -507,20 +581,29 @@ function ProfileSettingsFormView({
         </div>
       </SettingsSection>
 
-      <div className="flex min-h-20 items-center justify-end gap-3 border-t py-5">
+      <div
+        className="flex min-h-16 items-center justify-end gap-3 border-t py-5"
+        aria-live="polite"
+      >
         {saveError ? (
           <p className="text-sm text-destructive" role="alert">
             {saveError}
           </p>
-        ) : null}
-        <Button type="submit" size="lg" disabled={isSaving}>
-          {isSaving ? (
+        ) : saveState === "saving" ? (
+          <p className="flex items-center gap-2 text-sm text-muted-foreground">
             <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
-          ) : (
-            <Save className="size-4" aria-hidden="true" />
-          )}
-          {isSaving ? "Saving..." : "Save changes"}
-        </Button>
+            Saving...
+          </p>
+        ) : (
+          <p className="flex items-center gap-2 text-sm text-muted-foreground">
+            {saveState === "saved" ? (
+              <Check className="size-4 text-primary" aria-hidden="true" />
+            ) : null}
+            {saveState === "saved"
+              ? "Saved automatically"
+              : "Changes save automatically"}
+          </p>
+        )}
       </div>
     </form>
   );
@@ -718,12 +801,14 @@ function AppearanceSettingsSection({
   accentLabelId,
   themePreference,
   onThemePreferenceChange,
+  onAccentColorChange,
 }: {
   currentUser: CurrentUser;
   themeLabelId: string;
   accentLabelId: string;
   themePreference: CurrentUser["themePreference"];
   onThemePreferenceChange(value: string): void;
+  onAccentColorChange(value: string): void;
 }) {
   return (
     <SettingsSection title="Appearance" description="Theme and accent color">
@@ -775,11 +860,60 @@ function AppearanceSettingsSection({
             initialColor={currentUser.accentColor}
             inputName="accent_color"
             labelId={accentLabelId}
+            onColorChange={onAccentColorChange}
           />
         </div>
       </div>
     </SettingsSection>
   );
+}
+
+function mergeSettingsUpdates(
+  current: ProfileSettingsUpdate | null,
+  update: ProfileSettingsUpdate,
+): ProfileSettingsUpdate {
+  return { ...(current ?? {}), ...update };
+}
+
+function createProfileSettingsFormData(
+  csrfToken: string,
+  update: ProfileSettingsUpdate,
+) {
+  const formData = new FormData();
+  formData.append("csrf_token", csrfToken);
+
+  if (update.displayName !== undefined) {
+    formData.append("display_name", update.displayName);
+  }
+  if (update.themePreference !== undefined) {
+    formData.append("theme_preference", update.themePreference);
+  }
+  if (update.accentColor !== undefined) {
+    formData.append("accent_color", update.accentColor);
+  }
+  if (update.folderZipPromptEnabled !== undefined) {
+    formData.append(
+      "folder_zip_prompt_enabled",
+      update.folderZipPromptEnabled ? "1" : "0",
+    );
+  }
+  if (update.vaultAutoLockMinutes !== undefined) {
+    formData.append(
+      "vault_auto_lock_minutes",
+      String(update.vaultAutoLockMinutes),
+    );
+  }
+  if (update.profileImage === null) {
+    formData.append("remove_profile_image", "1");
+  } else if (update.profileImage) {
+    formData.append("profile_image", update.profileImage);
+  }
+
+  return formData;
+}
+
+function preventSettingsSubmit(event: FormEvent<HTMLFormElement>) {
+  event.preventDefault();
 }
 
 function getProfileSaveError(result: string | null) {

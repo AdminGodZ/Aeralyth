@@ -10,7 +10,7 @@ import type { Metadata } from "next";
 import { redirect } from "next/navigation";
 
 import { AeralythLogo } from "@/components/aeralyth-logo";
-import { DottedSurface } from "@/components/dotted-surface";
+import { DarkGradientBg } from "@/components/dark-gradient-bg";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -69,8 +69,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
   const loginAlertIsError = backendUnavailable || invalidCredentials;
 
   return (
-    <main className="relative isolate min-h-dvh overflow-hidden bg-background text-foreground">
-      <DottedSurface className="opacity-70" />
+    <DarkGradientBg as="main" className="isolate text-foreground">
       {loginAlertMessage ? (
         <Alert
           className={cn(
@@ -98,15 +97,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           </div>
         </Alert>
       ) : null}
-      <div
-        aria-hidden="true"
-        className={cn(
-          "pointer-events-none absolute -top-10 left-1/2 z-0 size-full -translate-x-1/2 rounded-full",
-          "bg-[radial-gradient(ellipse_at_center,--theme(--color-foreground/.1),transparent_50%)]",
-          "blur-[30px]",
-        )}
-      />
-      <div className="relative z-10 mx-auto grid min-h-dvh w-full max-w-6xl items-center px-5 py-10 sm:px-8">
+      <div className="mx-auto grid min-h-dvh w-full max-w-6xl items-center px-5 py-10 sm:px-8">
         <section className="grid flex-1 items-center gap-10 py-10 lg:grid-cols-[minmax(0,1fr)_minmax(360px,420px)] lg:items-stretch">
           <div className="relative hidden max-w-2xl lg:block">
             <div
@@ -264,7 +255,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           </div>
         </section>
       </div>
-    </main>
+    </DarkGradientBg>
   );
 }
 
