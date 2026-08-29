@@ -3,7 +3,7 @@ use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AuthUser, require_admin, require_admin_user, require_csrf};
+use crate::auth::{AuthUser, parse_json_body, require_admin, require_admin_user, require_csrf};
 use crate::state::AppState;
 use crate::timestamps;
 
@@ -50,10 +50,12 @@ const CREATE_INVITATION_QUERY: &str = r#"
            EXISTS (SELECT 1 FROM inserted) AS inserted
     FROM decision
 "#;
-const CREATE_USER_QUERY: &str = r#"
+const CREATE_ONE_PASSWORD_USER_QUERY: &str = r#"
     WITH inserted AS (
-      INSERT INTO users (id, username, password_hash, role, status)
-      VALUES (gen_random_uuid()::text, $1, $2, $3, 'active')
+      INSERT INTO users (
+        id, username, password_hash, role, status, auth_version, auth_kdf_salt
+      )
+      VALUES (gen_random_uuid()::text, $1, $2, $3, 'active', 1, $4)
       ON CONFLICT DO NOTHING
       RETURNING username
     ), accepted_invitations AS (
@@ -360,11 +362,12 @@ pub(crate) struct InvitationForm {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct CreateUserForm {
+#[serde(rename_all = "camelCase")]
+pub(crate) struct CreateOnePasswordUserRequest {
     username: String,
-    password: String,
+    credential: String,
+    salt: String,
     role: String,
-    csrf_token: String,
 }
 
 #[derive(Deserialize)]
@@ -498,43 +501,47 @@ pub async fn create_invitation(
     Ok(redirect(format!("/users?invite=created&token={token}")))
 }
 
-pub async fn create_user(
+pub async fn create_one_password_user(
     state: web::Data<AppState>,
     request: HttpRequest,
-    form: web::Form<CreateUserForm>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     require_admin(&state, &request).await?;
-    require_csrf(&state, &request, &form.csrf_token).await?;
-    let username = normalize_username(&form.username);
-    let password = form.password.trim();
-    let Some(role) = normalize_role(&form.role) else {
-        return Ok(redirect("/users?user=invalid-role"));
+    let csrf_token = request
+        .headers()
+        .get("x-csrf-token")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| error::ErrorForbidden("csrf token required"))?;
+    require_csrf(&state, &request, csrf_token).await?;
+    let body = parse_json_body::<CreateOnePasswordUserRequest>(&request, body, 2 * 1024).await?;
+    let username = normalize_username(&body.username);
+    let Some(role) = normalize_role(&body.role) else {
+        return Ok(HttpResponse::BadRequest().body("role is invalid"));
     };
-
     if !is_valid_username(&username) {
-        return Ok(redirect("/users?user=invalid-username"));
+        return Ok(HttpResponse::BadRequest().body("username is invalid"));
     }
-
-    if password.len() < 8 {
-        return Ok(redirect("/users?user=weak-password"));
+    if !super::auth::valid_credential(&body.credential) {
+        return Ok(HttpResponse::BadRequest().body("authentication credential is invalid"));
     }
-
+    let salt = super::auth::decode_fixed_auth_value::<16>(&body.salt, "authentication salt")?;
     state.db.release_request_connection().await;
     let password_hash =
-        state.passwords.hash(password).await.map_err(|_| {
+        state.passwords.hash(&body.credential).await.map_err(|_| {
             error::ErrorServiceUnavailable("password service temporarily unavailable")
         })?;
-
     let outcome = state
         .db
-        .query_one(CREATE_USER_QUERY, &[&username, &password_hash, &role])
+        .query_one(
+            CREATE_ONE_PASSWORD_USER_QUERY,
+            &[&username, &password_hash, &role, &salt.as_slice()],
+        )
         .await
         .map_err(error::ErrorInternalServerError)?;
     if !outcome.get::<_, bool>("inserted") {
-        return Ok(redirect("/users?user=user-exists"));
+        return Ok(HttpResponse::Conflict().body("username already exists"));
     }
-
-    Ok(redirect("/users?user=created"))
+    Ok(HttpResponse::Created().finish())
 }
 
 pub async fn update_user_role(
@@ -1292,8 +1299,8 @@ fn redirect(location: impl AsRef<str>) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        ADMIN_USER_MUTATION_LOCK_ID, CREATE_INVITATION_QUERY, CREATE_USER_QUERY, DELETE_USER_QUERY,
-        INVITATION_LIFETIME_DAYS, UPDATE_USER_QUERY, UPDATE_USER_ROLE_QUERY,
+        ADMIN_USER_MUTATION_LOCK_ID, CREATE_INVITATION_QUERY, CREATE_ONE_PASSWORD_USER_QUERY,
+        DELETE_USER_QUERY, INVITATION_LIFETIME_DAYS, UPDATE_USER_QUERY, UPDATE_USER_ROLE_QUERY,
         UPDATE_USER_STATUS_QUERY, admin_mutation_outcome, literal_ilike_pattern,
     };
 
@@ -1374,21 +1381,22 @@ mod tests {
         assert!(CREATE_INVITATION_QUERY.contains("WHERE invitations.expires_at <= now()"));
         assert!(CREATE_INVITATION_QUERY.contains("user_exists"));
         assert!(CREATE_INVITATION_QUERY.contains("invitation_exists"));
-        assert!(CREATE_USER_QUERY.contains("WITH inserted AS"));
-        assert!(CREATE_USER_QUERY.contains("ON CONFLICT DO NOTHING"));
-        assert!(CREATE_USER_QUERY.contains("accepted_invitations"));
+        assert!(CREATE_ONE_PASSWORD_USER_QUERY.contains("WITH inserted AS"));
+        assert!(CREATE_ONE_PASSWORD_USER_QUERY.contains("ON CONFLICT DO NOTHING"));
+        assert!(CREATE_ONE_PASSWORD_USER_QUERY.contains("accepted_invitations"));
+        assert!(CREATE_ONE_PASSWORD_USER_QUERY.contains("auth_version, auth_kdf_salt"));
 
         let source = include_str!("admin.rs");
         for (start, end, query_name) in [
             (
                 "pub async fn create_invitation(",
-                "pub async fn create_user(",
+                "pub async fn create_one_password_user(",
                 "CREATE_INVITATION_QUERY",
             ),
             (
-                "pub async fn create_user(",
+                "pub async fn create_one_password_user(",
                 "pub async fn update_user_role(",
-                "CREATE_USER_QUERY",
+                "CREATE_ONE_PASSWORD_USER_QUERY",
             ),
         ] {
             let handler = source
@@ -1418,7 +1426,7 @@ mod tests {
 
         for query in [
             CREATE_INVITATION_QUERY,
-            CREATE_USER_QUERY,
+            CREATE_ONE_PASSWORD_USER_QUERY,
             UPDATE_USER_ROLE_QUERY,
             UPDATE_USER_STATUS_QUERY,
             UPDATE_USER_QUERY,
@@ -1529,13 +1537,15 @@ mod tests {
             .expect("user invitation fixture inserts");
         assert!(setup_invitation.get::<_, bool>("inserted"));
 
-        let user_params_a: [&(dyn tokio_postgres::types::ToSql + Sync); 3] =
-            [&user_username, &"hash-a", &role];
-        let user_params_b: [&(dyn tokio_postgres::types::ToSql + Sync); 3] =
-            [&user_username, &"hash-b", &role];
+        let auth_salt_a = [1_u8; 16];
+        let auth_salt_b = [2_u8; 16];
+        let user_params_a: [&(dyn tokio_postgres::types::ToSql + Sync); 4] =
+            [&user_username, &"hash-a", &role, &&auth_salt_a[..]];
+        let user_params_b: [&(dyn tokio_postgres::types::ToSql + Sync); 4] =
+            [&user_username, &"hash-b", &role, &&auth_salt_b[..]];
         let (user_a, user_b) = futures_util::try_join!(
-            client_a.query_one(CREATE_USER_QUERY, &user_params_a),
-            client_b.query_one(CREATE_USER_QUERY, &user_params_b),
+            client_a.query_one(CREATE_ONE_PASSWORD_USER_QUERY, &user_params_a),
+            client_b.query_one(CREATE_ONE_PASSWORD_USER_QUERY, &user_params_b),
         )
         .expect("concurrent user statements complete");
         assert_eq!(

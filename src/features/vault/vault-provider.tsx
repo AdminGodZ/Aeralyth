@@ -54,8 +54,11 @@ import {
   VAULT_AUTO_LOCK_CHANGE_EVENT,
 } from "@/features/vault/vault-preferences";
 import {
+  persistVaultResumeSession,
+  VAULT_RESUME_RECORD_GRACE_MS,
+} from "@/features/vault/vault-resume-client";
+import {
   clearVaultResumeMarker,
-  createVaultResumeMarker,
   readVaultResumeMarker,
   type VaultResumeMarker,
   writeVaultResumeMarker,
@@ -99,7 +102,6 @@ type VaultContextValue = {
 
 export const VAULT_LOCKING_EVENT = "aeralyth:vault-locking";
 
-const VAULT_RESUME_RECORD_GRACE_MS = 5_000;
 const VAULT_RESUME_PERSIST_INTERVAL_MS = 1_000;
 
 const VaultContext = createContext<VaultContextValue | null>(null);
@@ -119,6 +121,7 @@ type VaultProviderProps = {
   e2eeMode: "off" | "migrate" | "required";
   vaultConfigured: boolean;
   autoLockMinutes: number;
+  onePasswordEnabled?: boolean;
 };
 
 export function VaultProvider({
@@ -134,6 +137,7 @@ function useVaultProviderController({
   e2eeMode,
   vaultConfigured,
   autoLockMinutes,
+  onePasswordEnabled = false,
 }: Omit<VaultProviderProps, "children">) {
   const enabled = e2eeMode !== "off";
   const clientRef = useRef<VaultCryptoClient | null>(null);
@@ -173,20 +177,17 @@ function useVaultProviderController({
     async (client: VaultCryptoClient, vaultVersion: number): Promise<void> => {
       const storage = vaultSessionStorage();
       if (!storage) return;
-      const expiresAt = Date.now() + activeAutoLockMinutes * 60 * 1_000;
-      const marker = createVaultResumeMarker(expiresAt);
-      if (!writeVaultResumeMarker(storage, marker)) return;
-
       try {
-        await client.persistSession(
-          marker.sessionId,
+        const marker = await persistVaultResumeSession(
+          client,
           csrfToken,
-          expiresAt + VAULT_RESUME_RECORD_GRACE_MS,
+          activeAutoLockMinutes,
           vaultVersion,
+          storage,
         );
         resumeSessionIdRef.current = marker.sessionId;
-        persistedResumeExpirationRef.current = expiresAt;
-        lockDeadlineRef.current = expiresAt;
+        persistedResumeExpirationRef.current = marker.expiresAt;
+        lockDeadlineRef.current = marker.expiresAt;
       } catch {
         clearVaultResumeMarker(storage);
       }
@@ -470,7 +471,11 @@ function useVaultProviderController({
       const client = getClient();
       if (mode === "setup") {
         if (password !== passwordConfirmation) {
-          throw new Error("The vault passwords do not match.");
+          throw new Error(
+            onePasswordEnabled
+              ? "The account passwords do not match."
+              : "The vault passwords do not match.",
+          );
         }
         const setup = await client.setup(password);
         const created = await setupVault(csrfToken, setup.payload);
@@ -507,9 +512,13 @@ function useVaultProviderController({
       setRecoveryCodeInput("");
     } catch (failure) {
       const message =
-        failure instanceof Error
-          ? failure.message
-          : "The vault operation failed.";
+        onePasswordEnabled &&
+        failure instanceof VaultWorkerError &&
+        failure.code === "INVALID_PASSWORD"
+          ? "The account password is incorrect."
+          : failure instanceof Error
+            ? failure.message
+            : "The vault operation failed.";
       cancelShareDirectorySyncForLock();
       await clientRef.current?.lock().catch(() => undefined);
       setError(message);
@@ -561,6 +570,7 @@ function useVaultProviderController({
   }
 
   function switchMode(): void {
+    if (onePasswordEnabled) return;
     setError(null);
     setMode(mode === "recover" ? "unlock" : "recover");
   }
@@ -574,6 +584,7 @@ function useVaultProviderController({
     error,
     mode,
     newRecoveryCode,
+    onePasswordEnabled,
     onDialogOpenChange: changeDialogOpen,
     onFinishRecoveryConfirmation: finishRecoveryConfirmation,
     onPasswordChange: setPassword,
@@ -595,6 +606,7 @@ function VaultProviderView({
   dialogOpen,
   canClose,
   newRecoveryCode,
+  onePasswordEnabled,
   recoveryConfirmed,
   onRecoveryConfirmedChange,
   onFinishRecoveryConfirmation,
@@ -617,6 +629,7 @@ function VaultProviderView({
   dialogOpen: boolean;
   canClose: boolean;
   newRecoveryCode: string | null;
+  onePasswordEnabled: boolean;
   recoveryConfirmed: boolean;
   onRecoveryConfirmedChange(value: boolean): void;
   onFinishRecoveryConfirmation(): void;
@@ -642,6 +655,7 @@ function VaultProviderView({
           {newRecoveryCode ? (
             <RecoveryKeyConfirmation
               recoveryCode={newRecoveryCode}
+              onePasswordEnabled={onePasswordEnabled}
               confirmed={recoveryConfirmed}
               onConfirmedChange={onRecoveryConfirmedChange}
               onDone={onFinishRecoveryConfirmation}
@@ -662,17 +676,25 @@ function VaultProviderView({
                     />
                   )}
                   {mode === "setup"
-                    ? "Create your encrypted vault"
+                    ? onePasswordEnabled
+                      ? "Protect encrypted files"
+                      : "Create your encrypted vault"
                     : mode === "recover"
                       ? "Recover your encrypted vault"
-                      : "Unlock your encrypted vault"}
+                      : onePasswordEnabled
+                        ? "Unlock encrypted files"
+                        : "Unlock your encrypted vault"}
                 </DialogTitle>
                 <DialogDescription>
                   {mode === "setup"
-                    ? "Choose a separate vault password. Aeralyth cannot recover it without your recovery key."
+                    ? onePasswordEnabled
+                      ? "Your account password also unlocks encrypted files. Aeralyth cannot recover them without your recovery key."
+                      : "Choose a separate vault password. Aeralyth cannot recover it without your recovery key."
                     : mode === "recover"
                       ? "Use your recovery key to replace the vault password and recovery key."
-                      : "Your vault password is processed only in this browser."}
+                      : onePasswordEnabled
+                        ? "Your account password unlocks encrypted files only in this browser."
+                        : "Your vault password is processed only in this browser."}
                 </DialogDescription>
               </DialogHeader>
 
@@ -702,7 +724,9 @@ function VaultProviderView({
                   <Label htmlFor="vault-password">
                     {mode === "recover"
                       ? "New vault password"
-                      : "Vault password"}
+                      : onePasswordEnabled
+                        ? "Account password"
+                        : "Vault password"}
                   </Label>
                   <Input
                     id="vault-password"
@@ -720,7 +744,9 @@ function VaultProviderView({
                 {mode !== "unlock" ? (
                   <div className="space-y-2">
                     <Label htmlFor="vault-password-confirmation">
-                      Confirm vault password
+                      {onePasswordEnabled
+                        ? "Confirm account password"
+                        : "Confirm vault password"}
                     </Label>
                     <Input
                       id="vault-password-confirmation"
@@ -737,12 +763,16 @@ function VaultProviderView({
                 ) : null}
                 {error ? (
                   <Alert variant="destructive">
-                    <AlertTitle>Vault unavailable</AlertTitle>
+                    <AlertTitle>
+                      {onePasswordEnabled
+                        ? "Encrypted files unavailable"
+                        : "Vault unavailable"}
+                    </AlertTitle>
                     <AlertDescription>{error}</AlertDescription>
                   </Alert>
                 ) : null}
                 <DialogFooter className="sm:justify-between">
-                  {configured ? (
+                  {configured && !onePasswordEnabled ? (
                     <Button
                       type="button"
                       variant="ghost"
@@ -759,7 +789,9 @@ function VaultProviderView({
                     {busy
                       ? "Working..."
                       : mode === "setup"
-                        ? "Create vault"
+                        ? onePasswordEnabled
+                          ? "Protect files"
+                          : "Create vault"
                         : mode === "recover"
                           ? "Recover vault"
                           : "Unlock"}
@@ -776,11 +808,13 @@ function VaultProviderView({
 
 function RecoveryKeyConfirmation({
   recoveryCode,
+  onePasswordEnabled,
   confirmed,
   onConfirmedChange,
   onDone,
 }: {
   recoveryCode: string;
+  onePasswordEnabled: boolean;
   confirmed: boolean;
   onConfirmedChange(value: boolean): void;
   onDone(): void;
@@ -790,8 +824,8 @@ function RecoveryKeyConfirmation({
       <DialogHeader>
         <DialogTitle>Store your recovery key</DialogTitle>
         <DialogDescription>
-          This key is shown once. It is the only recovery path if you forget the
-          vault password.
+          This key is shown once. It is the only recovery path if you forget the{" "}
+          {onePasswordEnabled ? "account password" : "vault password"}.
         </DialogDescription>
       </DialogHeader>
       <div className="rounded-md border bg-muted/40 p-3 font-mono text-sm break-all select-all">

@@ -14,6 +14,7 @@ export type CurrentUser = {
   accentColor: string;
   folderZipPromptEnabled: boolean;
   vaultAutoLockMinutes: number;
+  onePasswordEnabled: boolean;
   profileImageUrl: string | null;
   e2eeMode: "off" | "migrate" | "required";
   vaultConfigured: boolean;

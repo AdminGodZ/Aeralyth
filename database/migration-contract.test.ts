@@ -18,6 +18,7 @@ describe.each([
     "020_share_link_legacy_writer_guard.sql",
     "020-share-link-legacy-writer-guard",
   ],
+  ["024_one_password_auth.sql", "024-one-password-auth"],
 ])("%s", (fileName, version) => {
   const migration = readFileSync(resolve(migrationRoot, fileName), "utf8");
 
@@ -33,6 +34,23 @@ describe.each([
     expect(guardStart).toBeGreaterThan(-1);
     expect(guardEnd).toBeGreaterThan(guardStart);
     expect(migration.trimEnd().endsWith("COMMIT;")).toBe(true);
+  });
+});
+
+describe("one-password authentication migration", () => {
+  it("keeps legacy users valid while requiring a fixed salt for migrated users", () => {
+    const migration = readFileSync(
+      resolve(migrationRoot, "024_one_password_auth.sql"),
+      "utf8",
+    );
+
+    expect(migration).toContain(
+      "ADD COLUMN IF NOT EXISTS auth_version SMALLINT NOT NULL DEFAULT 0",
+    );
+    expect(migration).toContain("auth_version = 0 AND auth_kdf_salt IS NULL");
+    expect(migration).toContain(
+      "auth_version = 1 AND octet_length(auth_kdf_salt) = 16",
+    );
   });
 });
 

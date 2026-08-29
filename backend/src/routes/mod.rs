@@ -31,7 +31,13 @@ pub fn configure(config: &mut web::ServiceConfig) {
                 .route("/metrics", web::get().to(metrics::metrics))
                 .service(
                     web::scope("/auth")
+                        .route("/info", web::get().to(auth::info))
                         .route("/login", web::post().to(auth::login))
+                        .route("/login-json", web::post().to(auth::login_json))
+                        .route(
+                            "/enroll-one-password",
+                            web::post().to(auth::enroll_one_password),
+                        )
                         .route("/logout", web::post().to(auth::logout))
                         .route("/csrf", web::get().to(auth::csrf))
                         .route("/me", web::get().to(auth::me)),
@@ -46,7 +52,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
                     web::scope("/admin")
                         .route("/me", web::get().to(admin::me))
                         .route("/users", web::get().to(admin::users))
-                        .route("/users", web::post().to(admin::create_user))
+                        .route(
+                            "/users/one-password",
+                            web::post().to(admin::create_one_password_user),
+                        )
                         .route("/users/{id}", web::post().to(admin::update_user))
                         .route("/users/{id}/avatar", web::get().to(admin::user_avatar))
                         .route("/users/{id}/delete", web::post().to(admin::delete_user))
@@ -67,8 +76,8 @@ pub fn configure(config: &mut web::ServiceConfig) {
                 )
                 .route("/invitations/{token}", web::get().to(invitations::details))
                 .route(
-                    "/invitations/{token}/accept",
-                    web::post().to(invitations::accept),
+                    "/invitations/{token}/accept-one-password",
+                    web::post().to(invitations::accept_one_password),
                 )
                 .route("/share-links", web::get().to(share_links::list_owned))
                 .route("/share-links", web::post().to(share_links::create))
@@ -154,6 +163,11 @@ pub fn configure(config: &mut web::ServiceConfig) {
                         .route("/unlock-material", web::get().to(vault::unlock_material))
                         .route("/account-state", web::get().to(vault::account_state))
                         .route("/rewrap", web::post().to(vault::rewrap))
+                        .route("/rewrap-password", web::post().to(vault::rewrap_password))
+                        .route(
+                            "/change-one-password",
+                            web::post().to(vault::change_one_password),
+                        )
                         .route("/migrations/claim", web::post().to(vault::claim_migration))
                         .route("/identities/{username}", web::get().to(vault::identity))
                         .route(

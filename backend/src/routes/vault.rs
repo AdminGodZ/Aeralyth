@@ -25,6 +25,7 @@ use crate::e2ee::{
     verify_decoded_node_record, verify_ed25519_signature, verify_share_envelope_material,
     verify_wrapper_set_proof, wrapper_set_commitment,
 };
+use crate::passwords::PasswordError;
 use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
 use crate::routes::tree_walk::{TREE_MUTATION_BATCH_SIZE, TreeWalkScope, walk_subtree};
 use crate::routes::upload_reservations::{reservation_amount, reserve_upload_capacity};
@@ -426,6 +427,24 @@ pub(crate) struct VaultRewrapRequest {
     encrypted_account_state: Option<String>,
     recovery: Option<bool>,
     proof_signature: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct VaultPasswordRewrapRequest {
+    expected_vault_version: u64,
+    kdf: KdfRequest,
+    password_wrapper: RootWrapperRequest,
+    proof_signature: String,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct OnePasswordChangeRequest {
+    current_credential: String,
+    new_credential: String,
+    new_salt: String,
+    vault: Option<VaultPasswordRewrapRequest>,
 }
 
 #[derive(Serialize)]
@@ -1555,6 +1574,216 @@ pub async fn rewrap(
     Ok(HttpResponse::Ok().json(VaultMutationResponse {
         vault_version: row.get("vault_version"),
     }))
+}
+
+pub async fn rewrap_password(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    body: web::Payload,
+) -> Result<HttpResponse> {
+    require_vault_enabled(&state)?;
+    let user = require_principal(&state, &request).await?;
+    require_header_csrf(&state, &request).await?;
+    let _mutation_permit = state
+        .upload_control_limiter
+        .try_acquire(&user.id)
+        .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
+    let body =
+        parse_json_body::<VaultPasswordRewrapRequest>(&request, body, VAULT_ACCOUNT_JSON_LIMIT)
+            .await?;
+    let material = validate_password_rewrap(&body)?;
+    let signer = active_identity(&state, &user.id).await?;
+    verify_ed25519_signature(
+        &material.proof,
+        &material.proof_signature,
+        &signer.ed25519_public_key,
+    )
+    .map_err(error::ErrorForbidden)?;
+    let row = state
+        .db
+        .query_opt(
+            "
+                UPDATE user_vaults
+                SET kdf_salt = $1,
+                    password_wrapper_id = $2,
+                    password_root_ciphertext = $3,
+                    updated_at = now()
+                WHERE user_id = $4 AND vault_version = $5
+                RETURNING vault_version
+            ",
+            &[
+                &material.kdf_salt,
+                &material.password_wrapper_id,
+                &material.password_ciphertext,
+                &user.id,
+                &material.expected_vault_version,
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let Some(row) = row else {
+        return Ok(HttpResponse::Conflict().body("vault material changed; unlock again"));
+    };
+
+    Ok(HttpResponse::Ok().json(VaultMutationResponse {
+        vault_version: row.get("vault_version"),
+    }))
+}
+
+pub async fn change_one_password(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    body: web::Payload,
+) -> Result<HttpResponse> {
+    let user = require_principal(&state, &request).await?;
+    require_header_csrf(&state, &request).await?;
+    let _mutation_permit = state
+        .upload_control_limiter
+        .try_acquire(&user.id)
+        .map_err(|()| LoadShedError::too_many_requests("account mutation capacity is full"))?;
+    let body =
+        parse_json_body::<OnePasswordChangeRequest>(&request, body, VAULT_ACCOUNT_JSON_LIMIT)
+            .await?;
+    if !super::auth::valid_credential(&body.current_credential)
+        || !super::auth::valid_credential(&body.new_credential)
+    {
+        return Err(error::ErrorBadRequest(
+            "authentication credential is invalid",
+        ));
+    }
+    let new_salt =
+        super::auth::decode_fixed_auth_value::<16>(&body.new_salt, "authentication salt")?;
+
+    let account = state
+        .db
+        .query_opt(
+            "
+                SELECT users.password_hash, COALESCE(users.auth_version, 0) AS auth_version,
+                       EXISTS (
+                         SELECT 1 FROM user_vaults WHERE user_id = users.id
+                       ) AS vault_configured
+                FROM users
+                WHERE users.id = $1 AND users.status = 'active'
+                LIMIT 1
+            ",
+            &[&user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let Some(account) = account else {
+        return Ok(HttpResponse::Unauthorized().finish());
+    };
+    let current_hash: String = account.get("password_hash");
+    let auth_version: i16 = account.get("auth_version");
+    let vault_configured: bool = account.get("vault_configured");
+    state.db.release_request_connection().await;
+    if auth_version != 1 {
+        return Ok(
+            HttpResponse::Conflict().body("account must be migrated before changing password")
+        );
+    }
+    let current_valid = state
+        .passwords
+        .verify_candidate(&body.current_credential, Some(&current_hash))
+        .await
+        .map_err(map_account_password_error)?;
+    if !current_valid {
+        return Ok(HttpResponse::BadRequest().body("current password is incorrect"));
+    }
+    if vault_configured != body.vault.is_some() {
+        return Ok(HttpResponse::Conflict()
+            .body("vault password material must be changed together with the account password"));
+    }
+
+    let vault_material = if let Some(vault) = body.vault.as_ref() {
+        let material = validate_password_rewrap(vault)?;
+        let signer = active_identity(&state, &user.id).await?;
+        verify_ed25519_signature(
+            &material.proof,
+            &material.proof_signature,
+            &signer.ed25519_public_key,
+        )
+        .map_err(error::ErrorForbidden)?;
+        Some(material)
+    } else {
+        None
+    };
+    let new_hash = state
+        .passwords
+        .hash(&body.new_credential)
+        .await
+        .map_err(map_account_password_error)?;
+
+    let mut client = state
+        .db
+        .get()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let transaction = client
+        .transaction()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let changed = transaction
+        .execute(
+            "
+                UPDATE users
+                SET password_hash = $1, auth_kdf_salt = $2, updated_at = now()
+                WHERE id = $3 AND password_hash = $4
+                  AND auth_version = 1 AND status = 'active'
+            ",
+            &[&new_hash, &new_salt.as_slice(), &user.id, &current_hash],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    if changed != 1 {
+        return Ok(HttpResponse::Conflict().body("password changed concurrently; try again"));
+    }
+    if let Some(material) = vault_material {
+        let changed = transaction
+            .execute(
+                "
+                    UPDATE user_vaults
+                    SET kdf_salt = $1,
+                        password_wrapper_id = $2,
+                        password_root_ciphertext = $3,
+                        updated_at = now()
+                    WHERE user_id = $4 AND vault_version = $5
+                ",
+                &[
+                    &material.kdf_salt,
+                    &material.password_wrapper_id,
+                    &material.password_ciphertext,
+                    &user.id,
+                    &material.expected_vault_version,
+                ],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+        if changed != 1 {
+            return Ok(HttpResponse::Conflict().body("vault material changed; unlock again"));
+        }
+    }
+    transaction
+        .execute("DELETE FROM sessions WHERE user_id = $1", &[&user.id])
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    transaction
+        .commit()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+
+    Ok(HttpResponse::NoContent()
+        .cookie(super::auth::expired_session_cookie(
+            state.config.cookie_secure,
+        ))
+        .finish())
+}
+
+fn map_account_password_error(password_error: PasswordError) -> actix_web::Error {
+    match password_error {
+        PasswordError::Busy => error::ErrorTooManyRequests("too many password requests"),
+        _ => error::ErrorServiceUnavailable("password change temporarily unavailable"),
+    }
 }
 
 pub async fn identity(
@@ -7512,6 +7741,70 @@ fn validate_kdf(kdf: &KdfRequest) -> Result<()> {
     Ok(())
 }
 
+pub(crate) struct PasswordRewrapMaterial {
+    pub expected_vault_version: i64,
+    pub kdf_salt: Vec<u8>,
+    pub password_wrapper_id: Vec<u8>,
+    pub password_ciphertext: Vec<u8>,
+    pub proof_signature: Vec<u8>,
+    pub proof: Vec<u8>,
+}
+
+pub(crate) fn validate_password_rewrap(
+    body: &VaultPasswordRewrapRequest,
+) -> Result<PasswordRewrapMaterial> {
+    validate_kdf(&body.kdf)?;
+    let expected_vault_version = i64::try_from(body.expected_vault_version)
+        .map_err(|_| error::ErrorBadRequest("vault version is invalid"))?;
+    let kdf_salt = decode_fixed::<16>(&body.kdf.salt, "KDF salt")?.to_vec();
+    let password_wrapper_id =
+        decode_fixed::<16>(&body.password_wrapper.id, "password wrapper id")?.to_vec();
+    let password_ciphertext = decode_fixed::<48>(
+        &body.password_wrapper.ciphertext,
+        "password root ciphertext",
+    )?
+    .to_vec();
+    let proof_signature =
+        decode_fixed::<64>(&body.proof_signature, "password rewrap proof signature")?.to_vec();
+    let proof = password_rewrap_proof_message(
+        expected_vault_version,
+        &body.kdf,
+        &kdf_salt,
+        &password_wrapper_id,
+        &password_ciphertext,
+    )?;
+    Ok(PasswordRewrapMaterial {
+        expected_vault_version,
+        kdf_salt,
+        password_wrapper_id,
+        password_ciphertext,
+        proof_signature,
+        proof,
+    })
+}
+
+fn password_rewrap_proof_message(
+    expected_vault_version: i64,
+    kdf: &KdfRequest,
+    kdf_salt: &[u8],
+    password_wrapper_id: &[u8],
+    password_ciphertext: &[u8],
+) -> Result<Vec<u8>> {
+    let expected_vault_version = u64::try_from(expected_vault_version)
+        .map_err(|_| error::ErrorBadRequest("vault version is invalid"))?;
+    let mut output = b"aeralyth/vault-password-rewrap-proof/v1".to_vec();
+    output.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+    output.extend_from_slice(&expected_vault_version.to_be_bytes());
+    append_proof_field(&mut output, kdf.algorithm.as_bytes())?;
+    append_proof_field(&mut output, kdf_salt)?;
+    output.extend_from_slice(&kdf.operations.to_be_bytes());
+    output.extend_from_slice(&kdf.memory_bytes.to_be_bytes());
+    output.extend_from_slice(&kdf.output_bytes.to_be_bytes());
+    append_proof_field(&mut output, password_wrapper_id)?;
+    append_proof_field(&mut output, password_ciphertext)?;
+    Ok(output)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn rewrap_proof_message(
     expected_vault_version: i64,
@@ -8921,6 +9214,36 @@ mod tests {
             &[8_u8; 64],
         )
         .unwrap();
+        assert!(
+            verify_ed25519_signature(
+                &changed,
+                &signature,
+                &signing_key.verifying_key().to_bytes(),
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn password_rewrap_proof_rejects_wrapper_changes() {
+        let kdf = KdfRequest {
+            algorithm: ARGON2ID_ALGORITHM.to_owned(),
+            salt: encode_bytes([1_u8; 16]),
+            operations: ARGON2ID_OPERATIONS,
+            memory_bytes: ARGON2ID_MEMORY_BYTES,
+            output_bytes: ARGON2ID_OUTPUT_BYTES,
+        };
+        let proof =
+            password_rewrap_proof_message(7, &kdf, &[1_u8; 16], &[2_u8; 16], &[3_u8; 48]).unwrap();
+        let signing_key = SigningKey::from_bytes(&[9_u8; 32]);
+        let signature = signing_key.sign(&proof).to_bytes();
+        assert!(
+            verify_ed25519_signature(&proof, &signature, &signing_key.verifying_key().to_bytes())
+                .is_ok()
+        );
+
+        let changed =
+            password_rewrap_proof_message(7, &kdf, &[1_u8; 16], &[4_u8; 16], &[3_u8; 48]).unwrap();
         assert!(
             verify_ed25519_signature(
                 &changed,

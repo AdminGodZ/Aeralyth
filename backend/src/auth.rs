@@ -80,6 +80,7 @@ pub struct AuthUser {
     pub accent_color: String,
     pub folder_zip_prompt_enabled: bool,
     pub vault_auto_lock_minutes: i32,
+    pub one_password_enabled: bool,
     pub profile_image_url: Option<String>,
     pub e2ee_mode: String,
     pub vault_configured: bool,
@@ -94,7 +95,8 @@ impl AuthUser {
 pub async fn authenticate_password(
     state: &AppState,
     username: &str,
-    password: &str,
+    legacy_password: &str,
+    one_password_credential: Option<&str>,
 ) -> Result<Option<AuthUser>> {
     let user = state
         .db
@@ -104,6 +106,7 @@ pub async fn authenticate_password(
                   id,
                   username,
                   password_hash,
+                  COALESCE(auth_version, 0) AS auth_version,
                   role,
                   status,
                   display_name,
@@ -126,8 +129,18 @@ pub async fn authenticate_password(
         .map_err(error::ErrorInternalServerError)?;
     let candidate = user.map(|row| {
         let password_hash: String = row.get("password_hash");
+        let auth_version: i16 = row.get("auth_version");
         let user = auth_user_from_row(row, state.config.e2ee_mode.as_str());
-        (user, password_hash)
+        (user, password_hash, auth_version)
+    });
+    let candidate_secret = candidate.as_ref().and_then(|(_, _, auth_version)| {
+        if *auth_version == 1 {
+            one_password_credential
+        } else if legacy_password.is_empty() {
+            None
+        } else {
+            Some(legacy_password)
+        }
     });
 
     // Bcrypt is CPU-bound. Return the scarce PostgreSQL connection before
@@ -136,10 +149,14 @@ pub async fn authenticate_password(
     let verified = state
         .passwords
         .verify_candidate(
-            password,
+            candidate_secret.unwrap_or(""),
             candidate
                 .as_ref()
-                .map(|(_, password_hash)| password_hash.as_str()),
+                .filter(|(_, _, auth_version)| {
+                    (*auth_version == 1 && one_password_credential.is_some())
+                        || (*auth_version == 0 && !legacy_password.is_empty())
+                })
+                .map(|(_, password_hash, _)| password_hash.as_str()),
         )
         .await
         .map_err(|password_error| match password_error {
@@ -149,7 +166,7 @@ pub async fn authenticate_password(
             _ => error::ErrorServiceUnavailable("authentication temporarily unavailable"),
         })?;
 
-    Ok(candidate.and_then(|(user, _)| verified.then_some(user)))
+    Ok(candidate.and_then(|(user, _, _)| verified.then_some(user)))
 }
 
 pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Option<AuthUser>> {
@@ -177,6 +194,7 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
                       COALESCE(users.accent_color, '#3088f0') AS accent_color,
                       COALESCE(users.folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
                       COALESCE(users.vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes,
+                      COALESCE(users.auth_version, 0) AS auth_version,
                       users.profile_image_bytes IS NOT NULL AS has_profile_image,
                       COALESCE(users.profile_image_updated_at, users.updated_at)
                         AS profile_image_version_at,
@@ -207,6 +225,7 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
                   COALESCE(users.accent_color, '#3088f0') AS accent_color,
                   COALESCE(users.folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
                   COALESCE(users.vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes,
+                  COALESCE(users.auth_version, 0) AS auth_version,
                   users.profile_image_bytes IS NOT NULL AS has_profile_image,
                   COALESCE(users.profile_image_updated_at, users.updated_at)
                     AS profile_image_version_at,
@@ -367,6 +386,7 @@ fn auth_user_from_row(row: tokio_postgres::Row, e2ee_mode: &str) -> AuthUser {
         accent_color: row.get("accent_color"),
         folder_zip_prompt_enabled: row.get("folder_zip_prompt_enabled"),
         vault_auto_lock_minutes: row.get("vault_auto_lock_minutes"),
+        one_password_enabled: row.get::<_, i16>("auth_version") == 1,
         profile_image_url,
         e2ee_mode: e2ee_mode.to_owned(),
         vault_configured: row.get("vault_configured"),
@@ -532,7 +552,8 @@ mod tests {
             ("repositories", include_str!("routes/repositories.rs"), 3),
             ("share links", include_str!("routes/share_links.rs"), 1),
             ("profile", include_str!("routes/profile.rs"), 2),
-            ("vault", include_str!("routes/vault.rs"), 9),
+            ("admin", include_str!("routes/admin.rs"), 1),
+            ("vault", include_str!("routes/vault.rs"), 11),
         ] {
             assert!(
                 !source.contains("web::Json<"),

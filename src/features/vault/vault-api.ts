@@ -6,6 +6,7 @@ import type {
   VaultMetadataPlan,
   VaultMetadataReference,
   VaultNodeRecord,
+  VaultPasswordRewrapPayload,
   VaultPublicIdentity,
   VaultRewrapPayload,
   VaultSetupPayload,
@@ -292,6 +293,19 @@ export function rewrapVault(
   signal?: AbortSignal,
 ): Promise<{ vaultVersion: number }> {
   return vaultMutation("/api/vault/rewrap", csrfToken, payload, signal);
+}
+
+export function rewrapVaultPassword(
+  csrfToken: string,
+  payload: VaultPasswordRewrapPayload,
+  signal?: AbortSignal,
+): Promise<{ vaultVersion: number }> {
+  return vaultMutation(
+    "/api/vault/rewrap-password",
+    csrfToken,
+    payload,
+    signal,
+  );
 }
 
 export function initVaultUpload(

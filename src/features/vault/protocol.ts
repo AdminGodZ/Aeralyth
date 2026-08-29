@@ -81,6 +81,13 @@ export type VaultRewrapPayload = Omit<
   proofSignature: string;
 };
 
+export type VaultPasswordRewrapPayload = {
+  expectedVaultVersion: number;
+  kdf: VaultKdf;
+  passwordWrapper: { id: string; ciphertext: string };
+  proofSignature: string;
+};
+
 export type VaultWrapperRecord = {
   formatVersion: number;
   wrapperId: Uint8Array;
@@ -375,6 +382,29 @@ export function encodeVaultRewrapProof(
     return concatBytes(...fields);
   } finally {
     wipe(accountStateRecordId, ...fields.slice(4));
+  }
+}
+
+export function encodeVaultPasswordRewrapProof(
+  payload: Omit<VaultPasswordRewrapPayload, "proofSignature">,
+): Uint8Array {
+  assertArgon2idProfile(payload.kdf);
+  const fields = [
+    utf8("aeralyth/vault-password-rewrap-proof/v1"),
+    encodeUnsigned64(VAULT_FORMAT_VERSION),
+    encodeUnsigned64(payload.expectedVaultVersion),
+    encodeLengthPrefixed(utf8(payload.kdf.algorithm)),
+    encodeLengthPrefixed(fromBase64Url(payload.kdf.salt)),
+    encodeUnsigned64(payload.kdf.operations),
+    encodeUnsigned64(payload.kdf.memoryBytes),
+    encodeUnsigned64(payload.kdf.outputBytes),
+    encodeLengthPrefixed(fromBase64Url(payload.passwordWrapper.id)),
+    encodeLengthPrefixed(fromBase64Url(payload.passwordWrapper.ciphertext)),
+  ];
+  try {
+    return concatBytes(...fields);
+  } finally {
+    wipe(...fields.slice(3));
   }
 }
 

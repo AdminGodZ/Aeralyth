@@ -6,6 +6,7 @@ import type {
   VaultMetadataPlan,
   VaultMetadataReference,
   VaultNodeRecord,
+  VaultPasswordRewrapPayload,
   VaultPublicIdentity,
   VaultRewrapPayload,
   VaultSetupPayload,
@@ -16,6 +17,13 @@ import type {
 
 export type VaultWorkerRequest =
   | { id: number; type: "preflight" }
+  | {
+      id: number;
+      type: "deriveAuthCredential";
+      username: string;
+      password: string;
+      salt: string;
+    }
   | { id: number; type: "setup"; password: string }
   | {
       id: number;
@@ -48,6 +56,13 @@ export type VaultWorkerRequest =
       id: number;
       type: "recover";
       recoveryCode: string;
+      newPassword: string;
+      material: VaultUnlockMaterial;
+    }
+  | {
+      id: number;
+      type: "rewrapPassword";
+      currentPassword: string;
       newPassword: string;
       material: VaultUnlockMaterial;
     }
@@ -264,6 +279,10 @@ export type VaultRecoveryResult = {
   recoveryCode: string;
 };
 
+export type VaultPasswordRewrapResult = {
+  payload: VaultPasswordRewrapPayload;
+};
+
 export type VaultShareMaterialInput = {
   shareId: string;
   rootNodeId: string;
@@ -297,12 +316,14 @@ export type VaultShareMaterialResult = {
 
 export type VaultWorkerResult =
   | { type: "preflight"; supported: true }
+  | { type: "deriveAuthCredential"; credential: string }
   | { type: "setup"; result: VaultSetupResult }
   | { type: "unlock"; result: VaultUnlockResult }
   | { type: "resume"; result: VaultResumeResult }
   | { type: "persistSession" }
   | { type: "extendSession" }
   | { type: "recover"; result: VaultRecoveryResult }
+  | { type: "rewrapPassword"; result: VaultPasswordRewrapResult }
   | { type: "lock" }
   | { type: "openPlan"; result: VaultOpenPlanResult }
   | { type: "getCachedMetadata"; results: VaultCachedMetadataResult[] }

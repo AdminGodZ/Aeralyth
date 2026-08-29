@@ -2,6 +2,7 @@ import type {
   VaultDownloadPlan,
   VaultMetadataPlan,
   VaultMetadataReference,
+  VaultPasswordRewrapPayload,
   VaultUnlockMaterial,
 } from "@/features/vault/protocol";
 import type {
@@ -96,6 +97,22 @@ export class VaultCryptoClient {
     expectResult(await this.send({ type: "preflight" }), "preflight");
   }
 
+  async deriveAuthCredential(
+    username: string,
+    password: string,
+    salt: string,
+  ): Promise<string> {
+    return expectResult(
+      await this.send({
+        type: "deriveAuthCredential",
+        username,
+        password,
+        salt,
+      }),
+      "deriveAuthCredential",
+    ).credential;
+  }
+
   async setup(password: string): Promise<VaultSetupResult> {
     return expectResult(await this.send({ type: "setup", password }), "setup")
       .result;
@@ -166,6 +183,22 @@ export class VaultCryptoClient {
       }),
       "recover",
     ).result;
+  }
+
+  async rewrapPassword(
+    currentPassword: string,
+    newPassword: string,
+    material: VaultUnlockMaterial,
+  ): Promise<VaultPasswordRewrapPayload> {
+    return expectResult(
+      await this.send({
+        type: "rewrapPassword",
+        currentPassword,
+        newPassword,
+        material,
+      }),
+      "rewrapPassword",
+    ).result.payload;
   }
 
   async lock(): Promise<void> {

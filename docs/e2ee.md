@@ -20,7 +20,7 @@ state, padded ciphertext sizes, and request timing. PADME reduces exact size
 leakage; it does not hide whether an entry is a file or folder.
 
 The design does not protect a device after malicious code executes in the
-signed-in Aeralyth origin, a stolen vault password or recovery key, plaintext a
+signed-in Aeralyth origin, a stolen account password or recovery key, plaintext a
 recipient already downloaded, traffic analysis, or service denial and deletion.
 A fully malicious server can replay a self-consistent historical snapshot to a
 fresh client that has no separately pinned head or transparency log. Browser
@@ -31,6 +31,11 @@ complete memory erasure is not guaranteed.
 
 - Account root: random 32-byte material, wrapped at rest and imported after
   unlock as a non-extractable Web Crypto HKDF key.
+- Account authentication: the browser derives a domain-separated 32-byte
+  Argon2id credential from the username, account password, and a per-account
+  16-byte salt. New and migrated accounts send that credential rather than the
+  account password to the API. This provides password/key separation, but it is
+  not an SRP or PAKE protocol and the derived credential remains replayable.
 - Password KDF: libsodium Argon2id13 with exactly 3 operations, 268435456 bytes
   of memory, a 16-byte salt, and a 32-byte output. A real 256 MiB preflight runs
   before setup. Unsupported devices are rejected; parameters are never lowered.
@@ -62,10 +67,15 @@ complete memory erasure is not guaranteed.
 
 ## Recovery and locking
 
-The normal account password cannot unlock file data. Each user chooses a
-separate vault password and receives a one-time recovery key. Losing both makes
-the encrypted data permanently unrecoverable; administrators cannot reset the
-vault.
+The account password unwraps the encrypted account root in the browser and also
+derives a separate server authentication credential. A successful login unlocks
+the vault in the same worker flow, then persists only an expiring,
+non-extractable resume key. The raw account password is sent to the API once only
+when a legacy account is migrated from the former two-password format.
+
+Each user receives a one-time recovery key. Losing both the account password and
+recovery key makes encrypted data permanently unrecoverable; administrators
+cannot reset the vault.
 
 The active account root and identity private keys live in the dedicated
 same-origin worker. While the vault is unlocked, IndexedDB may hold an expiring

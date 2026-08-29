@@ -95,6 +95,7 @@ export function DashboardFrame({
         e2eeMode={currentUser.e2eeMode}
         vaultConfigured={currentUser.vaultConfigured}
         autoLockMinutes={currentUser.vaultAutoLockMinutes}
+        onePasswordEnabled={currentUser.onePasswordEnabled}
       >
         <DashboardSidebar
           canViewSystemNavigation={currentUser.role === "admin"}

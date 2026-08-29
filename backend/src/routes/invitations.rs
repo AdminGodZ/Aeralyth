@@ -1,12 +1,13 @@
-use actix_web::http::header::LOCATION;
 use actix_web::{HttpResponse, Result, error, web};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::parse_json_body;
 use crate::state::AppState;
 use crate::timestamps;
 
-const MIN_PASSWORD_BYTES: usize = 8;
-const MAX_PASSWORD_BYTES: usize = 128;
+use super::auth::{decode_fixed_auth_value, valid_credential};
+
+const ACCEPT_JSON_LIMIT: usize = 2 * 1024;
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -22,8 +23,15 @@ struct InvitationDetailsResponse {
 }
 
 #[derive(Deserialize)]
-pub(crate) struct AcceptInvitationForm {
-    password: String,
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AcceptOnePasswordRequest {
+    credential: String,
+    salt: String,
+}
+
+#[derive(Serialize)]
+struct AcceptedInvitationResponse {
+    username: String,
 }
 
 pub async fn details(state: web::Data<AppState>, path: web::Path<String>) -> Result<HttpResponse> {
@@ -65,23 +73,22 @@ pub async fn details(state: web::Data<AppState>, path: web::Path<String>) -> Res
     }))
 }
 
-pub async fn accept(
+pub async fn accept_one_password(
     state: web::Data<AppState>,
+    request: actix_web::HttpRequest,
     path: web::Path<String>,
-    form: web::Form<AcceptInvitationForm>,
+    body: web::Payload,
 ) -> Result<HttpResponse> {
     let token = path.into_inner();
-
     if !is_valid_token(&token) {
-        return Ok(redirect("/login"));
+        return Ok(HttpResponse::NotFound().finish());
     }
-
-    let password = form.password.trim();
-
-    if !(MIN_PASSWORD_BYTES..=MAX_PASSWORD_BYTES).contains(&password.len()) {
-        return Ok(redirect(format!("/invite/{token}?error=weak-password")));
+    let body =
+        parse_json_body::<AcceptOnePasswordRequest>(&request, body, ACCEPT_JSON_LIMIT).await?;
+    if !valid_credential(&body.credential) {
+        return Ok(HttpResponse::BadRequest().body("authentication credential is invalid"));
     }
-
+    let salt = decode_fixed_auth_value::<16>(&body.salt, "authentication salt")?;
     let invitation_available = state
         .db
         .query_opt(
@@ -103,15 +110,13 @@ pub async fn accept(
         .await
         .map_err(error::ErrorInternalServerError)?;
     if invitation_available.is_none() {
-        return Ok(redirect(format!("/invite/{token}?error=unavailable")));
+        return Ok(HttpResponse::Conflict().body("invitation is unavailable"));
     }
-
     state.db.release_request_connection().await;
     let password_hash =
-        state.passwords.hash(password).await.map_err(|_| {
+        state.passwords.hash(&body.credential).await.map_err(|_| {
             error::ErrorServiceUnavailable("password service temporarily unavailable")
         })?;
-
     let accepted_user = state
         .db
         .query_opt(
@@ -130,27 +135,31 @@ pub async fn accept(
                     )
                   RETURNING invited_username, role
                 )
-                INSERT INTO users (id, username, password_hash, role, status)
+                INSERT INTO users (
+                  id, username, password_hash, role, status,
+                  auth_version, auth_kdf_salt
+                )
                 SELECT
                   gen_random_uuid()::text,
                   invited_username,
                   $2,
                   role,
-                  'active'
+                  'active',
+                  1,
+                  $3
                 FROM accepted_invitation
                 RETURNING username
             ",
-            &[&token, &password_hash],
+            &[&token, &password_hash, &salt.as_slice()],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-
     let Some(accepted_user) = accepted_user else {
-        return Ok(redirect(format!("/invite/{token}?error=unavailable")));
+        return Ok(HttpResponse::Conflict().body("invitation is unavailable"));
     };
-    let username: String = accepted_user.get("username");
-
-    Ok(redirect(format!("/login?username={username}")))
+    Ok(HttpResponse::Created().json(AcceptedInvitationResponse {
+        username: accepted_user.get("username"),
+    }))
 }
 
 fn is_valid_token(token: &str) -> bool {
@@ -158,10 +167,4 @@ fn is_valid_token(token: &str) -> bool {
         && token
             .chars()
             .all(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
-}
-
-fn redirect(location: impl AsRef<str>) -> HttpResponse {
-    HttpResponse::SeeOther()
-        .insert_header((LOCATION, location.as_ref().to_owned()))
-        .finish()
 }

@@ -2,6 +2,10 @@ import { Aes256Gcm, CipherSuite, HkdfSha256 } from "@hpke/core";
 import { DhkemX25519HkdfSha256 } from "@hpke/dhkem-x25519";
 import bs58check from "bs58check";
 import sodium from "libsodium-wrappers-sumo";
+import {
+  ACCOUNT_AUTH_KDF,
+  normalizeAccountUsername,
+} from "@/features/auth/account-password";
 import { BatchScopedValueCache } from "@/features/vault/batch-scoped-value-cache";
 import {
   detectedCryptoConcurrency,
@@ -30,6 +34,7 @@ import {
   concatBytes,
   encodeChunkAad,
   encodeRecordAad,
+  encodeVaultPasswordRewrapProof,
   encodeVaultRewrapProof,
   encryptedLength,
   equalBytes,
@@ -58,6 +63,7 @@ import {
   type VaultManifest,
   type VaultMetadataPlan,
   type VaultMetadataReference,
+  type VaultPasswordRewrapPayload,
   type VaultPublicIdentity,
   type VaultRewrapPayload,
   type VaultSetupPayload,
@@ -83,6 +89,7 @@ import type {
   VaultEncryptionStart,
   VaultMetadataOpenResult,
   VaultOpenPlanResult,
+  VaultPasswordRewrapResult,
   VaultRecoveryResult,
   VaultResumeResult,
   VaultSetupResult,
@@ -255,6 +262,17 @@ async function dispatch(
     case "preflight":
       await preflightArgon2id();
       return { result: { type: "preflight", supported: true } };
+    case "deriveAuthCredential":
+      return {
+        result: {
+          type: "deriveAuthCredential",
+          credential: deriveAuthCredential(
+            request.username,
+            request.password,
+            request.salt,
+          ),
+        },
+      };
     case "setup":
       return {
         result: { type: "setup", result: await setupVault(request.password) },
@@ -294,6 +312,17 @@ async function dispatch(
           type: "recover",
           result: await recoverVault(
             request.recoveryCode,
+            request.newPassword,
+            request.material,
+          ),
+        },
+      };
+    case "rewrapPassword":
+      return {
+        result: {
+          type: "rewrapPassword",
+          result: await rewrapVaultPassword(
+            request.currentPassword,
             request.newPassword,
             request.material,
           ),
@@ -513,6 +542,35 @@ async function preflightArgon2id(): Promise<void> {
   }
 }
 
+function deriveAuthCredential(
+  username: string,
+  password: string,
+  encodedSalt: string,
+): string {
+  const salt = fromBase64Url(encodedSalt);
+  const normalizedUsername = normalizeAccountUsername(username);
+  const passwordBytes = utf8(
+    `aeralyth/account-auth/v1/${normalizedUsername}\0${password}`,
+  );
+  let credential: Uint8Array | null = null;
+  try {
+    if (salt.length !== 16 || !normalizedUsername) {
+      throw new Error("The account authentication parameters are invalid.");
+    }
+    credential = sodium.crypto_pwhash(
+      ACCOUNT_AUTH_KDF.outputBytes,
+      passwordBytes,
+      salt,
+      ACCOUNT_AUTH_KDF.operations,
+      ACCOUNT_AUTH_KDF.memoryBytes,
+      sodium.crypto_pwhash_ALG_ARGON2ID13,
+    );
+    return toBase64Url(credential);
+  } finally {
+    wipe(salt, passwordBytes, credential);
+  }
+}
+
 async function setupVault(password: string): Promise<VaultSetupResult> {
   validatePassword(password);
   await preflightArgon2id();
@@ -673,6 +731,102 @@ async function unlockVault(
     throw error;
   } finally {
     wipe(salt, wrapperId, passwordMaterial, rootMaterial);
+  }
+}
+
+async function rewrapVaultPassword(
+  currentPassword: string,
+  newPassword: string,
+  material: VaultUnlockMaterial,
+): Promise<VaultPasswordRewrapResult> {
+  assertUnlockMaterial(material);
+  validatePassword(newPassword);
+  lockVault();
+
+  const currentSalt = fromBase64Url(material.kdf.salt);
+  const currentWrapperId = fromBase64Url(material.passwordWrapper.id);
+  const nextSalt = randomBytes(16);
+  const nextWrapperId = randomBytes(16);
+  let currentPasswordMaterial: Uint8Array | null = null;
+  let nextPasswordMaterial: Uint8Array | null = null;
+  let rootMaterial: Uint8Array | null = null;
+
+  try {
+    currentPasswordMaterial = derivePasswordMaterial(
+      currentPassword,
+      currentSalt,
+    );
+    const currentPasswordBase = await importHkdf(currentPasswordMaterial);
+    rootMaterial = await unwrapRootMaterial(
+      fromBase64Url(material.passwordWrapper.ciphertext),
+      currentPasswordBase,
+      "password-root",
+      currentWrapperId,
+      currentWrapperId,
+      material.vaultVersion,
+    );
+    await installUnlockedMaterial(rootMaterial, material);
+
+    nextPasswordMaterial = derivePasswordMaterial(newPassword, nextSalt);
+    const nextPasswordBase = await importHkdf(nextPasswordMaterial);
+    const unsignedPayload: Omit<VaultPasswordRewrapPayload, "proofSignature"> =
+      {
+        expectedVaultVersion: material.vaultVersion,
+        kdf: {
+          algorithm: ARGON2ID_PROFILE.algorithm,
+          salt: toBase64Url(nextSalt),
+          operations: ARGON2ID_PROFILE.operations,
+          memoryBytes: ARGON2ID_PROFILE.memoryBytes,
+          outputBytes: ARGON2ID_PROFILE.outputBytes,
+        },
+        passwordWrapper: {
+          id: toBase64Url(nextWrapperId),
+          ciphertext: toBase64Url(
+            await wrapRootMaterial(
+              rootMaterial,
+              nextPasswordBase,
+              "password-root",
+              nextWrapperId,
+              nextWrapperId,
+              material.vaultVersion,
+            ),
+          ),
+        },
+      };
+    const proof = encodeVaultPasswordRewrapProof(unsignedPayload);
+    const proofSignature = sodium.crypto_sign_detached(
+      proof,
+      requireIdentity().ed25519PrivateKey,
+    );
+    try {
+      return {
+        payload: {
+          ...unsignedPayload,
+          proofSignature: toBase64Url(proofSignature),
+        },
+      };
+    } finally {
+      wipe(proof, proofSignature);
+    }
+  } catch (error) {
+    lockVault();
+    if (error instanceof DOMException && error.name === "OperationError") {
+      throw vaultError(
+        "INVALID_PASSWORD",
+        "The current password is incorrect.",
+      );
+    }
+    throw error;
+  } finally {
+    wipe(
+      currentSalt,
+      currentWrapperId,
+      nextSalt,
+      nextWrapperId,
+      currentPasswordMaterial,
+      nextPasswordMaterial,
+      rootMaterial,
+    );
   }
 }
 
@@ -3802,8 +3956,13 @@ function isCryptoLifecycleError(error: unknown): boolean {
 }
 
 function validatePassword(password: string): void {
-  if (password.length < 12 || password.length > 1024) {
-    throw new Error("Use a vault password between 12 and 1024 characters.");
+  const passwordBytes = utf8(password);
+  try {
+    if (passwordBytes.length < 8 || passwordBytes.length > 1024) {
+      throw new Error("Use a password between 8 and 1024 bytes.");
+    }
+  } finally {
+    wipe(passwordBytes);
   }
 }
 

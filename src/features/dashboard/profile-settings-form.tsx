@@ -48,7 +48,11 @@ import {
 import { Separator } from "@/components/ui/separator";
 import { Switch } from "@/components/ui/switch";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import { getAccountAuthInfo } from "@/features/auth/auth-api";
 import { AccentColorPreference } from "@/features/dashboard/accent-color-preference";
+import { randomBytes, toBase64Url } from "@/features/vault/protocol";
+import { getUnlockMaterial } from "@/features/vault/vault-api";
+import { VaultCryptoClient } from "@/features/vault/vault-client";
 import { VaultMigrationControl } from "@/features/vault/vault-migration-control";
 import {
   normalizeVaultAutoLockMinutes,
@@ -493,7 +497,10 @@ function ProfileSettingsFormView({
               Changing it signs this account out on every device.
             </p>
           </div>
-          <ChangePasswordDialog csrfToken={csrfToken} />
+          <ChangePasswordDialog
+            csrfToken={csrfToken}
+            currentUser={currentUser}
+          />
         </div>
       </SettingsSection>
 
@@ -513,7 +520,7 @@ function ProfileSettingsFormView({
       {currentUser.e2eeMode === "migrate" ? (
         <>
           <SettingsSection
-            title="Encrypted vault"
+            title="Encrypted files"
             description="Convert existing content"
           >
             <VaultMigrationControl csrfToken={csrfToken} />
@@ -522,14 +529,18 @@ function ProfileSettingsFormView({
         </>
       ) : null}
 
-      <SettingsSection title="Security" description="Vault and upload behavior">
+      <SettingsSection
+        title="Security"
+        description="Encrypted-file access and uploads"
+      >
         <div className="space-y-6">
           <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
             <div className="min-w-0">
-              <Label id={vaultAutoLockId}>Lock encrypted vault</Label>
+              <Label id={vaultAutoLockId}>Automatic lock</Label>
               <p className="mt-1 text-xs leading-5 text-muted-foreground">
-                Require the vault password again after a period without
-                activity.
+                Require your{" "}
+                {currentUser.onePasswordEnabled ? "account" : "vault"} password
+                again to access encrypted files after inactivity.
               </p>
             </div>
             <Select
@@ -609,7 +620,13 @@ function ProfileSettingsFormView({
   );
 }
 
-function ChangePasswordDialog({ csrfToken }: { csrfToken: string }) {
+function ChangePasswordDialog({
+  csrfToken,
+  currentUser,
+}: {
+  csrfToken: string;
+  currentUser: CurrentUser;
+}) {
   const currentPasswordId = useId();
   const newPasswordId = useId();
   const confirmPasswordId = useId();
@@ -645,8 +662,12 @@ function ChangePasswordDialog({ csrfToken }: { csrfToken: string }) {
       setChangeError("The new passwords do not match.");
       return;
     }
-    if (newPasswordBytes < 12 || newPasswordBytes > 72) {
-      setChangeError("Use a new password between 12 and 72 bytes.");
+    if (newPasswordBytes < 12 || newPasswordBytes > 128) {
+      setChangeError("Use a new password between 12 and 128 bytes.");
+      return;
+    }
+    if (currentPassword === newPassword) {
+      setChangeError("Choose a password different from the current one.");
       return;
     }
 
@@ -655,14 +676,45 @@ function ChangePasswordDialog({ csrfToken }: { csrfToken: string }) {
     setChangeError(null);
 
     try {
-      const response = await fetch("/api/profile/password", {
+      let path = "/api/profile/password";
+      let body: object = { currentPassword, newPassword };
+      if (currentUser.onePasswordEnabled) {
+        const client = new VaultCryptoClient();
+        try {
+          const authInfo = await getAccountAuthInfo(currentUser.username);
+          const currentCredential = await client.deriveAuthCredential(
+            currentUser.username,
+            currentPassword,
+            authInfo.salt,
+          );
+          const newSalt = toBase64Url(randomBytes(16));
+          const newCredential = await client.deriveAuthCredential(
+            currentUser.username,
+            newPassword,
+            newSalt,
+          );
+          const vault = currentUser.vaultConfigured
+            ? await client.rewrapPassword(
+                currentPassword,
+                newPassword,
+                await getUnlockMaterial(),
+              )
+            : undefined;
+          path = "/api/vault/change-one-password";
+          body = { currentCredential, newCredential, newSalt, vault };
+        } finally {
+          await client.close();
+        }
+      }
+
+      const response = await fetch(path, {
         method: "POST",
         credentials: "same-origin",
         headers: {
           "Content-Type": "application/json",
           "X-CSRF-Token": csrfToken,
         },
-        body: JSON.stringify({ currentPassword, newPassword }),
+        body: JSON.stringify(body),
       });
 
       if (!response.ok) {
@@ -721,7 +773,7 @@ function ChangePasswordDialog({ csrfToken }: { csrfToken: string }) {
                 autoComplete="new-password"
                 required
                 minLength={12}
-                maxLength={72}
+                maxLength={128}
                 aria-describedby={`${newPasswordId}-hint`}
                 disabled={isChanging}
               />
@@ -729,7 +781,7 @@ function ChangePasswordDialog({ csrfToken }: { csrfToken: string }) {
                 id={`${newPasswordId}-hint`}
                 className="text-xs text-muted-foreground"
               >
-                Use 12 to 72 bytes and do not reuse the current password.
+                Use 12 to 128 bytes and do not reuse the current password.
               </p>
             </div>
             <div className="grid gap-2">
@@ -741,7 +793,7 @@ function ChangePasswordDialog({ csrfToken }: { csrfToken: string }) {
                 autoComplete="new-password"
                 required
                 minLength={12}
-                maxLength={72}
+                maxLength={128}
                 disabled={isChanging}
               />
             </div>
@@ -784,6 +836,9 @@ function getPasswordChangeError(status: number, detail: string) {
   }
   if (detail.includes("12 to 72 bytes")) {
     return "Use a new password between 12 and 72 bytes.";
+  }
+  if (detail.includes("vault password material")) {
+    return "The encrypted vault changed. Sign in again and retry.";
   }
   if (status === 409) {
     return "The password changed in another session. Sign in again and retry.";

@@ -1,4 +1,4 @@
-import { ArrowRight, CircleAlert, Clock3, KeyRound } from "lucide-react";
+import { CircleAlert, Clock3, KeyRound } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
 
@@ -8,8 +8,7 @@ import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import { OnePasswordInvitationForm } from "@/features/auth/one-password-invitation-form";
 import { getInvitationState } from "@/lib/api";
 
 export const metadata: Metadata = {
@@ -89,36 +88,10 @@ export default async function InvitationPage({
                 </Alert>
               ) : null}
 
-              <form
-                action={`/api/invitations/${encodeURIComponent(token)}/accept`}
-                method="post"
-                className="space-y-5"
-              >
-                <div className="space-y-2">
-                  <Label htmlFor="password">Password</Label>
-                  <div className="relative">
-                    <KeyRound
-                      className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-                      aria-hidden="true"
-                    />
-                    <Input
-                      id="password"
-                      name="password"
-                      type="password"
-                      autoComplete="new-password"
-                      minLength={8}
-                      maxLength={128}
-                      required
-                      autoFocus
-                      className="h-11 pl-10"
-                    />
-                  </div>
-                </div>
-                <Button type="submit" size="lg" className="w-full">
-                  Create account
-                  <ArrowRight className="size-4" aria-hidden="true" />
-                </Button>
-              </form>
+              <OnePasswordInvitationForm
+                token={token}
+                username={invitationState.invitation.username}
+              />
             </CardContent>
           </Card>
         ) : (

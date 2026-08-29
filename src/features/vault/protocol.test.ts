@@ -15,6 +15,7 @@ import {
   chunkNonce,
   ciphertextLeafHash,
   encodeChunkAad,
+  encodeVaultPasswordRewrapProof,
   encodeVaultRewrapProof,
   encryptedLength,
   equalBytes,
@@ -380,6 +381,37 @@ describe("vault protocol", () => {
       expectedVaultVersion: 8,
     });
     expect(equalBytes(first, changed)).toBe(false);
+  });
+
+  it("binds account-password wrapper changes into a deterministic proof", () => {
+    const payload = {
+      expectedVaultVersion: 7,
+      kdf: {
+        algorithm: "argon2id13",
+        salt: toBase64Url(new Uint8Array(16).fill(1)),
+        operations: 3,
+        memoryBytes: 268_435_456,
+        outputBytes: 32,
+      },
+      passwordWrapper: {
+        id: toBase64Url(new Uint8Array(16).fill(2)),
+        ciphertext: toBase64Url(new Uint8Array(48).fill(3)),
+      },
+    };
+    const first = encodeVaultPasswordRewrapProof(payload);
+    expect(encodeVaultPasswordRewrapProof(payload)).toEqual(first);
+    expect(
+      equalBytes(
+        first,
+        encodeVaultPasswordRewrapProof({
+          ...payload,
+          passwordWrapper: {
+            ...payload.passwordWrapper,
+            id: toBase64Url(new Uint8Array(16).fill(4)),
+          },
+        }),
+      ),
+    ).toBe(false);
   });
 });
 

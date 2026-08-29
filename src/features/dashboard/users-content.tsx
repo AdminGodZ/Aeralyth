@@ -19,7 +19,14 @@ import {
   Users,
 } from "lucide-react";
 import Link from "next/link";
-import { useId, useState, useSyncExternalStore } from "react";
+import {
+  type FormEvent,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import {
@@ -72,6 +79,8 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { randomBytes, toBase64Url } from "@/features/vault/protocol";
+import { VaultCryptoClient } from "@/features/vault/vault-client";
 import type {
   AdminUser,
   AdminUsersState,
@@ -473,10 +482,82 @@ function InvitationsTable({
 function CreateUserDialog({ csrfToken }: { csrfToken: string }) {
   const usernameId = useId();
   const passwordId = useId();
+  const passwordConfirmationId = useId();
   const roleId = useId();
+  const clientRef = useRef<VaultCryptoClient | null>(null);
+  const [open, setOpen] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      void clientRef.current?.close();
+      clientRef.current = null;
+    };
+  }, []);
+
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy) return;
+    const data = new FormData(event.currentTarget);
+    const username = String(data.get("username") ?? "").trim();
+    const password = String(data.get("password") ?? "");
+    const confirmation = String(data.get("password_confirmation") ?? "");
+    const role = String(data.get("role") ?? "user");
+    const passwordBytes = new TextEncoder().encode(password).byteLength;
+    if (password !== confirmation) {
+      setError("The passwords do not match.");
+      return;
+    }
+    if (passwordBytes < 12 || passwordBytes > 128) {
+      setError("Use a temporary password between 12 and 128 bytes.");
+      return;
+    }
+    setBusy(true);
+    setError(null);
+    try {
+      if (!clientRef.current) clientRef.current = new VaultCryptoClient();
+      const client = clientRef.current;
+      const salt = toBase64Url(randomBytes(16));
+      const credential = await client.deriveAuthCredential(
+        username,
+        password,
+        salt,
+      );
+      const response = await fetch("/api/admin/users/one-password", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrfToken,
+        },
+        body: JSON.stringify({ username, credential, salt, role }),
+      });
+      if (!response.ok) {
+        const detail = await response.text();
+        throw new Error(detail || "The account could not be created.");
+      }
+      window.location.assign("/users?user=created");
+    } catch (failure) {
+      setError(
+        failure instanceof Error
+          ? failure.message
+          : "The account could not be created.",
+      );
+      setBusy(false);
+    }
+  }
 
   return (
-    <Dialog>
+    <Dialog
+      open={open}
+      onOpenChange={(nextOpen) => {
+        if (!busy) {
+          setOpen(nextOpen);
+          if (!nextOpen) setError(null);
+        }
+      }}
+    >
       <DialogTrigger asChild>
         <Button type="button" variant="outline">
           <UserPlus className="size-4" aria-hidden="true" />
@@ -484,8 +565,7 @@ function CreateUserDialog({ csrfToken }: { csrfToken: string }) {
         </Button>
       </DialogTrigger>
       <DialogContent>
-        <form action="/api/admin/users" method="post" className="contents">
-          <input type="hidden" name="csrf_token" value={csrfToken} />
+        <form className="contents" onSubmit={submit}>
           <DialogHeader>
             <DialogTitle>Create account</DialogTitle>
             <DialogDescription>
@@ -514,7 +594,24 @@ function CreateUserDialog({ csrfToken }: { csrfToken: string }) {
                 type="password"
                 autoComplete="new-password"
                 required
-                minLength={8}
+                minLength={12}
+                maxLength={128}
+                disabled={busy}
+              />
+            </div>
+            <div className="grid gap-2">
+              <Label htmlFor={passwordConfirmationId}>
+                Confirm temporary password
+              </Label>
+              <Input
+                id={passwordConfirmationId}
+                name="password_confirmation"
+                type="password"
+                autoComplete="new-password"
+                required
+                minLength={12}
+                maxLength={128}
+                disabled={busy}
               />
             </div>
             <div className="grid gap-2">
@@ -529,16 +626,21 @@ function CreateUserDialog({ csrfToken }: { csrfToken: string }) {
                 </SelectContent>
               </Select>
             </div>
+            {error ? (
+              <p className="text-sm text-destructive" role="alert">
+                {error}
+              </p>
+            ) : null}
           </div>
           <DialogFooter>
             <DialogClose asChild>
-              <Button type="button" variant="outline">
+              <Button type="button" variant="outline" disabled={busy}>
                 Cancel
               </Button>
             </DialogClose>
-            <Button type="submit">
+            <Button type="submit" disabled={busy}>
               <UserPlus className="size-4" aria-hidden="true" />
-              Create account
+              {busy ? "Creating..." : "Create account"}
             </Button>
           </DialogFooter>
         </form>
