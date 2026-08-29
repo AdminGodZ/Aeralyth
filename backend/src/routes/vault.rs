@@ -1658,7 +1658,7 @@ pub async fn change_one_password(
         .db
         .query_opt(
             "
-                SELECT users.password_hash, COALESCE(users.auth_version, 0) AS auth_version,
+                SELECT users.password_hash, COALESCE(users.auth_version, 0::smallint) AS auth_version,
                        EXISTS (
                          SELECT 1 FROM user_vaults WHERE user_id = users.id
                        ) AS vault_configured

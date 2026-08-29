@@ -92,7 +92,7 @@ pub async fn info(
         .db
         .query_opt(
             "
-                SELECT COALESCE(auth_version, 0) AS auth_version, auth_kdf_salt
+                SELECT COALESCE(auth_version, 0::smallint) AS auth_version, auth_kdf_salt
                 FROM users
                 WHERE lower(username) = lower($1) AND status = 'active'
                 LIMIT 1
@@ -279,7 +279,7 @@ pub async fn enroll_one_password(
     let row = state
         .db
         .query_opt(
-            "SELECT password_hash, COALESCE(auth_version, 0) AS auth_version FROM users WHERE id = $1 AND status = 'active' LIMIT 1",
+            "SELECT password_hash, COALESCE(auth_version, 0::smallint) AS auth_version FROM users WHERE id = $1 AND status = 'active' LIMIT 1",
             &[&principal.id],
         )
         .await

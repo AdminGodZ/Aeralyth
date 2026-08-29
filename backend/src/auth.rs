@@ -106,7 +106,7 @@ pub async fn authenticate_password(
                   id,
                   username,
                   password_hash,
-                  COALESCE(auth_version, 0) AS auth_version,
+                  COALESCE(auth_version, 0::smallint) AS auth_version,
                   role,
                   status,
                   display_name,
@@ -194,7 +194,7 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
                       COALESCE(users.accent_color, '#3088f0') AS accent_color,
                       COALESCE(users.folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
                       COALESCE(users.vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes,
-                      COALESCE(users.auth_version, 0) AS auth_version,
+                      COALESCE(users.auth_version, 0::smallint) AS auth_version,
                       users.profile_image_bytes IS NOT NULL AS has_profile_image,
                       COALESCE(users.profile_image_updated_at, users.updated_at)
                         AS profile_image_version_at,
@@ -225,7 +225,7 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
                   COALESCE(users.accent_color, '#3088f0') AS accent_color,
                   COALESCE(users.folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
                   COALESCE(users.vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes,
-                  COALESCE(users.auth_version, 0) AS auth_version,
+                  COALESCE(users.auth_version, 0::smallint) AS auth_version,
                   users.profile_image_bytes IS NOT NULL AS has_profile_image,
                   COALESCE(users.profile_image_updated_at, users.updated_at)
                     AS profile_image_version_at,
@@ -424,6 +424,26 @@ mod tests {
             assert!(
                 !SESSION_PRINCIPAL_QUERY.contains(forbidden),
                 "principal query unexpectedly selects {forbidden}"
+            );
+        }
+    }
+
+    #[test]
+    fn auth_version_fallbacks_keep_the_smallint_wire_type() {
+        let untyped_fallback = ["auth_version, ", "0)"].concat();
+        let smallint_fallback = ["auth_version, ", "0::smallint)"].concat();
+        for (name, source) in [
+            ("authentication", include_str!("auth.rs")),
+            ("auth routes", include_str!("routes/auth.rs")),
+            ("vault routes", include_str!("routes/vault.rs")),
+        ] {
+            assert!(
+                !source.contains(&untyped_fallback),
+                "{name} has an untyped auth-version fallback"
+            );
+            assert!(
+                source.contains(&smallint_fallback),
+                "{name} does not preserve the SMALLINT result type"
             );
         }
     }
