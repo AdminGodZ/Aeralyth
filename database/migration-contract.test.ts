@@ -52,6 +52,27 @@ describe("one-password authentication migration", () => {
       "auth_version = 1 AND octet_length(auth_kdf_salt) = 16",
     );
   });
+
+  it.each([
+    "fresh_navigation_hot_paths.sh",
+    "fresh_collection_hierarchy_performance.sh",
+    "fresh_bounded_tree_operations.sh",
+  ])(
+    "updates the schema used by current backend query contracts in %s",
+    (fileName) => {
+      const fixture = readFileSync(
+        resolve(import.meta.dirname, "tests", fileName),
+        "utf8",
+      );
+      const migration = fixture.indexOf("024_one_password_auth.sql");
+      const queryContracts = fixture.indexOf(
+        "database_query_contracts_prepare",
+      );
+
+      expect(migration).toBeGreaterThan(-1);
+      expect(queryContracts).toBeGreaterThan(migration);
+    },
+  );
 });
 
 describe("share-token rolling-deployment compatibility", () => {
