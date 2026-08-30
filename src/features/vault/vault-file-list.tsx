@@ -36,7 +36,11 @@ import type { FolderArchiveProgress } from "@/features/files/folder-archive";
 import { FolderDownloadProgressPanel } from "@/features/files/folder-download-progress-panel";
 import { ShareLinkDialog } from "@/features/sharing/share-link-dialog";
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
-import { getVaultDownloadPlan } from "@/features/vault/vault-api";
+import {
+  type FileTreeMutation,
+  getVaultDownloadPlan,
+  mutateFileTree,
+} from "@/features/vault/vault-api";
 import { removeEncryptedSelections } from "@/features/vault/vault-list-selection";
 import {
   markVaultFolderClick,
@@ -146,6 +150,8 @@ function useVaultFileListController({
   const vaultStateRef = useRef(vault.state);
   const [favoriteError, setFavoriteError] = useState<string | null>(null);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const mutationBusyRef = useRef(false);
+  const [mutationBusy, setMutationBusy] = useState(false);
   const favoritePendingIdsRef = useRef<Set<string> | null>(null);
   if (favoritePendingIdsRef.current === null) {
     favoritePendingIdsRef.current = new Set();
@@ -500,8 +506,14 @@ function useVaultFileListController({
     }
   }
 
-  async function moveToTrash(targets: ResolvedEntry[]): Promise<void> {
-    if (targets.length === 0) return;
+  async function mutateEntries(
+    targets: ResolvedEntry[],
+    mutation: FileTreeMutation,
+  ): Promise<void> {
+    if (targets.length === 0 || mutationBusyRef.current) return;
+
+    mutationBusyRef.current = true;
+    setMutationBusy(true);
 
     const targetIds = new Set(targets.map((entry) => entry.id));
     setDeleteError(null);
@@ -514,12 +526,21 @@ function useVaultFileListController({
       return next;
     });
 
-    const results = await Promise.allSettled(
-      targets.map((entry) => requestTrash(entry.id, csrfToken)),
-    );
-    const failed = targets.filter(
-      (_entry, index) => results[index]?.status === "rejected",
-    );
+    const failed: ResolvedEntry[] = [];
+    try {
+      for (const entry of targets) {
+        try {
+          // Recursive metadata mutations share one backend lane per user.
+          // react-doctor-disable-next-line react-doctor/async-await-in-loop
+          await mutateFileTree(entry.id, mutation, csrfToken);
+        } catch {
+          failed.push(entry);
+        }
+      }
+    } finally {
+      mutationBusyRef.current = false;
+      setMutationBusy(false);
+    }
     if (failed.length === 0) return;
 
     const failedIds = new Set(failed.map((entry) => entry.id));
@@ -530,10 +551,16 @@ function useVaultFileListController({
       ),
     ]);
     setSelectedIds((current) => new Set([...current, ...failedIds]));
+    const action =
+      mutation === "trash"
+        ? "moved to Trash"
+        : mutation === "restore"
+          ? "restored"
+          : "permanently deleted";
     setDeleteError(
       failed.length === 1
-        ? "The item could not be deleted."
-        : `${failed.length} items could not be deleted.`,
+        ? `The item could not be ${action}.`
+        : `${failed.length} items could not be ${action}.`,
     );
   }
 
@@ -655,12 +682,18 @@ function useVaultFileListController({
       downloadError,
       downloadId,
       favoriteError,
+      mutationBusy,
       onAllDisplayedSelectedChange: setAllDisplayedSelected,
       onClearSelection: () => setSelectedIds(new Set()),
       onDownload: download,
       onEntrySelectedChange: setEntrySelected,
       onFavorite: toggleFavorite,
-      onMoveToTrash: moveToTrash,
+      onDeletePermanently: (targets: ResolvedEntry[]) =>
+        mutateEntries(targets, "delete"),
+      onMoveToTrash: (targets: ResolvedEntry[]) =>
+        mutateEntries(targets, "trash"),
+      onRestore: (targets: ResolvedEntry[]) =>
+        mutateEntries(targets, "restore"),
       onShareEntryChange: setShareEntry,
       onSortChange: changeSort,
       sectionKey,
@@ -679,10 +712,13 @@ function VaultFileListView({
   onSortChange,
   onShareEntryChange,
   onMoveToTrash,
+  onRestore,
+  onDeletePermanently,
   onClearSelection,
   vault,
   downloadError,
   favoriteError,
+  mutationBusy,
   deleteError,
   displayed,
   sectionKey,
@@ -701,10 +737,13 @@ function VaultFileListView({
   onSortChange(field: FileSort): void;
   onShareEntryChange(entry: ResolvedEntry | null): void;
   onMoveToTrash(entries: ResolvedEntry[]): Promise<void>;
+  onRestore(entries: ResolvedEntry[]): Promise<void>;
+  onDeletePermanently(entries: ResolvedEntry[]): Promise<void>;
   onClearSelection(): void;
   vault: ReturnType<typeof useVault>;
   downloadError: string | null;
   favoriteError: string | null;
+  mutationBusy: boolean;
   deleteError: string | null;
   displayed: ResolvedEntry[];
   sectionKey: string;
@@ -814,11 +853,36 @@ function VaultFileListView({
                 {sharingActionLabel(singleSelectedEntry)}
               </Button>
             ) : null}
-            {!isTrash && !isShared ? (
+            {isTrash ? (
+              <>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={mutationBusy}
+                  onClick={() => void onRestore(selectedEntries)}
+                >
+                  <RotateCcw className="size-4" aria-hidden="true" />
+                  Restore
+                </Button>
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  disabled={mutationBusy}
+                  className="text-destructive hover:text-destructive"
+                  onClick={() => void onDeletePermanently(selectedEntries)}
+                >
+                  <Trash2 className="size-4" aria-hidden="true" />
+                  Delete permanently
+                </Button>
+              </>
+            ) : !isShared ? (
               <Button
                 type="button"
                 variant="secondary"
                 size="sm"
+                disabled={mutationBusy}
                 className="text-destructive hover:text-destructive"
                 onClick={() => void onMoveToTrash(selectedEntries)}
               >
@@ -886,6 +950,7 @@ function VaultFileListView({
             csrfToken={csrfToken}
             downloadBusy={downloadId !== null}
             downloading={downloadId === entry.id}
+            mutationBusy={mutationBusy}
             selected={entry.resolved && selectedIds.has(entry.id)}
             onDownload={() => void onDownload(entry)}
             onDelete={() => void onMoveToTrash([entry])}
@@ -972,6 +1037,7 @@ function VaultFileRow({
   csrfToken,
   downloadBusy,
   downloading,
+  mutationBusy,
   selected,
   onDownload,
   onDelete,
@@ -985,6 +1051,7 @@ function VaultFileRow({
   csrfToken: string;
   downloadBusy: boolean;
   downloading: boolean;
+  mutationBusy: boolean;
   selected: boolean;
   onDownload(): void;
   onDelete(): void;
@@ -1109,6 +1176,7 @@ function VaultFileRow({
                 <ActionMenuForm
                   action={`/api/files/${entry.id}/restore`}
                   csrfToken={csrfToken}
+                  disabled={mutationBusy}
                 >
                   <RotateCcw className="size-4" aria-hidden="true" />
                   Restore
@@ -1118,6 +1186,7 @@ function VaultFileRow({
                   action={`/api/files/${entry.id}/delete`}
                   csrfToken={csrfToken}
                   destructive
+                  disabled={mutationBusy}
                 >
                   <Trash2 className="size-4" aria-hidden="true" />
                   Delete
@@ -1181,7 +1250,11 @@ function VaultFileRow({
                       {entry.favorite ? "Unstar" : "Star"}
                     </DropdownMenuItem>
                     <DropdownMenuSeparator />
-                    <DropdownMenuItem variant="destructive" onSelect={onDelete}>
+                    <DropdownMenuItem
+                      variant="destructive"
+                      disabled={mutationBusy}
+                      onSelect={onDelete}
+                    >
                       <Trash2 className="size-4" aria-hidden="true" />
                       Delete
                     </DropdownMenuItem>
@@ -1216,11 +1289,13 @@ function ActionMenuForm({
   csrfToken,
   children,
   destructive,
+  disabled,
 }: {
   action: string;
   csrfToken: string;
   children: React.ReactNode;
   destructive?: boolean;
+  disabled?: boolean;
 }) {
   return (
     <form action={action} method="post" className="contents">
@@ -1229,7 +1304,7 @@ function ActionMenuForm({
         asChild
         variant={destructive ? "destructive" : "default"}
       >
-        <button type="submit" className="w-full">
+        <button type="submit" className="w-full" disabled={disabled}>
           {children}
         </button>
       </DropdownMenuItem>
@@ -1292,39 +1367,6 @@ async function requestFavorite(
   }
 
   return payload.favorite;
-}
-
-async function requestTrash(entryId: string, csrfToken: string): Promise<void> {
-  const response = await fetch(
-    `/api/files/${encodeURIComponent(entryId)}/trash`,
-    {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: new URLSearchParams({ csrf_token: csrfToken }),
-    },
-  );
-
-  if (!response.ok) {
-    throw new Error("The item could not be deleted.");
-  }
-
-  const contentType = response.headers.get("content-type") ?? "";
-  if (contentType.includes("application/json")) return;
-
-  if (response.redirected) {
-    const responseUrl = new URL(response.url);
-    if (
-      responseUrl.pathname === "/files" &&
-      responseUrl.searchParams.get("file") === "trashed"
-    ) {
-      return;
-    }
-  }
-
-  throw new Error("The delete endpoint returned an invalid response.");
 }
 
 function fileKind(name: string, mimeType: string | null): string {

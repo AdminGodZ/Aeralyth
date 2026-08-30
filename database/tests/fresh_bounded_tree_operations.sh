@@ -100,7 +100,8 @@ for migration in \
   021_compact_account_state.sql \
   022_large_share_commitments.sql \
   023_maintenance_coordination.sql \
-  024_one_password_auth.sql
+  024_one_password_auth.sql \
+  025_trash_retention.sql
 do
   docker compose exec -T postgres psql \
     -q \

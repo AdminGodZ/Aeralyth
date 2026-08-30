@@ -27,28 +27,29 @@ const PROFILE_UPDATE_QUERY: &str = "
         accent_color = COALESCE($4, accent_color),
         folder_zip_prompt_enabled = COALESCE($5, folder_zip_prompt_enabled),
         vault_auto_lock_minutes = COALESCE($6, vault_auto_lock_minutes),
-        profile_image_bytes = CASE $7::smallint
-          WHEN 1 THEN NULL
-          WHEN 2 THEN $8
-          ELSE profile_image_bytes
-        END,
-        profile_image_mime_type = CASE $7::smallint
+        trash_retention_days = COALESCE($7, trash_retention_days),
+        profile_image_bytes = CASE $8::smallint
           WHEN 1 THEN NULL
           WHEN 2 THEN $9
-          ELSE profile_image_mime_type
+          ELSE profile_image_bytes
         END,
-        profile_image_size_bytes = CASE $7::smallint
+        profile_image_mime_type = CASE $8::smallint
           WHEN 1 THEN NULL
           WHEN 2 THEN $10
+          ELSE profile_image_mime_type
+        END,
+        profile_image_size_bytes = CASE $8::smallint
+          WHEN 1 THEN NULL
+          WHEN 2 THEN $11
           ELSE profile_image_size_bytes
         END,
-        profile_image_updated_at = CASE $7::smallint
+        profile_image_updated_at = CASE $8::smallint
           WHEN 1 THEN NULL
           WHEN 2 THEN now()
           ELSE profile_image_updated_at
         END,
         updated_at = now()
-    WHERE id = $11
+    WHERE id = $12
     RETURNING id
 ";
 
@@ -85,6 +86,7 @@ struct ProfileUpdate {
     accent_color: Option<String>,
     folder_zip_prompt_enabled: Option<bool>,
     vault_auto_lock_minutes: Option<i32>,
+    trash_retention_days: Option<i32>,
     remove_profile_image: bool,
     profile_image: Option<ProfileImage>,
 }
@@ -167,6 +169,10 @@ pub async fn update(
             "vault_auto_lock_minutes" => {
                 let value = read_limited_text_field(&mut field, 8).await?;
                 update.vault_auto_lock_minutes = normalize_vault_auto_lock_minutes(&value);
+            }
+            "trash_retention_days" => {
+                let value = read_limited_text_field(&mut field, 8).await?;
+                update.trash_retention_days = normalize_trash_retention_days(&value);
             }
             "remove_profile_image" => {
                 let value = read_limited_text_field(&mut field, 32).await?;
@@ -257,6 +263,7 @@ pub async fn update(
                 &accent_color,
                 &update.folder_zip_prompt_enabled,
                 &update.vault_auto_lock_minutes,
+                &update.trash_retention_days,
                 &profile_image_action,
                 &profile_image_bytes,
                 &profile_image_mime_type,
@@ -501,6 +508,13 @@ fn normalize_vault_auto_lock_minutes(value: &str) -> Option<i32> {
     }
 }
 
+fn normalize_trash_retention_days(value: &str) -> Option<i32> {
+    match value.trim().parse::<i32>().ok()? {
+        days @ (1 | 7 | 30 | 60) => Some(days),
+        _ => None,
+    }
+}
+
 fn is_allowed_profile_image_mime_type(mime_type: &str) -> bool {
     matches!(
         mime_type,
@@ -516,7 +530,10 @@ fn redirect(location: &'static str) -> HttpResponse {
 
 #[cfg(test)]
 mod tests {
-    use super::{PASSWORD_CHANGE_QUERY, PROFILE_UPDATE_QUERY, validate_new_password};
+    use super::{
+        PASSWORD_CHANGE_QUERY, PROFILE_UPDATE_QUERY, normalize_trash_retention_days,
+        validate_new_password,
+    };
 
     #[test]
     fn password_change_requires_a_bcrypt_safe_strong_length() {
@@ -524,6 +541,19 @@ mod tests {
         assert!(validate_new_password(&"a".repeat(12)).is_ok());
         assert!(validate_new_password(&"a".repeat(72)).is_ok());
         assert!(validate_new_password(&"a".repeat(73)).is_err());
+    }
+
+    #[test]
+    fn trash_retention_accepts_only_supported_day_counts() {
+        for days in [1, 7, 30, 60] {
+            assert_eq!(
+                normalize_trash_retention_days(&days.to_string()),
+                Some(days)
+            );
+        }
+        for days in [0, 2, 365] {
+            assert_eq!(normalize_trash_retention_days(&days.to_string()), None);
+        }
     }
 
     #[test]
@@ -603,6 +633,7 @@ mod tests {
         assert!(normalized.contains("returning id"));
         assert!(normalized.contains("case when $2 then $1 else display_name end"));
         assert!(normalized.contains("coalesce($3, theme_preference)"));
+        assert!(normalized.contains("coalesce($7, trash_retention_days)"));
     }
 
     #[actix_web::test]
@@ -664,6 +695,7 @@ mod tests {
         let accent: Option<&str> = None;
         let zip_prompt = Some(false);
         let auto_lock = Some(30_i32);
+        let trash_retention = Some(7_i32);
         let image_bytes: Option<Vec<u8>> = None;
         let image_mime: Option<String> = None;
         let image_size: Option<i64> = None;
@@ -677,6 +709,7 @@ mod tests {
                     &accent,
                     &zip_prompt,
                     &auto_lock,
+                    &trash_retention,
                     &0_i16,
                     &image_bytes,
                     &image_mime,
@@ -690,7 +723,8 @@ mod tests {
         let stored = transaction
             .query_one(
                 "SELECT display_name, theme_preference, accent_color,
-                        folder_zip_prompt_enabled, vault_auto_lock_minutes
+                        folder_zip_prompt_enabled, vault_auto_lock_minutes,
+                        trash_retention_days
                  FROM users WHERE id = 'usr_perf_profile'",
                 &[],
             )
@@ -704,6 +738,7 @@ mod tests {
         assert_eq!(stored.get::<_, String>("accent_color"), "#112233");
         assert!(!stored.get::<_, bool>("folder_zip_prompt_enabled"));
         assert_eq!(stored.get::<_, i32>("vault_auto_lock_minutes"), 30);
+        assert_eq!(stored.get::<_, i32>("trash_retention_days"), 7);
         transaction
             .rollback()
             .await

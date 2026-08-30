@@ -30,6 +30,12 @@ describe("profile settings form security", () => {
     expect(source).toContain("mergeSettingsUpdates(");
     expect(source).toContain("queueSettingsUpdate({ displayName: value })");
     expect(source).toContain("queueSettingsUpdate({ themePreference: value })");
+    expect(source).toContain(
+      "queueSettingsUpdate({ trashRetentionDays: normalizedValue })",
+    );
+    expect(source).toContain(
+      'formData.append("trash_retention_days", String(update.trashRetentionDays))',
+    );
     expect(source).toContain("onColorChange={onAccentColorChange}");
     expect(source).not.toContain("Save changes");
   });

@@ -46,6 +46,8 @@ const USER_DELETION_BATCH_SIZE: i64 = 500;
 const USER_DELETION_BATCHES_PER_TICK: usize = 32;
 const SESSION_EXPIRY_BATCH_SIZE: i64 = 1_000;
 const SESSION_EXPIRY_BATCHES_PER_TICK: usize = 4;
+const TRASH_EXPIRY_BATCH_SIZE: i64 = 500;
+const TRASH_EXPIRY_BATCHES_PER_TICK: usize = 32;
 const MAINTENANCE_RESTART_DELAY: Duration = Duration::from_secs(1);
 const S3_REQUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
 const S3_REQUEST_READ_TIMEOUT: Duration = Duration::from_secs(10);
@@ -147,6 +149,54 @@ const COMPLETE_MIGRATION_CLEANUP_QUERY: &str = "
     UPDATE vault_migrations
     SET state = 'complete', updated_at = now()
     WHERE legacy_object_key = $1 AND state = 'cleanup_queued'
+";
+const EXPIRE_TRASH_BATCH_QUERY: &str = "
+    WITH targets AS MATERIALIZED (
+      SELECT files.id, files.owner_id, files.storage_name, files.entry_type,
+             uploads.upload_mode, uploads.write_expires_at
+      FROM files
+      INNER JOIN users ON users.id = files.owner_id
+      LEFT JOIN file_uploads AS uploads
+        ON uploads.file_id = files.id AND uploads.status = 'completed'
+      WHERE files.state = 'trashed'
+        AND files.trashed_at IS NOT NULL
+        AND files.trashed_at
+              + (users.trash_retention_days * interval '1 day') <= now()
+        AND NOT EXISTS (
+          SELECT 1 FROM files AS children WHERE children.parent_id = files.id
+        )
+      ORDER BY files.trashed_at, files.id
+      LIMIT $1
+      FOR UPDATE OF files SKIP LOCKED
+    ), queued AS (
+      INSERT INTO storage_deletion_jobs (object_key, available_at)
+      SELECT
+        CASE
+          WHEN position('/' IN targets.storage_name) = 0
+            THEN targets.owner_id || '/' || targets.storage_name
+          ELSE targets.storage_name
+        END,
+        CASE
+          WHEN targets.upload_mode = 'single'
+            THEN GREATEST(COALESCE(targets.write_expires_at, now()), now())
+          ELSE now()
+        END
+      FROM targets
+      WHERE targets.entry_type = 'file'
+      ON CONFLICT (object_key) DO UPDATE SET
+        available_at = GREATEST(
+          storage_deletion_jobs.available_at,
+          EXCLUDED.available_at
+        )
+      RETURNING object_key
+    ), deleted AS (
+      DELETE FROM files AS entries
+      USING targets
+      WHERE entries.id = targets.id
+        AND (SELECT count(*) FROM queued) >= 0
+      RETURNING entries.id
+    )
+    SELECT count(*)::bigint AS deleted FROM deleted
 ";
 const RECONCILE_USER_COUNTERS_PAGE_QUERY: &str = "
     WITH owners AS MATERIALIZED (
@@ -350,6 +400,7 @@ enum MaintenanceWorker {
     VaultUploadExpiry,
     InvitationExpiry,
     SessionExpiry,
+    TrashExpiry,
     MultipartReconciliation,
     CounterReconciliation,
 }
@@ -560,6 +611,12 @@ const MAINTENANCE_SCHEDULES: &[MaintenanceSchedule] = &[
     MaintenanceSchedule {
         worker: MaintenanceWorker::SessionExpiry,
         initial_delay: Duration::from_secs(5),
+        interval: Duration::from_secs(10),
+        maximum_interval: Duration::from_secs(5 * 60),
+    },
+    MaintenanceSchedule {
+        worker: MaintenanceWorker::TrashExpiry,
+        initial_delay: Duration::from_secs(6),
         interval: Duration::from_secs(10),
         maximum_interval: Duration::from_secs(5 * 60),
     },
@@ -1890,6 +1947,7 @@ impl MaintenanceWorker {
             Self::VaultUploadExpiry => "encrypted upload expiry",
             Self::InvitationExpiry => "invitation expiry",
             Self::SessionExpiry => "session expiry",
+            Self::TrashExpiry => "trash expiry",
             Self::MultipartReconciliation => "multipart reconciliation",
             Self::CounterReconciliation => "counter reconciliation",
         }
@@ -1908,6 +1966,7 @@ impl MaintenanceWorker {
             Self::VaultUploadExpiry => matches!(table, "vault_uploads"),
             Self::InvitationExpiry => matches!(table, "invitations"),
             Self::SessionExpiry => matches!(table, "sessions"),
+            Self::TrashExpiry => matches!(table, "files" | "users"),
             Self::MultipartReconciliation | Self::CounterReconciliation => false,
         }
     }
@@ -1936,6 +1995,9 @@ impl MaintenanceWorker {
                 "SELECT MIN(expires_at) AS next_at FROM invitations WHERE status = 'pending'"
             }
             Self::SessionExpiry => "SELECT MIN(expires_at) AS next_at FROM sessions",
+            Self::TrashExpiry => {
+                "SELECT MIN(files.trashed_at + (users.trash_retention_days * interval '1 day')) AS next_at FROM files INNER JOIN users ON users.id = files.owner_id WHERE files.state = 'trashed' AND files.trashed_at IS NOT NULL"
+            }
             Self::MultipartReconciliation | Self::CounterReconciliation => return Ok(None),
         };
         let row = db.query_one(due_expression, &[]).await?;
@@ -1964,6 +2026,7 @@ impl MaintenanceWorker {
             }
             Self::InvitationExpiry => expire_invitations_batch(db).await,
             Self::SessionExpiry => expire_sessions_batches(db).await,
+            Self::TrashExpiry => expire_trash_batches(db).await,
             Self::MultipartReconciliation => {
                 reconcile_orphaned_multipart_uploads(db, storage, metrics, storage_concurrency)
                     .await
@@ -1971,6 +2034,21 @@ impl MaintenanceWorker {
             Self::CounterReconciliation => reconcile_counters(db, metrics).await,
         }
     }
+}
+
+async fn expire_trash_batches(db: &Database) -> Result<bool, Box<dyn StdError + Send + Sync>> {
+    let mut did_work = false;
+    for _ in 0..TRASH_EXPIRY_BATCHES_PER_TICK {
+        let row = db
+            .query_one(EXPIRE_TRASH_BATCH_QUERY, &[&TRASH_EXPIRY_BATCH_SIZE])
+            .await?;
+        let deleted: i64 = row.get("deleted");
+        if deleted == 0 {
+            break;
+        }
+        did_work = true;
+    }
+    Ok(did_work)
 }
 
 async fn process_user_deletion_jobs(
@@ -3519,6 +3597,27 @@ mod tests {
         assert!(vault_schema.contains("vault_migrations_cleanup_object_idx"));
     }
 
+    #[test]
+    fn trash_expiry_is_bounded_leaf_first_and_queues_object_deletion() {
+        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("users.trash_retention_days"));
+        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("files.state = 'trashed'"));
+        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("NOT EXISTS"));
+        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("children.parent_id = files.id"));
+        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("LIMIT $1"));
+        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("FOR UPDATE OF files SKIP LOCKED"));
+        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("INSERT INTO storage_deletion_jobs"));
+        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("targets.write_expires_at"));
+        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("DELETE FROM files"));
+
+        let worker = MAINTENANCE_SCHEDULES
+            .iter()
+            .find(|schedule| schedule.worker == MaintenanceWorker::TrashExpiry)
+            .expect("trash expiry schedule should exist");
+        assert_eq!(worker.interval, Duration::from_secs(10));
+        assert!(MaintenanceWorker::TrashExpiry.accepts_notification("files"));
+        assert!(MaintenanceWorker::TrashExpiry.accepts_notification("users"));
+    }
+
     #[actix_web::test]
     async fn maintenance_bulkheads_keep_running_when_one_task_stalls() {
         let workers = MAINTENANCE_SCHEDULES
@@ -3815,6 +3914,87 @@ mod tests {
             .prepare(CLAIM_STORAGE_DELETION_JOBS_QUERY)
             .await
             .expect("the storage deletion claim query should prepare");
+        client
+            .prepare(EXPIRE_TRASH_BATCH_QUERY)
+            .await
+            .expect("the trash expiry query should prepare");
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires a PostgreSQL test database"]
+    async fn trash_expiry_executes_leaf_first_and_queues_file_objects() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (client, connection) = tokio_postgres::connect(&database_url, NoTls)
+            .await
+            .expect("postgres should be available");
+        tokio::spawn(async move {
+            connection
+                .await
+                .expect("postgres connection should remain healthy");
+        });
+        client
+            .batch_execute(
+                "CREATE TEMP TABLE users (
+                   id TEXT PRIMARY KEY,
+                   trash_retention_days INTEGER NOT NULL
+                 );
+                 CREATE TEMP TABLE files (
+                   id TEXT PRIMARY KEY,
+                   owner_id TEXT NOT NULL,
+                   storage_name TEXT NOT NULL,
+                   entry_type TEXT NOT NULL,
+                   state TEXT NOT NULL,
+                   trashed_at TIMESTAMPTZ,
+                   parent_id TEXT REFERENCES files(id) ON DELETE CASCADE
+                 );
+                 CREATE TEMP TABLE file_uploads (
+                   file_id TEXT,
+                   status TEXT,
+                   upload_mode TEXT,
+                   write_expires_at TIMESTAMPTZ
+                 );
+                 CREATE TEMP TABLE storage_deletion_jobs (
+                   object_key TEXT PRIMARY KEY,
+                   available_at TIMESTAMPTZ NOT NULL
+                 );
+                 INSERT INTO users (id, trash_retention_days)
+                 VALUES ('usr_trash_expiry', 1);
+                 INSERT INTO files (
+                   id, owner_id, storage_name, entry_type, state, trashed_at, parent_id
+                 ) VALUES
+                   ('folder', 'usr_trash_expiry', 'folder', 'folder', 'trashed',
+                    now() - interval '2 days', NULL),
+                   ('file', 'usr_trash_expiry', 'object-key', 'file', 'trashed',
+                    now() - interval '2 days', 'folder');",
+            )
+            .await
+            .expect("trash expiry fixtures should initialize");
+
+        let first: i64 = client
+            .query_one(EXPIRE_TRASH_BATCH_QUERY, &[&TRASH_EXPIRY_BATCH_SIZE])
+            .await
+            .expect("expired leaf should delete")
+            .get("deleted");
+        let second: i64 = client
+            .query_one(EXPIRE_TRASH_BATCH_QUERY, &[&TRASH_EXPIRY_BATCH_SIZE])
+            .await
+            .expect("newly empty parent should delete")
+            .get("deleted");
+        let remaining: i64 = client
+            .query_one("SELECT count(*)::bigint AS count FROM files", &[])
+            .await
+            .expect("remaining files should count")
+            .get("count");
+        let queued: i64 = client
+            .query_one(
+                "SELECT count(*)::bigint AS count FROM storage_deletion_jobs",
+                &[],
+            )
+            .await
+            .expect("queued objects should count")
+            .get("count");
+
+        assert_eq!((first, second, remaining, queued), (1, 1, 0, 1));
     }
 
     #[actix_web::test]

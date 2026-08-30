@@ -148,6 +148,13 @@ export type VaultEpochRotationPlan = {
   previousRecordHash: string;
 };
 
+export type FileTreeMutation = "trash" | "restore" | "delete";
+
+type FileTreeMutationResponse = {
+  status: "trashed" | "restored" | "deleted";
+  fileId: string;
+};
+
 export class VaultApiError extends Error {
   constructor(
     message: string,
@@ -242,6 +249,49 @@ function waitForVaultCapacity(
 
 export function getVaultStatus(signal?: AbortSignal): Promise<VaultStatus> {
   return vaultRequest("/api/vault", { signal });
+}
+
+export function mutateFileTree(
+  entryId: string,
+  mutation: FileTreeMutation,
+  csrfToken: string,
+  signal?: AbortSignal,
+): Promise<FileTreeMutationResponse> {
+  return runVaultRecursiveOperation(async () => {
+    const response = await fetch(
+      `/api/files/${encodeURIComponent(entryId)}/${mutation}`,
+      {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: new URLSearchParams({ csrf_token: csrfToken }),
+        signal,
+      },
+    );
+    if (!response.ok) {
+      throw new VaultApiError(
+        (await response.text()) || "The file operation failed.",
+        response.status,
+        response.headers.get("retry-after"),
+      );
+    }
+
+    const payload =
+      (await response.json()) as Partial<FileTreeMutationResponse>;
+    const expectedStatus =
+      mutation === "trash"
+        ? "trashed"
+        : mutation === "restore"
+          ? "restored"
+          : "deleted";
+    if (payload.fileId !== entryId || payload.status !== expectedStatus) {
+      throw new Error("The file operation returned an invalid response.");
+    }
+    return payload as FileTreeMutationResponse;
+  }, signal);
 }
 
 export function getUnlockMaterial(

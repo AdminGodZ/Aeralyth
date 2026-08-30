@@ -19,6 +19,7 @@ describe.each([
     "020-share-link-legacy-writer-guard",
   ],
   ["024_one_password_auth.sql", "024-one-password-auth"],
+  ["025_trash_retention.sql", "025-trash-retention"],
 ])("%s", (fileName, version) => {
   const migration = readFileSync(resolve(migrationRoot, fileName), "utf8");
 
@@ -73,6 +74,22 @@ describe("one-password authentication migration", () => {
       expect(queryContracts).toBeGreaterThan(migration);
     },
   );
+});
+
+describe("trash retention migration", () => {
+  it("limits the preference and wakes bounded background cleanup", () => {
+    const migration = readFileSync(
+      resolve(migrationRoot, "025_trash_retention.sql"),
+      "utf8",
+    );
+
+    expect(migration).toContain(
+      "trash_retention_days INTEGER NOT NULL DEFAULT 30",
+    );
+    expect(migration).toContain("trash_retention_days IN (1, 7, 30, 60)");
+    expect(migration).toContain("files_trashed_retention_idx");
+    expect(migration).toContain("notify_aeralyth_maintenance()");
+  });
 });
 
 describe("share-token rolling-deployment compatibility", () => {

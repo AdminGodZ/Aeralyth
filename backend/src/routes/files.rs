@@ -2256,6 +2256,7 @@ pub async fn restore(
     let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
     let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    let wants_json = request_wants_json(&request);
     let file_id = path.into_inner();
     let mut client = state
         .db
@@ -2293,6 +2294,13 @@ pub async fn restore(
         .commit()
         .await
         .map_err(error::ErrorInternalServerError)?;
+
+    if wants_json {
+        return Ok(HttpResponse::Ok().json(FileMutationResponse {
+            status: "restored",
+            file_id,
+        }));
+    }
 
     Ok(redirect("/trash?file=restored"))
 }
@@ -2346,6 +2354,7 @@ pub async fn delete(
     let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
     let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    let wants_json = request_wants_json(&request);
     let file_id = path.into_inner();
     let mut client = state
         .db
@@ -2393,6 +2402,13 @@ pub async fn delete(
         .commit()
         .await
         .map_err(error::ErrorInternalServerError)?;
+
+    if wants_json {
+        return Ok(HttpResponse::Ok().json(FileMutationResponse {
+            status: "deleted",
+            file_id,
+        }));
+    }
 
     Ok(redirect("/trash?file=deleted"))
 }
@@ -3730,6 +3746,33 @@ mod tests {
                 admission < recursive_query,
                 "{start} must acquire recursive capacity first"
             );
+        }
+    }
+
+    #[test]
+    fn file_lifecycle_mutations_return_json_for_client_side_batches() {
+        let source = include_str!("files.rs");
+        for (start, end, status) in [
+            ("pub async fn trash(", "pub async fn restore(", "trashed"),
+            (
+                "pub async fn restore(",
+                "pub async fn toggle_favorite(",
+                "restored",
+            ),
+            (
+                "pub async fn delete(",
+                "async fn validate_folder(",
+                "deleted",
+            ),
+        ] {
+            let handler = source
+                .split_once(start)
+                .and_then(|(_, tail)| tail.split_once(end))
+                .map(|(handler, _)| handler)
+                .expect("file lifecycle handler should remain inspectable");
+            assert!(handler.contains("request_wants_json(&request)"));
+            assert!(handler.contains("FileMutationResponse"));
+            assert!(handler.contains(&format!("status: \"{status}\"")));
         }
     }
 
