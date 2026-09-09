@@ -92,7 +92,11 @@ describe("Railway production deployment", () => {
     expect(encode).toBeTruthy();
     expect(encode).toContain("minimum_length 1024");
     expect(encode).toContain("application/json*");
-    expect(encode).toContain("text/*");
+    expect(encode).toContain("text/html*");
+    expect(encode).toContain("text/css*");
+    expect(encode).toContain("text/plain*");
+    expect(encode).not.toContain("text/*");
+    expect(encode).not.toContain("text/event-stream");
     expect(encode).not.toContain("application/octet-stream");
     expect(encode).not.toContain("application/vnd.aeralyth");
   });

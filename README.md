@@ -50,6 +50,8 @@ cargo build --manifest-path backend/Cargo.toml
 The encrypted vault design and rollout procedure are documented in
 [docs/e2ee.md](docs/e2ee.md). Object-storage configuration is documented in
 [docs/storage.md](docs/storage.md).
+Cross-device updates, replay, and rollout requirements are documented in
+[docs/realtime.md](docs/realtime.md).
 
 ## Local Database
 

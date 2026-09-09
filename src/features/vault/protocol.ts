@@ -1,4 +1,4 @@
-import { sha256 as nobleSha256 } from "@noble/hashes/sha2";
+import { sha256 as nobleSha256 } from "@noble/hashes/sha2.js";
 import {
   detectedCryptoConcurrency,
   mapWithConcurrency,

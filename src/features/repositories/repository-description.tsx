@@ -3,8 +3,8 @@
 import { Check, LoaderCircle, Pencil, X } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useState } from "react";
-
 import { Button } from "@/components/ui/button";
+import { useRealtimeActivity } from "@/features/realtime/realtime-provider";
 
 const MAX_DESCRIPTION_LENGTH = 350;
 
@@ -22,6 +22,14 @@ export function RepositoryDescription({
   const [draft, setDraft] = useState(description);
   const [editing, setEditing] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [serverDescription, setServerDescription] =
+    useState(initialDescription);
+  if (serverDescription !== initialDescription) {
+    setServerDescription(initialDescription);
+    setDescription(initialDescription ?? "");
+    if (!editing) setDraft(initialDescription ?? "");
+  }
+  useRealtimeActivity(editing || busy);
   const [error, setError] = useState<string | null>(null);
 
   async function saveDescription() {

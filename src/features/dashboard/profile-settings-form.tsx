@@ -22,7 +22,6 @@ import {
   useRef,
   useState,
 } from "react";
-
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -50,6 +49,7 @@ import { Switch } from "@/components/ui/switch";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { getAccountAuthInfo } from "@/features/auth/auth-api";
 import { AccentColorPreference } from "@/features/dashboard/accent-color-preference";
+import { useRealtimeActivity } from "@/features/realtime/realtime-provider";
 import { randomBytes, toBase64Url } from "@/features/vault/protocol";
 import { getUnlockMaterial } from "@/features/vault/vault-api";
 import { VaultCryptoClient } from "@/features/vault/vault-client";
@@ -99,6 +99,7 @@ export function ProfileSettingsForm({
   const [previewUrl, setPreviewUrl] = useState<string | null>(null);
   const [removeImage, setRemoveImage] = useState(false);
   const [saveState, setSaveState] = useState<SaveState>("idle");
+  useRealtimeActivity(saveState === "saving");
   const [saveError, setSaveError] = useState<string | null>(null);
   // These values are editable form drafts, not rendered copies of immutable props.
   // react-doctor-disable-next-line react-doctor/no-derived-useState
@@ -119,6 +120,36 @@ export function ProfileSettingsForm({
   const [trashRetentionDays, setTrashRetentionDays] = useState(() =>
     normalizeTrashRetentionDays(currentUser.trashRetentionDays),
   );
+  const previousServerUser = useRef(currentUser);
+  useEffect(() => {
+    const previous = previousServerUser.current;
+    previousServerUser.current = currentUser;
+    // Merge remote preferences only into untouched drafts. A server refresh
+    // arriving while the user types must not replace their unsaved input.
+    setDisplayNameDraft((draft) =>
+      draft === (previous.displayName ?? "")
+        ? (currentUser.displayName ?? "")
+        : draft,
+    );
+    setThemePreference((draft) =>
+      draft === previous.themePreference ? currentUser.themePreference : draft,
+    );
+    setFolderZipPromptEnabled((draft) =>
+      draft === (previous.folderZipPromptEnabled !== false)
+        ? currentUser.folderZipPromptEnabled !== false
+        : draft,
+    );
+    setVaultAutoLockMinutes((draft) =>
+      draft === normalizeVaultAutoLockMinutes(previous.vaultAutoLockMinutes)
+        ? normalizeVaultAutoLockMinutes(currentUser.vaultAutoLockMinutes)
+        : draft,
+    );
+    setTrashRetentionDays((draft) =>
+      draft === normalizeTrashRetentionDays(previous.trashRetentionDays)
+        ? normalizeTrashRetentionDays(currentUser.trashRetentionDays)
+        : draft,
+    );
+  }, [currentUser]);
   const profileName = displayNameDraft.trim() || currentUser.username;
   const avatarUrl = removeImage
     ? null

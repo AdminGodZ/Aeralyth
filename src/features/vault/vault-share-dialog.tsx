@@ -10,7 +10,6 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
-
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,6 +22,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { useRealtimeActivity } from "@/features/realtime/realtime-provider";
 import {
   fromBase64Url,
   randomPrefixedId,
@@ -75,6 +75,7 @@ function useVaultShareDialogController({
     completedNodes: number;
     totalNodes: number;
   } | null>(null);
+  useRealtimeActivity(busy);
   const [complete, setComplete] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [ownedShares, setOwnedShares] = useState<VaultOwnedShare[]>([]);

@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import type { RealtimeChange } from "@/features/realtime/changes";
 import { isVaultNodeId } from "@/features/vault/node-id";
 import type {
   VaultDownloadPlan,
@@ -80,6 +81,7 @@ type VaultContextValue = {
   client: VaultCryptoClient | null;
   requestUnlock(): void;
   lock(): Promise<void>;
+  invalidateMetadata(changes: RealtimeChange[], reset: boolean): void;
   openNode(
     nodeId: string,
     plan?: VaultDownloadPlan,
@@ -156,6 +158,9 @@ function useVaultProviderController({
   const [activeAutoLockMinutes, setActiveAutoLockMinutes] = useState(() =>
     normalizeVaultAutoLockMinutes(autoLockMinutes),
   );
+  useEffect(() => {
+    setActiveAutoLockMinutes(normalizeVaultAutoLockMinutes(autoLockMinutes));
+  }, [autoLockMinutes]);
   const [dialogOpen, setDialogOpen] = useState(enabled && !vaultConfigured);
   const [mode, setMode] = useState<VaultDialogMode>(
     vaultConfigured ? "unlock" : "setup",
@@ -463,6 +468,24 @@ function useVaultProviderController({
     [metadataResolver, state],
   );
 
+  const invalidateMetadata = useCallback(
+    (changes: RealtimeChange[], reset: boolean) => {
+      if (
+        reset ||
+        changes.some(({ scope }) => scope === "shared" || scope === "vault")
+      ) {
+        metadataResolver.clear();
+        nodeOpenFlightsRef.current.clear();
+        return;
+      }
+      for (const change of changes) {
+        if (change.scope === "files")
+          metadataResolver.invalidateFolders(change.folderIds);
+      }
+    },
+    [metadataResolver],
+  );
+
   async function submit(): Promise<void> {
     setError(null);
     setBusy(true);
@@ -548,6 +571,7 @@ function useVaultProviderController({
       client: clientRef.current,
       requestUnlock,
       lock,
+      invalidateMetadata,
       openNode,
       resolveMetadata,
       prefetchFolderMetadata,
@@ -556,6 +580,7 @@ function useVaultProviderController({
     [
       enabled,
       lock,
+      invalidateMetadata,
       openNode,
       prefetchFolderMetadata,
       rememberFolderMetadata,

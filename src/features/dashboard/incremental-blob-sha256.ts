@@ -1,4 +1,4 @@
-import { sha256 } from "@noble/hashes/sha2";
+import { sha256 } from "@noble/hashes/sha2.js";
 
 export const BLOB_HASH_CHUNK_BYTES = 1024 * 1024;
 

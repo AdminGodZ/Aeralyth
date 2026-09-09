@@ -84,6 +84,7 @@ jobs:
       - name: Verify every migration replays safely
         run: npm run db:migrate
       - run: npm run db:test:migration-replay
+      - run: npm run db:test:realtime
       - run: npm run db:test:folder-manifest
       - run: npm run db:test:folder-manifest-fresh
       - run: npm run db:test:upload-completion-fresh
@@ -121,6 +122,7 @@ jobs:
       - run: npm run perf:http
       - run: npm run perf:auth-before-body
       - run: npm run perf:auth-database-isolation
+      - run: npm run test:realtime:live
       - name: Show API log on failure
         if: failure()
         run: |

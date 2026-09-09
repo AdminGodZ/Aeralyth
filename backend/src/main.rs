@@ -5,6 +5,7 @@ mod db;
 mod e2ee;
 mod observability;
 mod passwords;
+mod realtime;
 mod routes;
 mod state;
 mod storage;
@@ -115,6 +116,8 @@ async fn main() -> std::io::Result<()> {
     let storage_maintenance_concurrency = config.storage_maintenance_concurrency;
     let maintenance_database_url = config.database_url.clone();
     let maintenance_storage = storage.clone();
+    let realtime_hub = realtime::RealtimeHub::new();
+    let realtime_database_url = config.database_url.clone();
     let state = web::Data::new(AppState {
         config: config.clone(),
         db,
@@ -124,6 +127,7 @@ async fn main() -> std::io::Result<()> {
         passwords,
         login_rate_limiter,
         storage,
+        realtime: realtime_hub.clone(),
         upload_control_limiter: MutationLimiter::new(
             config.upload_control_concurrency,
             config.upload_control_per_user,
@@ -253,6 +257,11 @@ async fn main() -> std::io::Result<()> {
     .bind(&bind_addr)?
     .run();
     let (maintenance_shutdown, maintenance_shutdown_receiver) = watch::channel(false);
+    let realtime = tokio::spawn(realtime::run(
+        realtime_hub,
+        realtime_database_url,
+        maintenance_shutdown_receiver.clone(),
+    ));
     let maintenance = tokio::spawn(storage::run_maintenance(
         maintenance_db,
         maintenance_storage,
@@ -263,6 +272,9 @@ async fn main() -> std::io::Result<()> {
     ));
     let result = server.await;
     let _ = maintenance_shutdown.send(true);
+    if let Err(error) = realtime.await {
+        tracing::error!(%error, "realtime runtime stopped unexpectedly");
+    }
     if let Err(error) = maintenance.await {
         tracing::error!(%error, "maintenance runtime stopped unexpectedly");
     }

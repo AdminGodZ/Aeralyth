@@ -34,6 +34,8 @@ import {
 import { Skeleton } from "@/components/ui/skeleton";
 import type { FolderArchiveProgress } from "@/features/files/folder-archive";
 import { FolderDownloadProgressPanel } from "@/features/files/folder-download-progress-panel";
+import { applyFileListOverlay } from "@/features/realtime/file-list-overlay";
+import { useRealtimeMutation } from "@/features/realtime/realtime-provider";
 import { ShareLinkDialog } from "@/features/sharing/share-link-dialog";
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
 import {
@@ -128,6 +130,9 @@ function useVaultFileListController({
   initialDirection,
 }: VaultFileListProps) {
   const vault = useVault();
+  const beginRealtimeMutation = useRealtimeMutation();
+  const optimisticRemoved = useRef(new Set<string>());
+  const optimisticFavorites = useRef(new Map<string, boolean>());
   const [localEntries, setLocalEntries] = useState(entries);
   const [resolved, setResolved] = useState<Record<string, ResolvedMetadata>>(
     {},
@@ -163,7 +168,14 @@ function useVaultFileListController({
   // localEntries is an optimistic overlay; server refreshes replace its base.
   // react-doctor-disable-next-line react-doctor/no-mirror-prop-effect
   useEffect(() => {
-    setLocalEntries(entries);
+    setLocalEntries(
+      applyFileListOverlay(
+        entries,
+        optimisticRemoved.current,
+        optimisticFavorites.current,
+        sectionKey === "favorites",
+      ),
+    );
     const availableIds = new Set(entries.map((entry) => entry.id));
     setSelectedIds((current) => {
       const next = new Set(
@@ -171,7 +183,7 @@ function useVaultFileListController({
       );
       return next.size === current.size ? current : next;
     });
-  }, [entries]);
+  }, [entries, sectionKey]);
 
   useEffect(
     () => () => {
@@ -463,6 +475,8 @@ function useVaultFileListController({
     if (favoritePendingIds.has(entry.id)) return;
 
     const nextFavorite = !entry.favorite;
+    const endRealtimeMutation = beginRealtimeMutation();
+    optimisticFavorites.current.set(entry.id, nextFavorite);
     const originalEntry: FileEntry = entry;
     setFavoriteError(null);
     favoritePendingIds.add(entry.id);
@@ -488,6 +502,7 @@ function useVaultFileListController({
             ),
       );
     } catch (failure) {
+      optimisticFavorites.current.delete(entry.id);
       setLocalEntries((current) => {
         if (current.some((candidate) => candidate.id === entry.id)) {
           return current.map((candidate) =>
@@ -503,6 +518,7 @@ function useVaultFileListController({
       );
     } finally {
       favoritePendingIds.delete(entry.id);
+      endRealtimeMutation();
     }
   }
 
@@ -513,6 +529,8 @@ function useVaultFileListController({
     if (targets.length === 0 || mutationBusyRef.current) return;
 
     mutationBusyRef.current = true;
+    const endRealtimeMutation = beginRealtimeMutation();
+    for (const entry of targets) optimisticRemoved.current.add(entry.id);
     setMutationBusy(true);
 
     const targetIds = new Set(targets.map((entry) => entry.id));
@@ -540,10 +558,12 @@ function useVaultFileListController({
     } finally {
       mutationBusyRef.current = false;
       setMutationBusy(false);
+      endRealtimeMutation();
     }
     if (failed.length === 0) return;
 
     const failedIds = new Set(failed.map((entry) => entry.id));
+    for (const entryId of failedIds) optimisticRemoved.current.delete(entryId);
     setLocalEntries((current) => [
       ...current,
       ...failed.filter(

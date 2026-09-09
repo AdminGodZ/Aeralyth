@@ -2,6 +2,7 @@ mod admin;
 mod auth;
 mod avatar;
 mod conditional;
+mod events;
 mod files;
 mod health;
 mod invitations;
@@ -25,6 +26,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
         .route("/metrics", web::get().to(metrics::metrics))
         .service(
             web::scope("/api")
+                .route("/events", web::get().to(events::events))
                 .route("/health", web::get().to(health::live))
                 .route("/health/live", web::get().to(health::live))
                 .route("/health/ready", web::get().to(health::ready))

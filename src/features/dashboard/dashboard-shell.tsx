@@ -25,6 +25,7 @@ import { ProfileSettingsForm } from "@/features/dashboard/profile-settings-form"
 import { UploadPanel } from "@/features/dashboard/upload-panel";
 import { UserPreferenceHydrator } from "@/features/dashboard/user-preference-hydrator";
 import { UsersContent as UsersDirectory } from "@/features/dashboard/users-content";
+import { RealtimeProvider } from "@/features/realtime/realtime-provider";
 import { RepositoryDetail } from "@/features/repositories/repository-detail";
 import { RepositoryOverview } from "@/features/repositories/repository-overview";
 import { VaultBreadcrumbs } from "@/features/vault/vault-breadcrumbs";
@@ -97,15 +98,17 @@ export function DashboardFrame({
         autoLockMinutes={currentUser.vaultAutoLockMinutes}
         onePasswordEnabled={currentUser.onePasswordEnabled}
       >
-        <DashboardSidebar
-          canViewSystemNavigation={currentUser.role === "admin"}
-          csrfToken={csrfToken}
-          initialCollapsed={initialSidebarCollapsed}
-        />
+        <RealtimeProvider key={currentUser.id}>
+          <DashboardSidebar
+            canViewSystemNavigation={currentUser.role === "admin"}
+            csrfToken={csrfToken}
+            initialCollapsed={initialSidebarCollapsed}
+          />
 
-        <section className="dashboard-main-panel flex min-w-0 flex-1 flex-col lg:mt-4 lg:min-h-[calc(100dvh-1rem)] lg:overflow-hidden lg:rounded-tl-3xl">
-          {children}
-        </section>
+          <section className="dashboard-main-panel flex min-w-0 flex-1 flex-col lg:mt-4 lg:min-h-[calc(100dvh-1rem)] lg:overflow-hidden lg:rounded-tl-3xl">
+            {children}
+          </section>
+        </RealtimeProvider>
       </VaultProvider>
     </main>
   );

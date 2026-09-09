@@ -37,6 +37,43 @@ describe("VaultMetadataResolver", () => {
     apiMocks.getVaultMetadataPlans.mockReset();
   });
 
+  it("invalidates only changed folder listings while preserving unrelated warm folders", async () => {
+    const resolver = new VaultMetadataResolver();
+    const { client } = fakeClient();
+    const context = {
+      csrfToken: "csrf",
+      client,
+      openNode: vi.fn(async () => undefined),
+    };
+    apiMocks.getVaultFolderMetadataReferences.mockResolvedValue([]);
+    await resolver.prefetchFolder("fil_first_folder", "files", context);
+    await resolver.prefetchFolder("fil_other_folder", "files", context);
+    resolver.invalidateFolders(["fil_first_folder"]);
+    await resolver.prefetchFolder("fil_first_folder", "files", context);
+    await resolver.prefetchFolder("fil_other_folder", "files", context);
+    expect(apiMocks.getVaultFolderMetadataReferences).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not cache an obsolete folder response that finishes after an SSE invalidation", async () => {
+    const resolver = new VaultMetadataResolver();
+    const { client } = fakeClient();
+    const context = {
+      csrfToken: "csrf",
+      client,
+      openNode: vi.fn(async () => undefined),
+    };
+    const pending = deferred<VaultMetadataReference[]>();
+    apiMocks.getVaultFolderMetadataReferences
+      .mockReturnValueOnce(pending.promise)
+      .mockResolvedValue([]);
+    const old = resolver.prefetchFolder("fil_changed_folder", "files", context);
+    resolver.invalidateFolders(["fil_changed_folder"]);
+    pending.resolve([]);
+    await old;
+    await resolver.prefetchFolder("fil_changed_folder", "files", context);
+    expect(apiMocks.getVaultFolderMetadataReferences).toHaveBeenCalledTimes(2);
+  });
+
   it("uses one network batch and one worker RPC for 100 cold rows, then stays memory-local", async () => {
     const references = Array.from({ length: 100 }, (_, index) =>
       reference(`fil_metadata_${index}`),

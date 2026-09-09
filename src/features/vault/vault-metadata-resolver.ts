@@ -70,9 +70,28 @@ export class VaultMetadataResolver {
   private cacheBytes = 0;
   private cacheClock = 0;
   private validationFlight = 0;
+  private folderRevision = 0;
+
+  invalidateFolders(folderIds: string[]): void {
+    this.folderRevision += 1;
+    this.folderFlights.clear();
+    if (folderIds.length === 0) {
+      this.folderReferences.clear();
+      this.prefetchedFolders.clear();
+      return;
+    }
+    for (const folderId of folderIds) {
+      for (const view of ["files", "shared"] as const) {
+        const key = folderReferenceKey(folderId || null, view);
+        this.folderReferences.delete(key);
+        this.prefetchedFolders.delete(key);
+      }
+    }
+  }
 
   clear(): void {
     this.session += 1;
+    this.folderRevision += 1;
     this.metadata.clear();
     this.plans.clear();
     for (const flight of this.planFlights.values()) flight.controller.abort();
@@ -407,6 +426,7 @@ export class VaultMetadataResolver {
     const existing = this.folderFlights.get(key);
     if (existing) return existing;
     const session = this.session;
+    const folderRevision = this.folderRevision;
     const operation = (async () => {
       try {
         const listingStartedAt = vaultPerformanceNow();
@@ -415,6 +435,7 @@ export class VaultMetadataResolver {
           cachedReferences ??
           (await getVaultFolderMetadataReferences(folderId, view));
         this.assertSession(session);
+        if (folderRevision !== this.folderRevision) return;
         recordVaultMetadataPerformance("folder_listing", listingStartedAt, {
           nodeCount: references.length,
           cacheHits: cachedReferences ? references.length : 0,
@@ -428,6 +449,7 @@ export class VaultMetadataResolver {
           });
         }
         this.assertSession(session);
+        if (folderRevision !== this.folderRevision) return;
         this.prefetchedFolders.add(key);
       } catch {
         // Prefetch is opportunistic; navigation performs the authoritative load.

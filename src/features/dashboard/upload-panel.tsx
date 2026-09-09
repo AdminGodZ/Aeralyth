@@ -14,7 +14,6 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
-
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -59,6 +58,7 @@ import {
   type PreparedFolderUploadSelection,
   prepareFolderUploadSelection,
 } from "@/features/dashboard/upload-selection-policy";
+import { useRealtimeActivity } from "@/features/realtime/realtime-provider";
 import { createAnimationFrameProgressCoalescer } from "@/features/uploads/progress-coalescer";
 import {
   runUploadWithRetry,
@@ -244,6 +244,12 @@ function useUploadPanelController({
         ? "compressing"
         : "idle";
   const isBusy = activity !== "idle";
+  useRealtimeActivity(
+    isBusy ||
+      pendingUploadExclusionReview !== null ||
+      pendingFolderUpload !== null ||
+      pendingReplacementUpload !== null,
+  );
   const requestAuthHeaders: Record<string, string> = shareToken
     ? { "X-Aeralyth-Share-Token": shareToken }
     : csrfToken

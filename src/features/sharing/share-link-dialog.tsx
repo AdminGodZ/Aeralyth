@@ -19,7 +19,6 @@ import {
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useRef, useState } from "react";
-
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Calendar } from "@/components/ui/calendar";
@@ -45,6 +44,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { useRealtimeActivity } from "@/features/realtime/realtime-provider";
 import { cn } from "@/lib/utils";
 
 type AccessScope = "public" | "account";
@@ -158,6 +158,7 @@ function useShareLinkDialogController({
   const [busy, setBusy] = useState(false);
   const [revokingId, setRevokingId] = useState<string | null>(null);
   const [rotatingId, setRotatingId] = useState<string | null>(null);
+  useRealtimeActivity(busy || revokingId !== null || rotatingId !== null);
   const [error, setError] = useState<string | null>(null);
 
   // The dialog is opened from client-only selection state, so this lookup

@@ -6,6 +6,10 @@ const nextConfig: NextConfig = {
   allowedDevOrigins: ["127.0.0.1"],
   devIndicators: false,
   output: "standalone",
+  experimental: {
+    // Run PostCSS without the socket-based child-process pool.
+    turbopackPluginRuntimeStrategy: "workerThreads",
+  },
   async headers() {
     return [
       {
