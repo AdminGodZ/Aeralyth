@@ -3,6 +3,7 @@
 import { CheckIcon, ChevronDownIcon, ChevronUpIcon } from "lucide-react";
 import { Select as SelectPrimitive } from "radix-ui";
 import type * as React from "react";
+import { useCspNonce } from "@/components/csp-nonce-provider";
 import { popupSurfaceClassName } from "@/components/ui/popup-surface";
 import { cn } from "@/lib/utils";
 
@@ -64,6 +65,7 @@ function SelectContent({
   align = "center",
   ...props
 }: React.ComponentProps<typeof SelectPrimitive.Content>) {
+  const nonce = useCspNonce();
   return (
     <SelectPrimitive.Portal>
       <SelectPrimitive.Content
@@ -82,6 +84,7 @@ function SelectContent({
       >
         <SelectScrollUpButton />
         <SelectPrimitive.Viewport
+          nonce={nonce}
           data-position={position}
           className={cn(
             "p-1.5 data-[position=popper]:h-(--radix-select-trigger-height) data-[position=popper]:w-full data-[position=popper]:min-w-(--radix-select-trigger-width)",

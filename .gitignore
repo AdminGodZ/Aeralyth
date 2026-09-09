@@ -19,6 +19,7 @@
 /out/
 /.worker-build/
 /public/workers/*.worker.js
+/public/workers/zip-module.*.wasm
 
 # production
 /build

@@ -1,6 +1,5 @@
-import { BlobReader, BlobWriter, ZipWriter } from "@zip.js/zip.js";
-
 import { archiveCompressionLevel } from "@/features/archive/compression-policy";
+import { BlobReader, BlobWriter, ZipWriter } from "@/features/archive/zip";
 import { BoundedBlobWriter } from "@/features/dashboard/bounded-blob-writer";
 import type {
   FolderZipWorkerRequest,

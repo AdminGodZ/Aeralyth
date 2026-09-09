@@ -43,6 +43,15 @@ const sql = (query) =>
   ).trim();
 const streams = [];
 const headers = (value) => ({ Cookie: `aeralyth_session=${value}` });
+async function sync(value, cursor, extraHeaders = {}) {
+  return fetch(
+    `${origin}/api/events/sync${cursor === undefined ? "" : `?cursor=${cursor}`}`,
+    {
+      headers: { ...headers(value), ...extraHeaders },
+      signal: AbortSignal.timeout(5000),
+    },
+  );
+}
 async function openStream(value, cursor, base = origin, extraHeaders = {}) {
   const controller = new AbortController();
   const response = await fetch(
@@ -105,6 +114,12 @@ try {
     ('${other}', '${other}', decode('${hash(otherToken)}', 'hex'), '${prefix}', now() + interval '1 hour');
     SELECT realtime_dispatch();`);
   assert.equal((await fetch(`${origin}/api/events`)).status, 401);
+  assert.equal((await fetch(`${origin}/api/events/sync`)).status, 401);
+  assert.equal((await sync(token, "invalid")).status, 400);
+  assert.equal(
+    (await sync(token, undefined, { "Sec-Fetch-Site": "cross-site" })).status,
+    403,
+  );
   assert.equal(
     (
       await fetch(`${origin}/api/events?cursor=invalid`, {
@@ -137,6 +152,32 @@ try {
     ]);
   }
   const deliveryMs = Math.round(performance.now() - start);
+
+  const catchUp = await sync(token, initial.id);
+  assert.match(catchUp.headers.get("cache-control"), /no-store/);
+  const caughtUp = await catchUp.json();
+  assert.equal(caughtUp.reset, false);
+  assert.equal(typeof caughtUp.cursor, "string");
+  assert.deepEqual(caughtUp.changes, [{ scope: "profile", folderIds: [] }]);
+  assert.deepEqual(
+    await (await sync(token, caughtUp.cursor)).json(),
+    {
+      cursor: caughtUp.cursor,
+      reset: false,
+      changes: [],
+    },
+    "unchanged catch-up must not invalidate the page",
+  );
+  assert.deepEqual(
+    (await (await sync(otherToken, initial.id)).json()).changes,
+    [],
+    "catch-up must not expose another account's changes",
+  );
+  assert.equal(
+    (await (await sync(token, "9223372036854775807")).json()).reset,
+    true,
+  );
+  assert.equal((await (await sync(token)).json()).reset, true);
 
   const isolated = await openStream(otherToken, initial.id);
   assert.equal(
@@ -197,6 +238,7 @@ try {
       .status,
     401,
   );
+  assert.equal((await sync(otherToken)).status, 401);
   console.log(
     JSON.stringify({
       passed: true,
@@ -211,6 +253,7 @@ try {
         "513-recipient burst",
         "session revocation",
         "unbuffered headers",
+        "catch-up replay, unchanged cursor, isolation, reset and revocation",
       ],
     }),
   );

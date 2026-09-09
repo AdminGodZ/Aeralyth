@@ -27,6 +27,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
         .service(
             web::scope("/api")
                 .route("/events", web::get().to(events::events))
+                .route("/events/sync", web::get().to(events::sync))
                 .route("/health", web::get().to(health::live))
                 .route("/health/live", web::get().to(health::live))
                 .route("/health/ready", web::get().to(health::ready))

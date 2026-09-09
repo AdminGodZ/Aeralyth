@@ -1,4 +1,4 @@
-import { Writer, ZipWriter } from "@zip.js/zip.js";
+import { Writer, ZipWriter } from "@/features/archive/zip";
 
 import { BoundedBlobWriter } from "@/features/dashboard/bounded-blob-writer";
 import type {

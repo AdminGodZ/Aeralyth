@@ -1,4 +1,4 @@
-import { Writer } from "@zip.js/zip.js";
+import { Writer } from "@/features/archive/zip";
 
 export const ZIP_ARCHIVE_SAFETY_LIMIT_ERROR =
   "The ZIP archive exceeds the browser safety limit.";

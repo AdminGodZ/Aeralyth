@@ -83,9 +83,11 @@ export class RefreshCoordinator {
   private changes: RealtimeChange[] = [];
   private reset = false;
   private mutations = 0;
+  private pendingSince: number | undefined;
   private visible = true;
   private refreshing = false;
   private timer: ReturnType<typeof setTimeout> | undefined;
+  private timerDeadline = 0;
   private disposed = false;
 
   constructor(
@@ -98,6 +100,7 @@ export class RefreshCoordinator {
   request(changes: RealtimeChange[], reset = false): void {
     this.changes = mergeChanges(this.changes, changes);
     this.reset ||= reset;
+    if (this.reset || this.changes.length) this.pendingSince ??= Date.now();
     this.schedule();
   }
 
@@ -109,8 +112,7 @@ export class RefreshCoordinator {
       ended = true;
       this.mutations -= 1;
       // A response already in flight when the mutation began may be stale.
-      this.reset = true;
-      this.schedule();
+      this.request([], true);
     };
   }
 
@@ -130,22 +132,38 @@ export class RefreshCoordinator {
   private schedule(): void {
     if (
       this.disposed ||
-      this.timer ||
       !this.visible ||
       this.refreshing ||
-      this.mutations ||
       (!this.reset && this.changes.length === 0)
     )
       return;
+    const delay = Math.max(
+      200,
+      this.mutations
+        ? 1_000 - (Date.now() - (this.pendingSince ?? Date.now()))
+        : 0,
+    );
+    const deadline = Date.now() + delay;
+    // Completion may bring a refresh forward, but must never postpone one.
+    if (this.timer && this.timerDeadline <= deadline) return;
+    clearTimeout(this.timer);
+    this.timerDeadline = deadline;
     this.timer = setTimeout(() => {
       this.timer = undefined;
-      if (!this.visible || this.refreshing || this.mutations || this.disposed)
+      if (!this.visible || this.refreshing || this.disposed) return;
+      if (
+        this.mutations &&
+        Date.now() - (this.pendingSince ?? Date.now()) < 1_000
+      ) {
+        this.schedule();
         return;
+      }
       const changes = this.changes;
       const reset = this.reset;
       this.changes = [];
       this.reset = false;
+      this.pendingSince = undefined;
       this.refresh(changes, reset);
-    }, 200);
+    }, delay);
   }
 }

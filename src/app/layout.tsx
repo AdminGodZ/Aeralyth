@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Figtree, Geist, Geist_Mono } from "next/font/google";
 import { headers } from "next/headers";
 import { AccentColorScript } from "@/components/accent-color-script";
+import { CspNonceProvider } from "@/components/csp-nonce-provider";
 import { ThemeProvider } from "@/components/theme-provider";
 import { cn } from "@/lib/utils";
 import "./globals.css";
@@ -53,15 +54,16 @@ export default async function RootLayout({
     >
       <body className="min-h-full flex flex-col">
         <AccentColorScript nonce={nonce} />
-        <ThemeProvider
-          attribute="class"
-          defaultTheme="system"
-          enableSystem
-          disableTransitionOnChange
-          nonce={nonce}
-        >
-          {children}
-        </ThemeProvider>
+        <CspNonceProvider nonce={nonce}>
+          <ThemeProvider
+            attribute="class"
+            defaultTheme="system"
+            enableSystem
+            disableTransitionOnChange
+          >
+            {children}
+          </ThemeProvider>
+        </CspNonceProvider>
       </body>
     </html>
   );

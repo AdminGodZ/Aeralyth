@@ -46,7 +46,7 @@ temporarily exceed them. The transactional outbox remains durable until drained.
 - Every replay or heartbeat query checks that the exact session token is still
   valid and its account is active. Revocation wakes that account; the server emits
   `session-expired`, and the browser locks its vault and returns to login.
-  Heartbeats provide a 15-second recheck when no wakeup arrives.
+  Heartbeats provide a five-second recheck when no wakeup arrives.
 - Connections are capped at 16 per account and 2,048 per API instance. These are
   per-instance limits. Each connection holds a coalesced wakeup revision, not an
   event queue. Idle sockets do not hold pooled database connections.
@@ -58,7 +58,9 @@ temporarily exceed them. The transactional outbox remains durable until drained.
 
 The refresh coordinator combines event bursts within 200 ms and permits one
 route refresh at a time. Local uploads, tree mutations, sharing operations, and
-profile saves defer refreshes until the operation finishes. Optimistic file
+profile saves defer pending refreshes for at most one second, so long operations
+or open editors cannot indefinitely hide remote changes. Mutation completion
+requests a final reconciliation, including after an older refresh finishes. Optimistic file
 deletions and favorites remain overlaid until the server confirms them. Existing
 selection and unsaved profile or repository-description drafts survive refreshes.
 
@@ -68,10 +70,30 @@ remain reusable after scoped folder invalidation, and old in-flight prefetches
 cannot restore an invalidated folder reference.
 
 Hidden or offline tabs close their stream. Returning to the page reconnects and
-requests a fresh snapshot. Native reconnects replay from the cursor. If the stream
-stops responding for 45 seconds it is recreated. While disconnected, a session
-probe runs at most every 30 seconds and refreshes only if the API responds
-successfully. This keeps the current page visible during an API outage.
+requests a fresh snapshot. A stream error immediately starts a short request to
+`GET /api/events/sync?cursor=...` and schedules a new EventSource after 250 ms.
+Repeated connection failures back off to five seconds. While the stream is
+unhealthy, single-flight catch-up requests repeat one second after completion,
+with a three-second request timeout. The endpoint uses the same account-scoped
+replay snapshot and exact session checks as SSE; it needs no streaming slot.
+Its cursor is a string to preserve PostgreSQL bigint precision. It returns only
+merged changes or a reset flag; an unchanged checkpoint does not refresh the UI.
+
+The first valid stream frame stops catch-up polling. Responses from canceled
+requests and superseded streams are ignored, and late frames cannot regress the
+cursor. A connection with no first frame is retried after two seconds. An open
+stream missing its five-second heartbeat is retried after eight seconds. Hidden
+or offline tabs cancel requests and timers; a 401 or `session-expired` event
+locks the vault and returns to login. Ordinary API failures retain the current
+page until recovery.
+
+These bounds cover application scheduling, not network or server response time.
+SSE error recovery can catch up immediately when ordinary requests still work;
+a silent transport stall takes up to eight seconds to detect. Five-second
+heartbeats increase idle replay queries from four to twelve per minute per tab.
+Healthy streams do not run catch-up polling. This does not change HTTP/3 or
+Cloudflare configuration; production QUIC failures still need separate transport
+verification if they persist after deployment.
 
 ## Deployment
 
@@ -128,3 +150,14 @@ stream delivery was 184 ms in that run; one browser deletion appeared about
 latency guarantee. Browser checks used legacy files in local E2EE-off mode;
 encrypted cache invalidation is covered by resolver tests, not a production
 encrypted-vault browser run.
+
+Recovery verification used a local production build with `/api/events` blocked
+in an isolated, visible browser while `/api/events/sync` remained available.
+A disposable upload appeared 516 ms after the API completed; moving the file
+to Trash removed it after 597 ms. Removing the block restored SSE and the
+catch-up request count stayed unchanged over a subsequent 12-second observation.
+The updated API smoke test measured 164 ms
+stream delivery and checked sync replay, unchanged checkpoints, reset, account
+isolation, and revoked sessions. Fake-timer tests cover overlapping refreshes,
+continuous mutation completions, stale responses, missing heartbeats, stream
+recovery, and cleanup. These measurements used local E2EE-off test data.

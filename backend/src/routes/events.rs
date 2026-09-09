@@ -11,7 +11,7 @@ use crate::db::Database;
 use crate::realtime::Subscription;
 use crate::state::{AppState, LoadShedError};
 
-const HEARTBEAT: Duration = Duration::from_secs(15);
+const HEARTBEAT: Duration = Duration::from_secs(5);
 const STREAM_LIFETIME: Duration = Duration::from_secs(25 * 60);
 const REPLAY_QUERY: &str = "
     SELECT state.head, state.floor,
@@ -45,6 +45,14 @@ struct Snapshot {
     changes: Vec<Change>,
 }
 
+#[derive(Serialize)]
+struct SyncResponse {
+    // PostgreSQL bigint cursors must not lose precision in JavaScript.
+    cursor: String,
+    reset: bool,
+    changes: Vec<Change>,
+}
+
 struct EventStream {
     db: Database,
     subscription: Subscription,
@@ -61,26 +69,9 @@ pub async fn events(
     request: HttpRequest,
     query: web::Query<EventQuery>,
 ) -> Result<HttpResponse> {
-    if request
-        .headers()
-        .get("sec-fetch-site")
-        .is_some_and(|site| site == "cross-site")
-    {
-        return Err(error::ErrorForbidden("same-origin event stream required"));
-    }
+    require_same_origin(&request)?;
     let principal = require_principal(&state, &request).await?;
-    let cursor = request
-        .headers()
-        .get("last-event-id")
-        .map(|value| {
-            value
-                .to_str()
-                .map_err(|_| error::ErrorBadRequest("invalid event cursor"))
-        })
-        .transpose()?
-        .or(query.cursor.as_deref())
-        .map(parse_cursor)
-        .transpose()?;
+    let cursor = request_cursor(&request, &query)?;
     let subscription = state
         .realtime
         .subscribe(&principal.id)
@@ -154,6 +145,65 @@ pub async fn events(
         .streaming(body))
 }
 
+/// Short requests use the same durable replay and session checks as the stream.
+/// They do not allocate a streaming subscription or refresh unchanged pages.
+pub async fn sync(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    query: web::Query<EventQuery>,
+) -> Result<HttpResponse> {
+    require_same_origin(&request)?;
+    let principal = require_principal(&state, &request).await?;
+    let cursor = request_cursor(&request, &query)?;
+    let token_hash = hash_session_token(
+        request
+            .cookie(SESSION_COOKIE)
+            .expect("authenticated cookie")
+            .value(),
+    );
+    let snapshot = read_snapshot(
+        &state.db,
+        &principal.id,
+        &principal.session_id,
+        &token_hash,
+        cursor,
+    )
+    .await
+    .map_err(error::ErrorServiceUnavailable)?;
+    if !snapshot.authorized {
+        return Err(error::ErrorUnauthorized("session expired"));
+    }
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "private, no-store, no-transform"))
+        .json(sync_response(cursor, &snapshot)))
+}
+
+fn require_same_origin(request: &HttpRequest) -> Result<()> {
+    if request
+        .headers()
+        .get("sec-fetch-site")
+        .is_some_and(|site| site == "cross-site")
+    {
+        return Err(error::ErrorForbidden("same-origin event stream required"));
+    }
+    Ok(())
+}
+
+fn request_cursor(request: &HttpRequest, query: &EventQuery) -> Result<Option<i64>> {
+    request
+        .headers()
+        .get("last-event-id")
+        .map(|value| {
+            value
+                .to_str()
+                .map_err(|_| error::ErrorBadRequest("invalid event cursor"))
+        })
+        .transpose()?
+        .or(query.cursor.as_deref())
+        .map(parse_cursor)
+        .transpose()
+}
+
 fn parse_cursor(value: &str) -> Result<i64> {
     if value.is_empty() || value.len() > 19 || !value.bytes().all(|byte| byte.is_ascii_digit()) {
         return Err(error::ErrorBadRequest("invalid event cursor"));
@@ -166,15 +216,31 @@ fn parse_cursor(value: &str) -> Result<i64> {
 async fn snapshot(
     state: &EventStream,
 ) -> std::result::Result<Snapshot, Box<dyn std::error::Error + Send + Sync>> {
-    let row = state
-        .db
+    read_snapshot(
+        &state.db,
+        &state.user_id,
+        &state.session_id,
+        &state.token_hash,
+        state.cursor,
+    )
+    .await
+}
+
+async fn read_snapshot(
+    db: &Database,
+    user_id: &str,
+    session_id: &str,
+    token_hash: &[u8; 32],
+    cursor: Option<i64>,
+) -> std::result::Result<Snapshot, Box<dyn std::error::Error + Send + Sync>> {
+    let row = db
         .query_one(
             REPLAY_QUERY,
             &[
-                &state.user_id,
-                &state.session_id,
-                &state.cursor.unwrap_or(0),
-                &state.token_hash.as_slice(),
+                &user_id,
+                &session_id,
+                &cursor.unwrap_or(0),
+                &token_hash.as_slice(),
             ],
         )
         .await?;
@@ -187,23 +253,35 @@ async fn snapshot(
 }
 
 fn encode_snapshot(cursor: Option<i64>, snapshot: &Snapshot) -> String {
-    if cursor.is_none_or(|cursor| cursor < snapshot.floor || cursor > snapshot.head)
-        || snapshot.changes.len() > 128
-    {
+    let response = sync_response(cursor, snapshot);
+    if response.reset {
         return format!(
             "retry: 2000\nid: {}\nevent: reset\ndata: {{}}\n\n",
             snapshot.head
         );
     }
-    if snapshot.changes.is_empty() {
+    if response.changes.is_empty() {
         return format!("id: {}\nevent: checkpoint\ndata: {{}}\n\n", snapshot.head);
     }
-    let changes = merge_changes(&snapshot.changes);
     format!(
         "id: {}\nevent: changes\ndata: {}\n\n",
         snapshot.head,
-        serde_json::to_string(&changes).expect("change metadata is JSON serializable")
+        serde_json::to_string(&response.changes).expect("change metadata is JSON serializable")
     )
+}
+
+fn sync_response(cursor: Option<i64>, snapshot: &Snapshot) -> SyncResponse {
+    let reset = cursor.is_none_or(|cursor| cursor < snapshot.floor || cursor > snapshot.head)
+        || snapshot.changes.len() > 128;
+    SyncResponse {
+        cursor: snapshot.head.to_string(),
+        reset,
+        changes: if reset {
+            vec![]
+        } else {
+            merge_changes(&snapshot.changes)
+        },
+    }
 }
 
 fn merge_changes(changes: &[Change]) -> Vec<Change> {
@@ -263,6 +341,34 @@ mod tests {
             129
         ];
         assert!(encode_snapshot(Some(10), &snapshot).contains("event: reset"));
+    }
+
+    #[test]
+    fn sync_preserves_bigint_cursors_and_uses_the_same_reset_and_merge_rules() {
+        let snapshot = Snapshot {
+            head: i64::MAX,
+            floor: 10,
+            authorized: true,
+            changes: vec![
+                Change {
+                    scope: "files".into(),
+                    folder_ids: vec!["a".into()]
+                };
+                2
+            ],
+        };
+        let response = sync_response(Some(10), &snapshot);
+        assert_eq!(response.cursor, "9223372036854775807");
+        assert!(!response.reset);
+        assert_eq!(response.changes.len(), 1);
+        assert_eq!(response.changes[0].folder_ids, vec!["a"]);
+        assert_eq!(
+            serde_json::to_value(&response).unwrap()["cursor"],
+            "9223372036854775807"
+        );
+        let reset = sync_response(Some(9), &snapshot);
+        assert!(reset.reset);
+        assert!(reset.changes.is_empty());
     }
 
     #[test]

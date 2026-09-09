@@ -27,7 +27,9 @@ export function RepositoryArchivePreview({ blob }: { blob: Blob }) {
     let canceled = false;
     void (async () => {
       try {
-        const { BlobReader, ZipReader } = await import("@zip.js/zip.js");
+        const { BlobReader, ZipReader } = await import(
+          "@/features/archive/zip"
+        );
         const reader = new ZipReader(new BlobReader(blob));
         try {
           const entries = await reader.getEntries();

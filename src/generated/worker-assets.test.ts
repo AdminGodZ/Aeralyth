@@ -9,6 +9,7 @@ import {
   UPLOAD_CHECKSUM_WORKER_URL,
   VAULT_WORKER_URL,
 } from "@/generated/worker-assets";
+import { ZIP_CODEC_WORKER_URL, ZIP_WASM_URL } from "@/generated/zip-assets";
 
 const root = resolve(import.meta.dirname, "../..");
 
@@ -25,6 +26,7 @@ describe("worker asset fingerprints", () => {
     ["vault", VAULT_WORKER_URL],
     ["folder-zip", FOLDER_ZIP_WORKER_URL],
     ["upload-checksum", UPLOAD_CHECKSUM_WORKER_URL],
+    ["zip-codec", ZIP_CODEC_WORKER_URL],
   ])("matches the emitted content hash for %s", async (name, url) => {
     expect(url).toMatch(
       new RegExp(`^/workers/${name}\\.([a-f0-9]{64})\\.worker\\.js$`, "u"),
@@ -33,6 +35,19 @@ describe("worker asset fingerprints", () => {
     const fingerprint = createHash("sha256").update(bytes).digest("hex");
 
     expect(url).toBe(`/workers/${name}.${fingerprint}.worker.js`);
+  });
+
+  it("ships the matching ZIP WebAssembly module under its content hash", async () => {
+    const bytes = await readFile(resolve(root, `public${ZIP_WASM_URL}`));
+    const fingerprint = createHash("sha256").update(bytes).digest("hex");
+    expect(ZIP_WASM_URL).toBe(`/workers/zip-module.${fingerprint}.wasm`);
+    const packaged = await readFile(
+      new URL(import.meta.resolve("@zip.js/zip.js/dist/zip-module.wasm")),
+    );
+    expect(bytes).toEqual(packaged);
+    await expect(WebAssembly.compile(bytes)).resolves.toBeInstanceOf(
+      WebAssembly.Module,
+    );
   });
 
   it("serves only hash-named worker assets with immutable caching", () => {
@@ -49,7 +64,13 @@ describe("worker asset fingerprints", () => {
     );
     expect(buildScript).not.toMatch(/\?v=\$\{fingerprint\}/u);
     expect(readdirSync(resolve(root, "public/workers")).sort()).toEqual(
-      [VAULT_WORKER_URL, FOLDER_ZIP_WORKER_URL, UPLOAD_CHECKSUM_WORKER_URL]
+      [
+        VAULT_WORKER_URL,
+        FOLDER_ZIP_WORKER_URL,
+        UPLOAD_CHECKSUM_WORKER_URL,
+        ZIP_CODEC_WORKER_URL,
+        ZIP_WASM_URL,
+      ]
         .map((url) => url.slice("/workers/".length))
         .sort(),
     );

@@ -10,7 +10,7 @@ import { applyFileListOverlay } from "./file-list-overlay";
 afterEach(() => vi.useRealTimers());
 
 describe("realtime refresh coordination", () => {
-  it("coalesces a burst and still refreshes during a continuous upload", () => {
+  it("coalesces a burst into bounded invalidations", () => {
     vi.useFakeTimers();
     const refresh = vi.fn();
     const coordinator = new RefreshCoordinator(refresh);
@@ -36,7 +36,7 @@ describe("realtime refresh coordination", () => {
     const end = coordinator.beginMutation();
     coordinator.request([{ scope: "files", folderIds: [""] }]);
     coordinator.setRefreshing(false);
-    vi.advanceTimersByTime(1000);
+    vi.advanceTimersByTime(500);
     expect(refresh).not.toHaveBeenCalled();
     end();
     end();
@@ -45,6 +45,34 @@ describe("realtime refresh coordination", () => {
       [{ scope: "files", folderIds: [""] }],
       true,
     );
+  });
+
+  it("bounds deferral during real, overlapping upload and edit activity", () => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    const coordinator = new RefreshCoordinator(refresh);
+    const endUpload = coordinator.beginMutation();
+    const endEdit = coordinator.beginMutation();
+    coordinator.request([{ scope: "files", folderIds: ["remote"] }]);
+    vi.advanceTimersByTime(900);
+    coordinator.request([{ scope: "files", folderIds: ["another"] }]);
+    vi.advanceTimersByTime(100);
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(
+      [{ scope: "files", folderIds: ["remote", "another"] }],
+      false,
+    );
+    coordinator.setRefreshing(true);
+    coordinator.request([{ scope: "shared", folderIds: [] }]);
+    vi.advanceTimersByTime(2_000);
+    expect(refresh).toHaveBeenCalledOnce();
+    coordinator.setRefreshing(false);
+    vi.advanceTimersByTime(200);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    endUpload();
+    endEdit();
+    vi.advanceTimersByTime(200);
+    expect(refresh).toHaveBeenLastCalledWith([], true);
+    coordinator.dispose();
   });
 
   it("keeps hidden-tab invalidations until resume and cancels work on unmount", () => {
@@ -62,6 +90,25 @@ describe("realtime refresh coordination", () => {
     coordinator.dispose();
     vi.advanceTimersByTime(1000);
     expect(refresh).toHaveBeenCalledOnce();
+  });
+
+  it("never extends the deadline when short mutations keep finishing", () => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    const coordinator = new RefreshCoordinator(refresh);
+    const endUpload = coordinator.beginMutation();
+    coordinator.request([{ scope: "files", folderIds: ["remote"] }]);
+    for (let i = 0; i < 30; i++) {
+      vi.advanceTimersByTime(100);
+      coordinator.beginMutation()();
+    }
+    expect(refresh.mock.calls[0]).toEqual([
+      [{ scope: "files", folderIds: ["remote"] }],
+      true,
+    ]);
+    expect(refresh).toHaveBeenCalledTimes(3);
+    endUpload();
+    coordinator.dispose();
   });
 });
 
