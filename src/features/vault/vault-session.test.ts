@@ -83,4 +83,15 @@ describe("vault resume marker", () => {
 
     expect(storage.length).toBe(0);
   });
+
+  it("retains a Never marker across arbitrarily long idle periods", () => {
+    const storage = new MemoryStorage();
+    const never = { ...MARKER, expiresAt: 0 };
+    writeVaultResumeMarker(storage, never);
+    expect(
+      readVaultResumeMarker(storage, NOW + 10 * 365 * 24 * 60 * 60 * 1000),
+    ).toEqual(never);
+    clearVaultResumeMarker(storage);
+    expect(readVaultResumeMarker(storage, NOW)).toBeNull();
+  });
 });

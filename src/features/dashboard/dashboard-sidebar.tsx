@@ -202,8 +202,11 @@ export function DashboardSidebar({
           <form
             action="/api/auth/logout"
             method="post"
-            onSubmit={() => {
-              void vault.lock();
+            onSubmit={(event) => {
+              event.preventDefault();
+              const form = event.currentTarget;
+              // Erase the persisted resume key before navigation closes its worker.
+              void vault.lock().finally(() => form.submit());
             }}
             className={cn(
               "absolute left-0 top-0 h-9 min-w-0 transition-[width] duration-200 ease-out",

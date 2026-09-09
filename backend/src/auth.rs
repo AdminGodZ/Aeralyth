@@ -81,6 +81,7 @@ pub struct AuthUser {
     pub folder_zip_prompt_enabled: bool,
     pub vault_auto_lock_minutes: i32,
     pub trash_retention_days: i32,
+    pub trash_retention_minutes: i32,
     pub one_password_enabled: bool,
     pub profile_image_url: Option<String>,
     pub e2ee_mode: String,
@@ -116,6 +117,7 @@ pub async fn authenticate_password(
                   COALESCE(folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
                   COALESCE(vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes,
                   COALESCE(trash_retention_days, 30) AS trash_retention_days,
+                  COALESCE(trash_retention_minutes, 43200) AS trash_retention_minutes,
                   profile_image_bytes IS NOT NULL AS has_profile_image,
                   COALESCE(profile_image_updated_at, updated_at)
                     AS profile_image_version_at,
@@ -197,6 +199,7 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
                       COALESCE(users.folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
                       COALESCE(users.vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes,
                       COALESCE(users.trash_retention_days, 30) AS trash_retention_days,
+                  COALESCE(users.trash_retention_minutes, 43200) AS trash_retention_minutes,
                       COALESCE(users.auth_version, 0::smallint) AS auth_version,
                       users.profile_image_bytes IS NOT NULL AS has_profile_image,
                       COALESCE(users.profile_image_updated_at, users.updated_at)
@@ -229,6 +232,7 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
                   COALESCE(users.folder_zip_prompt_enabled, TRUE) AS folder_zip_prompt_enabled,
                   COALESCE(users.vault_auto_lock_minutes, 15) AS vault_auto_lock_minutes,
                   COALESCE(users.trash_retention_days, 30) AS trash_retention_days,
+                  COALESCE(users.trash_retention_minutes, 43200) AS trash_retention_minutes,
                   COALESCE(users.auth_version, 0::smallint) AS auth_version,
                   users.profile_image_bytes IS NOT NULL AS has_profile_image,
                   COALESCE(users.profile_image_updated_at, users.updated_at)
@@ -391,6 +395,7 @@ fn auth_user_from_row(row: tokio_postgres::Row, e2ee_mode: &str) -> AuthUser {
         folder_zip_prompt_enabled: row.get("folder_zip_prompt_enabled"),
         vault_auto_lock_minutes: row.get("vault_auto_lock_minutes"),
         trash_retention_days: row.get("trash_retention_days"),
+        trash_retention_minutes: row.get("trash_retention_minutes"),
         one_password_enabled: row.get::<_, i16>("auth_version") == 1,
         profile_image_url,
         e2ee_mode: e2ee_mode.to_owned(),

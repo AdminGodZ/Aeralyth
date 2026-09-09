@@ -52,6 +52,8 @@ The encrypted vault design and rollout procedure are documented in
 [docs/storage.md](docs/storage.md).
 Cross-device updates, replay, and rollout requirements are documented in
 [docs/realtime.md](docs/realtime.md).
+Trash retention and the Never lock option are documented in
+[docs/settings-retention-and-lock.md](docs/settings-retention-and-lock.md).
 
 ## Local Database
 

@@ -104,6 +104,7 @@ import type {
   VaultWorkerResponse,
   VaultWorkerResult,
 } from "@/features/vault/vault-messages";
+import { validVaultResumeExpiration } from "@/features/vault/vault-preferences";
 
 type WorkerScope = {
   onmessage: ((event: MessageEvent<VaultWorkerRequest>) => void) | null;
@@ -228,7 +229,6 @@ const METADATA_CACHE_DATABASE_VERSION = 3;
 const METADATA_CACHE_STORE = "metadata";
 const VAULT_RESUME_SESSION_STORE = "resume-sessions";
 const VAULT_RESUME_SESSION_ID_PATTERN = /^vrs_[A-Za-z0-9_-]{24}$/u;
-const MAX_VAULT_RESUME_SESSION_MS = 61 * 60_000;
 let metadataDatabasePromise: Promise<IDBDatabase> | null = null;
 const hpkeSuite = new CipherSuite({
   kem: new DhkemX25519HkdfSha256(),
@@ -843,8 +843,7 @@ async function resumeVaultSession(
   if (
     !stored ||
     !isStoredVaultResumeSession(stored) ||
-    stored.expiresAt <= now ||
-    stored.expiresAt > now + MAX_VAULT_RESUME_SESSION_MS ||
+    !validVaultResumeExpiration(stored.expiresAt, now) ||
     stored.sessionBindingHash !== sessionBindingHash ||
     stored.identityFingerprint !== material.identity.fingerprintSha256 ||
     stored.vaultVersion !== material.vaultVersion
@@ -2370,8 +2369,7 @@ async function pruneExpiredVaultResumeSessions(now: number): Promise<void> {
     const stored = cursor.value;
     if (
       !isStoredVaultResumeSession(stored) ||
-      stored.expiresAt <= now ||
-      stored.expiresAt > now + MAX_VAULT_RESUME_SESSION_MS
+      !validVaultResumeExpiration(stored.expiresAt, now)
     ) {
       cursor.delete();
     }
@@ -2413,11 +2411,7 @@ function assertVaultResumeSessionId(sessionId: string): void {
 
 function assertVaultResumeExpiration(expiresAt: number): void {
   const now = Date.now();
-  if (
-    !Number.isSafeInteger(expiresAt) ||
-    expiresAt <= now ||
-    expiresAt > now + MAX_VAULT_RESUME_SESSION_MS
-  ) {
+  if (!validVaultResumeExpiration(expiresAt, now)) {
     throw new Error("The vault resume expiration is invalid.");
   }
 }

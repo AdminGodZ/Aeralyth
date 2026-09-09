@@ -32,7 +32,7 @@ describe("vault lock lifecycle", () => {
     expect(source).not.toContain('addEventListener("pagehide"');
   });
 
-  it("binds the expiring resume record to the server session and a non-extractable root key", () => {
+  it("binds the resume record to the server session and a non-extractable root key", () => {
     const source = readFileSync(
       resolve(import.meta.dirname, "vault.worker.ts"),
       "utf8",
@@ -49,7 +49,9 @@ describe("vault lock lifecycle", () => {
     expect(storedSession).toContain("identityFingerprint: string");
     expect(storedSession).toContain("rootKey: CryptoKey");
     expect(storedSession).not.toContain("password");
-    expect(resumeValidation).toContain("stored.expiresAt <= now");
+    expect(resumeValidation).toContain(
+      "!validVaultResumeExpiration(stored.expiresAt, now)",
+    );
     expect(resumeValidation).toContain(
       "stored.sessionBindingHash !== sessionBindingHash",
     );

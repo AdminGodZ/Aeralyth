@@ -15,6 +15,7 @@ export type CurrentUser = {
   folderZipPromptEnabled: boolean;
   vaultAutoLockMinutes: number;
   trashRetentionDays: number;
+  trashRetentionMinutes: number;
   onePasswordEnabled: boolean;
   profileImageUrl: string | null;
   e2eeMode: "off" | "migrate" | "required";

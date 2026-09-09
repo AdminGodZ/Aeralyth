@@ -89,7 +89,9 @@ for migration in \
   022_large_share_commitments.sql \
   023_maintenance_coordination.sql \
   024_one_password_auth.sql \
-  025_trash_retention.sql
+  025_trash_retention.sql \
+  026_realtime_changes.sql \
+  027_flexible_retention_and_vault_lock.sql
 do
   docker compose exec -T postgres psql \
     -q \

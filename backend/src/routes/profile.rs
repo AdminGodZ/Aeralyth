@@ -27,7 +27,7 @@ const PROFILE_UPDATE_QUERY: &str = "
         accent_color = COALESCE($4, accent_color),
         folder_zip_prompt_enabled = COALESCE($5, folder_zip_prompt_enabled),
         vault_auto_lock_minutes = COALESCE($6, vault_auto_lock_minutes),
-        trash_retention_days = COALESCE($7, trash_retention_days),
+        trash_retention_minutes = COALESCE($7, trash_retention_minutes),
         profile_image_bytes = CASE $8::smallint
           WHEN 1 THEN NULL
           WHEN 2 THEN $9
@@ -86,7 +86,7 @@ struct ProfileUpdate {
     accent_color: Option<String>,
     folder_zip_prompt_enabled: Option<bool>,
     vault_auto_lock_minutes: Option<i32>,
-    trash_retention_days: Option<i32>,
+    trash_retention_minutes: Option<i32>,
     remove_profile_image: bool,
     profile_image: Option<ProfileImage>,
 }
@@ -168,11 +168,28 @@ pub async fn update(
             }
             "vault_auto_lock_minutes" => {
                 let value = read_limited_text_field(&mut field, 8).await?;
-                update.vault_auto_lock_minutes = normalize_vault_auto_lock_minutes(&value);
+                update.vault_auto_lock_minutes =
+                    Some(normalize_vault_auto_lock_minutes(&value).ok_or_else(|| {
+                        error::ErrorBadRequest("invalid automatic lock duration")
+                    })?);
             }
             "trash_retention_days" => {
                 let value = read_limited_text_field(&mut field, 8).await?;
-                update.trash_retention_days = normalize_trash_retention_days(&value);
+                let minutes = value
+                    .trim()
+                    .parse::<i32>()
+                    .ok()
+                    .and_then(|days| days.checked_mul(1440))
+                    .and_then(|minutes| normalize_trash_retention_minutes(&minutes.to_string()))
+                    .ok_or_else(|| error::ErrorBadRequest("invalid trash retention duration"))?;
+                update.trash_retention_minutes.get_or_insert(minutes);
+            }
+            "trash_retention_minutes" => {
+                let value = read_limited_text_field(&mut field, 8).await?;
+                update.trash_retention_minutes =
+                    Some(normalize_trash_retention_minutes(&value).ok_or_else(|| {
+                        error::ErrorBadRequest("trash retention must be 1 to 525600 minutes")
+                    })?);
             }
             "remove_profile_image" => {
                 let value = read_limited_text_field(&mut field, 32).await?;
@@ -263,7 +280,7 @@ pub async fn update(
                 &accent_color,
                 &update.folder_zip_prompt_enabled,
                 &update.vault_auto_lock_minutes,
-                &update.trash_retention_days,
+                &update.trash_retention_minutes,
                 &profile_image_action,
                 &profile_image_bytes,
                 &profile_image_mime_type,
@@ -503,14 +520,14 @@ fn normalize_boolean_preference(value: &str) -> Option<bool> {
 
 fn normalize_vault_auto_lock_minutes(value: &str) -> Option<i32> {
     match value.trim().parse::<i32>().ok()? {
-        value @ (5 | 15 | 30 | 60) => Some(value),
+        value @ (0 | 5 | 15 | 30 | 60) => Some(value),
         _ => None,
     }
 }
 
-fn normalize_trash_retention_days(value: &str) -> Option<i32> {
+fn normalize_trash_retention_minutes(value: &str) -> Option<i32> {
     match value.trim().parse::<i32>().ok()? {
-        days @ (1 | 7 | 30 | 60) => Some(days),
+        minutes @ 1..=525600 => Some(minutes),
         _ => None,
     }
 }
@@ -531,8 +548,8 @@ fn redirect(location: &'static str) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        PASSWORD_CHANGE_QUERY, PROFILE_UPDATE_QUERY, normalize_trash_retention_days,
-        validate_new_password,
+        PASSWORD_CHANGE_QUERY, PROFILE_UPDATE_QUERY, normalize_trash_retention_minutes,
+        normalize_vault_auto_lock_minutes, validate_new_password,
     };
 
     #[test]
@@ -544,15 +561,28 @@ mod tests {
     }
 
     #[test]
-    fn trash_retention_accepts_only_supported_day_counts() {
-        for days in [1, 7, 30, 60] {
+    fn trash_retention_accepts_minute_precision_up_to_one_year() {
+        for minutes in [1, 2, 59, 60, 1441, 525600] {
             assert_eq!(
-                normalize_trash_retention_days(&days.to_string()),
-                Some(days)
+                normalize_trash_retention_minutes(&minutes.to_string()),
+                Some(minutes)
             );
         }
-        for days in [0, 2, 365] {
-            assert_eq!(normalize_trash_retention_days(&days.to_string()), None);
+        for value in ["0", "-1", "525601", "1.5", "1e3", "garbage"] {
+            assert_eq!(normalize_trash_retention_minutes(value), None);
+        }
+    }
+
+    #[test]
+    fn automatic_lock_accepts_never_and_existing_durations() {
+        for minutes in [0, 5, 15, 30, 60] {
+            assert_eq!(
+                normalize_vault_auto_lock_minutes(&minutes.to_string()),
+                Some(minutes)
+            );
+        }
+        for value in ["-1", "1", "1440", "forever"] {
+            assert_eq!(normalize_vault_auto_lock_minutes(value), None);
         }
     }
 
@@ -633,7 +663,7 @@ mod tests {
         assert!(normalized.contains("returning id"));
         assert!(normalized.contains("case when $2 then $1 else display_name end"));
         assert!(normalized.contains("coalesce($3, theme_preference)"));
-        assert!(normalized.contains("coalesce($7, trash_retention_days)"));
+        assert!(normalized.contains("coalesce($7, trash_retention_minutes)"));
     }
 
     #[actix_web::test]
@@ -724,7 +754,7 @@ mod tests {
             .query_one(
                 "SELECT display_name, theme_preference, accent_color,
                         folder_zip_prompt_enabled, vault_auto_lock_minutes,
-                        trash_retention_days
+                        trash_retention_minutes
                  FROM users WHERE id = 'usr_perf_profile'",
                 &[],
             )
@@ -738,7 +768,7 @@ mod tests {
         assert_eq!(stored.get::<_, String>("accent_color"), "#112233");
         assert!(!stored.get::<_, bool>("folder_zip_prompt_enabled"));
         assert_eq!(stored.get::<_, i32>("vault_auto_lock_minutes"), 30);
-        assert_eq!(stored.get::<_, i32>("trash_retention_days"), 7);
+        assert_eq!(stored.get::<_, i32>("trash_retention_minutes"), 7);
         transaction
             .rollback()
             .await

@@ -21,6 +21,10 @@ describe.each([
   ["024_one_password_auth.sql", "024-one-password-auth"],
   ["025_trash_retention.sql", "025-trash-retention"],
   ["026_realtime_changes.sql", "026-realtime-changes"],
+  [
+    "027_flexible_retention_and_vault_lock.sql",
+    "027-flexible-retention-and-vault-lock",
+  ],
 ])("%s", (fileName, version) => {
   const migration = readFileSync(resolve(migrationRoot, fileName), "utf8");
 

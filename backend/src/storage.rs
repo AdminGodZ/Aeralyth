@@ -161,7 +161,7 @@ const EXPIRE_TRASH_BATCH_QUERY: &str = "
       WHERE files.state = 'trashed'
         AND files.trashed_at IS NOT NULL
         AND files.trashed_at
-              + (users.trash_retention_days * interval '1 day') <= now()
+              + (users.trash_retention_minutes * interval '1 minute') <= now()
         AND NOT EXISTS (
           SELECT 1 FROM files AS children WHERE children.parent_id = files.id
         )
@@ -617,7 +617,7 @@ const MAINTENANCE_SCHEDULES: &[MaintenanceSchedule] = &[
     MaintenanceSchedule {
         worker: MaintenanceWorker::TrashExpiry,
         initial_delay: Duration::from_secs(6),
-        interval: Duration::from_secs(10),
+        interval: Duration::from_secs(1),
         maximum_interval: Duration::from_secs(5 * 60),
     },
     MaintenanceSchedule {
@@ -1996,7 +1996,7 @@ impl MaintenanceWorker {
             }
             Self::SessionExpiry => "SELECT MIN(expires_at) AS next_at FROM sessions",
             Self::TrashExpiry => {
-                "SELECT MIN(files.trashed_at + (users.trash_retention_days * interval '1 day')) AS next_at FROM files INNER JOIN users ON users.id = files.owner_id WHERE files.state = 'trashed' AND files.trashed_at IS NOT NULL"
+                "SELECT MIN(files.trashed_at + (users.trash_retention_minutes * interval '1 minute')) AS next_at FROM files INNER JOIN users ON users.id = files.owner_id WHERE files.state = 'trashed' AND files.trashed_at IS NOT NULL"
             }
             Self::MultipartReconciliation | Self::CounterReconciliation => return Ok(None),
         };
@@ -3599,7 +3599,7 @@ mod tests {
 
     #[test]
     fn trash_expiry_is_bounded_leaf_first_and_queues_object_deletion() {
-        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("users.trash_retention_days"));
+        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("users.trash_retention_minutes"));
         assert!(EXPIRE_TRASH_BATCH_QUERY.contains("files.state = 'trashed'"));
         assert!(EXPIRE_TRASH_BATCH_QUERY.contains("NOT EXISTS"));
         assert!(EXPIRE_TRASH_BATCH_QUERY.contains("children.parent_id = files.id"));
@@ -3613,7 +3613,7 @@ mod tests {
             .iter()
             .find(|schedule| schedule.worker == MaintenanceWorker::TrashExpiry)
             .expect("trash expiry schedule should exist");
-        assert_eq!(worker.interval, Duration::from_secs(10));
+        assert_eq!(worker.interval, Duration::from_secs(1));
         assert!(MaintenanceWorker::TrashExpiry.accepts_notification("files"));
         assert!(MaintenanceWorker::TrashExpiry.accepts_notification("users"));
     }
@@ -3936,7 +3936,7 @@ mod tests {
             .batch_execute(
                 "CREATE TEMP TABLE users (
                    id TEXT PRIMARY KEY,
-                   trash_retention_days INTEGER NOT NULL
+                   trash_retention_minutes INTEGER NOT NULL
                  );
                  CREATE TEMP TABLE files (
                    id TEXT PRIMARY KEY,
@@ -3957,15 +3957,19 @@ mod tests {
                    object_key TEXT PRIMARY KEY,
                    available_at TIMESTAMPTZ NOT NULL
                  );
-                 INSERT INTO users (id, trash_retention_days)
+                 INSERT INTO users (id, trash_retention_minutes)
                  VALUES ('usr_trash_expiry', 1);
                  INSERT INTO files (
                    id, owner_id, storage_name, entry_type, state, trashed_at, parent_id
                  ) VALUES
                    ('folder', 'usr_trash_expiry', 'folder', 'folder', 'trashed',
-                    now() - interval '2 days', NULL),
+                    now() - interval '61 seconds', NULL),
                    ('file', 'usr_trash_expiry', 'object-key', 'file', 'trashed',
-                    now() - interval '2 days', 'folder');",
+                    now() - interval '61 seconds', 'folder'),
+                   ('fresh', 'usr_trash_expiry', 'fresh-object', 'file', 'trashed',
+                    now() - interval '30 seconds', NULL),
+                   ('restored', 'usr_trash_expiry', 'restored-object', 'file', 'active',
+                    now() - interval '61 seconds', NULL);",
             )
             .await
             .expect("trash expiry fixtures should initialize");
@@ -3994,7 +3998,7 @@ mod tests {
             .expect("queued objects should count")
             .get("count");
 
-        assert_eq!((first, second, remaining, queued), (1, 1, 0, 1));
+        assert_eq!((first, second, remaining, queued), (1, 1, 2, 1));
     }
 
     #[actix_web::test]

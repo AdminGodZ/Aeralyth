@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  Check,
   KeyRound,
   LoaderCircle,
   Monitor,
@@ -49,6 +48,8 @@ import { Switch } from "@/components/ui/switch";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { getAccountAuthInfo } from "@/features/auth/auth-api";
 import { AccentColorPreference } from "@/features/dashboard/accent-color-preference";
+import { normalizeTrashRetentionMinutes } from "@/features/dashboard/trash-retention";
+import { TrashRetentionInput } from "@/features/dashboard/trash-retention-input";
 import { useRealtimeActivity } from "@/features/realtime/realtime-provider";
 import { randomBytes, toBase64Url } from "@/features/vault/protocol";
 import { getUnlockMaterial } from "@/features/vault/vault-api";
@@ -68,15 +69,13 @@ type ProfileSettingsFormProps = {
 
 type SaveState = "idle" | "saving" | "saved" | "error";
 
-const TRASH_RETENTION_OPTIONS = [1, 7, 30, 60] as const;
-
 type ProfileSettingsUpdate = {
   displayName?: string;
   themePreference?: CurrentUser["themePreference"];
   accentColor?: string;
   folderZipPromptEnabled?: boolean;
   vaultAutoLockMinutes?: number;
-  trashRetentionDays?: number;
+  trashRetentionMinutes?: number;
   profileImage?: File | null;
 };
 
@@ -117,8 +116,8 @@ export function ProfileSettingsForm({
   const [vaultAutoLockMinutes, setVaultAutoLockMinutes] = useState(() =>
     normalizeVaultAutoLockMinutes(currentUser.vaultAutoLockMinutes),
   );
-  const [trashRetentionDays, setTrashRetentionDays] = useState(() =>
-    normalizeTrashRetentionDays(currentUser.trashRetentionDays),
+  const [trashRetentionMinutes, setTrashRetentionMinutes] = useState(() =>
+    normalizeTrashRetentionMinutes(currentUser.trashRetentionMinutes),
   );
   const previousServerUser = useRef(currentUser);
   useEffect(() => {
@@ -144,9 +143,9 @@ export function ProfileSettingsForm({
         ? normalizeVaultAutoLockMinutes(currentUser.vaultAutoLockMinutes)
         : draft,
     );
-    setTrashRetentionDays((draft) =>
-      draft === normalizeTrashRetentionDays(previous.trashRetentionDays)
-        ? normalizeTrashRetentionDays(currentUser.trashRetentionDays)
+    setTrashRetentionMinutes((draft) =>
+      draft === normalizeTrashRetentionMinutes(previous.trashRetentionMinutes)
+        ? normalizeTrashRetentionMinutes(currentUser.trashRetentionMinutes)
         : draft,
     );
   }, [currentUser]);
@@ -248,10 +247,10 @@ export function ProfileSettingsForm({
     queueSettingsUpdate({ vaultAutoLockMinutes: normalizedValue });
   }
 
-  function updateTrashRetentionDays(value: number) {
-    const normalizedValue = normalizeTrashRetentionDays(value);
-    setTrashRetentionDays(normalizedValue);
-    queueSettingsUpdate({ trashRetentionDays: normalizedValue });
+  function updateTrashRetentionMinutes(value: number) {
+    const normalizedValue = normalizeTrashRetentionMinutes(value);
+    setTrashRetentionMinutes(normalizedValue);
+    queueSettingsUpdate({ trashRetentionMinutes: normalizedValue });
   }
 
   function queueSettingsUpdate(update: ProfileSettingsUpdate) {
@@ -360,7 +359,7 @@ export function ProfileSettingsForm({
       themePreference={themePreference}
       folderZipPromptEnabled={folderZipPromptEnabled}
       vaultAutoLockMinutes={vaultAutoLockMinutes}
-      trashRetentionDays={trashRetentionDays}
+      trashRetentionMinutes={trashRetentionMinutes}
       onFileChange={handleFileChange}
       onResetProfileImage={resetProfileImage}
       onDisplayNameChange={updateDisplayName}
@@ -368,7 +367,7 @@ export function ProfileSettingsForm({
       onAccentColorChange={updateAccentColor}
       onFolderZipPromptEnabledChange={updateFolderZipPromptEnabled}
       onVaultAutoLockMinutesChange={updateVaultAutoLockMinutes}
-      onTrashRetentionDaysChange={updateTrashRetentionDays}
+      onTrashRetentionMinutesChange={updateTrashRetentionMinutes}
     />
   );
 }
@@ -393,7 +392,7 @@ function ProfileSettingsFormView({
   themePreference,
   folderZipPromptEnabled,
   vaultAutoLockMinutes,
-  trashRetentionDays,
+  trashRetentionMinutes,
   onFileChange,
   onResetProfileImage,
   onDisplayNameChange,
@@ -401,7 +400,7 @@ function ProfileSettingsFormView({
   onAccentColorChange,
   onFolderZipPromptEnabledChange,
   onVaultAutoLockMinutesChange,
-  onTrashRetentionDaysChange,
+  onTrashRetentionMinutesChange,
 }: {
   currentUser: CurrentUser;
   csrfToken: string;
@@ -422,7 +421,7 @@ function ProfileSettingsFormView({
   themePreference: CurrentUser["themePreference"];
   folderZipPromptEnabled: boolean;
   vaultAutoLockMinutes: number;
-  trashRetentionDays: number;
+  trashRetentionMinutes: number;
   onFileChange(event: ChangeEvent<HTMLInputElement>): void;
   onResetProfileImage(): void;
   onDisplayNameChange(event: ChangeEvent<HTMLInputElement>): void;
@@ -432,7 +431,7 @@ function ProfileSettingsFormView({
   onVaultAutoLockMinutesChange(
     value: ReturnType<typeof normalizeVaultAutoLockMinutes>,
   ): void;
-  onTrashRetentionDaysChange(value: number): void;
+  onTrashRetentionMinutesChange(value: number): void;
 }) {
   return (
     <form
@@ -461,8 +460,8 @@ function ProfileSettingsFormView({
       />
       <input
         type="hidden"
-        name="trash_retention_days"
-        value={trashRetentionDays}
+        name="trash_retention_minutes"
+        value={trashRetentionMinutes}
       />
 
       <SettingsSection title="Profile" description="Photo and display name">
@@ -539,27 +538,15 @@ function ProfileSettingsFormView({
           <div className="min-w-0">
             <Label id={trashRetentionId}>Delete items after</Label>
             <p className="mt-1 text-xs leading-5 text-muted-foreground">
-              Items are permanently deleted after this many days in Trash.
+              Permanently delete items after this time in Trash. Choose 1 minute
+              to 365 days. Applies to items already in Trash.
             </p>
           </div>
-          <Select
-            value={String(trashRetentionDays)}
-            onValueChange={(value) => onTrashRetentionDaysChange(Number(value))}
-          >
-            <SelectTrigger
-              className="h-10 w-full min-w-40 sm:w-44"
-              aria-labelledby={trashRetentionId}
-            >
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {TRASH_RETENTION_OPTIONS.map((days) => (
-                <SelectItem key={days} value={String(days)}>
-                  After {days} {days === 1 ? "day" : "days"}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+          <TrashRetentionInput
+            value={trashRetentionMinutes}
+            onChange={onTrashRetentionMinutesChange}
+            labelId={trashRetentionId}
+          />
         </div>
       </SettingsSection>
 
@@ -629,7 +616,9 @@ function ProfileSettingsFormView({
               <p className="mt-1 text-xs leading-5 text-muted-foreground">
                 Require your{" "}
                 {currentUser.onePasswordEnabled ? "account" : "vault"} password
-                again to access encrypted files after inactivity.
+                again after inactivity. Choose Never to keep access while signed
+                in, including after refreshes and browser restarts. Signing out
+                always locks your files.
               </p>
             </div>
             <Select
@@ -649,7 +638,7 @@ function ProfileSettingsFormView({
               <SelectContent>
                 {VAULT_AUTO_LOCK_OPTIONS.map((minutes) => (
                   <SelectItem key={minutes} value={String(minutes)}>
-                    After {minutes} minutes
+                    {minutes === 0 ? "Never" : `After ${minutes} minutes`}
                   </SelectItem>
                 ))}
               </SelectContent>
@@ -694,16 +683,7 @@ function ProfileSettingsFormView({
             <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
             Saving...
           </p>
-        ) : (
-          <p className="flex items-center gap-2 text-sm text-muted-foreground">
-            {saveState === "saved" ? (
-              <Check className="size-4 text-primary" aria-hidden="true" />
-            ) : null}
-            {saveState === "saved"
-              ? "Saved automatically"
-              : "Changes save automatically"}
-          </p>
-        )}
+        ) : null}
       </div>
     </form>
   );
@@ -1047,8 +1027,11 @@ function createProfileSettingsFormData(
       String(update.vaultAutoLockMinutes),
     );
   }
-  if (update.trashRetentionDays !== undefined) {
-    formData.append("trash_retention_days", String(update.trashRetentionDays));
+  if (update.trashRetentionMinutes !== undefined) {
+    formData.append(
+      "trash_retention_minutes",
+      String(update.trashRetentionMinutes),
+    );
   }
   if (update.profileImage === null) {
     formData.append("remove_profile_image", "1");
@@ -1057,14 +1040,6 @@ function createProfileSettingsFormData(
   }
 
   return formData;
-}
-
-function normalizeTrashRetentionDays(value: number): number {
-  return TRASH_RETENTION_OPTIONS.includes(
-    value as (typeof TRASH_RETENTION_OPTIONS)[number],
-  )
-    ? value
-    : 30;
 }
 
 function preventSettingsSubmit(event: FormEvent<HTMLFormElement>) {

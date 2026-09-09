@@ -53,15 +53,16 @@ import {
 import {
   normalizeVaultAutoLockMinutes,
   VAULT_AUTO_LOCK_CHANGE_EVENT,
+  vaultAutoLockDeadline,
+  vaultResumeRecordExpiration,
 } from "@/features/vault/vault-preferences";
-import {
-  persistVaultResumeSession,
-  VAULT_RESUME_RECORD_GRACE_MS,
-} from "@/features/vault/vault-resume-client";
+import { persistVaultResumeSession } from "@/features/vault/vault-resume-client";
 import {
   clearVaultResumeMarker,
+  clearVaultResumeMarkers,
   readVaultResumeMarker,
   type VaultResumeMarker,
+  vaultSessionStorage,
   writeVaultResumeMarker,
 } from "@/features/vault/vault-session";
 
@@ -108,15 +109,6 @@ const VAULT_RESUME_PERSIST_INTERVAL_MS = 1_000;
 
 const VaultContext = createContext<VaultContextValue | null>(null);
 
-function vaultSessionStorage(): Storage | null {
-  if (typeof window === "undefined") return null;
-  try {
-    return window.sessionStorage;
-  } catch {
-    return null;
-  }
-}
-
 type VaultProviderProps = {
   children: ReactNode;
   csrfToken: string;
@@ -149,6 +141,8 @@ function useVaultProviderController({
   const lockDeadlineRef = useRef(0);
   const resumeSessionIdRef = useRef<string | null>(null);
   const persistedResumeExpirationRef = useRef(0);
+  const serverAutoLockMinutesRef = useRef(autoLockMinutes);
+  serverAutoLockMinutesRef.current = autoLockMinutes;
   const [state, setState] = useState<VaultState>(
     enabled ? (vaultConfigured ? "unlocking" : "setup") : "off",
   );
@@ -158,9 +152,6 @@ function useVaultProviderController({
   const [activeAutoLockMinutes, setActiveAutoLockMinutes] = useState(() =>
     normalizeVaultAutoLockMinutes(autoLockMinutes),
   );
-  useEffect(() => {
-    setActiveAutoLockMinutes(normalizeVaultAutoLockMinutes(autoLockMinutes));
-  }, [autoLockMinutes]);
   const [dialogOpen, setDialogOpen] = useState(enabled && !vaultConfigured);
   const [mode, setMode] = useState<VaultDialogMode>(
     vaultConfigured ? "unlock" : "setup",
@@ -180,7 +171,7 @@ function useVaultProviderController({
 
   const beginVaultResumeSession = useCallback(
     async (client: VaultCryptoClient, vaultVersion: number): Promise<void> => {
-      const storage = vaultSessionStorage();
+      const storage = vaultSessionStorage(activeAutoLockMinutes);
       if (!storage) return;
       try {
         const marker = await persistVaultResumeSession(
@@ -208,8 +199,7 @@ function useVaultProviderController({
     lockDeadlineRef.current = 0;
     resumeSessionIdRef.current = null;
     persistedResumeExpirationRef.current = 0;
-    const storage = vaultSessionStorage();
-    if (storage) clearVaultResumeMarker(storage);
+    clearVaultResumeMarkers();
     cancelShareDirectorySyncForLock();
     if (enabled) {
       window.dispatchEvent(new Event(VAULT_LOCKING_EVENT));
@@ -237,7 +227,7 @@ function useVaultProviderController({
 
   useEffect(() => {
     if (!enabled || !vaultConfigured) return;
-    const storage = vaultSessionStorage();
+    const storage = vaultSessionStorage(serverAutoLockMinutesRef.current);
     const marker = storage ? readVaultResumeMarker(storage) : null;
     if (!marker) {
       setState("locked");
@@ -265,9 +255,11 @@ function useVaultProviderController({
 
         resumeSessionIdRef.current = marker.sessionId;
         persistedResumeExpirationRef.current = Math.min(
-          marker.expiresAt,
-          resumed.expiresAt,
+          marker.expiresAt || Number.POSITIVE_INFINITY,
+          resumed.expiresAt || Number.POSITIVE_INFINITY,
         );
+        if (marker.expiresAt === 0 && resumed.expiresAt === 0)
+          persistedResumeExpirationRef.current = 0;
         lockDeadlineRef.current = marker.expiresAt;
         setState("unlocked");
         setDialogOpen(false);
@@ -301,6 +293,7 @@ function useVaultProviderController({
       if (state !== "unlocked") return;
       const now = Date.now();
       if (
+        activeAutoLockMinutes !== 0 &&
         !resetExpiredDeadline &&
         lockDeadlineRef.current > 0 &&
         now >= lockDeadlineRef.current
@@ -309,10 +302,10 @@ function useVaultProviderController({
         return;
       }
 
-      const expiresAt = now + activeAutoLockMinutes * 60 * 1_000;
+      const expiresAt = vaultAutoLockDeadline(activeAutoLockMinutes, now);
       lockDeadlineRef.current = expiresAt;
       const resumeSessionId = resumeSessionIdRef.current;
-      const storage = vaultSessionStorage();
+      const storage = vaultSessionStorage(activeAutoLockMinutes);
       if (resumeSessionId && storage) {
         const marker: VaultResumeMarker = {
           version: 1,
@@ -320,15 +313,20 @@ function useVaultProviderController({
           expiresAt,
         };
         writeVaultResumeMarker(storage, marker);
+        const otherStorage = vaultSessionStorage(
+          activeAutoLockMinutes === 0 ? 15 : 0,
+        );
+        if (otherStorage) clearVaultResumeMarker(otherStorage);
         if (
-          expiresAt - persistedResumeExpirationRef.current >=
-          VAULT_RESUME_PERSIST_INTERVAL_MS
+          (expiresAt === 0) !== (persistedResumeExpirationRef.current === 0) ||
+          Math.abs(expiresAt - persistedResumeExpirationRef.current) >=
+            VAULT_RESUME_PERSIST_INTERVAL_MS
         ) {
           persistedResumeExpirationRef.current = expiresAt;
           void clientRef.current
             ?.extendSession(
               resumeSessionId,
-              expiresAt + VAULT_RESUME_RECORD_GRACE_MS,
+              vaultResumeRecordExpiration(expiresAt),
             )
             .catch(() => {
               if (resumeSessionIdRef.current === resumeSessionId) {
@@ -338,6 +336,7 @@ function useVaultProviderController({
         }
       }
 
+      if (activeAutoLockMinutes === 0) return;
       timer = setTimeout(
         () => {
           void lock();

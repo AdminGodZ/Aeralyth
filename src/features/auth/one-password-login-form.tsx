@@ -9,7 +9,6 @@ import {
   ShieldCheck,
 } from "lucide-react";
 import { type FormEvent, useEffect, useRef, useState } from "react";
-
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -42,6 +41,7 @@ import {
   VaultWorkerError,
 } from "@/features/vault/vault-client";
 import { persistVaultResumeSession } from "@/features/vault/vault-resume-client";
+import { vaultSessionStorage } from "@/features/vault/vault-session";
 import { cn } from "@/lib/utils";
 
 type PendingMigration = {
@@ -480,7 +480,8 @@ async function persistLoginVaultSession(
     login.csrfToken,
     login.user.vaultAutoLockMinutes,
     vaultVersion,
-    window.sessionStorage,
+    vaultSessionStorage(login.user.vaultAutoLockMinutes) ??
+      window.sessionStorage,
   );
 }
 
