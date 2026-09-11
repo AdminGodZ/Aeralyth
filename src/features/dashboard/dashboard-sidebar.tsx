@@ -116,6 +116,7 @@ export function DashboardSidebar({
         isCollapsed ? "w-20" : "w-[15.5rem]",
       )}
     >
+      <span className="dashboard-sidebar-ambient" aria-hidden="true" />
       <span
         aria-hidden="true"
         className={cn(

@@ -6,6 +6,7 @@
 
 @theme inline {
   --color-background: var(--background);
+  --color-login-panel: var(--login-panel);
   --color-foreground: var(--foreground);
   --font-display:
     var(--font-figtree), var(--font-geist-sans), ui-sans-serif, system-ui,
@@ -66,11 +67,13 @@ h3 {
 }
 
 :root {
+  --dashboard-sidebar: #080a0e;
+  --login-panel: rgb(0 0 0 / 50%);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.141 0.005 285.823);
   --popover: oklch(1 0 0);
   --popover-foreground: oklch(0.141 0.005 285.823);
-  --primary: #3088f0;
+  --primary: #f4b64d;
   --primary-foreground: oklch(0.141 0.005 285.823);
   --secondary: oklch(0.967 0.001 286.375);
   --secondary-foreground: oklch(0.21 0.006 285.885);
@@ -90,7 +93,7 @@ h3 {
   --radius: 0.625rem;
   --sidebar: oklch(0.958 0.002 286.35);
   --sidebar-foreground: oklch(0.141 0.005 285.823);
-  --sidebar-primary: #3088f0;
+  --sidebar-primary: #f4b64d;
   --sidebar-primary-foreground: oklch(0.141 0.005 285.823);
   --sidebar-accent: oklch(0.967 0.001 286.375);
   --sidebar-accent-foreground: oklch(0.21 0.006 285.885);
@@ -107,7 +110,7 @@ h3 {
   --card-foreground: oklch(0.985 0 0);
   --popover: oklch(0.21 0.006 285.885);
   --popover-foreground: oklch(0.985 0 0);
-  --primary: #3088f0;
+  --primary: #f4b64d;
   --primary-foreground: oklch(0.21 0.006 285.885);
   --secondary: oklch(0.274 0.006 286.033);
   --secondary-foreground: oklch(0.985 0 0);
@@ -126,7 +129,7 @@ h3 {
   --chart-5: oklch(0.274 0.006 286.033);
   --sidebar: oklch(0.21 0.006 285.885);
   --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: #3088f0;
+  --sidebar-primary: #f4b64d;
   --sidebar-primary-foreground: oklch(0.21 0.006 285.885);
   --sidebar-accent: oklch(0.274 0.006 286.033);
   --sidebar-accent-foreground: oklch(0.985 0 0);
@@ -140,139 +143,72 @@ h3 {
 }
 
 .dashboard-frame {
-  background:
-    radial-gradient(
-      circle at 31px 7px,
-      rgb(238 244 255 / 60%) 0 0.7px,
-      transparent 1.25px
-    )
-    0 0 / 157px 71px,
-    radial-gradient(
-      circle at 89px 13px,
-      rgb(220 230 248 / 36%) 0 0.6px,
-      transparent 1.15px
-    )
-    53px 0 / 239px 83px,
-    linear-gradient(90deg, rgb(8 9 12 / 90%), rgb(4 5 7 / 82%));
-  background-color: #050609;
+  --dashboard-canvas: #0b0d12;
+  --dashboard-control: #101319;
+  --dashboard-divider: rgb(255 255 255 / 8%);
+  background: var(--dashboard-sidebar);
 }
 
 .dashboard-sidebar {
   position: relative;
   --foreground: oklch(0.97 0.004 286);
   --muted-foreground: oklch(0.62 0.012 286);
-  --border: oklch(1 0 0 / 9%);
+  --border: var(--dashboard-divider);
   --destructive: oklch(0.72 0.17 24);
   isolation: isolate;
-  background: linear-gradient(180deg, rgb(8 9 12 / 82%), rgb(4 5 7 / 72%));
-  background-color: rgb(4 5 8 / 76%);
-  box-shadow: 18px 0 60px rgb(0 0 0 / 12%);
+  background: var(--dashboard-sidebar);
   color: var(--foreground);
-  backdrop-filter: blur(24px) saturate(118%);
 }
 
-.dashboard-sidebar::before,
-.dashboard-sidebar::after {
+.dashboard-sidebar-ambient {
   position: absolute;
-  top: 0;
-  left: 0;
+  inset: 0;
   z-index: -1;
-  border-radius: 999px;
-  background: rgb(232 240 255 / 72%);
-  content: "";
+  overflow: hidden;
   pointer-events: none;
 }
 
-.dashboard-sidebar::before {
-  width: 1px;
-  height: 1px;
-  box-shadow:
-    18px 22px rgb(238 244 255 / 72%),
-    114px 54px rgb(220 230 248 / 42%),
-    211px 20px rgb(238 244 255 / 58%),
-    56px 91px rgb(220 230 248 / 36%),
-    191px 111px rgb(238 244 255 / 52%),
-    98px 137px rgb(220 230 248 / 38%),
-    21px 155px rgb(238 244 255 / 62%),
-    146px 174px rgb(220 230 248 / 34%),
-    230px 197px rgb(238 244 255 / 54%),
-    68px 224px rgb(220 230 248 / 40%),
-    185px 248px rgb(238 244 255 / 62%),
-    15px 282px rgb(220 230 248 / 34%),
-    113px 295px rgb(238 244 255 / 68%),
-    218px 317px rgb(220 230 248 / 38%),
-    54px 351px rgb(238 244 255 / 54%),
-    160px 369px rgb(220 230 248 / 34%),
-    231px 403px rgb(238 244 255 / 62%),
-    25px 421px rgb(220 230 248 / 46%),
-    104px 448px rgb(238 244 255 / 58%),
-    201px 466px rgb(220 230 248 / 34%),
-    72px 497px rgb(238 244 255 / 66%),
-    151px 523px rgb(220 230 248 / 42%),
-    18px 546px rgb(238 244 255 / 48%),
-    222px 552px rgb(220 230 248 / 38%),
-    93px 586px rgb(238 244 255 / 62%),
-    177px 614px rgb(220 230 248 / 36%),
-    37px 641px rgb(238 244 255 / 58%),
-    136px 669px rgb(220 230 248 / 42%),
-    226px 690px rgb(238 244 255 / 66%),
-    75px 724px rgb(220 230 248 / 36%),
-    188px 752px rgb(238 244 255 / 52%),
-    20px 779px rgb(220 230 248 / 42%),
-    113px 807px rgb(238 244 255 / 68%),
-    232px 830px rgb(220 230 248 / 34%),
-    58px 861px rgb(238 244 255 / 58%),
-    162px 882px rgb(220 230 248 / 42%);
+.dashboard-sidebar-ambient::before {
+  content: "";
+  position: absolute;
+  inset: -16% -45%;
+  background:
+    radial-gradient(
+      ellipse at 20% 22%,
+      color-mix(in srgb, var(--primary) 16%, transparent) 0%,
+      color-mix(in srgb, var(--primary) 5%, transparent) 30%,
+      transparent 60%
+    ),
+    radial-gradient(
+      ellipse at 85% 80%,
+      color-mix(in srgb, var(--primary) 10%, transparent) 0%,
+      transparent 55%
+    );
+  animation: sidebar-accent-drift 22s ease-in-out infinite alternate;
 }
 
-.dashboard-sidebar::after {
-  width: 2px;
-  height: 2px;
-  background: color-mix(in srgb, var(--primary) 34%, white);
-  box-shadow:
-    43px 74px 4px color-mix(in srgb, var(--primary) 28%, transparent),
-    199px 184px 5px rgb(226 235 255 / 28%),
-    126px 332px 4px rgb(226 235 255 / 24%),
-    40px 511px 5px color-mix(in srgb, var(--primary) 24%, transparent),
-    208px 648px 4px rgb(226 235 255 / 22%),
-    122px 765px 5px color-mix(in srgb, var(--primary) 26%, transparent);
+@keyframes sidebar-accent-drift {
+  from {
+    transform: translate3d(-5%, -4%, 0) scale(1.02);
+  }
+  to {
+    transform: translate3d(10%, 8%, 0) scale(1.1);
+  }
 }
 
 .dashboard-topbar {
-  --background: rgb(7 8 11 / 64%);
+  --background: var(--dashboard-control);
   --foreground: oklch(0.97 0.004 286);
   --muted-foreground: oklch(0.66 0.012 286);
-  --border: oklch(1 0 0 / 9%);
-  background:
-    radial-gradient(
-      circle at 19px 17px,
-      rgb(238 244 255 / 64%) 0 0.75px,
-      transparent 1.3px
-    )
-    0 0 / 173px 97px,
-    radial-gradient(
-      circle at 61px 54px,
-      rgb(220 230 248 / 38%) 0 0.65px,
-      transparent 1.2px
-    )
-    37px 11px / 241px 113px,
-    radial-gradient(
-      circle at 127px 31px,
-      color-mix(in srgb, var(--primary) 44%, white) 0 0.6px,
-      transparent 1.15px
-    )
-    83px 23px / 331px 89px,
-    linear-gradient(90deg, rgb(8 9 12 / 80%), rgb(4 5 7 / 68%));
-  background-color: rgb(4 5 8 / 72%);
-  border-bottom-color: rgb(255 255 255 / 8%);
-  box-shadow: inset 0 -1px 0 rgb(255 255 255 / 2%);
+  --border: var(--dashboard-divider);
+  background: var(--dashboard-canvas);
+  border-bottom-color: var(--dashboard-divider);
   color: var(--foreground);
-  backdrop-filter: blur(24px) saturate(118%);
 }
 
 .dashboard-main-panel {
   position: relative;
-  --background: rgb(6 7 10 / 72%);
+  --background: var(--dashboard-canvas);
   --foreground: oklch(0.97 0.004 286);
   --card: rgb(11 12 16 / 66%);
   --card-foreground: oklch(0.97 0.004 286);
@@ -286,40 +222,174 @@ h3 {
   --accent-foreground: oklch(0.97 0.004 286);
   --border: rgb(255 255 255 / 10%);
   --input: rgb(255 255 255 / 12%);
-  background:
-    radial-gradient(
-      circle at 23px 29px,
-      rgb(238 244 255 / 62%) 0 0.75px,
-      transparent 1.35px
-    )
-    0 0 / 211px 137px,
-    radial-gradient(
-      circle at 107px 71px,
-      rgb(220 230 248 / 38%) 0 0.65px,
-      transparent 1.2px
-    )
-    31px 17px / 293px 181px,
-    radial-gradient(
-      circle at 173px 119px,
-      color-mix(in srgb, var(--primary) 42%, white) 0 0.6px,
-      transparent 1.15px
-    )
-    79px 43px / 389px 227px,
-    radial-gradient(
-      circle at 74% 82%,
-      color-mix(in srgb, var(--primary) 9%, transparent),
-      transparent 34%
-    ),
-    linear-gradient(145deg, rgb(8 9 13 / 84%), rgb(4 5 8 / 76%));
-  background-color: #050609;
+  background: var(--dashboard-canvas);
   color: var(--foreground);
 }
 
 @media (min-width: 64rem) {
   .dashboard-main-panel {
-    border-top: 1px solid
-      color-mix(in srgb, var(--primary) 42%, var(--border) 58%);
-    border-left: 1px solid color-mix(in srgb, var(--primary) 50%, transparent);
+    border-top: 1px solid var(--dashboard-divider);
+    border-left: 1px solid var(--dashboard-divider);
+  }
+}
+
+.login-page {
+  --primary: #f4b64d;
+  --primary-foreground: #241a0c;
+  --background: #131211;
+  --muted-foreground: #b9b4aa;
+  --ring: var(--primary);
+}
+
+.storage-usage-meter {
+  display: block;
+  width: 100%;
+  height: 0.5rem;
+  overflow: hidden;
+  appearance: none;
+  border: 0;
+  border-radius: 999px;
+  background: var(--muted);
+  color: var(--primary);
+}
+
+.storage-usage-meter::-webkit-progress-bar {
+  background: transparent;
+}
+
+.storage-usage-meter::-webkit-progress-value {
+  border-radius: inherit;
+  background: var(--primary);
+}
+
+.storage-usage-meter::-moz-progress-bar {
+  border-radius: inherit;
+  background: var(--primary);
+}
+
+.login-remember {
+  transition:
+    transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1.3),
+    background-color 180ms ease,
+    border-color 180ms ease;
+}
+
+.login-remember:not(:disabled):active,
+.login-remember-field:has(label:active) .login-remember:not(:disabled) {
+  transform: scale(0.88);
+  transition-duration: 90ms;
+}
+
+.login-remember[aria-checked="true"] [data-slot="checkbox-indicator"] {
+  animation: login-check-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1.2);
+}
+
+.login-remember[aria-checked="true"] svg path {
+  stroke-dasharray: 24;
+  animation: login-check-draw 220ms ease-out;
+}
+
+.login-remember-field label {
+  cursor: pointer;
+}
+
+.login-remember-field:has(:disabled) label {
+  cursor: default;
+}
+
+.login-submit {
+  transition:
+    transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1),
+    background-color 160ms ease,
+    opacity 160ms ease;
+}
+
+.login-submit:not(:disabled):active {
+  transform: scale(0.975);
+  transition-duration: 90ms;
+}
+
+.login-submit-content {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  animation: login-content-in 180ms ease-out;
+}
+
+.login-submit-arrow {
+  transition: transform 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (hover: hover) {
+  .login-submit:not(:disabled):hover .login-submit-arrow {
+    transform: translateX(3px);
+  }
+}
+
+@keyframes login-check-in {
+  from {
+    opacity: 0;
+    transform: scale(0.65);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes login-check-draw {
+  from {
+    stroke-dashoffset: 24;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes login-content-in {
+  from {
+    opacity: 0;
+    transform: translateY(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+.login-gradient-drift {
+  animation: login-gradient-drift 12s ease-in-out infinite alternate;
+  will-change: transform;
+}
+
+.login-light-ray {
+  opacity: 0.2;
+  transform-origin: 20% 0%;
+  animation: login-light-ray 12s ease-in-out infinite alternate;
+}
+
+@keyframes login-light-ray {
+  0% {
+    opacity: 0.12;
+    transform: translate3d(-5%, -2%, 0) skewX(36deg) scaleX(0.88);
+  }
+  50% {
+    opacity: 0.28;
+    transform: translate3d(2%, 0, 0) skewX(44deg) scaleX(1.06);
+  }
+  100% {
+    opacity: 0.16;
+    transform: translate3d(6%, 1%, 0) skewX(49deg) scaleX(0.95);
+  }
+}
+
+@keyframes login-gradient-drift {
+  from {
+    transform: translate3d(-3%, -2%, 0) scale(1.02);
+  }
+  to {
+    transform: translate3d(4%, 3%, 0) scale(1.06);
   }
 }
 
@@ -538,6 +608,27 @@ h3 {
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .login-remember,
+  .login-remember-field .login-remember:not(:disabled):active,
+  .login-remember-field:has(label:active) .login-remember:not(:disabled),
+  .login-submit,
+  .login-submit:not(:disabled):active,
+  .login-submit .login-submit-arrow,
+  .login-submit:not(:disabled):hover .login-submit-arrow {
+    transform: none;
+    transition: none;
+  }
+
+  .login-remember[aria-checked="true"] [data-slot="checkbox-indicator"],
+  .login-remember[aria-checked="true"] svg path,
+  .login-submit-content,
+  .login-submit .animate-spin {
+    animation: none;
+  }
+
+  .dashboard-sidebar-ambient::before,
+  .login-gradient-drift,
+  .login-light-ray,
   .dotted-surface::before,
   .dotted-surface::after,
   .upload-edge-glow,
@@ -548,6 +639,10 @@ h3 {
 
   .upload-edge-spark {
     display: none;
+  }
+
+  .login-gradient-drift {
+    will-change: auto;
   }
 }
 

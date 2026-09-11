@@ -1,4 +1,8 @@
 import { headers } from "next/headers";
+import {
+  isStorageOverview,
+  type StorageOverviewState,
+} from "@/features/dashboard/storage-overview";
 
 type HeaderSource = {
   get(name: string): string | null;
@@ -581,6 +585,33 @@ export async function getCsrfState(): Promise<CsrfState> {
           status: "ready",
           token: data.csrfToken,
         };
+      },
+    );
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
+export async function getStorageOverviewState(): Promise<StorageOverviewState> {
+  const requestHeaders = await headers();
+  try {
+    return await requestApi<StorageOverviewState>(
+      `${getApiOrigin()}/api/admin/storage`,
+      {
+        headers: getForwardedHeaders(
+          requestHeaders,
+          requestHeaders.get("cookie"),
+        ),
+        cache: "no-store",
+      },
+      async (response) => {
+        if (response.status === 401) return { status: "unauthorized" };
+        if (response.status === 403) return { status: "forbidden" };
+        if (!response.ok) return { status: "unavailable" };
+        const data: unknown = await response.json();
+        return isStorageOverview(data)
+          ? { status: "ready", data }
+          : { status: "unavailable" };
       },
     );
   } catch {

@@ -271,7 +271,7 @@ export function OnePasswordLoginForm({
           </Label>
           <div className="group/input relative overflow-hidden rounded-2xl">
             <Mail
-              className="pointer-events-none absolute left-4 top-1/2 z-20 size-4 -translate-y-1/2 text-muted-foreground"
+              className="pointer-events-none absolute left-4 top-1/2 z-20 size-4 -translate-y-1/2 text-primary"
               aria-hidden="true"
             />
             <Input
@@ -283,7 +283,7 @@ export function OnePasswordLoginForm({
               placeholder="john.doe"
               required
               disabled={busy || backendUnavailable}
-              className="h-12 rounded-2xl border-white/[0.07] bg-background/20 pl-11 pr-4 text-base shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-md focus-visible:border-white/[0.07] focus-visible:ring-0"
+              className="h-12 rounded-2xl border-white/[0.07] bg-background/70 pl-11 pr-4 text-base shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-md focus-visible:border-white/[0.07] focus-visible:ring-0"
             />
             <InputShimmer />
           </div>
@@ -295,7 +295,7 @@ export function OnePasswordLoginForm({
           </Label>
           <div className="group/input relative overflow-hidden rounded-2xl">
             <LockKeyhole
-              className="pointer-events-none absolute left-4 top-1/2 z-20 size-4 -translate-y-1/2 text-muted-foreground"
+              className="pointer-events-none absolute left-4 top-1/2 z-20 size-4 -translate-y-1/2 text-primary"
               aria-hidden="true"
             />
             <Input
@@ -306,18 +306,18 @@ export function OnePasswordLoginForm({
               placeholder="Enter your password..."
               required
               disabled={busy || backendUnavailable}
-              className="h-12 rounded-2xl border-white/[0.07] bg-background/20 pl-11 pr-4 text-base shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-md focus-visible:border-white/[0.07] focus-visible:ring-0"
+              className="h-12 rounded-2xl border-white/[0.07] bg-background/70 pl-11 pr-4 text-base shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-md focus-visible:border-white/[0.07] focus-visible:ring-0"
             />
             <InputShimmer />
           </div>
         </div>
 
-        <div className="group/field flex items-center gap-3">
+        <div className="login-remember-field group/field flex items-center gap-3">
           <Checkbox
             id="remember"
             name="remember"
             disabled={busy || backendUnavailable}
-            className="size-5 rounded-[5px] border-white/[0.07] bg-background/20 shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-md"
+            className="login-remember size-5 rounded-[5px] border-white/[0.07] bg-background/20 shadow-[inset_0_1px_0_rgb(255_255_255/0.06)] backdrop-blur-md"
           />
           <Label
             htmlFor="remember"
@@ -331,14 +331,23 @@ export function OnePasswordLoginForm({
           type="submit"
           size="lg"
           disabled={busy || backendUnavailable}
-          className="h-12 w-full rounded-full bg-primary/85 text-base shadow-[0_16px_40px_color-mix(in_srgb,var(--primary)_18%,transparent)] hover:bg-primary/95"
+          className="login-submit h-12 w-full gap-2 rounded-2xl bg-zinc-100 text-base text-zinc-950 shadow-none hover:bg-zinc-200 focus-visible:border-transparent focus-visible:ring-2 focus-visible:ring-white/70 focus-visible:ring-offset-2 focus-visible:ring-offset-login-panel active:not-aria-[haspopup]:translate-y-0 active:bg-zinc-300"
         >
-          {busy ? (
-            <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
-          ) : (
-            <ArrowRight className="size-4" aria-hidden="true" />
-          )}
-          {busy ? "Unlocking..." : "Sign in"}
+          <span className="login-submit-content" key={busy ? "busy" : "ready"}>
+            {busy ? (
+              <LoaderCircle
+                className="size-4 animate-spin"
+                aria-hidden="true"
+              />
+            ) : null}
+            {busy ? "Unlocking..." : "Sign in"}
+            {!busy ? (
+              <ArrowRight
+                className="login-submit-arrow size-4"
+                aria-hidden="true"
+              />
+            ) : null}
+          </span>
         </Button>
       </form>
 

@@ -3,7 +3,7 @@ export type AccentColorPreset = {
   value: `#${string}`;
 };
 
-export const DEFAULT_ACCENT_COLOR = "#3088f0" as const;
+export const DEFAULT_ACCENT_COLOR = "#f4b64d" as const;
 export const ACCENT_COLOR_STORAGE_KEY = "aeralyth-accent-color";
 
 export const ACCENT_COLOR_PRESETS: AccentColorPreset[] = [

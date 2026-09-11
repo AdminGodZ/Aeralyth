@@ -5,6 +5,38 @@ development and production. Metadata, quota reservations, counters, and
 deletion jobs stay in PostgreSQL. Encrypted object bytes travel directly between
 the browser and S3 through short-lived presigned URLs.
 
+## Storage overview
+
+The administrator Storage page separates the signed-in account's usage and
+quota from the whole bucket. Account usage comes from the existing PostgreSQL
+counters, including Trash; `AERALYTH_STORAGE_QUOTA_BYTES` remains the per-account
+upload limit. Percentages show one decimal place. Displayed byte sizes use
+decimal units, matching Railway: the default 10 GiB quota is shown as 10.7 GB.
+
+`GET /api/admin/storage` requires an administrator session and returns the
+account summary plus aggregate S3 bucket measurements. It does not load file
+listings or decrypted metadata. The bucket totals count all completed objects
+through paginated `ListObjectsV2` requests, including objects from other accounts;
+in-progress multipart uploads and non-current object versions are not included.
+The account quota is not a bucket capacity limit.
+
+The first bucket measurement runs in the background. A shared cache permits
+one scan at a time per API replica, refreshes on demand after 60 seconds, and
+retains the last complete measurement after errors. Each scan is bounded to
+120 seconds and 10,000 pages; partial scans are never published as complete
+totals. The page polls while a measurement is pending and otherwise refreshes
+once per minute while visible. Bucket name and region come from the configured
+S3 connection; credentials and object keys are never returned to the browser.
+
+Local-filesystem development continues to report local storage and has no
+bucket totals. Production uses its configured Railway S3 bucket. A read-only
+live scanner test is available as
+`cargo test --manifest-path backend/Cargo.toml reads_configured_bucket_read_only -- --ignored --nocapture`;
+it requires `AERALYTH_TEST_S3_ENDPOINT`, `AERALYTH_TEST_S3_BUCKET`,
+`AERALYTH_TEST_S3_REGION`, `AERALYTH_TEST_S3_ACCESS_KEY_ID`, and
+`AERALYTH_TEST_S3_SECRET_ACCESS_KEY`. Set `AERALYTH_TEST_S3_PATH_STYLE=true` only
+for a path-style endpoint. This test only lists objects; it never writes data.
+
 ## Local development
 
 Use Railway S3 locally with `AERALYTH_STORAGE_BACKEND=s3`. The API accepts the

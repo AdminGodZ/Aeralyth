@@ -55,6 +55,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
                     web::scope("/admin")
                         .route("/me", web::get().to(admin::me))
                         .route("/users", web::get().to(admin::users))
+                        .route("/storage", web::get().to(files::storage_overview))
                         .route(
                             "/users/one-password",
                             web::post().to(admin::create_one_password_user),

@@ -458,6 +458,26 @@ pub async fn storage(state: web::Data<AppState>, request: HttpRequest) -> Result
     Ok(HttpResponse::Ok().json(storage_stats(&state, summary.used_bytes)))
 }
 
+pub async fn storage_overview(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+) -> Result<HttpResponse> {
+    let user = crate::auth::require_admin(&state, &request).await?;
+    let summary = get_summary(&state, &user).await?;
+    let is_s3 = state.storage.backend_name() == "s3";
+    Ok(HttpResponse::Ok()
+        .insert_header((actix_web::http::header::CACHE_CONTROL, "private, no-store"))
+        .json(serde_json::json!({
+            "account": storage_stats(&state, summary.used_bytes),
+            "provider": crate::bucket_usage::provider_label(
+                state.storage.backend_name(), state.config.s3_endpoint.as_deref()
+            ),
+            "bucketName": if is_s3 { state.config.s3_bucket.as_deref() } else { None },
+            "region": if is_s3 { Some(state.config.s3_region.as_str()) } else { None },
+            "bucketUsage": state.bucket_usage.read(&state.storage),
+        })))
+}
+
 pub async fn create_folder_manifest(
     state: web::Data<AppState>,
     request: HttpRequest,

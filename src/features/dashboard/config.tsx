@@ -120,7 +120,7 @@ export const dashboardSections: DashboardSection[] = [
     content: "system",
     icon: HardDrive,
     title: "Storage",
-    subtitle: "Capacity, quotas, and storage locations",
+    subtitle: "Account usage and storage bucket",
   },
   {
     key: "users",

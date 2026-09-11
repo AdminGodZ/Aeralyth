@@ -203,35 +203,29 @@ export function UsersContent({
             </TabsTrigger>
           </TabsList>
 
-          <div className="flex flex-col gap-2 sm:flex-row sm:items-center">
-            <form action="/users" method="get" className="flex gap-2">
-              <div className="relative min-w-0 sm:w-72">
-                <Search
-                  className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
-                  aria-hidden="true"
-                />
-                <Input
-                  type="search"
-                  name="q"
-                  value={query}
-                  onChange={(event) => setQuery(event.currentTarget.value)}
-                  placeholder={
-                    activeTab === "accounts"
-                      ? "Search accounts"
-                      : "Search invitations"
-                  }
-                  aria-label={
-                    activeTab === "accounts"
-                      ? "Search accounts"
-                      : "Search invitations"
-                  }
-                  className="h-9 pl-9"
-                />
-              </div>
-              <Button type="submit" variant="outline" size="sm">
-                Search
-              </Button>
-            </form>
+          <div className="flex min-w-0 flex-col gap-2 sm:flex-row sm:flex-wrap sm:items-center">
+            <div className="relative min-w-0 sm:w-72">
+              <Search
+                className="pointer-events-none absolute left-3 top-1/2 size-4 -translate-y-1/2 text-muted-foreground"
+                aria-hidden="true"
+              />
+              <Input
+                type="search"
+                value={query}
+                onChange={(event) => setQuery(event.currentTarget.value)}
+                placeholder={
+                  activeTab === "accounts"
+                    ? "Search accounts"
+                    : "Search invitations"
+                }
+                aria-label={
+                  activeTab === "accounts"
+                    ? "Search accounts"
+                    : "Search invitations"
+                }
+                className="h-9 rounded-full pl-9"
+              />
+            </div>
             <div className="flex gap-2">
               <InviteUserDialog csrfToken={csrfToken} />
               <CreateUserDialog csrfToken={csrfToken} />
@@ -559,7 +553,7 @@ function CreateUserDialog({ csrfToken }: { csrfToken: string }) {
       }}
     >
       <DialogTrigger asChild>
-        <Button type="button" variant="outline">
+        <Button type="button" variant="outline" size="lg">
           <UserPlus className="size-4" aria-hidden="true" />
           Create account
         </Button>
@@ -656,7 +650,7 @@ function InviteUserDialog({ csrfToken }: { csrfToken: string }) {
   return (
     <Dialog>
       <DialogTrigger asChild>
-        <Button type="button">
+        <Button type="button" size="lg">
           <MailPlus className="size-4" aria-hidden="true" />
           Invite
         </Button>

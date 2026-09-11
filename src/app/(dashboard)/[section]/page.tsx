@@ -11,6 +11,7 @@ import {
   getAdminUsersState,
   getFilesState,
   getRepositoriesState,
+  getStorageOverviewState,
   type RepositoriesState,
 } from "@/lib/api";
 
@@ -99,16 +100,22 @@ export default async function SectionPage({
     section.key === "repositories"
       ? getRepositoriesState(cursor?.trim() || undefined)
       : Promise.resolve<RepositoriesState>({ status: "unavailable" });
+  const storagePromise =
+    section.key === "storage"
+      ? getStorageOverviewState()
+      : Promise.resolve(undefined);
   const [
     { csrfToken, currentUser },
     adminUsersState,
     filesState,
     repositoriesState,
+    storageState,
   ] = await Promise.all([
     dashboardSessionPromise,
     adminUsersPromise,
     filesPromise,
     repositoriesPromise,
+    storagePromise,
   ]);
 
   if (section.group === "system" && currentUser.role !== "admin") {
@@ -119,7 +126,10 @@ export default async function SectionPage({
     redirect("/login");
   }
 
-  if (filesState.status === "unauthorized") {
+  if (
+    filesState.status === "unauthorized" ||
+    storageState?.status === "unauthorized"
+  ) {
     redirect("/login");
   }
 
@@ -127,7 +137,10 @@ export default async function SectionPage({
     redirect("/login");
   }
 
-  if (adminUsersState?.status === "forbidden") {
+  if (
+    adminUsersState?.status === "forbidden" ||
+    storageState?.status === "forbidden"
+  ) {
     notFound();
   }
 
@@ -143,6 +156,7 @@ export default async function SectionPage({
       fileSort={fileSort}
       fileSortDirection={fileSortDirection}
       repositoriesState={repositoriesState}
+      storageState={storageState}
     />
   );
 }
@@ -162,7 +176,7 @@ function getFileView(sectionKey: string): FileView | null {
 }
 
 function sectionNeedsFiles(sectionKey: string) {
-  return sectionKey === "storage" || getFileView(sectionKey) !== null;
+  return getFileView(sectionKey) !== null;
 }
 
 function normalizeFileSort(value?: string): FileSort | undefined {

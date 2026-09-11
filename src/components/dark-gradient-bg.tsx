@@ -30,26 +30,28 @@ export function DarkGradientBg({
     >
       <div className="pointer-events-none absolute inset-0" aria-hidden="true">
         <div
-          className="absolute inset-0"
+          className="login-gradient-drift absolute -inset-[12%]"
           style={{
             background:
-              "radial-gradient(100% 100% at 0% 0%, rgb(46 46 46) 0%, rgb(0 0 0) 100%)",
+              "radial-gradient(100% 100% at 0% 0%, rgb(46 40 31) 0%, rgb(0 0 0) 100%)",
             maskImage:
               "radial-gradient(125% 100% at 0% 0%, #000 0%, rgb(0 0 0 / 22.4%) 88.2883%, transparent 100%)",
             WebkitMaskImage:
               "radial-gradient(125% 100% at 0% 0%, #000 0%, rgb(0 0 0 / 22.4%) 88.2883%, transparent 100%)",
           }}
         >
-          {STREAK_MASKS.map((maskImage) => (
+          {STREAK_MASKS.map((maskImage, index) => (
             <div
               key={maskImage}
-              className="absolute inset-0 opacity-20"
+              className="login-light-ray absolute inset-0"
               style={{
                 background:
-                  "linear-gradient(rgb(0 207 255) 0%, rgb(0 207 255 / 0%) 100%)",
+                  "linear-gradient(180deg, rgb(255 231 168 / 85%) 0%, rgb(255 182 62 / 80%) 24%, rgb(232 134 32 / 25%) 58%, transparent 90%)",
                 maskImage,
                 WebkitMaskImage: maskImage,
                 transform: "skewX(45deg)",
+                animationDuration: `${10 + index * 2}s`,
+                animationDelay: `${-index * 2.4}s`,
               }}
             />
           ))}
@@ -74,7 +76,7 @@ export function DarkGradientBg({
           className="absolute inset-0"
           style={{
             background:
-              "radial-gradient(circle at 50% 15%, rgb(30 41 59 / 20%), transparent 48%)",
+              "radial-gradient(circle at 50% 15%, rgb(101 63 24 / 24%), transparent 48%)",
           }}
         />
       </div>

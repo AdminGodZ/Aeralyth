@@ -24,6 +24,7 @@ pub struct AppState {
     pub passwords: PasswordService,
     pub login_rate_limiter: LoginRateLimiter,
     pub storage: Storage,
+    pub bucket_usage: crate::bucket_usage::BucketUsageCache,
     pub realtime: crate::realtime::RealtimeHub,
     pub upload_control_limiter: MutationLimiter,
     pub recursive_operation_limiter: QueuedMutationLimiter,

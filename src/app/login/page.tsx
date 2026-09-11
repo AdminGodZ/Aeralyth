@@ -59,7 +59,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
   const loginAlertIsError = backendUnavailable || invalidCredentials;
 
   return (
-    <DarkGradientBg as="main" className="isolate text-foreground">
+    <DarkGradientBg as="main" className="login-page isolate text-foreground">
       {loginAlertMessage ? (
         <Alert
           className={cn(
@@ -94,13 +94,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
               aria-hidden="true"
               className="pointer-events-none absolute -left-20 top-16 -z-10 size-72 rounded-full bg-primary/15 blur-3xl"
             />
-            <Card className="relative isolate mb-9 flex size-20 items-center justify-center rounded-[1.75rem] border border-white/[0.07] bg-card/10 p-0 py-0 shadow-[0_20px_60px_rgb(0_0_0/0.2)] ring-0 backdrop-blur-md backdrop-saturate-150 dark:bg-card/12">
-              <div
-                aria-hidden="true"
-                className="pointer-events-none absolute inset-0 bg-[linear-gradient(145deg,--theme(--color-foreground/.16),transparent_36%,--theme(--color-primary/.16))]"
-              />
-              <AeralythLogo className="relative size-14 drop-shadow-[0_0_18px_rgb(48_136_240/0.32)]" />
-            </Card>
+            <AeralythLogo className="relative mb-9 size-28" />
 
             <h1 className="max-w-3xl font-display text-6xl font-semibold leading-[1.02] tracking-normal">
               Private cloud access
@@ -131,7 +125,7 @@ export default async function LoginPage({ searchParams }: LoginPageProps) {
           </div>
 
           <div className="w-full max-w-md justify-self-center lg:flex lg:justify-self-end">
-            <Card className="h-full w-full justify-center gap-0 rounded-[2rem] border border-white/[0.07] bg-card/10 py-0 shadow-[0_24px_80px_rgb(0_0_0/0.2)] ring-0 backdrop-blur-md backdrop-saturate-150 dark:bg-card/12">
+            <Card className="h-full w-full justify-center gap-0 rounded-[2rem] border border-white/[0.08] bg-login-panel py-0 shadow-[0_24px_80px_rgb(0_0_0/0.2)] ring-0">
               <CardHeader className="items-center px-7 pt-8 pb-5 text-center sm:px-8 sm:pt-9">
                 <CardTitle className="font-display text-4xl font-semibold tracking-normal text-foreground">
                   Welcome back

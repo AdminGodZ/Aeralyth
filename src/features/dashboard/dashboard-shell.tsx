@@ -22,6 +22,8 @@ import {
 } from "@/features/dashboard/config";
 import { DashboardSidebar } from "@/features/dashboard/dashboard-sidebar";
 import { ProfileSettingsForm } from "@/features/dashboard/profile-settings-form";
+import { StorageContent } from "@/features/dashboard/storage-content";
+import type { StorageOverviewState } from "@/features/dashboard/storage-overview";
 import { UploadPanel } from "@/features/dashboard/upload-panel";
 import { UserPreferenceHydrator } from "@/features/dashboard/user-preference-hydrator";
 import { UsersContent as UsersDirectory } from "@/features/dashboard/users-content";
@@ -67,6 +69,7 @@ type DashboardPageProps = {
   repositoriesState?: RepositoriesState;
   repositoryDetailState?: RepositoryDetailState;
   repositoryFileId?: string;
+  storageState?: StorageOverviewState;
 };
 
 type ReadyFilesState = Extract<FilesState, { status: "ready" }>;
@@ -127,6 +130,7 @@ export function DashboardPage({
   repositoriesState,
   repositoryDetailState,
   repositoryFileId,
+  storageState,
 }: DashboardPageProps) {
   const section =
     getDashboardSection(sectionKey) ?? getDashboardSection("files");
@@ -151,6 +155,7 @@ export function DashboardPage({
         repositoriesState={repositoriesState}
         repositoryDetailState={repositoryDetailState}
         repositoryFileId={repositoryFileId}
+        storageState={storageState}
       />
     </>
   );
@@ -275,6 +280,7 @@ function DashboardContent({
   repositoriesState,
   repositoryDetailState,
   repositoryFileId,
+  storageState,
 }: {
   section: DashboardSection;
   currentUser: CurrentUser;
@@ -288,6 +294,7 @@ function DashboardContent({
   repositoriesState?: RepositoriesState;
   repositoryDetailState?: RepositoryDetailState;
   repositoryFileId?: string;
+  storageState?: StorageOverviewState;
 }) {
   if (section.key === "settings") {
     return <SettingsContent currentUser={currentUser} csrfToken={csrfToken} />;
@@ -306,7 +313,11 @@ function DashboardContent({
   }
 
   if (section.key === "storage") {
-    return <StorageContent filesState={filesState} />;
+    return (
+      <StorageContent
+        initialState={storageState ?? { status: "unavailable" }}
+      />
+    );
   }
 
   if (section.key === "repositories") {
@@ -567,60 +578,6 @@ function FolderBreadcrumbs({
   );
 }
 
-function StorageContent({ filesState }: { filesState: FilesState }) {
-  if (!hasReadyFilesState(filesState)) {
-    return (
-      <div className="flex flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
-        <section className="rounded-md border p-5">
-          <p className="font-medium">Storage unavailable</p>
-          <p className="mt-2 text-sm text-muted-foreground">
-            The storage API is not reachable.
-          </p>
-        </section>
-      </div>
-    );
-  }
-
-  const storage = filesState.data.storage;
-  const usedPercent = percentage(storage.systemUsedBytes, storage.totalBytes);
-
-  return (
-    <div className="flex flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
-      <div className="grid gap-3 sm:grid-cols-4">
-        <Metric label="Used" value={formatBytes(storage.systemUsedBytes)} />
-        <Metric label="Available" value={formatBytes(storage.availableBytes)} />
-        <Metric label="Quota" value={formatBytes(storage.totalBytes)} />
-        <Metric label="Utilization" value={`${usedPercent}%`} />
-      </div>
-
-      <section className="rounded-md border p-5">
-        <div className="flex items-center justify-between gap-4 text-sm">
-          <span className="font-medium">Storage quota</span>
-          <span className="text-muted-foreground">{usedPercent}% used</span>
-        </div>
-        <div className="mt-4 h-3 rounded-full bg-muted">
-          <div
-            className="h-full rounded-full bg-primary"
-            style={{ width: `${usedPercent}%` }}
-          />
-        </div>
-        <p className="mt-4 text-sm text-muted-foreground">
-          {storage.storagePath}
-        </p>
-      </section>
-    </div>
-  );
-}
-
-function Metric({ label, value }: { label: string; value: string }) {
-  return (
-    <div className="rounded-md border p-4">
-      <p className="text-sm text-muted-foreground">{label}</p>
-      <p className="mt-2 font-display text-2xl font-semibold">{value}</p>
-    </div>
-  );
-}
-
 function FileMetric({
   icon: Icon,
   label,
@@ -714,14 +671,6 @@ function formatBytes(value: number) {
   return `${size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1)} ${
     units[unitIndex]
   }`;
-}
-
-function percentage(used: number, total: number) {
-  if (!Number.isFinite(used) || !Number.isFinite(total) || total <= 0) {
-    return 0;
-  }
-
-  return Math.min(100, Math.max(0, Math.round((used / total) * 100)));
 }
 
 function emptyFilesText(sectionKey: DashboardSectionKey) {

@@ -1,4 +1,5 @@
 mod auth;
+mod bucket_usage;
 mod collection_timestamps;
 mod config;
 mod db;
@@ -127,6 +128,7 @@ async fn main() -> std::io::Result<()> {
         passwords,
         login_rate_limiter,
         storage,
+        bucket_usage: bucket_usage::BucketUsageCache::default(),
         realtime: realtime_hub.clone(),
         upload_control_limiter: MutationLimiter::new(
             config.upload_control_concurrency,
