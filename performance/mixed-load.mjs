@@ -121,6 +121,7 @@ let sampler;
 let databaseStall;
 try {
   fixture = await createMixedFixture({ origin, timeoutMs, env });
+  result.fixtureSetupMs = performance.now() - started;
   result.fixture = fixture.fixture;
   const required = ["browse", "metadata", "publication", "maintenance"];
   for (const name of required) {
@@ -216,6 +217,7 @@ try {
     result.violations.push(`fault cleanup: ${error.message ?? String(error)}`);
   }
   await sampler;
+  const cleanupStarted = performance.now();
   try {
     await fixture?.close();
     result.fixtureCleanup = fixture ? "complete" : "not-created";
@@ -224,6 +226,8 @@ try {
     result.violations.push(
       `fixture cleanup: ${error.message ?? String(error)}`,
     );
+  } finally {
+    result.fixtureCleanupMs = performance.now() - cleanupStarted;
   }
   result.elapsedMs = performance.now() - started;
   result.passed = result.violations.length === 0;

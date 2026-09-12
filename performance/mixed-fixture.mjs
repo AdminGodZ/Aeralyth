@@ -12,6 +12,7 @@ import {
 } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { isolatedOrigin } from "./arrival-load.mjs";
+import { createFixtureStream } from "./fixture-stream.mjs";
 
 const hash = (...values) => {
   const digest = createHash("sha256");
@@ -520,58 +521,20 @@ export async function createMixedFixture({
   }
 
   async function openStream(index) {
-    const controller = new AbortController();
-    const stream = { controller, task: null, lastFrameAt: performance.now() };
-    const firstFrame = Promise.withResolvers();
-    const timeout = setTimeout(() => controller.abort(), timeoutMs);
     const token = index % 2 === 0 ? ownerToken : recipientToken;
-    const task = (async () => {
-      try {
-        const response = await fetch(new URL("/api/events", base.origin), {
-          headers: { Cookie: `aeralyth_session=${token}` },
-          signal: controller.signal,
-          redirect: "error",
-        });
-        assert.equal(
-          response.status,
-          200,
-          "SSE must authenticate successfully",
-        );
-        assert.match(
-          response.headers.get("content-type") ?? "",
-          /text\/event-stream/,
-        );
-        const decoder = new TextDecoder();
-        let buffer = "";
-        for await (const chunk of response.body) {
-          buffer += decoder.decode(chunk, { stream: true });
-          let end = buffer.indexOf("\n\n");
-          while (end >= 0) {
-            const frame = buffer.slice(0, end);
-            assert.ok(
-              !frame.includes("event: session-expired"),
-              "fixture session expired",
-            );
-            streamFrames++;
-            stream.lastFrameAt = performance.now();
-            firstFrame.resolve();
-            clearTimeout(timeout);
-            buffer = buffer.slice(end + 2);
-            end = buffer.indexOf("\n\n");
-          }
-          assert.ok(buffer.length < 1024 * 1024, "unbounded SSE frame");
-        }
-        if (!closed) throw new Error("SSE ended before workload completion");
-      } catch (error) {
-        firstFrame.reject(error);
-        if (!closed) streamErrors++;
-      } finally {
-        clearTimeout(timeout);
-      }
-    })();
-    stream.task = task;
+    const stream = createFixtureStream({
+      url: new URL("/api/events", base.origin),
+      headers: { Cookie: `aeralyth_session=${token}` },
+      timeoutMs,
+      onFrame() {
+        streamFrames++;
+      },
+      onError() {
+        streamErrors++;
+      },
+    });
     streams.push(stream);
-    await firstFrame.promise;
+    await stream.ready;
   }
 
   async function sample() {
@@ -634,34 +597,54 @@ export async function createMixedFixture({
   async function close() {
     if (closed) return;
     closed = true;
-    for (const stream of streams) stream.controller.abort();
-    await Promise.all(streams.map((stream) => stream.task));
-    await Promise.all(databaseStalls.map((stall) => stall.release()));
-    if (!seeded) return;
-    // No fixture writer remains. Only keys actually staged or published by this
-    // owner enter cleanup; seeded metadata has no provider object to remove.
-    await sql(`BEGIN;
-      INSERT INTO storage_deletion_jobs (object_key, available_at)
-      SELECT object_key, now() FROM vault_uploads WHERE owner_id = ${quote(owner)} AND object_key IS NOT NULL
-      ON CONFLICT (object_key) DO UPDATE SET available_at = LEAST(storage_deletion_jobs.available_at, EXCLUDED.available_at);
-      DELETE FROM users WHERE id IN (${ownerSet});
-      DELETE FROM realtime_outbox WHERE user_id IN (${ownerSet});
-      DELETE FROM realtime_events WHERE user_id IN (${ownerSet});
-      COMMIT;`);
-    const deadline = performance.now() + cleanupTimeout;
-    while (true) {
-      const pending = Number(
-        await sql(
-          `SELECT count(*) FROM storage_deletion_jobs WHERE ${jobPredicate};`,
-        ),
-      );
-      if (pending === 0) break;
-      assert.ok(
-        performance.now() < deadline,
-        `${pending} fixture provider cleanup jobs did not converge within ${cleanupTimeout} ms`,
-      );
-      await delay(250);
+    const failures = [];
+    for (const results of [
+      await Promise.allSettled(
+        streams.map((stream) => stream.close(cleanupTimeout)),
+      ),
+      await Promise.allSettled(databaseStalls.map((stall) => stall.release())),
+    ]) {
+      for (const result of results) {
+        if (result.status === "rejected") failures.push(result.reason);
+      }
     }
+    // Always remove fixture accounts and provider objects, even if a stream
+    // failed to close. A cleanup failure must remain a failing gate result.
+    try {
+      if (seeded) {
+        // No fixture writer remains. Only keys actually staged or published by this
+        // owner enter cleanup; seeded metadata has no provider object to remove.
+        await sql(`BEGIN;
+          INSERT INTO storage_deletion_jobs (object_key, available_at)
+          SELECT object_key, now() FROM vault_uploads WHERE owner_id = ${quote(owner)} AND object_key IS NOT NULL
+          ON CONFLICT (object_key) DO UPDATE SET available_at = LEAST(storage_deletion_jobs.available_at, EXCLUDED.available_at);
+          DELETE FROM users WHERE id IN (${ownerSet});
+          DELETE FROM realtime_outbox WHERE user_id IN (${ownerSet});
+          DELETE FROM realtime_events WHERE user_id IN (${ownerSet});
+          COMMIT;`);
+        const deadline = performance.now() + cleanupTimeout;
+        while (true) {
+          const pending = Number(
+            await sql(
+              `SELECT count(*) FROM storage_deletion_jobs WHERE ${jobPredicate};`,
+            ),
+          );
+          if (pending === 0) break;
+          assert.ok(
+            performance.now() < deadline,
+            `${pending} fixture provider cleanup jobs did not converge within ${cleanupTimeout} ms`,
+          );
+          await delay(250);
+        }
+      }
+    } catch (error) {
+      failures.push(error);
+    }
+    if (failures.length)
+      throw new AggregateError(
+        failures,
+        `mixed fixture cleanup failed: ${failures.map((error) => error.message ?? String(error)).join("; ")}`,
+      );
   }
 
   try {

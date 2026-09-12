@@ -9,6 +9,190 @@ import {
   phaseViolations,
   runArrivalPhase,
 } from "./arrival-load.mjs";
+import { createFixtureStream } from "./fixture-stream.mjs";
+
+test("missing initial SSE frames time out even without abort propagation", async (t) => {
+  let cancelled = false;
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async () =>
+      new Response(
+        new ReadableStream({
+          cancel() {
+            cancelled = true;
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } },
+      ),
+  );
+  const stream = createFixtureStream({
+    url: "http://127.0.0.1/unused",
+    timeoutMs: 15,
+    onFrame() {},
+    onError() {},
+  });
+  await assert.rejects(stream.ready, /initial frame timed out/);
+  await stream.close(1000);
+  assert.equal(cancelled, true);
+});
+
+test("SSE responses arriving after cleanup starts are still cancelled", async (t) => {
+  let cancelled = false;
+  const response = Promise.withResolvers();
+  t.mock.method(globalThis, "fetch", () => response.promise);
+  const stream = createFixtureStream({
+    url: "http://127.0.0.1/unused",
+    timeoutMs: 1000,
+    onFrame() {},
+    onError() {},
+  });
+  const closing = stream.close(1000);
+  response.resolve(
+    new Response(
+      new ReadableStream({
+        cancel() {
+          cancelled = true;
+        },
+      }),
+      { headers: { "Content-Type": "text/event-stream" } },
+    ),
+  );
+  await assert.rejects(stream.ready, /closed before its first frame/);
+  await closing;
+  assert.equal(cancelled, true);
+});
+
+test("SSE transport cancellation failures fail cleanup", async (t) => {
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode("event: checkpoint\ndata: {}\n\n"),
+            );
+          },
+          cancel() {
+            throw new Error("transport close failed");
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } },
+      ),
+  );
+  const stream = createFixtureStream({
+    url: "http://127.0.0.1/unused",
+    timeoutMs: 1000,
+    onFrame() {},
+    onError() {},
+  });
+  await stream.ready;
+  await assert.rejects(stream.close(1000), /transport close failed/);
+});
+
+test("fixture cleanup cancels a pending SSE read when fetch loses abort propagation", {
+  timeout: 3000,
+}, async (t) => {
+  let frames = 0;
+  const errors = [];
+  const disconnected = Promise.withResolvers();
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { "Content-Type": "text/event-stream" });
+    response.write("event: checkpoint\ndata: {}\n\n");
+    response.on("close", disconnected.resolve);
+  });
+  await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const actualFetch = globalThis.fetch;
+  // Model the lost internal abort listener deterministically. Body cancellation
+  // must still close the real HTTP connection, without waiting for server EOF.
+  t.mock.method(globalThis, "fetch", (url, options) =>
+    actualFetch(url, { ...options, signal: undefined }),
+  );
+  const stream = createFixtureStream({
+    url: `http://127.0.0.1:${server.address().port}`,
+    timeoutMs: 1000,
+    onFrame() {
+      frames++;
+    },
+    onError(error) {
+      errors.push(error);
+    },
+  });
+  try {
+    await stream.ready;
+    await stream.close(1000);
+    await disconnected.promise;
+    assert.equal(frames, 1);
+    assert.deepEqual(errors, []);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
+
+test("a non-settling SSE cancellation fails cleanup within its deadline", async (t) => {
+  t.mock.method(
+    globalThis,
+    "fetch",
+    async () =>
+      new Response(
+        new ReadableStream({
+          start(controller) {
+            controller.enqueue(
+              new TextEncoder().encode("event: checkpoint\ndata: {}\n\n"),
+            );
+          },
+          cancel() {
+            return new Promise(() => {});
+          },
+        }),
+        { headers: { "Content-Type": "text/event-stream" } },
+      ),
+  );
+  const stream = createFixtureStream({
+    url: "http://127.0.0.1/unused",
+    timeoutMs: 1000,
+    onFrame() {},
+    onError(error) {
+      throw error;
+    },
+  });
+  await stream.ready;
+  const started = performance.now();
+  await assert.rejects(stream.close(30), /fixture SSE cleanup timed out/);
+  assert.ok(performance.now() - started < 1000);
+});
+
+test("fixture SSE expiration and early EOF remain failures", async (t) => {
+  for (const body of ["event: session-expired\ndata: {}\n\n", ""]) {
+    const errors = [];
+    t.mock.method(
+      globalThis,
+      "fetch",
+      async () =>
+        new Response(body, {
+          headers: { "Content-Type": "text/event-stream" },
+        }),
+    );
+    const stream = createFixtureStream({
+      url: "http://127.0.0.1/unused",
+      timeoutMs: 1000,
+      onFrame() {},
+      onError(error) {
+        errors.push(error);
+      },
+    });
+    await assert.rejects(
+      stream.ready,
+      /fixture session expired|SSE ended before workload completion/,
+    );
+    await stream.close(1000);
+    assert.equal(errors.length, 1);
+    t.mock.restoreAll();
+  }
+});
 
 const defaults = {
   name: "mixed",
