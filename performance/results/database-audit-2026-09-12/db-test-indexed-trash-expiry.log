@@ -1,0 +1,59 @@
+Command: npm run db:test:indexed-trash-expiry
+
+> aeralyth@0.1.0 db:test:indexed-trash-expiry
+> bash database/tests/indexed_trash_expiry.sh
+
+Aggregate  (cost=5070.14..5070.15 rows=1 width=8) (actual time=22.620..22.622 rows=1.00 loops=1)
+  Buffers: shared hit=2534
+  ->  Hash Join  (cost=41.59..4070.23 rows=99991 width=12) (actual time=0.209..16.781 rows=100001.00 loops=1)
+        Hash Cond: (files.owner_id = users.id)
+        Buffers: shared hit=2534
+        ->  Seq Scan on files  (cost=0.00..3765.05 rows=99991 width=28) (actual time=0.008..7.880 rows=100001.00 loops=1)
+              Filter: ((trashed_at IS NOT NULL) AND (state = 'trashed'::text))
+              Rows Removed by Filter: 3
+              Buffers: shared hit=2515
+        ->  Hash  (cost=29.04..29.04 rows=1004 width=24) (actual time=0.186..0.187 rows=1004.00 loops=1)
+              Buckets: 1024  Batches: 1  Memory Usage: 64kB
+              Buffers: shared hit=19
+              ->  Seq Scan on users  (cost=0.00..29.04 rows=1004 width=24) (actual time=0.002..0.114 rows=1004.00 loops=1)
+                    Buffers: shared hit=19
+Planning:
+  Buffers: shared hit=255
+Planning Time: 0.392 ms
+Execution Time: 22.634 ms
+Result  (cost=0.37..0.38 rows=1 width=8) (actual time=0.010..0.010 rows=1.00 loops=1)
+  Buffers: shared hit=3
+  InitPlan 1
+    ->  Limit  (cost=0.28..0.37 rows=1 width=8) (actual time=0.009..0.009 rows=1.00 loops=1)
+          Buffers: shared hit=3
+          ->  Index Only Scan using trash_expiry_owners_due_idx on trash_expiry_owners  (cost=0.28..92.23 rows=1000 width=8) (actual time=0.009..0.009 rows=1.00 loops=1)
+                Heap Fetches: 1
+                Index Searches: 1
+                Buffers: shared hit=3
+Planning:
+  Buffers: shared hit=21
+Planning Time: 0.073 ms
+Execution Time: 0.038 ms
+Limit  (cost=0.28..8.29 rows=1 width=28) (actual time=0.008..0.008 rows=0.00 loops=1)
+  Buffers: shared hit=2
+  ->  Index Only Scan using trash_expiry_owners_due_idx on trash_expiry_owners  (cost=0.28..8.29 rows=1 width=28) (actual time=0.007..0.007 rows=0.00 loops=1)
+        Index Cond: (next_due_at <= now())
+        Heap Fetches: 0
+        Index Searches: 1
+        Buffers: shared hit=2
+Planning:
+  Buffers: shared hit=6
+Planning Time: 0.129 ms
+Execution Time: 0.026 ms
+Limit  (cost=0.42..10.42 rows=100 width=30) (actual time=0.071..0.071 rows=0.00 loops=1)
+  Buffers: shared hit=3
+  ->  Index Only Scan using files_trash_leaf_owner_due_idx on files  (cost=0.42..10.42 rows=100 width=30) (actual time=0.070..0.071 rows=0.00 loops=1)
+        Index Cond: ((owner_id = 'usr_expiry_scale_1'::text) AND (trashed_at <= (now() - '00:01:00'::interval)))
+        Heap Fetches: 0
+        Index Searches: 1
+        Buffers: shared hit=3
+Planning:
+  Buffers: shared hit=7
+Planning Time: 0.148 ms
+Execution Time: 0.078 ms
+Indexed trash expiry passed: leaf order, cascade, restore, move, bounded batches, concurrent child removal, policy extension/shortening/race, no nonleaf busy loop, active-write isolation, sibling lock-order race, historical generation cleanup, batch argument bounds, tree-job fencing, 100k-row old/new query plans, migration replay.

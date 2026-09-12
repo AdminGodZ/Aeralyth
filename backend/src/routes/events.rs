@@ -1,4 +1,6 @@
 use std::collections::BTreeMap;
+use std::collections::VecDeque;
+use std::sync::Arc;
 use std::time::Duration;
 
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
@@ -8,21 +10,24 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::{SESSION_COOKIE, hash_session_token, require_principal};
 use crate::db::Database;
-use crate::realtime::Subscription;
+use crate::observability::Metrics;
+use crate::realtime::{AUTHORIZATION_LIFETIME, Subscription};
 use crate::state::{AppState, LoadShedError};
 
 const HEARTBEAT: Duration = Duration::from_secs(5);
 const STREAM_LIFETIME: Duration = Duration::from_secs(25 * 60);
 const REPLAY_QUERY: &str = "
     SELECT state.head, state.floor,
-      EXISTS (SELECT 1 FROM sessions s JOIN users u ON u.id = s.user_id
-        WHERE s.id = $2 AND s.user_id = $1 AND s.token_hash = $4
-          AND s.expires_at > now() AND u.status = 'active') AS authorized,
       COALESCE((SELECT json_agg(batch)::text FROM (
         SELECT scope, folder_ids AS \"folderIds\" FROM realtime_events
-        WHERE user_id = $1 AND id > $3 AND id <= state.head
+        WHERE user_id = $1 AND id > $2 AND id <= state.head
         ORDER BY id LIMIT 129
-      ) batch), '[]') AS changes
+      ) batch), '[]') AS changes,
+      COALESCE((SELECT max(age) FROM (
+        SELECT EXTRACT(EPOCH FROM now() - created_at)::float8 AS age FROM realtime_events
+        WHERE user_id = $1 AND id > $2 AND id <= state.head
+        ORDER BY id LIMIT 129
+      ) ages), 0)::float8 AS delivery_lag
     FROM realtime_stream_state state WHERE singleton
 ";
 
@@ -38,11 +43,18 @@ struct Change {
     folder_ids: Vec<String>,
 }
 
-struct Snapshot {
+#[derive(Clone)]
+pub(crate) struct Snapshot {
     head: i64,
     floor: i64,
-    authorized: bool,
     changes: Vec<Change>,
+    delivery_lag: Duration,
+    overflow: bool,
+}
+
+#[derive(Default)]
+pub(crate) struct ReplayCache {
+    entries: VecDeque<(Option<i64>, u64, Arc<Snapshot>)>,
 }
 
 #[derive(Serialize)]
@@ -55,13 +67,13 @@ struct SyncResponse {
 
 struct EventStream {
     db: Database,
+    metrics: Metrics,
     subscription: Subscription,
     user_id: String,
-    session_id: String,
-    token_hash: [u8; 32],
     cursor: Option<i64>,
-    initial: Option<Snapshot>,
+    initial: Option<Arc<Snapshot>>,
     expires: tokio::time::Instant,
+    heartbeat: tokio::time::Instant,
 }
 
 pub async fn events(
@@ -71,72 +83,109 @@ pub async fn events(
 ) -> Result<HttpResponse> {
     require_same_origin(&request)?;
     let principal = require_principal(&state, &request).await?;
+    // A stream may already hold the per-user replay lock while waiting for a
+    // pool lease. Never retain a request lease while waiting for that lock.
+    state.db.release_request_connection().await;
     let cursor = request_cursor(&request, &query)?;
-    let subscription = state
-        .realtime
-        .subscribe(&principal.id)
-        .ok_or_else(|| LoadShedError::too_many_requests("too many event streams"))?;
     let token_hash = hash_session_token(
         request
             .cookie(SESSION_COOKIE)
             .expect("authenticated cookie")
             .value(),
     );
+    let subscription = state
+        .realtime
+        .subscribe(&principal.id, &principal.session_id, token_hash)
+        .ok_or_else(|| LoadShedError::too_many_requests("too many event streams"))?;
     let mut event_stream = EventStream {
         db: state.db.clone(),
+        metrics: state.metrics.clone(),
         subscription,
         user_id: principal.id,
-        session_id: principal.session_id,
-        token_hash,
         cursor,
         initial: None,
         expires: tokio::time::Instant::now() + STREAM_LIFETIME,
+        heartbeat: tokio::time::Instant::now() + HEARTBEAT,
     };
     let initial = snapshot(&event_stream)
         .await
         .map_err(error::ErrorServiceUnavailable)?;
-    if !initial.authorized {
-        return Err(error::ErrorUnauthorized("session expired"));
-    }
     event_stream.initial = Some(initial);
     state.db.release_request_connection().await;
 
     let body = stream::unfold(event_stream, |mut state| async move {
-        if tokio::time::Instant::now() >= state.expires {
-            return None;
-        }
-        let snapshot = if let Some(initial) = state.initial.take() {
-            initial
-        } else {
-            tokio::select! {
-                result = state.subscription.wake.changed() => {
-                    if result.is_err() { return None; }
-                    // Coalesce bulk commits before reading the current snapshot.
-                    tokio::time::sleep(Duration::from_millis(75)).await;
-                    state.subscription.wake.borrow_and_update();
+        loop {
+            let now = tokio::time::Instant::now();
+            if now >= state.expires {
+                if state.subscription.authorization.borrow().authorized {
+                    state.metrics.record_sse_termination("lifetime");
                 }
-                _ = tokio::time::sleep(HEARTBEAT) => {}
+                return None;
             }
-            match snapshot(&state).await {
-                Ok(snapshot) => snapshot,
-                Err(error) => {
-                    tracing::warn!(%error, "event stream interrupted; client will resume");
-                    return None;
+            let authorization = *state.subscription.authorization.borrow_and_update();
+            if !authorization.authorized {
+                state.metrics.record_sse_termination("auth");
+                state.expires = now;
+                return Some((
+                    Ok::<_, actix_web::Error>(Bytes::from_static(
+                        b"event: session-expired\ndata: {}\n\n",
+                    )),
+                    state,
+                ));
+            }
+            // Missing safety checks fail closed within the original five-second
+            // security bound, even when the notification connection is down.
+            let authorized_until = authorization.checked_at + AUTHORIZATION_LIFETIME;
+            if now >= authorized_until {
+                state.metrics.record_sse_termination("auth_check_timeout");
+                return None;
+            }
+            let snapshot = if let Some(initial) = state.initial.take() {
+                Some(initial)
+            } else {
+                tokio::select! {
+                    changed = state.subscription.authorization.changed() => {
+                        if changed.is_err() { state.metrics.record_sse_termination("shutdown"); return None; }
+                        continue;
+                    }
+                    _ = tokio::time::sleep_until(authorized_until.min(state.expires)) => { continue; }
+                    result = state.subscription.wake.changed() => {
+                        if result.is_err() { state.metrics.record_sse_termination("shutdown"); return None; }
+                        tokio::time::sleep(Duration::from_millis(75)).await;
+                        state.subscription.wake.borrow_and_update();
+                        match tokio::time::timeout_at(authorized_until, snapshot(&state)).await {
+                            Ok(Ok(snapshot)) => Some(snapshot),
+                            Ok(Err(_)) => { state.metrics.record_sse_termination("database"); return None; },
+                            Err(_) => { state.metrics.record_sse_termination("auth_check_timeout"); return None; },
+                        }
+                    }
+                    _ = tokio::time::sleep_until(state.heartbeat) => None,
                 }
+            };
+            // SQL and coalescing may outlive a revocation notification. Check
+            // the lease again immediately before emitting any user changes.
+            let authorization = *state.subscription.authorization.borrow();
+            if !authorization.authorized
+                || tokio::time::Instant::now() >= authorization.checked_at + AUTHORIZATION_LIFETIME
+            {
+                continue;
             }
-        };
-        if !snapshot.authorized {
-            state.expires = tokio::time::Instant::now();
-            return Some((
-                Ok::<_, actix_web::Error>(Bytes::from_static(
-                    b"event: session-expired\ndata: {}\n\n",
-                )),
-                state,
-            ));
+            let frame = if let Some(snapshot) = snapshot {
+                if !snapshot.changes.is_empty() {
+                    state.metrics.record_sse_delivery_lag(snapshot.delivery_lag);
+                }
+                let frame = encode_snapshot(state.cursor, &snapshot);
+                state.cursor = Some(snapshot.head);
+                frame
+            } else {
+                format!(
+                    "id: {}\nevent: checkpoint\ndata: {{}}\n\n",
+                    state.cursor.unwrap_or(0)
+                )
+            };
+            state.heartbeat = tokio::time::Instant::now() + HEARTBEAT;
+            return Some((Ok::<_, actix_web::Error>(Bytes::from(frame)), state));
         }
-        let frame = encode_snapshot(state.cursor, &snapshot);
-        state.cursor = Some(snapshot.head);
-        Some((Ok::<_, actix_web::Error>(Bytes::from(frame)), state))
     });
     Ok(HttpResponse::Ok()
         .insert_header(("Content-Type", "text/event-stream"))
@@ -155,24 +204,9 @@ pub async fn sync(
     require_same_origin(&request)?;
     let principal = require_principal(&state, &request).await?;
     let cursor = request_cursor(&request, &query)?;
-    let token_hash = hash_session_token(
-        request
-            .cookie(SESSION_COOKIE)
-            .expect("authenticated cookie")
-            .value(),
-    );
-    let snapshot = read_snapshot(
-        &state.db,
-        &principal.id,
-        &principal.session_id,
-        &token_hash,
-        cursor,
-    )
-    .await
-    .map_err(error::ErrorServiceUnavailable)?;
-    if !snapshot.authorized {
-        return Err(error::ErrorUnauthorized("session expired"));
-    }
+    let snapshot = read_snapshot(&state.db, &principal.id, cursor)
+        .await
+        .map_err(error::ErrorServiceUnavailable)?;
     Ok(HttpResponse::Ok()
         .insert_header(("Cache-Control", "private, no-store, no-transform"))
         .json(sync_response(cursor, &snapshot)))
@@ -215,40 +249,47 @@ fn parse_cursor(value: &str) -> Result<i64> {
 
 async fn snapshot(
     state: &EventStream,
-) -> std::result::Result<Snapshot, Box<dyn std::error::Error + Send + Sync>> {
-    read_snapshot(
-        &state.db,
-        &state.user_id,
-        &state.session_id,
-        &state.token_hash,
-        state.cursor,
-    )
-    .await
+) -> std::result::Result<Arc<Snapshot>, Box<dyn std::error::Error + Send + Sync>> {
+    // This helper is also used during initial HTTP setup, where auth may
+    // have acquired a task-local lease. Release it before the shared lock.
+    state.db.release_request_connection().await;
+    let generation = *state.subscription.wake.borrow();
+    let mut cache = state.subscription.replay.lock().await;
+    if let Some((_, _, snapshot)) = cache
+        .entries
+        .iter()
+        .find(|(cursor, revision, _)| *cursor == state.cursor && *revision == generation)
+    {
+        return Ok(Arc::clone(snapshot));
+    }
+    let snapshot = Arc::new(read_snapshot(&state.db, &state.user_id, state.cursor).await?);
+    cache
+        .entries
+        .retain(|(_, revision, _)| *revision == generation);
+    if cache.entries.len() >= 2 {
+        cache.entries.pop_front();
+    }
+    cache
+        .entries
+        .push_back((state.cursor, generation, Arc::clone(&snapshot)));
+    Ok(snapshot)
 }
 
 async fn read_snapshot(
     db: &Database,
     user_id: &str,
-    session_id: &str,
-    token_hash: &[u8; 32],
     cursor: Option<i64>,
 ) -> std::result::Result<Snapshot, Box<dyn std::error::Error + Send + Sync>> {
     let row = db
-        .query_one(
-            REPLAY_QUERY,
-            &[
-                &user_id,
-                &session_id,
-                &cursor.unwrap_or(0),
-                &token_hash.as_slice(),
-            ],
-        )
+        .query_one(REPLAY_QUERY, &[&user_id, &cursor.unwrap_or(0)])
         .await?;
+    let changes: Vec<Change> = serde_json::from_str(row.get::<_, &str>("changes"))?;
     Ok(Snapshot {
         head: row.get("head"),
         floor: row.get("floor"),
-        authorized: row.get("authorized"),
-        changes: serde_json::from_str(row.get::<_, &str>("changes"))?,
+        overflow: changes.len() > 128,
+        changes: merge_changes(&changes),
+        delivery_lag: Duration::from_secs_f64(row.get::<_, f64>("delivery_lag").max(0.0)),
     })
 }
 
@@ -272,6 +313,7 @@ fn encode_snapshot(cursor: Option<i64>, snapshot: &Snapshot) -> String {
 
 fn sync_response(cursor: Option<i64>, snapshot: &Snapshot) -> SyncResponse {
     let reset = cursor.is_none_or(|cursor| cursor < snapshot.floor || cursor > snapshot.head)
+        || snapshot.overflow
         || snapshot.changes.len() > 128;
     SyncResponse {
         cursor: snapshot.head.to_string(),
@@ -313,6 +355,72 @@ fn merge_changes(changes: &[Change]) -> Vec<Change> {
 mod tests {
     use super::*;
 
+    #[actix_web::test]
+    async fn shared_replay_releases_request_lease_before_waiting_and_reuses_the_result() {
+        if std::env::var("AERALYTH_DATABASE_INTEGRATION_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let config = crate::config::Config::from_env().unwrap();
+        let metrics = Metrics::new(&config);
+        let db = Database::create(
+            &config.database_url,
+            crate::db::DatabasePoolSettings {
+                role: crate::db::PoolRole::Request,
+                max_size: 1,
+                min_size: 1,
+                checkout_queue_capacity: 4,
+                wait_timeout: Duration::from_secs(1),
+                max_lifetime: Duration::from_secs(60),
+                lifetime_jitter: Duration::ZERO,
+            },
+            metrics.clone(),
+        )
+        .await
+        .unwrap();
+        let hub = crate::realtime::RealtimeHub::new();
+        let subscription = hub
+            .subscribe("replay-test", "test-session", [1; 32])
+            .unwrap();
+        let replay = Arc::clone(&subscription.replay);
+        let stream = EventStream {
+            db: db.clone(),
+            metrics,
+            subscription,
+            user_id: "replay-test".into(),
+            cursor: Some(0),
+            initial: None,
+            expires: tokio::time::Instant::now() + STREAM_LIFETIME,
+            heartbeat: tokio::time::Instant::now() + HEARTBEAT,
+        };
+        let held_lock = replay.lock_owned().await;
+        let (leased, lease_ready) = tokio::sync::oneshot::channel();
+        let request_db = db.clone();
+        let waiting_request = actix_web::rt::spawn(crate::db::scope_request(async move {
+            // Simulate the authorization read of an incoming SSE request.
+            request_db.query_one("SELECT 1", &[]).await.unwrap();
+            leased.send(()).unwrap();
+            let first = snapshot(&stream).await.unwrap();
+            let second = snapshot(&stream).await.unwrap();
+            assert!(
+                Arc::ptr_eq(&first, &second),
+                "tabs at the same cursor reuse one replay"
+            );
+            request_db.release_request_connection().await;
+        }));
+        lease_ready.await.unwrap();
+        // Simulate the earlier stream that owns the shared lock and needs
+        // the only database connection. Retaining auth's lease deadlocks it.
+        tokio::time::timeout(Duration::from_millis(250), db.ping())
+            .await
+            .expect("incoming auth lease starved replay owner")
+            .unwrap();
+        drop(held_lock);
+        tokio::time::timeout(Duration::from_millis(250), waiting_request)
+            .await
+            .expect("initial SSE replay did not finish")
+            .unwrap();
+    }
+
     #[test]
     fn cursors_cannot_inject_sse_fields_or_overflow() {
         for value in ["", "-1", "1\nevent: reset", "9223372036854775808", "1.5"] {
@@ -326,7 +434,8 @@ mod tests {
         let mut snapshot = Snapshot {
             head: 50,
             floor: 10,
-            authorized: true,
+            delivery_lag: Duration::ZERO,
+            overflow: false,
             changes: vec![],
         };
         for cursor in [None, Some(9), Some(51)] {
@@ -348,7 +457,8 @@ mod tests {
         let snapshot = Snapshot {
             head: i64::MAX,
             floor: 10,
-            authorized: true,
+            delivery_lag: Duration::ZERO,
+            overflow: false,
             changes: vec![
                 Change {
                     scope: "files".into(),

@@ -70,6 +70,16 @@ class FakeWorker {
 
   postMessage(request: VaultWorkerRequest): void {
     this.requests.push(request);
+    if (request.type === "cancelMetadataOperation") {
+      queueMicrotask(() =>
+        this.emit({
+          id: request.id,
+          ok: true,
+          result: { type: "cancelMetadataOperation" },
+        }),
+      );
+      return;
+    }
     if (request.type === "createShareMaterial") {
       const folder = request.input.nodes.find(
         (node) => node.entryType === "folder",

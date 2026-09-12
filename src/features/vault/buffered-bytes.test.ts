@@ -83,6 +83,26 @@ describe("exact stream reads", () => {
     await reader.cancel();
   });
 
+  it("wipes the allocated partial chunk when a network read throws", async () => {
+    const partial = Uint8Array.of(1, 2);
+    let reads = 0;
+    const allocated = new Uint8Array(4);
+    const reader = new ExactStreamReader(
+      {
+        async read() {
+          if (reads++ === 0) return { done: false as const, value: partial };
+          throw new TypeError("disconnected");
+        },
+        async cancel() {},
+      },
+      () => allocated,
+    );
+    await expect(reader.readExactly(4)).rejects.toThrow("disconnected");
+    expect(allocated).toEqual(new Uint8Array(4));
+    expect(partial).toEqual(new Uint8Array(2));
+    await reader.cancel();
+  });
+
   it("allocates one owned output for a crypto chunk fragmented into network reads", async () => {
     const networkChunkBytes = 64 * 1024;
     const cryptoChunkBytes = 4 * 1024 * 1024;

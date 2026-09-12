@@ -1,0 +1,41 @@
+Command: npm run db:test:folder-manifest
+
+> aeralyth@0.1.0 db:test:folder-manifest
+> docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U aeralyth -d aeralyth < database/tests/folder_manifest.sql
+
+BEGIN
+INSERT 0 1
+        set_config        
+--------------------------
+ usr_folder_manifest_2217
+(1 row)
+
+CREATE TABLE
+CREATE FUNCTION
+CREATE TRIGGER
+     path     |                  id                  
+--------------+--------------------------------------
+ project/src  | b45a29fb-8cf8-42e6-bd70-3efa80c6ccb4
+ project/docs | 379ee4de-6ec9-46bc-8d3d-9390f54f1c43
+(2 rows)
+
+DO
+TRUNCATE TABLE
+  path   |                  id                  
+---------+--------------------------------------
+ project | b0f728c2-807d-4f47-aadf-a5634c32fb4b
+(1 row)
+
+     path     |                  id                  
+--------------+--------------------------------------
+ project/src  | b45a29fb-8cf8-42e6-bd70-3efa80c6ccb4
+ project/docs | 379ee4de-6ec9-46bc-8d3d-9390f54f1c43
+(2 rows)
+
+DO
+ROLLBACK
+                  result                  
+------------------------------------------
+ folder manifest regression checks passed
+(1 row)
+

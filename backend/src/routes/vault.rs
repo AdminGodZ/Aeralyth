@@ -1,14 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
-use actix_web::http::header::{CONTENT_LENGTH, CONTENT_TYPE};
-use actix_web::{HttpRequest, HttpResponse, Result, error, web};
+use actix_web::http::header::{CONTENT_ENCODING, CONTENT_TYPE, ContentEncoding};
+use actix_web::{HttpMessage, HttpRequest, HttpResponse, Result, error, web};
 use base64::{
     Engine as _,
     engine::general_purpose::{STANDARD, URL_SAFE_NO_PAD},
 };
-use bytes::{Bytes, BytesMut};
-use futures_util::{StreamExt, future::try_join_all};
-use serde::{Deserialize, Serialize};
+use bytes::Bytes;
+use futures_util::{StreamExt, TryStreamExt, future::try_join_all};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use tokio_postgres::IsolationLevel;
 
@@ -42,6 +42,7 @@ const VAULT_SHARE_PAGE_SIZE: usize = 100;
 const MAX_ACCOUNT_STATE_CIPHERTEXT: usize = 16 * 1024;
 const MAX_MANIFEST_CIPHERTEXT: usize = 1024 * 1024;
 const MAX_PRESIGN_PARTS: usize = 32;
+const PRESIGN_BATCH_CONCURRENCY: usize = 4;
 const VAULT_CONTROL_JSON_LIMIT: usize = 64 * 1024;
 const VAULT_ACCOUNT_JSON_LIMIT: usize = 6 * 1024 * 1024;
 const VAULT_PUBLISH_JSON_LIMIT: usize = 8 * 1024 * 1024;
@@ -53,36 +54,15 @@ const MAX_METADATA_PLAN_EXPANDED_NODES: usize = 512;
 const MAX_METADATA_PLAN_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const SHARED_METADATA_PLAN_CONCURRENCY: usize = 8;
 const VAULT_PUBLICATION_CONTENT_TYPE: &str = "application/vnd.aeralyth.vault-publication";
+#[path = "vault_metadata_paging.rs"]
+mod metadata_paging;
+
 const OWNED_METADATA_PLANS_QUERY: &str = "
-    WITH RECURSIVE requested AS (
+    WITH requested AS (
       SELECT node_id, ordinality::bigint AS ordinal
       FROM unnest($1::text[]) WITH ORDINALITY AS input(node_id, ordinality)
-    ), owned_tree AS (
-      SELECT files.id, files.parent_id, requested.ordinal,
-             0::integer AS depth, ARRAY[files.id]::text[] AS visited_ids
-      FROM requested
-      INNER JOIN files ON files.id = requested.node_id
-      WHERE files.owner_id = $2
-        AND files.state IN ('active', 'trashed')
-        AND files.e2ee_state = 'encrypted'
-
-      UNION ALL
-
-      SELECT parent.id, parent.parent_id, child.ordinal,
-             child.depth + 1, child.visited_ids || parent.id
-      FROM owned_tree AS child
-      INNER JOIN files AS parent ON parent.id = child.parent_id
-      WHERE parent.owner_id = $2
-        AND parent.state IN ('active', 'trashed')
-        AND parent.e2ee_state = 'encrypted'
-        AND child.depth < 100
-        AND NOT parent.id = ANY(child.visited_ids)
-    ), candidates AS (
-      SELECT id, min(ordinal) AS ordinal, max(depth) AS depth
-      FROM owned_tree
-      GROUP BY id
     )
-    SELECT candidates.depth, candidates.ordinal,
+    SELECT 0::integer AS depth, requested.ordinal,
            files.id, files.entry_type, files.current_generation_number,
            files.current_generation_id,
            records.bootstrap_cbor, records.bootstrap_signature,
@@ -93,8 +73,11 @@ const OWNED_METADATA_PLANS_QUERY: &str = "
            COALESCE(generations.chunk_count, 0)::integer AS chunk_count,
            generations.ciphertext_merkle_root,
            identity.ed25519_public_key
-    FROM candidates
-    INNER JOIN files ON files.id = candidates.id
+    FROM requested
+    INNER JOIN visible_files AS files ON files.id = requested.node_id
+      AND files.owner_id = $2
+      AND files.state IN ('active', 'trashed')
+      AND files.e2ee_state = 'encrypted'
     INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
     INNER JOIN vault_node_records AS records
       ON records.node_id = heads.node_id
@@ -106,7 +89,7 @@ const OWNED_METADATA_PLANS_QUERY: &str = "
       ON generations.node_id = files.id
      AND generations.generation_number = files.current_generation_number
      AND generations.status = 'published'
-    ORDER BY candidates.depth DESC, candidates.ordinal, files.id
+    ORDER BY requested.ordinal
 ";
 const OWNED_SHARE_PREPARATION_PLANS_QUERY: &str = "
     WITH requested AS (
@@ -125,7 +108,7 @@ const OWNED_SHARE_PREPARATION_PLANS_QUERY: &str = "
            generations.ciphertext_merkle_root,
            identity.ed25519_public_key
     FROM requested
-    INNER JOIN files ON files.id = requested.node_id
+    INNER JOIN visible_files AS files ON files.id = requested.node_id
       AND files.owner_id = $2
       AND files.state = 'active'
       AND files.e2ee_state = 'encrypted'
@@ -155,12 +138,12 @@ const OWNED_METADATA_WRAPPERS_QUERY: &str = "
 const SHARED_DOWNLOAD_SNAPSHOT_QUERY: &str = "
     WITH RECURSIVE ancestors AS (
       SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
-             0::integer AS depth FROM files
+             0::integer AS depth FROM visible_files AS files
       WHERE id = $1 AND state = 'active' AND e2ee_state = 'encrypted'
       UNION ALL
       SELECT parent.id, parent.parent_id,
              child.visited_ids || parent.id, child.depth + 1
-      FROM files AS parent
+      FROM visible_files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
       WHERE parent.state = 'active' AND parent.e2ee_state = 'encrypted'
         AND child.depth < 100
@@ -187,7 +170,7 @@ const SHARED_DOWNLOAD_SNAPSHOT_QUERY: &str = "
        AND epochs.epoch = shares.active_epoch
        AND epochs.status = 'published'
       WHERE shares.status = 'active'
-      ORDER BY shares.created_at
+      ORDER BY shares.created_at, shares.id
       LIMIT 1
       FOR SHARE OF shares, recipients, epochs
     ), node AS MATERIALIZED (
@@ -201,7 +184,7 @@ const SHARED_DOWNLOAD_SNAPSHOT_QUERY: &str = "
              generations.crypto_chunk_bytes, generations.chunk_count,
              generations.ciphertext_merkle_root
       FROM authorized_share
-      INNER JOIN files
+      INNER JOIN visible_files AS files
         ON files.id = $1
        AND files.owner_id = authorized_share.owner_id
       INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
@@ -308,8 +291,8 @@ const MIGRATION_CLAIM_QUERY: &str = "
            files.original_name, files.mime_type, files.size_bytes,
            files.storage_name,
            (extract(epoch FROM files.updated_at) * 1000)::bigint AS last_modified
-    FROM files
-    LEFT JOIN files AS parent ON parent.id = files.parent_id
+    FROM visible_files AS files
+    LEFT JOIN visible_files AS parent ON parent.id = files.parent_id
     WHERE files.owner_id = $1
       AND files.e2ee_state IN ('legacy', 'staged')
       AND (files.parent_id IS NULL OR parent.e2ee_state = 'encrypted')
@@ -319,16 +302,10 @@ const MIGRATION_CLAIM_QUERY: &str = "
 ";
 const MIGRATION_SUMMARY_QUERY: &str = "
     SELECT
-      (SELECT count(*)::bigint FROM files
-       WHERE owner_id = $1 AND e2ee_state = 'legacy') AS legacy_nodes,
-      (SELECT count(DISTINCT pending.node_id)::bigint
-       FROM (
-         SELECT id AS node_id FROM files
-         WHERE owner_id = $1 AND e2ee_state = 'staged'
-         UNION ALL
-         SELECT node_id FROM vault_migrations
-         WHERE owner_id = $1 AND state <> 'complete'
-       ) AS pending) AS incomplete_nodes
+      COALESCE(progress.legacy_nodes, 0)::bigint AS legacy_nodes,
+      COALESCE(progress.incomplete_nodes, 0)::bigint AS incomplete_nodes
+    FROM (VALUES ($1::text)) AS owner(id)
+    LEFT JOIN vault_migration_progress AS progress ON progress.owner_id = owner.id
 ";
 
 #[derive(Serialize)]
@@ -733,6 +710,8 @@ pub(crate) struct MetadataPlansRequest {
     #[serde(default)]
     continuation: Option<usize>,
     #[serde(default)]
+    snapshot: Option<String>,
+    #[serde(default)]
     purpose: MetadataPlanPurpose,
 }
 
@@ -747,6 +726,7 @@ enum MetadataPlanPurpose {
 #[derive(Serialize)]
 struct MetadataPlansResponse {
     plans: Vec<MetadataPlanResponse>,
+    snapshot: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     continuation: Option<usize>,
 }
@@ -1083,7 +1063,7 @@ pub async fn status(state: web::Data<AppState>, request: HttpRequest) -> Result<
             &[&user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let migration = migration_summary(&state, &user).await?;
 
     Ok(HttpResponse::Ok().json(VaultStatusResponse {
@@ -1104,11 +1084,7 @@ pub async fn claim_migration(
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .transaction()
         .await
@@ -1122,6 +1098,7 @@ pub async fn claim_migration(
             .commit()
             .await
             .map_err(error::ErrorInternalServerError)?;
+        drop(client);
         return Ok(HttpResponse::Ok().json(MigrationClaimResponse {
             node: None,
             migration: migration_summary(&state, &user).await?,
@@ -1193,6 +1170,14 @@ pub async fn claim_migration(
     let entry_type: String = candidate.get("entry_type");
     let legacy_object_key =
         (entry_type == "file").then(|| candidate.get::<_, String>("storage_name"));
+    // Match publication/file mutation lock order: file revision shard, then progress counter.
+    transaction
+        .execute(
+            "UPDATE files SET e2ee_state = 'staged', updated_at = now() WHERE id = $1 AND owner_id = $2",
+            &[&node_id, &user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     transaction
         .execute(
             "
@@ -1205,13 +1190,6 @@ pub async fn claim_migration(
                     staged_object_key = NULL, last_error = NULL, updated_at = now()
             ",
             &[&node_id, &user.id, &legacy_object_key],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "UPDATE files SET e2ee_state = 'staged', updated_at = now() WHERE id = $1 AND owner_id = $2",
-            &[&node_id, &user.id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
@@ -1238,6 +1216,7 @@ pub async fn claim_migration(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
+    drop(client);
     Ok(HttpResponse::Ok().json(MigrationClaimResponse {
         node: Some(response),
         migration: migration_summary(&state, &user).await?,
@@ -1256,24 +1235,21 @@ pub async fn setup(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let body =
-        parse_json_body::<VaultSetupRequest>(&request, body, VAULT_ACCOUNT_JSON_LIMIT).await?;
-    let material = validate_setup_material(&body)?;
-    let fingerprint =
-        identity_fingerprint(&material.x25519_public_key, &material.ed25519_public_key);
-    if fingerprint != material.fingerprint_sha256 {
-        return Err(error::ErrorBadRequest("identity fingerprint is invalid"));
-    }
+    let material = parse_account_material(
+        &state,
+        &user.id,
+        &request,
+        body,
+        |body: VaultSetupRequest| validate_setup_material(&body),
+    )
+    .await?;
 
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
+    lock_account_for_mutation(&transaction, &user).await?;
     let inserted = transaction
         .execute(
             "
@@ -1386,7 +1362,7 @@ pub async fn unlock_material(
             &[&user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(row) = row else {
         return Ok(HttpResponse::NotFound().body("vault is not configured"));
     };
@@ -1455,7 +1431,7 @@ pub async fn account_state(
             &[&user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(row) = row else {
         return Ok(HttpResponse::NotFound().body("vault account state is unavailable"));
     };
@@ -1482,55 +1458,21 @@ pub async fn rewrap(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let body =
-        parse_json_body::<VaultRewrapRequest>(&request, body, VAULT_ACCOUNT_JSON_LIMIT).await?;
-    validate_kdf(&body.kdf)?;
-    let kdf_salt = decode_fixed::<16>(&body.kdf.salt, "KDF salt")?.to_vec();
-    let password_wrapper_id =
-        decode_fixed::<16>(&body.password_wrapper.id, "password wrapper id")?.to_vec();
-    let password_ciphertext = decode_fixed::<48>(
-        &body.password_wrapper.ciphertext,
-        "password root ciphertext",
-    )?
-    .to_vec();
-    let recovery_salt = decode_fixed::<16>(&body.recovery_wrapper.salt, "recovery salt")?.to_vec();
-    let recovery_wrapper_id =
-        decode_fixed::<16>(&body.recovery_wrapper.id, "recovery wrapper id")?.to_vec();
-    let recovery_ciphertext = decode_fixed::<48>(
-        &body.recovery_wrapper.ciphertext,
-        "recovery root ciphertext",
-    )?
-    .to_vec();
-    let account_state_record_id = decode_optional_fixed::<16>(
-        body.account_state_record_id.as_deref(),
-        "account state record id",
-    )?
-    .map(Vec::from);
-    let encrypted_account_state = decode_limited(
-        body.encrypted_account_state.as_deref().unwrap_or(""),
-        MAX_ACCOUNT_STATE_CIPHERTEXT,
-        "encrypted account state",
-    )?;
-    let expected_version = i64::try_from(body.expected_vault_version)
-        .map_err(|_| error::ErrorBadRequest("vault version is invalid"))?;
-    let recovered_at = body.recovery.unwrap_or(false);
-    let proof_signature = decode_fixed::<64>(&body.proof_signature, "rewrap proof signature")?;
-    let proof = rewrap_proof_message(
-        expected_version,
-        recovered_at,
-        &body.kdf,
-        &kdf_salt,
-        &password_wrapper_id,
-        &password_ciphertext,
-        &recovery_salt,
-        &recovery_wrapper_id,
-        &recovery_ciphertext,
-        account_state_record_id.as_deref(),
-        &encrypted_account_state,
-    )?;
+    let material = parse_account_material(
+        &state,
+        &user.id,
+        &request,
+        body,
+        |body: VaultRewrapRequest| validate_rewrap_material(&body),
+    )
+    .await?;
     let signer = active_identity(&state, &user.id).await?;
-    verify_ed25519_signature(&proof, &proof_signature, &signer.ed25519_public_key)
-        .map_err(error::ErrorForbidden)?;
+    verify_ed25519_signature(
+        &material.proof,
+        &material.proof_signature,
+        &signer.ed25519_public_key,
+    )
+    .map_err(error::ErrorForbidden)?;
     let row = state
         .db
         .query_opt(
@@ -1552,21 +1494,21 @@ pub async fn rewrap(
                 RETURNING vault_version
             ",
             &[
-                &kdf_salt,
-                &password_wrapper_id,
-                &password_ciphertext,
-                &recovery_salt,
-                &recovery_wrapper_id,
-                &recovery_ciphertext,
-                &account_state_record_id,
-                &encrypted_account_state,
-                &recovered_at,
+                &material.kdf_salt,
+                &material.password_wrapper_id,
+                &material.password_ciphertext,
+                &material.recovery_salt,
+                &material.recovery_wrapper_id,
+                &material.recovery_ciphertext,
+                &material.account_state_record_id,
+                &material.encrypted_account_state,
+                &material.recovered_at,
                 &user.id,
-                &expected_version,
+                &material.expected_vault_version,
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(row) = row else {
         return Ok(HttpResponse::Conflict().body("vault material changed; unlock again"));
     };
@@ -1588,10 +1530,14 @@ pub async fn rewrap_password(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let body =
-        parse_json_body::<VaultPasswordRewrapRequest>(&request, body, VAULT_ACCOUNT_JSON_LIMIT)
-            .await?;
-    let material = validate_password_rewrap(&body)?;
+    let material = parse_account_material(
+        &state,
+        &user.id,
+        &request,
+        body,
+        |body: VaultPasswordRewrapRequest| validate_password_rewrap(&body),
+    )
+    .await?;
     let signer = active_identity(&state, &user.id).await?;
     verify_ed25519_signature(
         &material.proof,
@@ -1620,7 +1566,7 @@ pub async fn rewrap_password(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(row) = row else {
         return Ok(HttpResponse::Conflict().body("vault material changed; unlock again"));
     };
@@ -1641,18 +1587,14 @@ pub async fn change_one_password(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("account mutation capacity is full"))?;
-    let body =
-        parse_json_body::<OnePasswordChangeRequest>(&request, body, VAULT_ACCOUNT_JSON_LIMIT)
-            .await?;
-    if !super::auth::valid_credential(&body.current_credential)
-        || !super::auth::valid_credential(&body.new_credential)
-    {
-        return Err(error::ErrorBadRequest(
-            "authentication credential is invalid",
-        ));
-    }
-    let new_salt =
-        super::auth::decode_fixed_auth_value::<16>(&body.new_salt, "authentication salt")?;
+    let body = parse_account_material(
+        &state,
+        &user.id,
+        &request,
+        body,
+        validate_one_password_change,
+    )
+    .await?;
 
     let account = state
         .db
@@ -1669,7 +1611,7 @@ pub async fn change_one_password(
             &[&user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(account) = account else {
         return Ok(HttpResponse::Unauthorized().finish());
     };
@@ -1695,8 +1637,13 @@ pub async fn change_one_password(
             .body("vault password material must be changed together with the account password"));
     }
 
-    let vault_material = if let Some(vault) = body.vault.as_ref() {
-        let material = validate_password_rewrap(vault)?;
+    let new_hash = state
+        .passwords
+        .hash(&body.new_credential)
+        .await
+        .map_err(map_account_password_error)?;
+    crate::auth::revalidate_principal(&state, &request).await?;
+    if let Some(material) = body.vault.as_ref() {
         let signer = active_identity(&state, &user.id).await?;
         verify_ed25519_signature(
             &material.proof,
@@ -1704,25 +1651,14 @@ pub async fn change_one_password(
             &signer.ed25519_public_key,
         )
         .map_err(error::ErrorForbidden)?;
-        Some(material)
-    } else {
-        None
-    };
-    let new_hash = state
-        .passwords
-        .hash(&body.new_credential)
-        .await
-        .map_err(map_account_password_error)?;
+    }
 
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
+    validate_password_account_state(&transaction, &user, body.vault.is_some()).await?;
     let changed = transaction
         .execute(
             "
@@ -1731,14 +1667,19 @@ pub async fn change_one_password(
                 WHERE id = $3 AND password_hash = $4
                   AND auth_version = 1 AND status = 'active'
             ",
-            &[&new_hash, &new_salt.as_slice(), &user.id, &current_hash],
+            &[
+                &new_hash,
+                &body.new_salt.as_slice(),
+                &user.id,
+                &current_hash,
+            ],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
     if changed != 1 {
         return Ok(HttpResponse::Conflict().body("password changed concurrently; try again"));
     }
-    if let Some(material) = vault_material {
+    if let Some(material) = body.vault {
         let changed = transaction
             .execute(
                 "
@@ -1815,7 +1756,7 @@ pub async fn identity(
             &[&user.id, &username],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(row) = row else {
         return Ok(HttpResponse::NotFound().finish());
     };
@@ -1857,7 +1798,7 @@ pub async fn trust_identity(
             &[&peer_user_id, &key_version, &fingerprint.as_slice()],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if exists.is_none() || peer_user_id == user.id {
         return Err(error::ErrorBadRequest("identity key changed or is invalid"));
     }
@@ -1884,7 +1825,7 @@ pub async fn trust_identity(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     Ok(HttpResponse::NoContent().finish())
 }
@@ -1932,7 +1873,7 @@ pub async fn init_upload(
                 "
                     SELECT files.parent_id, files.entry_type, files.size_bytes,
                            migrations.state
-                    FROM files
+                    FROM visible_files AS files
                     INNER JOIN vault_migrations AS migrations
                       ON migrations.node_id = files.id AND migrations.owner_id = files.owner_id
                     WHERE files.id = $1 AND files.owner_id = $2
@@ -1942,7 +1883,7 @@ pub async fn init_upload(
                 &[&body.node_id, &user.id],
             )
             .await
-            .map_err(error::ErrorInternalServerError)?
+            .map_err(crate::db::http_error)?
             .ok_or_else(|| error::ErrorConflict("legacy node is not claimed for migration"))?;
         if row.get::<_, String>("state") != "encrypting"
             || row.get::<_, String>("entry_type") != body.entry_type
@@ -1974,7 +1915,7 @@ pub async fn init_upload(
             &[&user.id, &body.node_id, &generation_number, &generation_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?
+        .map_err(crate::db::http_error)?
     {
         let upload_id: String = row.get("id");
         let upload = get_upload(&state, &user.id, &upload_id)
@@ -2003,11 +1944,7 @@ pub async fn init_upload(
         "single"
     };
     let part_size_bytes = (mode == "multipart").then_some(UPLOAD_PART_BYTES as i64);
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .transaction()
         .await
@@ -2024,7 +1961,7 @@ pub async fn init_upload(
         &transaction,
         "
             SELECT entry_type, size_bytes, e2ee_state
-            FROM files
+            FROM visible_files AS files
             WHERE id = $1 AND owner_id = $2 AND state = 'active'
             FOR UPDATE
         ",
@@ -2232,7 +2169,7 @@ pub async fn init_upload(
             &[&multipart_upload_id, &upload_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?
+        .map_err(crate::db::http_error)?
         .get::<_, bool>("initialized");
     if !initialized {
         return Err(error::ErrorConflict(
@@ -2276,12 +2213,13 @@ pub async fn presign_content(
                     write_expires_at = now() + interval '1 hour',
                     expires_at = now() + interval '1 hour'
                 WHERE id = $2 AND owner_id = $3 AND status = 'pending'
+                  AND expires_at > now()
                   AND (checksum_sha256 IS NULL OR checksum_sha256 = $1)
             ",
             &[&checksum, &upload.id, &user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if reserved != 1 {
         return Ok(HttpResponse::Conflict().body("upload checksum changed"));
     }
@@ -2293,17 +2231,24 @@ pub async fn presign_content(
         .map_err(|_| error::ErrorInternalServerError("ciphertext length is invalid"))?;
     let url = state
         .storage_operations
-        .run(
-            &user.id,
-            state.storage.presign_single_upload(
-                object_key,
-                "application/octet-stream",
-                &checksum,
-                content_length,
-            ),
-        )
-        .await?
-        .map_err(error::ErrorBadGateway)?;
+        .run(&user.id, async {
+            crate::auth::revalidate_principal(&state, &request).await?;
+            if !renew_vault_upload_idle_lease(&state, &user.id, &upload.id).await? {
+                return Err(error::ErrorConflict("upload lease changed"));
+            }
+            state.db.release_request_connection().await;
+            state
+                .storage
+                .presign_single_upload(
+                    object_key,
+                    "application/octet-stream",
+                    &checksum,
+                    content_length,
+                )
+                .await
+                .map_err(error::ErrorBadGateway)
+        })
+        .await??;
 
     Ok(HttpResponse::Ok().json(UploadUrlResponse {
         url,
@@ -2358,18 +2303,25 @@ pub async fn presign_part(
         .ok_or_else(|| error::ErrorInternalServerError("multipart upload id is missing"))?;
     let url = state
         .storage_operations
-        .run(
-            &user.id,
-            state.storage.presign_upload_part(
-                object_key,
-                multipart_upload_id,
-                part_number,
-                &checksum,
-                content_length,
-            ),
-        )
-        .await?
-        .map_err(error::ErrorBadGateway)?;
+        .run(&user.id, async {
+            crate::auth::revalidate_principal(&state, &request).await?;
+            if !renew_vault_upload_idle_lease(&state, &user.id, &upload.id).await? {
+                return Err(error::ErrorConflict("upload lease changed"));
+            }
+            state.db.release_request_connection().await;
+            state
+                .storage
+                .presign_upload_part(
+                    object_key,
+                    multipart_upload_id,
+                    part_number,
+                    &checksum,
+                    content_length,
+                )
+                .await
+                .map_err(error::ErrorBadGateway)
+        })
+        .await??;
 
     Ok(HttpResponse::Ok().json(UploadUrlResponse {
         url,
@@ -2390,12 +2342,14 @@ pub async fn presign_parts(
         .upload_control_limiter
         .try_acquire(&principal.id)
         .map_err(|()| LoadShedError::too_many_requests("upload control capacity is full"))?;
-    let upload = get_upload(&state, &principal.id, &path.into_inner())
+    let upload_id = path.into_inner();
+    let upload = get_upload(&state, &principal.id, &upload_id)
         .await?
         .ok_or_else(|| error::ErrorNotFound("upload not found"))?;
     if upload.mode != "multipart" || upload.status != "pending" {
         return Ok(HttpResponse::Conflict().finish());
     }
+    state.db.release_request_connection().await;
     let body =
         parse_json_body::<PartChecksumsRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT).await?;
     if body.parts.is_empty() || body.parts.len() > MAX_PRESIGN_PARTS {
@@ -2403,76 +2357,107 @@ pub async fn presign_parts(
             "multipart presign batch must contain 1 to 32 parts",
         ));
     }
+    // A whole local-signing batch consumes one admission slot. Individual parts must not
+    // compete with their siblings for the user's bounded storage queue.
+    state.db.release_request_connection().await;
+    state
+        .storage_operations
+        .run(&principal.id, async {
+            let principal = crate::auth::revalidate_principal(&state, &request).await?;
+            require_header_csrf(&state, &request).await?;
+            let upload = get_upload(&state, &principal.id, &upload_id)
+                .await?
+                .ok_or_else(|| error::ErrorNotFound("upload not found"))?;
+            if upload.mode != "multipart" || upload.status != "pending" {
+                return Ok(HttpResponse::Conflict().finish());
+            }
+            let total = u64::try_from(upload.ciphertext_length)
+                .map_err(|_| error::ErrorInternalServerError("ciphertext length is invalid"))?;
+            let part_count = total.div_ceil(UPLOAD_PART_BYTES);
+            let mut parts = body
+                .parts
+                .iter()
+                .map(|part| {
+                    let part_number = u64::try_from(part.part_number)
+                        .ok()
+                        .filter(|value| *value > 0 && *value <= part_count)
+                        .ok_or_else(|| error::ErrorBadRequest("part number is invalid"))?;
+                    let offset = (part_number - 1)
+                        .checked_mul(UPLOAD_PART_BYTES)
+                        .ok_or_else(|| error::ErrorBadRequest("part number is invalid"))?;
+                    let content_length = total
+                        .checked_sub(offset)
+                        .map(|remaining| remaining.min(UPLOAD_PART_BYTES))
+                        .filter(|length| *length > 0)
+                        .ok_or_else(|| error::ErrorBadRequest("part number is invalid"))?;
+                    Ok((
+                        part.part_number,
+                        validate_sha256_checksum(&part.checksum_sha256)?,
+                        content_length,
+                    ))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            parts.sort_by_key(|(part_number, _, _)| *part_number);
+            if parts.windows(2).any(|pair| pair[0].0 == pair[1].0) {
+                return Err(error::ErrorBadRequest("upload part is duplicated"));
+            }
+            if !renew_vault_upload_idle_lease(&state, &principal.id, &upload.id).await? {
+                return Ok(HttpResponse::Conflict().finish());
+            }
+            let object_key = upload
+                .object_key
+                .as_deref()
+                .ok_or_else(|| error::ErrorInternalServerError("object key is missing"))?;
+            let multipart_upload_id = upload
+                .multipart_upload_id
+                .as_deref()
+                .ok_or_else(|| error::ErrorInternalServerError("multipart upload id is missing"))?;
+            state.db.release_request_connection().await;
+            let urls =
+                collect_presign_batch(parts.iter().map(|(part_number, checksum, length)| {
+                    state.storage.presign_upload_part(
+                        object_key,
+                        multipart_upload_id,
+                        *part_number,
+                        checksum,
+                        *length,
+                    )
+                }))
+                .await
+                .map_err(error::ErrorBadGateway)?;
+            let parts = parts
+                .into_iter()
+                .zip(urls)
+                .map(|((part_number, _, content_length), url)| PartUrlResponse {
+                    part_number,
+                    url,
+                    content_length,
+                })
+                .collect();
 
-    let total = u64::try_from(upload.ciphertext_length)
-        .map_err(|_| error::ErrorInternalServerError("ciphertext length is invalid"))?;
-    let part_count = total.div_ceil(UPLOAD_PART_BYTES);
-    let mut parts = body
-        .parts
-        .iter()
-        .map(|part| {
-            let part_number = u64::try_from(part.part_number)
-                .ok()
-                .filter(|value| *value > 0 && *value <= part_count)
-                .ok_or_else(|| error::ErrorBadRequest("part number is invalid"))?;
-            let offset = (part_number - 1)
-                .checked_mul(UPLOAD_PART_BYTES)
-                .ok_or_else(|| error::ErrorBadRequest("part number is invalid"))?;
-            let content_length = total
-                .checked_sub(offset)
-                .map(|remaining| remaining.min(UPLOAD_PART_BYTES))
-                .filter(|length| *length > 0)
-                .ok_or_else(|| error::ErrorBadRequest("part number is invalid"))?;
-            Ok((
-                part.part_number,
-                validate_sha256_checksum(&part.checksum_sha256)?,
-                content_length,
-            ))
+            Ok(HttpResponse::Ok().json(PartUrlsResponse { parts }))
         })
-        .collect::<Result<Vec<_>>>()?;
-    parts.sort_by_key(|(part_number, _, _)| *part_number);
-    if parts.windows(2).any(|pair| pair[0].0 == pair[1].0) {
-        return Err(error::ErrorBadRequest("upload part is duplicated"));
-    }
-    if !renew_vault_upload_idle_lease(&state, &principal.id, &upload.id).await? {
-        return Ok(HttpResponse::Conflict().finish());
-    }
-    let object_key = upload
-        .object_key
-        .as_deref()
-        .ok_or_else(|| error::ErrorInternalServerError("object key is missing"))?;
-    let multipart_upload_id = upload
-        .multipart_upload_id
-        .as_deref()
-        .ok_or_else(|| error::ErrorInternalServerError("multipart upload id is missing"))?;
-    let urls = try_join_all(parts.iter().map(|(part_number, checksum, length)| async {
-        state
-            .storage_operations
-            .run(
-                &principal.id,
-                state.storage.presign_upload_part(
-                    object_key,
-                    multipart_upload_id,
-                    *part_number,
-                    checksum,
-                    *length,
-                ),
-            )
-            .await?
-            .map_err(error::ErrorBadGateway)
-    }))
+        .await?
+}
+
+async fn collect_presign_batch<T, E, Operation>(
+    operations: impl IntoIterator<Item = Operation>,
+) -> std::result::Result<Vec<T>, E>
+where
+    Operation: std::future::Future<Output = std::result::Result<T, E>>,
+{
+    // Replace each completed signer immediately, then restore the request's part order.
+    let mut completed = futures_util::stream::iter(
+        operations
+            .into_iter()
+            .enumerate()
+            .map(|(index, operation)| async move { operation.await.map(|value| (index, value)) }),
+    )
+    .buffer_unordered(PRESIGN_BATCH_CONCURRENCY)
+    .try_collect::<Vec<_>>()
     .await?;
-    let parts = parts
-        .into_iter()
-        .zip(urls)
-        .map(|((part_number, _, content_length), url)| PartUrlResponse {
-            part_number,
-            url,
-            content_length,
-        })
-        .collect();
-
-    Ok(HttpResponse::Ok().json(PartUrlsResponse { parts }))
+    completed.sort_by_key(|(index, _)| *index);
+    Ok(completed.into_iter().map(|(_, value)| value).collect())
 }
 
 pub async fn publish_upload(
@@ -2498,7 +2483,6 @@ pub async fn publish_upload(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let mut body = parse_node_publication(&state, &user.id, &request, body, true).await?;
     let requested_parts = std::mem::take(&mut body.parts);
     let upload_mode = upload.mode.clone();
@@ -2510,7 +2494,20 @@ pub async fn publish_upload(
     .await?;
     let decoded = decode_and_verify_node_record(&state, &user, body).await?;
     validate_record_for_upload(&decoded, &upload)?;
+    crate::auth::revalidate_principal(&state, &request).await?;
+    let upload = get_upload(&state, &user.id, &upload.id)
+        .await?
+        .ok_or_else(|| error::ErrorNotFound("upload not found"))?;
+    if upload.status == "published" {
+        return current_publish_response(&state, &user, &upload.node_id).await;
+    }
+    if !matches!(upload.status.as_str(), "pending" | "completing") {
+        return Ok(HttpResponse::Conflict().body("upload cannot be published"));
+    }
+    validate_record_for_upload(&decoded, &upload)?;
     let metadata = finalize_ciphertext_object(&state, &user, &upload, &completed_parts).await?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    crate::auth::revalidate_principal(&state, &request).await?;
     let response =
         publish_record_transaction(&state, &user, &upload, &decoded, metadata.as_ref()).await?;
 
@@ -2536,13 +2533,14 @@ pub async fn publish_folders_batch(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let bytes = read_publication_body(&request, body, VAULT_PUBLISH_JSON_LIMIT).await?;
     let publication = run_publication_decode(&state, &user.id, move || {
         vault_wire::decode_folder_batch(bytes).map_err(|failure| (400_u16, failure.to_string()))
     })
     .await?;
     let decoded = decode_and_verify_folder_batch(&state, &user, publication.records).await?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    crate::auth::revalidate_principal(&state, &request).await?;
     let folders = publish_folder_batch_transaction(&state, &user, &decoded).await?;
 
     Ok(HttpResponse::Created().json(FolderBatchResponse { folders }))
@@ -2562,7 +2560,6 @@ pub async fn publish_record(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let body = parse_node_publication(&state, &user.id, &request, body, false).await?;
     let decoded = decode_and_verify_node_record(&state, &user, body).await?;
     let node_id = path.into_inner();
@@ -2570,11 +2567,9 @@ pub async fn publish_record(
         return Err(error::ErrorBadRequest("node record targets another node"));
     }
 
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    crate::auth::revalidate_principal(&state, &request).await?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .transaction()
         .await
@@ -2585,7 +2580,7 @@ pub async fn publish_record(
             "
                 SELECT owner_id, parent_id, current_generation_number,
                        current_generation_id, size_bytes, entry_type
-                FROM files
+                FROM visible_files AS files
                 WHERE id = $1 AND owner_id = $2 AND e2ee_state = 'encrypted'
                 FOR UPDATE
             ",
@@ -2676,7 +2671,6 @@ pub async fn metadata_plans(
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     require_header_csrf(&state, &request).await?;
-    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let body =
         parse_json_body::<MetadataPlansRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT).await?;
     if body.node_ids.is_empty() || body.node_ids.len() > MAX_METADATA_PLAN_REQUEST_NODES {
@@ -2694,45 +2688,12 @@ pub async fn metadata_plans(
         }
     }
 
-    let share_preparation = body.purpose == MetadataPlanPurpose::SharePreparation;
-    let owned_query = if share_preparation {
-        OWNED_SHARE_PREPARATION_PLANS_QUERY
-    } else {
-        OWNED_METADATA_PLANS_QUERY
+    let page = {
+        let _interactive_permit = state.acquire_interactive_operation(&user.id).await?;
+        metadata_paging::load_page(&state, &user, &body).await?
     };
-    let owned_rows = state
-        .db
-        .query(owned_query, &[&body.node_ids, &user.id])
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    if !share_preparation && owned_rows.len() > MAX_METADATA_PLAN_EXPANDED_NODES {
-        return Err(error::ErrorPayloadTooLarge(
-            "metadata plan ancestry exceeds the bounded batch limit",
-        ));
-    }
-    let owned_node_ids = owned_rows
-        .iter()
-        .map(|row| row.get::<_, String>("id"))
-        .collect::<HashSet<_>>();
-    if share_preparation && owned_node_ids.len() != body.node_ids.len() {
-        return Err(error::ErrorConflict(
-            "share-preparation metadata changed; refresh the subtree snapshot",
-        ));
-    }
-    let wrapper_node_ids = owned_node_ids.iter().cloned().collect::<Vec<_>>();
-    let wrapper_rows = if wrapper_node_ids.is_empty() {
-        Vec::new()
-    } else {
-        state
-            .db
-            .query(OWNED_METADATA_WRAPPERS_QUERY, &[&wrapper_node_ids])
-            .await
-            .map_err(error::ErrorInternalServerError)?
-    };
-    state.db.release_request_connection().await;
-
-    let mut wrappers = HashMap::with_capacity(wrapper_rows.len());
-    for row in wrapper_rows {
+    let mut wrappers = HashMap::with_capacity(page.wrapper_rows.len());
+    for row in page.wrapper_rows {
         wrappers.insert(
             (
                 row.get::<_, String>("node_id"),
@@ -2741,9 +2702,9 @@ pub async fn metadata_plans(
             row.get::<_, Vec<Vec<u8>>>("wrapper_cbors"),
         );
     }
-    let mut plans = run_publication_decode(&state, &user.id, move || {
+    let mut plans = run_metadata_decode(&state, &user.id, move || {
         Ok::<_, (u16, String)>(
-            owned_rows
+            page.owned_rows
                 .into_iter()
                 .map(|row| {
                     let key = (
@@ -2756,95 +2717,22 @@ pub async fn metadata_plans(
         )
     })
     .await?;
-
-    let shared_node_ids = if share_preparation {
-        Vec::new()
-    } else {
-        body.node_ids
-            .iter()
-            .filter(|node_id| !owned_node_ids.contains(node_id.as_str()))
-            .cloned()
-            .collect::<Vec<_>>()
-    };
-    let shared_rows = if shared_node_ids.is_empty() {
-        Vec::new()
-    } else {
-        state
-            .db
-            .query(
-                &shared_metadata_plans_query(),
-                &[&shared_node_ids, &user.id],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?
-    };
-    state.db.release_request_connection().await;
-    for chunk in shared_rows.chunks(SHARED_METADATA_PLAN_CONCURRENCY) {
-        let loaded = try_join_all(chunk.iter().map(|row| {
-            let node_id: String = row.get("requested_node_id");
-            load_shared_metadata_plan_from_row(&state, &user, node_id, row.clone())
+    for chunk in page.shared_rows.chunks(SHARED_METADATA_PLAN_CONCURRENCY) {
+        let loaded = try_join_all(chunk.iter().map(|(node_id, row)| {
+            load_shared_metadata_plan_from_row(&state, &user, node_id.clone(), row.clone())
         }))
         .await?;
-        plans.extend(loaded.into_iter().flatten());
+        plans.extend(loaded);
     }
-
-    let continuation = body.continuation.unwrap_or_default();
-    let body = run_publication_decode(&state, &user.id, move || {
-        encode_bounded_metadata_plans(plans, continuation)
+    let body = run_metadata_decode(&state, &user.id, move || {
+        // Payload queries may group owned/shared work; restore the selected
+        // parent-first identity order before the one-pass response writer.
+        metadata_paging::encode_page(plans, page.order, page.continuation, page.snapshot)
     })
     .await?;
     Ok(HttpResponse::Ok()
         .content_type("application/json")
         .body(body))
-}
-
-fn shared_metadata_plans_query() -> String {
-    let snapshot = SHARED_DOWNLOAD_SNAPSHOT_QUERY.replace("$1", "requested.node_id");
-    format!(
-        "SELECT requested.node_id AS requested_node_id, snapshot.*
-         FROM unnest($1::text[]) WITH ORDINALITY AS requested(node_id, ordinal)
-         CROSS JOIN LATERAL ({snapshot}) AS snapshot
-         ORDER BY requested.ordinal"
-    )
-}
-
-fn encode_bounded_metadata_plans(
-    plans: Vec<MetadataPlanResponse>,
-    offset: usize,
-) -> std::result::Result<Bytes, (u16, String)> {
-    if offset > plans.len() {
-        return Err((400, "metadata plan continuation is invalid".to_owned()));
-    }
-    let total_plans = plans.len();
-    let mut selected = Vec::new();
-    let mut encoded_bytes = 64_usize;
-    for plan in plans.into_iter().skip(offset) {
-        let plan_bytes = serde_json::to_vec(&plan).map_err(|failure| (500, failure.to_string()))?;
-        if encoded_bytes.saturating_add(plan_bytes.len() + 1) > MAX_METADATA_PLAN_RESPONSE_BYTES {
-            break;
-        }
-        encoded_bytes += plan_bytes.len() + 1;
-        selected.push(plan);
-    }
-    if selected.is_empty() && offset < total_plans {
-        return Err((
-            413,
-            "one metadata plan exceeds the 8 MiB response limit".to_owned(),
-        ));
-    }
-    let next_offset = offset + selected.len();
-    let response = MetadataPlansResponse {
-        plans: selected,
-        continuation: (next_offset < total_plans).then_some(next_offset),
-    };
-    let encoded = encode_json_response(&response)?;
-    if encoded.len() > MAX_METADATA_PLAN_RESPONSE_BYTES {
-        return Err((
-            413,
-            "metadata plan response exceeds the 8 MiB limit".to_owned(),
-        ));
-    }
-    Ok(encoded)
 }
 
 fn owned_metadata_plan_from_row(
@@ -2899,7 +2787,7 @@ pub async fn download_plan(
                        generations.object_key, generations.ciphertext_length,
                        generations.crypto_chunk_bytes, generations.chunk_count,
                        generations.ciphertext_merkle_root
-                FROM files
+                FROM visible_files AS files
                 INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
                 INNER JOIN vault_node_records AS records
                   ON records.node_id = heads.node_id
@@ -2919,9 +2807,8 @@ pub async fn download_plan(
             &[&node_id, &user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(row) = row else {
-        let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
         return shared_download_plan(&state, &user, &node_id).await;
     };
     let record_version: i64 = row.get("record_version");
@@ -2932,7 +2819,7 @@ pub async fn download_plan(
             &[&node_id, &record_version],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let object_key: Option<String> = row.get("object_key");
     state.db.release_request_connection().await;
     let download_url = if let Some(object_key) = object_key.as_deref() {
@@ -2949,7 +2836,7 @@ pub async fn download_plan(
     } else {
         None
     };
-    let response = run_publication_decode(&state, &user.id, move || {
+    let response = run_metadata_decode(&state, &user.id, move || {
         let response: Result<DownloadPlanResponse> = (|| {
             let wrappers = wrapper_rows
                 .into_iter()
@@ -3054,7 +2941,7 @@ pub async fn abort_upload(
             &[&upload.id, &user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     Ok(HttpResponse::Accepted().finish())
 }
@@ -3070,11 +2957,7 @@ pub async fn share_plan(
     let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let node_id = path.into_inner();
     validate_node_id(&node_id)?;
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::RepeatableRead)
@@ -3088,6 +2971,7 @@ pub async fn share_plan(
         .await
         .map_err(error::ErrorInternalServerError)?;
     drop(client);
+    drop(_recursive_permit);
     let response = run_publication_decode(&state, &user.id, move || {
         encode_json_response(&SharePreparationResponse {
             nodes: snapshot.into_iter().map(snapshot_response).collect(),
@@ -3108,7 +2992,7 @@ pub async fn share_contexts(
     require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
-    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    let _recursive_permit = state.acquire_interactive_operation(&user.id).await?;
     let node_id = path.into_inner();
     validate_node_id(&node_id)?;
     let rows = state
@@ -3117,12 +3001,12 @@ pub async fn share_contexts(
             "
                 WITH RECURSIVE ancestors AS (
                   SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
-                         0::integer AS depth FROM files
+                         0::integer AS depth FROM visible_files AS files
                   WHERE id = $1 AND owner_id = $2 AND e2ee_state = 'encrypted'
                   UNION ALL
                   SELECT parent.id, parent.parent_id,
                          child.visited_ids || parent.id, child.depth + 1
-                  FROM files AS parent
+                  FROM visible_files AS parent
                   INNER JOIN ancestors AS child ON child.parent_id = parent.id
                   WHERE parent.owner_id = $2 AND parent.e2ee_state = 'encrypted'
                     AND child.depth < 100
@@ -3142,7 +3026,7 @@ pub async fn share_contexts(
             &[&node_id, &user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let contexts = rows
         .into_iter()
         .map(|row| ActiveShareContextResponse {
@@ -3171,7 +3055,7 @@ pub async fn share_sync_jobs(
                        files.current_generation_id,
                        heads.record_version, heads.record_hash
                 FROM vault_share_sync_jobs AS jobs
-                INNER JOIN files ON files.id = jobs.node_id
+                INNER JOIN visible_files AS files ON files.id = jobs.node_id
                 INNER JOIN vault_node_heads AS heads
                   ON heads.node_id = jobs.node_id
                  AND heads.record_version = jobs.record_version
@@ -3185,7 +3069,7 @@ pub async fn share_sync_jobs(
             &[&principal.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let jobs = rows
         .into_iter()
         .map(|row| ShareSyncJobResponse {
@@ -3214,15 +3098,12 @@ pub async fn publish_share_directory(
         .upload_control_limiter
         .try_acquire(&principal.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state.acquire_recursive_operation(&principal.id).await?;
     let body = parse_share_directory_publication(&state, &principal.id, &request, body).await?;
     let node_id = path.into_inner();
     validate_node_id(&node_id)?;
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let _recursive_permit = state.acquire_recursive_operation(&principal.id).await?;
+    crate::auth::revalidate_principal(&state, &request).await?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .transaction()
         .await
@@ -3237,7 +3118,7 @@ pub async fn publish_share_directory(
                        heads.record_hash, records.signer_key_version,
                        identity.ed25519_public_key
                 FROM vault_share_sync_jobs AS jobs
-                INNER JOIN files ON files.id = jobs.node_id
+                INNER JOIN visible_files AS files ON files.id = jobs.node_id
                 INNER JOIN vault_node_heads AS heads
                   ON heads.node_id = jobs.node_id
                  AND heads.record_version = jobs.record_version
@@ -3263,12 +3144,12 @@ pub async fn publish_share_directory(
             "
                 WITH RECURSIVE ancestors AS (
                   SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
-                         0::integer AS depth FROM files
+                         0::integer AS depth FROM visible_files AS files
                   WHERE id = $1 AND owner_id = $2
                   UNION ALL
                   SELECT parent.id, parent.parent_id,
                          child.visited_ids || parent.id, child.depth + 1
-                  FROM files AS parent
+                  FROM visible_files AS parent
                   INNER JOIN ancestors AS child ON child.parent_id = parent.id
                   WHERE parent.owner_id = $2
                     AND child.depth < 100
@@ -3344,6 +3225,7 @@ pub async fn publish_share_directory(
         .await
         .map_err(error::ErrorInternalServerError)?;
     drop(client);
+    drop(_recursive_permit);
     let validation_node_id = node_id.clone();
     let (validation_snapshot, directory_cbor, directory_signature, material, commitment) = state
         .vault_validation
@@ -3443,11 +3325,9 @@ pub async fn publish_share_directory(
         .await
         .map_err(vault_validation_error)?
         .map_err(publication_validation_error)?;
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let _recursive_permit = state.acquire_recursive_operation(&principal.id).await?;
+    crate::auth::revalidate_principal(&state, &request).await?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .transaction()
         .await
@@ -3537,7 +3417,6 @@ pub async fn create_share(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let mut body = parse_create_share_publication(&state, &user.id, &request, body).await?;
     validate_prefixed_id(&body.share_id, "shr_", "share id")?;
     validate_node_id(&body.root_node_id)?;
@@ -3565,7 +3444,7 @@ pub async fn create_share(
             &[&user.id, &body.recipient_id, &recipient_key_version],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if trusted.is_none() {
         return Err(error::ErrorPreconditionFailed(
             "confirm the recipient identity fingerprint before sharing",
@@ -3590,10 +3469,13 @@ pub async fn create_share(
         .await
         .map_err(vault_validation_error)?
         .map_err(error::ErrorBadRequest)?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    crate::auth::revalidate_principal(&state, &request).await?;
     let Some(snapshot) = read_owned_subtree_snapshot(&state, &body.root_node_id, &user.id).await?
     else {
         return Ok(HttpResponse::NotFound().body("encrypted share root not found"));
     };
+    drop(_recursive_permit);
     let validation_share_id = body.share_id.clone();
     let validation_sender_id = user.id.clone();
     let validation_recipient_id = body.recipient_id.clone();
@@ -3629,11 +3511,9 @@ pub async fn create_share(
         .await
         .map_err(vault_validation_error)?
         .map_err(error::ErrorBadRequest)?;
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    crate::auth::revalidate_principal(&state, &request).await?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::RepeatableRead)
@@ -3643,7 +3523,7 @@ pub async fn create_share(
     lock_share_topology(&transaction, &user.id).await?;
     let root = transaction
         .query_opt(
-            "SELECT entry_type FROM files WHERE id = $1 AND owner_id = $2 AND e2ee_state = 'encrypted' AND state = 'active' FOR UPDATE",
+            "SELECT entry_type FROM visible_files AS files WHERE id = $1 AND owner_id = $2 AND e2ee_state = 'encrypted' AND state = 'active' FOR UPDATE",
             &[&body.root_node_id, &user.id],
         )
         .await
@@ -3808,7 +3688,7 @@ pub async fn list_shares(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let mut shares = Vec::<OwnedShareResponse>::new();
     for row in rows {
         let share_id: String = row.get("id");
@@ -3873,11 +3753,7 @@ pub async fn pending_epoch_rotation(
     require_configured_vault(&state, &user).await?;
     let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let share_id = path.into_inner();
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::RepeatableRead)
@@ -3926,6 +3802,7 @@ pub async fn pending_epoch_rotation(
         .await
         .map_err(error::ErrorInternalServerError)?;
     drop(client);
+    drop(_recursive_permit);
     let validation_share_id = share_id.clone();
     let plan = run_publication_decode(&state, &user.id, move || {
         let actual_snapshot_hash = snapshot_hash(&snapshot);
@@ -3966,17 +3843,14 @@ pub async fn begin_epoch_rotation(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let body =
         parse_json_body::<BeginEpochRotationRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT)
             .await?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    crate::auth::revalidate_principal(&state, &request).await?;
     let share_id = path.into_inner();
     let (root_node_id, active_epoch, current_record_version, previous_record_hash, snapshot) = {
-        let mut client = state
-            .db
-            .get()
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+        let mut client = state.db.get().await.map_err(crate::db::http_error)?;
         let transaction = client
             .build_transaction()
             .isolation_level(IsolationLevel::RepeatableRead)
@@ -4032,6 +3906,7 @@ pub async fn begin_epoch_rotation(
         drop(client);
         values
     };
+    drop(_recursive_permit);
     let (snapshot, fence_snapshot_hash) = state
         .vault_validation
         .run(&user.id, move || {
@@ -4041,11 +3916,9 @@ pub async fn begin_epoch_rotation(
         .await
         .map_err(vault_validation_error)?;
 
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    crate::auth::revalidate_principal(&state, &request).await?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::RepeatableRead)
@@ -4253,7 +4126,6 @@ pub async fn publish_epoch_rotation(
         .upload_control_limiter
         .try_acquire(&user.id)
         .map_err(|()| LoadShedError::too_many_requests("vault mutation capacity is full"))?;
-    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let mut body = parse_publish_epoch_publication(&state, &user.id, &request, body).await?;
     let (share_id, pending_epoch) = path.into_inner();
     let requested_snapshot_hash: [u8; 32] = body
@@ -4281,12 +4153,10 @@ pub async fn publish_epoch_rotation(
         .await
         .map_err(vault_validation_error)?
         .map_err(error::ErrorBadRequest)?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    crate::auth::revalidate_principal(&state, &request).await?;
     let publication_snapshot = {
-        let mut client = state
-            .db
-            .get()
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+        let mut client = state.db.get().await.map_err(crate::db::http_error)?;
         let transaction = client
             .build_transaction()
             .isolation_level(IsolationLevel::RepeatableRead)
@@ -4303,6 +4173,7 @@ pub async fn publish_epoch_rotation(
         drop(client);
         snapshot
     };
+    drop(_recursive_permit);
     let Some(publication_snapshot) = publication_snapshot else {
         return Ok(HttpResponse::NotFound().finish());
     };
@@ -4360,11 +4231,9 @@ pub async fn publish_epoch_rotation(
         .await
         .map_err(vault_validation_error)?
         .map_err(error::ErrorBadRequest)?;
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    crate::auth::revalidate_principal(&state, &request).await?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::RepeatableRead)
@@ -4496,11 +4365,7 @@ pub async fn abort_epoch_rotation(
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let (share_id, pending_epoch) = path.into_inner();
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .transaction()
         .await
@@ -4575,7 +4440,7 @@ async fn active_identity(state: &AppState, user_id: &str) -> Result<ActiveIdenti
             &[&user_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(row) = row else {
         return Err(error::ErrorPreconditionFailed(
             "an active vault identity is required",
@@ -4860,11 +4725,7 @@ async fn read_owned_subtree_snapshot(
     root_node_id: &str,
     owner_id: &str,
 ) -> Result<Option<Vec<SnapshotNode>>> {
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::RepeatableRead)
@@ -4874,7 +4735,7 @@ async fn read_owned_subtree_snapshot(
         .map_err(error::ErrorInternalServerError)?;
     let root_exists = transaction
         .query_opt(
-            "SELECT 1 FROM files WHERE id = $1 AND owner_id = $2 AND e2ee_state = 'encrypted' AND state = 'active'",
+            "SELECT 1 FROM visible_files AS files WHERE id = $1 AND owner_id = $2 AND e2ee_state = 'encrypted' AND state = 'active'",
             &[&root_node_id, &owner_id],
         )
         .await
@@ -4984,7 +4845,7 @@ async fn load_share_directory_snapshot(
                    heads.record_hash, records.signer_key_version,
                    identity.ed25519_public_key
             FROM vault_share_sync_jobs AS jobs
-            INNER JOIN files ON files.id = jobs.node_id
+            INNER JOIN visible_files AS files ON files.id = jobs.node_id
             INNER JOIN vault_node_heads AS heads
               ON heads.node_id = jobs.node_id
              AND heads.record_version = jobs.record_version
@@ -5006,7 +4867,7 @@ async fn load_share_directory_snapshot(
                    heads.record_hash, records.signer_key_version,
                    identity.ed25519_public_key
             FROM vault_share_sync_jobs AS jobs
-            INNER JOIN files ON files.id = jobs.node_id
+            INNER JOIN visible_files AS files ON files.id = jobs.node_id
             INNER JOIN vault_node_heads AS heads
               ON heads.node_id = jobs.node_id
              AND heads.record_version = jobs.record_version
@@ -5031,12 +4892,12 @@ async fn load_share_directory_snapshot(
         "
             WITH RECURSIVE ancestors AS (
               SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
-                     0::integer AS depth FROM files
+                     0::integer AS depth FROM visible_files AS files
               WHERE id = $1 AND owner_id = $2
               UNION ALL
               SELECT parent.id, parent.parent_id,
                      child.visited_ids || parent.id, child.depth + 1
-              FROM files AS parent
+              FROM visible_files AS parent
               INNER JOIN ancestors AS child ON child.parent_id = parent.id
               WHERE parent.owner_id = $2
                 AND child.depth < 100
@@ -5054,12 +4915,12 @@ async fn load_share_directory_snapshot(
         "
             WITH RECURSIVE ancestors AS (
               SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
-                     0::integer AS depth FROM files
+                     0::integer AS depth FROM visible_files AS files
               WHERE id = $1 AND owner_id = $2
               UNION ALL
               SELECT parent.id, parent.parent_id,
                      child.visited_ids || parent.id, child.depth + 1
-              FROM files AS parent
+              FROM visible_files AS parent
               INNER JOIN ancestors AS child ON child.parent_id = parent.id
               WHERE parent.owner_id = $2
                 AND child.depth < 100
@@ -5145,7 +5006,7 @@ async fn subtree_snapshot(
                            files.current_generation_id,
                            heads.record_version, heads.record_hash
                     FROM unnest($1::text[]) WITH ORDINALITY AS requested(id, ordinal)
-                    INNER JOIN files ON files.id = requested.id
+                    INNER JOIN visible_files AS files ON files.id = requested.id
                     INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
                     WHERE files.owner_id = $2
                       AND files.state = 'active'
@@ -5231,7 +5092,10 @@ async fn committed_share_wrappers<'a>(
     include_generation: bool,
 ) -> Result<Vec<&'a ShareWrapperMaterial>> {
     let node_exists = transaction
-        .query_opt("SELECT 1 FROM files WHERE id = $1", &[&node_id])
+        .query_opt(
+            "SELECT 1 FROM visible_files AS files WHERE id = $1",
+            &[&node_id],
+        )
         .await
         .map_err(error::ErrorInternalServerError)?
         .is_some();
@@ -5246,12 +5110,12 @@ async fn committed_share_wrappers<'a>(
                 "
                     WITH RECURSIVE ancestors AS (
                       SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
-                             0::integer AS depth FROM files
+                             0::integer AS depth FROM visible_files AS files
                       WHERE id = $1 AND owner_id = $2
                       UNION ALL
                       SELECT parent.id, parent.parent_id,
                              child.visited_ids || parent.id, child.depth + 1
-                      FROM files AS parent
+                      FROM visible_files AS parent
                       INNER JOIN ancestors AS child ON child.parent_id = parent.id
                       WHERE parent.owner_id = $2
                         AND child.depth < 100
@@ -5351,7 +5215,10 @@ async fn publication_share_wrappers<'a>(
     }
 
     let node_exists = transaction
-        .query_opt("SELECT 1 FROM files WHERE id = $1", &[&node_id])
+        .query_opt(
+            "SELECT 1 FROM visible_files AS files WHERE id = $1",
+            &[&node_id],
+        )
         .await
         .map_err(error::ErrorInternalServerError)?
         .is_some();
@@ -5369,12 +5236,12 @@ async fn publication_share_wrappers<'a>(
                 SELECT EXISTS (
                   WITH RECURSIVE ancestors AS (
                     SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
-                           0::integer AS depth FROM files
+                           0::integer AS depth FROM visible_files AS files
                     WHERE id = $1 AND owner_id = $2
                     UNION ALL
                     SELECT parent.id, parent.parent_id,
                            child.visited_ids || parent.id, child.depth + 1
-                    FROM files AS parent
+                    FROM visible_files AS parent
                     INNER JOIN ancestors AS child ON child.parent_id = parent.id
                     WHERE parent.owner_id = $2
                       AND child.depth < 100
@@ -5705,11 +5572,11 @@ async fn finalize_ciphertext_object(
         let claimed = state
             .db
             .execute(
-                "UPDATE vault_uploads SET status = 'completing', expires_at = now() + interval '10 minutes' WHERE id = $1 AND owner_id = $2 AND status = 'pending'",
+                "UPDATE vault_uploads SET status = 'completing', expires_at = now() + interval '10 minutes' WHERE id = $1 AND owner_id = $2 AND status = 'pending' AND expires_at > now()",
                 &[&upload.id, &user.id],
             )
             .await
-            .map_err(error::ErrorInternalServerError)?;
+            .map_err(crate::db::http_error)?;
         if claimed != 1 {
             return Err(error::ErrorConflict("upload state changed; retry"));
         }
@@ -5751,7 +5618,7 @@ async fn finalize_ciphertext_object(
                                 &[&upload.id, &user.id],
                             )
                             .await
-                            .map_err(error::ErrorInternalServerError)?;
+                            .map_err(crate::db::http_error)?;
                     return Err(error::ErrorBadGateway(complete_error));
                 }
                 Err(metadata_error) => {
@@ -5805,11 +5672,7 @@ async fn publish_record_transaction(
     decoded: &DecodedNodeRecord,
     metadata: Option<&ObjectMetadata>,
 ) -> Result<PublishResponse> {
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .transaction()
         .await
@@ -5837,7 +5700,7 @@ async fn publish_record_transaction(
                 SELECT owner_id, parent_id, entry_type, e2ee_state,
                        current_generation_number, current_generation_id,
                        storage_name
-                FROM files WHERE id = $1 FOR UPDATE
+                FROM visible_files AS files WHERE id = $1 FOR UPDATE
             ",
             &[&upload.node_id],
         )
@@ -6126,7 +5989,7 @@ async fn decode_and_verify_node_record(
             &[&user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?
+        .map_err(crate::db::http_error)?
         .into_iter()
         .map(|row| {
             (
@@ -6168,7 +6031,7 @@ async fn decode_and_verify_folder_batch(
             &[&user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?
+        .map_err(crate::db::http_error)?
         .into_iter()
         .map(|row| {
             (
@@ -6304,11 +6167,7 @@ async fn publish_folder_batch_transaction(
         earlier_node_ids.insert(node_id.clone());
     }
 
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .transaction()
         .await
@@ -6327,7 +6186,7 @@ async fn publish_folder_batch_transaction(
                          WHERE jobs.node_id = files.id
                            AND jobs.record_version = heads.record_version
                        ) AS share_sync_required
-                FROM files
+                FROM visible_files AS files
                 LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
                 WHERE files.id = ANY($1::text[])
                 FOR UPDATE OF files
@@ -6390,7 +6249,7 @@ async fn publish_folder_batch_transaction(
             .query(
                 "
                     SELECT id, owner_id, entry_type, state, e2ee_state
-                    FROM files
+                    FROM visible_files AS files
                     WHERE id = ANY($1::text[])
                     FOR SHARE
                 ",
@@ -6441,13 +6300,13 @@ async fn publish_folder_batch_transaction(
                   SELECT requested.start_id, files.id, files.parent_id,
                          ARRAY[files.id]::text[] AS visited_ids, 0::integer AS depth
                   FROM requested
-                  INNER JOIN files ON files.id = requested.start_id
+                  INNER JOIN visible_files AS files ON files.id = requested.start_id
                   WHERE files.owner_id = $2
                   UNION ALL
                   SELECT child.start_id, parent.id, parent.parent_id,
                          child.visited_ids || parent.id, child.depth + 1
                   FROM ancestors AS child
-                  INNER JOIN files AS parent ON parent.id = child.parent_id
+                  INNER JOIN visible_files AS parent ON parent.id = child.parent_id
                   WHERE parent.owner_id = $2 AND child.depth < 100
                     AND NOT parent.id = ANY(child.visited_ids)
                 )
@@ -6893,7 +6752,10 @@ async fn reject_fenced_share_write(
     owner_id: &str,
 ) -> Result<()> {
     let anchor = if transaction
-        .query_opt("SELECT 1 FROM files WHERE id = $1", &[&node_id])
+        .query_opt(
+            "SELECT 1 FROM visible_files AS files WHERE id = $1",
+            &[&node_id],
+        )
         .await
         .map_err(error::ErrorInternalServerError)?
         .is_some()
@@ -6911,12 +6773,12 @@ async fn reject_fenced_share_write(
                 SELECT EXISTS (
                   WITH RECURSIVE ancestors AS (
                     SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
-                           0::integer AS depth FROM files
+                           0::integer AS depth FROM visible_files AS files
                     WHERE id = $1 AND owner_id = $2
                     UNION ALL
                     SELECT parent.id, parent.parent_id,
                            child.visited_ids || parent.id, child.depth + 1
-                    FROM files AS parent
+                    FROM visible_files AS parent
                     INNER JOIN ancestors AS child ON child.parent_id = parent.id
                     WHERE parent.owner_id = $2
                       AND child.depth < 100
@@ -6972,14 +6834,14 @@ async fn current_publish_response(
                          WHERE jobs.node_id = files.id
                            AND jobs.record_version = heads.record_version
                        ) AS share_sync_required
-                FROM files
+                FROM visible_files AS files
                 INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
                 WHERE files.id = $1 AND files.owner_id = $2
             ",
             &[&node_id, &user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(row) = row else {
         return Ok(HttpResponse::Conflict().body("published node is unavailable"));
     };
@@ -7001,11 +6863,8 @@ async fn load_shared_plan(
     encode_response: bool,
 ) -> Result<SharedDownloadCpuResponse> {
     let row = {
-        let mut client = state
-            .db
-            .get()
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+        let _interactive_permit = state.acquire_interactive_operation(&user.id).await?;
+        let mut client = state.db.get().await.map_err(crate::db::http_error)?;
         let transaction = client
             .transaction()
             .await
@@ -7067,7 +6926,7 @@ async fn prepare_shared_plan(
     };
     let user_id = user.id.clone();
     let node_id = node_id.to_owned();
-    let response = run_publication_decode(state, &user.id, move || {
+    let response = run_metadata_decode(state, &user.id, move || {
         let prepared: Result<Option<DownloadPlanResponse>> = (|| {
             let SharedDownloadSnapshot {
                 share_id,
@@ -7379,10 +7238,19 @@ async fn load_shared_metadata_plan_from_row(
     user: &SessionPrincipal,
     node_id: String,
     row: tokio_postgres::Row,
-) -> Result<Option<MetadataPlanResponse>> {
-    match prepare_shared_plan(state, user, &node_id, row, false, false).await? {
-        SharedDownloadCpuResponse::Plan(plan) => Ok(Some((*plan).into())),
-        SharedDownloadCpuResponse::Conflict | SharedDownloadCpuResponse::NotFound => Ok(None),
+) -> Result<MetadataPlanResponse> {
+    shared_metadata_response(prepare_shared_plan(state, user, &node_id, row, false, false).await?)
+}
+
+fn shared_metadata_response(response: SharedDownloadCpuResponse) -> Result<MetadataPlanResponse> {
+    match response {
+        SharedDownloadCpuResponse::Plan(plan) => Ok((*plan).into()),
+        SharedDownloadCpuResponse::Conflict => Err(error::ErrorConflict(
+            "share material is still synchronizing",
+        )),
+        SharedDownloadCpuResponse::NotFound => Err(error::ErrorConflict(
+            "selected shared metadata is no longer available",
+        )),
         SharedDownloadCpuResponse::Json(_) => Err(error::ErrorInternalServerError(
             "shared metadata plan was unexpectedly encoded",
         )),
@@ -7525,7 +7393,7 @@ async fn get_upload(
             &[&upload_id, &owner_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     Ok(row.map(|row| VaultUpload {
         id: row.get("id"),
         node_id: row.get("node_id"),
@@ -7552,11 +7420,11 @@ async fn renew_vault_upload_idle_lease(
     let updated = state
         .db
         .execute(
-            "UPDATE vault_uploads SET expires_at = now() + interval '1 hour' WHERE id = $1 AND owner_id = $2 AND status = 'pending'",
+            "UPDATE vault_uploads SET expires_at = now() + interval '1 hour' WHERE id = $1 AND owner_id = $2 AND status = 'pending' AND expires_at > now()",
             &[&upload_id, &owner_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     Ok(updated == 1)
 }
 
@@ -7584,14 +7452,14 @@ async fn validate_encrypted_parent(
         .db
         .query_opt(
             "
-                SELECT 1 FROM files
+                SELECT 1 FROM visible_files AS files
                 WHERE id = $1 AND owner_id = $2 AND entry_type = 'folder'
                   AND state = 'active' AND e2ee_state = 'encrypted'
             ",
             &[&parent_id, &user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if exists.is_none() {
         return Err(error::ErrorBadRequest("encrypted parent folder is invalid"));
     }
@@ -7603,7 +7471,7 @@ async fn require_configured_vault(state: &AppState, user: &SessionPrincipal) -> 
         .db
         .query_opt("SELECT 1 FROM user_vaults WHERE user_id = $1", &[&user.id])
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if configured.is_none() {
         return Err(error::ErrorPreconditionFailed(
             "configure and unlock the encrypted vault first",
@@ -7633,13 +7501,285 @@ async fn migration_summary(state: &AppState, user: &SessionPrincipal) -> Result<
         .db
         .query_one(MIGRATION_SUMMARY_QUERY, &[&user.id])
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let legacy_nodes: i64 = row.get("legacy_nodes");
     let incomplete_nodes: i64 = row.get("incomplete_nodes");
     Ok(MigrationSummary {
         legacy_nodes,
         incomplete_nodes,
         ready_for_required: legacy_nodes == 0 && incomplete_nodes == 0,
+    })
+}
+
+async fn lock_account_for_mutation(
+    transaction: &tokio_postgres::Transaction<'_>,
+    user: &SessionPrincipal,
+) -> Result<()> {
+    // Setup and password changes serialize on the account row. Refresh the
+    // principal after acquiring it, since lock admission may also have waited.
+    let account = transaction
+        .query_opt(
+            "SELECT id FROM users WHERE id = $1 AND role = $2 AND status = 'active' FOR UPDATE",
+            &[&user.id, &user.role],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    if account.is_none() {
+        return Err(error::ErrorUnauthorized(
+            "authentication changed; retry request",
+        ));
+    }
+    let session = transaction
+        .query_opt(
+            "SELECT 1 FROM sessions WHERE id = $1 AND user_id = $2 AND expires_at > clock_timestamp()",
+            &[&user.session_id, &user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    if session.is_none() {
+        return Err(error::ErrorUnauthorized(
+            "authentication changed; retry request",
+        ));
+    }
+    Ok(())
+}
+
+async fn validate_password_account_state(
+    transaction: &tokio_postgres::Transaction<'_>,
+    user: &SessionPrincipal,
+    includes_vault: bool,
+) -> Result<()> {
+    lock_account_for_mutation(transaction, user).await?;
+    let configured: bool = transaction
+        .query_one(
+            "SELECT EXISTS(SELECT 1 FROM user_vaults WHERE user_id = $1)",
+            &[&user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?
+        .get(0);
+    if configured != includes_vault {
+        return Err(error::ErrorConflict(
+            "vault password material must be changed together with the account password",
+        ));
+    }
+    Ok(())
+}
+
+async fn parse_account_material<Body, Material, Validate>(
+    state: &AppState,
+    user_id: &str,
+    request: &HttpRequest,
+    body: web::Payload,
+    validate: Validate,
+) -> Result<Material>
+where
+    Body: DeserializeOwned + 'static,
+    Material: Send + 'static,
+    Validate: FnOnce(Body) -> Result<Material> + Send + 'static,
+{
+    require_account_json(request)?;
+    let encoding = request
+        .headers()
+        .get(CONTENT_ENCODING)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(ContentEncoding::Identity);
+    let bytes =
+        crate::auth::read_control_body(request, body.into_inner(), VAULT_ACCOUNT_JSON_LIMIT)
+            .await?;
+    crate::auth::revalidate_principal(state, request).await?;
+    state.db.release_request_connection().await;
+    let material =
+        offload_account_material(&state.vault_validation, user_id, bytes, encoding, validate)
+            .await?;
+    crate::auth::revalidate_principal(state, request).await?;
+    Ok(material)
+}
+
+fn require_account_json(request: &HttpRequest) -> Result<()> {
+    // Preserve the JSON extractor's MIME checks, including structured +json types.
+    let accepted = request.mime_type().ok().flatten().is_some_and(|mime| {
+        mime.subtype().as_str() == "json"
+            || mime
+                .suffix()
+                .is_some_and(|suffix| suffix.as_str() == "json")
+    });
+    if !accepted {
+        return Err(error::JsonPayloadError::ContentType.into());
+    }
+    Ok(())
+}
+
+async fn offload_account_material<Body, Material, Validate>(
+    service: &crate::state::VaultValidationService,
+    user_id: &str,
+    bytes: Bytes,
+    encoding: ContentEncoding,
+    validate: Validate,
+) -> Result<Material>
+where
+    Body: DeserializeOwned + 'static,
+    Material: Send + 'static,
+    Validate: FnOnce(Body) -> Result<Material> + Send + 'static,
+{
+    // Queue admission precedes the parsed JSON and decoded buffers. Both permits
+    // remain in the blocking closure even if the HTTP request is cancelled.
+    service
+        .run(user_id, move || {
+            let bytes =
+                decode_account_content(bytes, encoding).map_err(portable_publication_error)?;
+            let body = serde_json::from_slice::<Body>(&bytes).map_err(|failure| {
+                portable_publication_error(error::JsonPayloadError::Deserialize(failure).into())
+            })?;
+            validate(body).map_err(portable_publication_error)
+        })
+        .await
+        .map_err(vault_validation_error)?
+        .map_err(publication_body_error)
+}
+
+fn decode_account_content(bytes: Bytes, encoding: ContentEncoding) -> Result<Bytes> {
+    use std::io::Read;
+    let decoder: Box<dyn Read + '_> = match encoding {
+        ContentEncoding::Identity => return Ok(bytes),
+        ContentEncoding::Gzip => Box::new(flate2::read::GzDecoder::new(bytes.as_ref())),
+        ContentEncoding::Deflate => Box::new(flate2::read::ZlibDecoder::new(bytes.as_ref())),
+        ContentEncoding::Brotli => Box::new(brotli::Decompressor::new(bytes.as_ref(), 8192)),
+        ContentEncoding::Zstd => {
+            let mut decoder =
+                zstd::stream::read::Decoder::new(bytes.as_ref()).map_err(error::ErrorBadRequest)?;
+            // The body fits in an 8 MiB history window. Bound frame workspace too.
+            decoder.window_log_max(23).map_err(error::ErrorBadRequest)?;
+            Box::new(decoder)
+        }
+        _ => return Ok(bytes),
+    };
+    // Stop decoding after the first excess byte, even for tiny compressed bombs.
+    // Decompression, allocation and JSON parsing all share the validation permit.
+    let mut decoded = Vec::new();
+    decoder
+        .take(VAULT_ACCOUNT_JSON_LIMIT as u64 + 1)
+        .read_to_end(&mut decoded)
+        .map_err(error::ErrorBadRequest)?;
+    if decoded.len() > VAULT_ACCOUNT_JSON_LIMIT {
+        return Err(error::ErrorPayloadTooLarge("control body is too large"));
+    }
+    Ok(Bytes::from(decoded))
+}
+
+struct RewrapMaterial {
+    expected_vault_version: i64,
+    kdf_salt: Vec<u8>,
+    password_wrapper_id: Vec<u8>,
+    password_ciphertext: Vec<u8>,
+    recovery_salt: Vec<u8>,
+    recovery_wrapper_id: Vec<u8>,
+    recovery_ciphertext: Vec<u8>,
+    account_state_record_id: Option<Vec<u8>>,
+    encrypted_account_state: Vec<u8>,
+    recovered_at: bool,
+    proof_signature: [u8; 64],
+    proof: Vec<u8>,
+}
+
+fn validate_rewrap_material(body: &VaultRewrapRequest) -> Result<RewrapMaterial> {
+    validate_kdf(&body.kdf)?;
+    let kdf_salt = decode_fixed::<16>(&body.kdf.salt, "KDF salt")?.to_vec();
+    let password_wrapper_id =
+        decode_fixed::<16>(&body.password_wrapper.id, "password wrapper id")?.to_vec();
+    let password_ciphertext = decode_fixed::<48>(
+        &body.password_wrapper.ciphertext,
+        "password root ciphertext",
+    )?
+    .to_vec();
+    let recovery_salt = decode_fixed::<16>(&body.recovery_wrapper.salt, "recovery salt")?.to_vec();
+    let recovery_wrapper_id =
+        decode_fixed::<16>(&body.recovery_wrapper.id, "recovery wrapper id")?.to_vec();
+    let recovery_ciphertext = decode_fixed::<48>(
+        &body.recovery_wrapper.ciphertext,
+        "recovery root ciphertext",
+    )?
+    .to_vec();
+    let account_state_record_id = decode_optional_fixed::<16>(
+        body.account_state_record_id.as_deref(),
+        "account state record id",
+    )?
+    .map(Vec::from);
+    let encrypted_account_state = decode_limited(
+        body.encrypted_account_state.as_deref().unwrap_or(""),
+        MAX_ACCOUNT_STATE_CIPHERTEXT,
+        "encrypted account state",
+    )?;
+    let expected_vault_version = i64::try_from(body.expected_vault_version)
+        .map_err(|_| error::ErrorBadRequest("vault version is invalid"))?;
+    let recovered_at = body.recovery.unwrap_or(false);
+    let proof_signature = decode_fixed::<64>(&body.proof_signature, "rewrap proof signature")?;
+    let proof = rewrap_proof_message(
+        expected_vault_version,
+        recovered_at,
+        &body.kdf,
+        &kdf_salt,
+        &password_wrapper_id,
+        &password_ciphertext,
+        &recovery_salt,
+        &recovery_wrapper_id,
+        &recovery_ciphertext,
+        account_state_record_id.as_deref(),
+        &encrypted_account_state,
+    )?;
+    Ok(RewrapMaterial {
+        expected_vault_version,
+        kdf_salt,
+        password_wrapper_id,
+        password_ciphertext,
+        recovery_salt,
+        recovery_wrapper_id,
+        recovery_ciphertext,
+        account_state_record_id,
+        encrypted_account_state,
+        recovered_at,
+        proof_signature,
+        proof,
+    })
+}
+
+struct OnePasswordChangeMaterial {
+    current_credential: String,
+    new_credential: String,
+    new_salt: [u8; 16],
+    vault: Option<PasswordRewrapMaterial>,
+}
+
+fn validate_one_password_change(
+    body: OnePasswordChangeRequest,
+) -> Result<OnePasswordChangeMaterial> {
+    if body.current_credential.len() != 43
+        || body.new_credential.len() != 43
+        || !super::auth::valid_credential(&body.current_credential)
+        || !super::auth::valid_credential(&body.new_credential)
+    {
+        return Err(error::ErrorBadRequest(
+            "authentication credential is invalid",
+        ));
+    }
+    if body.new_salt.len() != 22 {
+        return Err(error::ErrorBadRequest(
+            "authentication salt has an invalid length",
+        ));
+    }
+    Ok(OnePasswordChangeMaterial {
+        new_salt: super::auth::decode_fixed_auth_value::<16>(
+            &body.new_salt,
+            "authentication salt",
+        )?,
+        vault: body
+            .vault
+            .as_ref()
+            .map(validate_password_rewrap)
+            .transpose()?,
+        current_credential: body.current_credential,
+        new_credential: body.new_credential,
     })
 }
 
@@ -7672,7 +7812,7 @@ fn validate_setup_material(body: &VaultSetupRequest) -> Result<SetupMaterial> {
             "the first identity key version must be one",
         ));
     }
-    Ok(SetupMaterial {
+    let material = SetupMaterial {
         kdf_salt: decode_fixed::<16>(&body.kdf.salt, "KDF salt")?.to_vec(),
         password_wrapper_id: decode_fixed::<16>(&body.password_wrapper.id, "password wrapper id")?
             .to_vec(),
@@ -7725,7 +7865,13 @@ fn validate_setup_material(body: &VaultSetupRequest) -> Result<SetupMaterial> {
             MAX_ACCOUNT_STATE_CIPHERTEXT,
             "encrypted account state",
         )?,
-    })
+    };
+    if identity_fingerprint(&material.x25519_public_key, &material.ed25519_public_key)
+        != material.fingerprint_sha256
+    {
+        return Err(error::ErrorBadRequest("identity fingerprint is invalid"));
+    }
+    Ok(material)
 }
 
 fn validate_kdf(kdf: &KdfRequest) -> Result<()> {
@@ -7930,8 +8076,14 @@ fn identity_fingerprint(x25519: &[u8], ed25519: &[u8]) -> Vec<u8> {
 }
 
 fn decode_fixed<const SIZE: usize>(value: &str, label: &str) -> Result<[u8; SIZE]> {
+    let value = value.trim();
+    if value.len() != (SIZE * 4).div_ceil(3) {
+        return Err(error::ErrorBadRequest(format!(
+            "{label} has an invalid length"
+        )));
+    }
     URL_SAFE_NO_PAD
-        .decode(value.trim())
+        .decode(value)
         .map_err(|_| error::ErrorBadRequest(format!("{label} is not valid base64url")))?
         .try_into()
         .map_err(|_| error::ErrorBadRequest(format!("{label} has an invalid length")))
@@ -7949,8 +8101,12 @@ fn decode_optional_fixed<const SIZE: usize>(
 }
 
 fn decode_limited(value: &str, maximum: usize, label: &str) -> Result<Vec<u8>> {
+    let value = value.trim();
+    if value.len() > maximum.saturating_mul(4).div_ceil(3) {
+        return Err(error::ErrorPayloadTooLarge(format!("{label} is too large")));
+    }
     let decoded = URL_SAFE_NO_PAD
-        .decode(value.trim())
+        .decode(value)
         .map_err(|_| error::ErrorBadRequest(format!("{label} is not valid base64url")))?;
     if decoded.len() > maximum {
         return Err(error::ErrorPayloadTooLarge(format!("{label} is too large")));
@@ -8197,6 +8353,23 @@ where
         .map_err(publication_body_error)
 }
 
+async fn run_metadata_decode<T, Operation>(
+    state: &AppState,
+    user_id: &str,
+    operation: Operation,
+) -> Result<T>
+where
+    T: Send + 'static,
+    Operation: FnOnce() -> std::result::Result<T, (u16, String)> + Send + 'static,
+{
+    state
+        .interactive_validation
+        .run(user_id, operation)
+        .await
+        .map_err(vault_validation_error)?
+        .map_err(publication_body_error)
+}
+
 fn portable_publication_error(error: actix_web::Error) -> (u16, String) {
     (
         error.as_response_error().status_code().as_u16(),
@@ -8291,30 +8464,10 @@ fn require_json_publication(request: &HttpRequest) -> Result<()> {
 
 async fn read_publication_body(
     request: &HttpRequest,
-    mut body: web::Payload,
+    body: web::Payload,
     limit: usize,
 ) -> Result<Bytes> {
-    let declared = request
-        .headers()
-        .get(CONTENT_LENGTH)
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.parse::<usize>().ok());
-    if declared.is_some_and(|length| length > limit) {
-        return Err(error::ErrorPayloadTooLarge(
-            "vault publication is too large",
-        ));
-    }
-    let mut bytes = BytesMut::with_capacity(declared.unwrap_or_default().min(limit));
-    while let Some(chunk) = body.next().await {
-        let chunk = chunk.map_err(error::ErrorBadRequest)?;
-        if bytes.len().saturating_add(chunk.len()) > limit {
-            return Err(error::ErrorPayloadTooLarge(
-                "vault publication is too large",
-            ));
-        }
-        bytes.extend_from_slice(&chunk);
-    }
-    Ok(bytes.freeze())
+    crate::auth::read_control_body(request, body.into_inner(), limit).await
 }
 
 fn vault_validation_error(error: VaultValidationError) -> actix_web::Error {
@@ -8352,6 +8505,135 @@ mod tests {
 
     use super::*;
 
+    #[actix_web::test]
+    async fn presign_batches_complete_under_partial_admission_with_bounded_signing() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::time::Duration;
+
+        let service = crate::state::AsyncOperationService::new(2, 2, 2, 2);
+        let occupied_service = service.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let occupied = actix_web::rt::spawn(async move {
+            occupied_service
+                .run("same-user", async move {
+                    started_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                })
+                .await
+                .unwrap();
+        });
+        started_rx.await.unwrap();
+
+        // One queue slot remains, even though either supported batch has more parts.
+        for part_count in [4, MAX_PRESIGN_PARTS] {
+            let active = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let signed = Arc::new(AtomicUsize::new(0));
+            let result = tokio::time::timeout(
+                Duration::from_secs(2),
+                service.run("same-user", async {
+                    collect_presign_batch((0..part_count).map(|part| {
+                        let active = Arc::clone(&active);
+                        let peak = Arc::clone(&peak);
+                        let signed = Arc::clone(&signed);
+                        async move {
+                            let count = active.fetch_add(1, Ordering::SeqCst) + 1;
+                            peak.fetch_max(count, Ordering::SeqCst);
+                            // Vary completion order to verify URLs remain paired with their parts.
+                            tokio::time::sleep(Duration::from_millis(1 + (part % 3) as u64)).await;
+                            active.fetch_sub(1, Ordering::SeqCst);
+                            signed.fetch_add(1, Ordering::SeqCst);
+                            Ok::<_, ()>(part)
+                        }
+                    }))
+                    .await
+                }),
+            )
+            .await
+            .expect("a supported batch must finish without self-induced admission failure")
+            .unwrap()
+            .unwrap();
+            assert_eq!(result, (0..part_count).collect::<Vec<_>>());
+            assert_eq!(signed.load(Ordering::SeqCst), part_count);
+            assert_eq!(peak.load(Ordering::SeqCst), PRESIGN_BATCH_CONCURRENCY);
+            assert_eq!(active.load(Ordering::SeqCst), 0);
+        }
+        release_tx.send(()).unwrap();
+        occupied.await.unwrap();
+    }
+
+    #[actix_web::test]
+    async fn presign_batch_replenishes_slots_while_the_first_part_is_pending() {
+        let (next_tx, next_rx) = tokio::sync::oneshot::channel();
+        let mut next_tx = Some(next_tx);
+        let mut next_rx = Some(next_rx);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            collect_presign_batch((0..MAX_PRESIGN_PARTS).map(|part| {
+                let wait_for_replacement = (part == 0).then(|| next_rx.take().unwrap());
+                let release_first_part =
+                    (part == PRESIGN_BATCH_CONCURRENCY).then(|| next_tx.take().unwrap());
+                async move {
+                    if let Some(replacement) = wait_for_replacement {
+                        replacement.await.unwrap();
+                    }
+                    if let Some(release) = release_first_part {
+                        release.send(()).unwrap();
+                    }
+                    Ok::<_, ()>(part)
+                }
+            })),
+        )
+        .await
+        .expect("a finished slot must be refilled even while the first part remains pending")
+        .unwrap();
+        assert_eq!(result, (0..MAX_PRESIGN_PARTS).collect::<Vec<_>>());
+    }
+
+    #[actix_web::test]
+    async fn presign_batch_rejection_does_not_start_any_signing() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let service = crate::state::AsyncOperationService::new(1, 1, 1, 1);
+        let occupied_service = service.clone();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        let occupied = actix_web::rt::spawn(async move {
+            occupied_service
+                .run("same-user", async move {
+                    started_tx.send(()).unwrap();
+                    release_rx.await.unwrap();
+                })
+                .await
+                .unwrap();
+        });
+        started_rx.await.unwrap();
+        let signed = Arc::new(AtomicUsize::new(0));
+        let result = service
+            .run("same-user", async {
+                collect_presign_batch((0..MAX_PRESIGN_PARTS).map(|part| {
+                    let signed = Arc::clone(&signed);
+                    async move {
+                        signed.fetch_add(1, Ordering::SeqCst);
+                        Ok::<_, ()>(part)
+                    }
+                }))
+                .await
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(
+            actix_web::ResponseError::status_code(&result),
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(signed.load(Ordering::SeqCst), 0);
+        release_tx.send(()).unwrap();
+        occupied.await.unwrap();
+    }
+
     #[test]
     fn node_id_validation_accepts_modern_and_legacy_ids() {
         assert!(validate_node_id("fil_test").is_ok());
@@ -8374,8 +8656,8 @@ mod tests {
     #[test]
     fn metadata_plan_batches_are_bounded_ancestor_first_and_storage_free() {
         assert!(OWNED_METADATA_PLANS_QUERY.contains("unnest($1::text[]) WITH ORDINALITY"));
-        assert!(OWNED_METADATA_PLANS_QUERY.contains("WITH RECURSIVE requested"));
-        assert!(OWNED_METADATA_PLANS_QUERY.contains("candidates.depth DESC"));
+        assert!(!OWNED_METADATA_PLANS_QUERY.contains("WITH RECURSIVE"));
+        assert!(OWNED_METADATA_PLANS_QUERY.contains("ORDER BY requested.ordinal"));
         assert!(OWNED_METADATA_WRAPPERS_QUERY.contains("wrappers.node_id = ANY($1)"));
         assert!(!OWNED_METADATA_PLANS_QUERY.contains("object_key"));
         assert!(OWNED_METADATA_PLANS_QUERY.contains("vault_object_generations"));
@@ -8391,12 +8673,10 @@ mod tests {
             "fn owned_metadata_plan_from_row(",
         );
         assert!(handler.contains("MAX_METADATA_PLAN_REQUEST_NODES"));
-        assert!(handler.contains("MetadataPlanPurpose::SharePreparation"));
-        assert!(handler.contains("OWNED_SHARE_PREPARATION_PLANS_QUERY"));
+        assert!(handler.contains("metadata_paging::load_page"));
         assert!(handler.contains("SHARED_METADATA_PLAN_CONCURRENCY"));
-        assert!(handler.contains("shared_metadata_plans_query"));
         assert!(handler.contains("load_shared_metadata_plan_from_row"));
-        assert!(handler.contains("encode_bounded_metadata_plans"));
+        assert!(handler.contains("metadata_paging::encode_page"));
         let shared_metadata = source_between(
             production,
             "async fn load_shared_metadata_plan_from_row(",
@@ -8415,8 +8695,8 @@ mod tests {
             OWNED_METADATA_PLANS_QUERY
                 .matches("state IN ('active', 'trashed')")
                 .count(),
-            2,
-            "listing metadata must include a trashed node and its encrypted ancestors"
+            1,
+            "selected listing payloads must include trashed nodes"
         );
         assert!(OWNED_SHARE_PREPARATION_PLANS_QUERY.contains("files.state = 'active'"));
         assert!(!OWNED_SHARE_PREPARATION_PLANS_QUERY.contains("'trashed'"));
@@ -8454,13 +8734,46 @@ mod tests {
             record_hash: "A".repeat(43),
             share: None,
         };
-        let encoded =
-            encode_bounded_metadata_plans(vec![plan("fil_first"), plan("fil_second")], 0).unwrap();
+        let encoded = metadata_paging::encode_page(
+            vec![plan("fil_first")],
+            vec!["fil_first".into()],
+            Some(1),
+            "snapshot".to_owned(),
+        )
+        .unwrap();
         let value: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
 
         assert!(encoded.len() <= MAX_METADATA_PLAN_RESPONSE_BYTES);
         assert_eq!(value["plans"].as_array().unwrap().len(), 1);
         assert_eq!(value["continuation"], 1);
+        assert_eq!(
+            metadata_paging::encode_page(
+                vec![plan("fil_first")],
+                vec!["fil_other".into()],
+                None,
+                "snapshot".into()
+            )
+            .unwrap_err()
+            .0,
+            409
+        );
+    }
+
+    #[test]
+    fn selected_shared_metadata_cannot_silently_disappear_from_a_page() {
+        for response in [
+            SharedDownloadCpuResponse::Conflict,
+            SharedDownloadCpuResponse::NotFound,
+        ] {
+            assert_eq!(
+                shared_metadata_response(response)
+                    .err()
+                    .unwrap()
+                    .as_response_error()
+                    .status_code(),
+                actix_web::http::StatusCode::CONFLICT
+            );
+        }
     }
 
     #[test]
@@ -8643,7 +8956,7 @@ mod tests {
     }
 
     #[test]
-    fn recursive_vault_paths_are_admitted_once_at_the_handler_boundary() {
+    fn recursive_vault_paths_are_admitted_in_their_database_phase() {
         let source = include_str!("vault.rs");
         let production = source.split("#[cfg(test)]").next().unwrap_or(source);
         for (start, end) in [
@@ -8688,9 +9001,13 @@ mod tests {
             ),
         ] {
             let handler = source_between(production, start, end);
+            let owns_phase = handler.contains("acquire_recursive_operation")
+                || handler.contains("acquire_interactive_operation");
+            let delegated_snapshot =
+                start == "pub async fn download_plan(" && handler.contains("shared_download_plan");
             assert!(
-                handler.contains("acquire_recursive_operation"),
-                "{start} must admit recursive work before it starts"
+                owns_phase || delegated_snapshot,
+                "{start} must admit its database traversal phase"
             );
         }
 
@@ -8701,7 +9018,7 @@ mod tests {
         );
         assert!(
             !snapshot_helper.contains("acquire_recursive_operation"),
-            "the create-share handler owns the permit across both subtree snapshots"
+            "the create-share handler owns separate permits for its two database phases"
         );
     }
 
@@ -8856,7 +9173,7 @@ mod tests {
             &[
                 "release_request_connection",
                 ".download_url(",
-                "run_publication_decode",
+                "run_metadata_decode",
                 "encode_json_response",
             ],
         );
@@ -8872,7 +9189,7 @@ mod tests {
                 ".commit()",
                 "drop(client)",
                 ".download_url(",
-                "run_publication_decode",
+                "run_metadata_decode",
                 "encode_json_response",
             ],
         );
@@ -8914,10 +9231,16 @@ mod tests {
             !production.contains("interval '24 hours'"),
             "encrypted upload code must not regress to the legacy 24-hour lease"
         );
-        assert_eq!(
-            multipart.matches("renew_vault_upload_idle_lease").count(),
-            2
-        );
+        let single_part = multipart
+            .split("pub async fn presign_parts(")
+            .next()
+            .unwrap();
+        assert!(single_part.contains("renew_vault_upload_idle_lease"));
+        let batched_parts = multipart
+            .split("pub async fn presign_parts(")
+            .nth(1)
+            .unwrap();
+        assert!(batched_parts.contains("renew_vault_upload_idle_lease"));
     }
 
     #[test]
@@ -9323,7 +9646,7 @@ mod tests {
             .await
             .expect("owned metadata wrapper batch query should prepare");
         client
-            .prepare(&shared_metadata_plans_query())
+            .prepare(metadata_paging::SHARED_IDENTITY_QUERY)
             .await
             .expect("shared metadata batch query should prepare");
     }
@@ -9462,7 +9785,47 @@ mod tests {
             .await
             .expect("shared-download fixture should insert");
 
-        let trashed_node_ids = vec!["fil_perf_trash_child".to_owned()];
+        // Shared metadata resolves authorization in a bounded identity batch,
+        // then fetches payloads only for the selected page in the same snapshot.
+        let metadata_transaction = snapshot_client.transaction().await.unwrap();
+        let mut metadata_request = MetadataPlansRequest {
+            node_ids: vec!["fil_perf_share_root".to_owned()],
+            continuation: None,
+            snapshot: None,
+            purpose: MetadataPlanPurpose::Listing,
+        };
+        let shared_page = metadata_paging::load_transaction_page(
+            &metadata_transaction,
+            "usr_perf_share_recipient",
+            &metadata_request,
+        )
+        .await
+        .unwrap();
+        assert_eq!(shared_page.shared_rows.len(), 1);
+        assert!(shared_page.owned_rows.is_empty());
+        assert_eq!(shared_page.order, vec!["fil_perf_share_root"]);
+        metadata_request.snapshot = Some(shared_page.snapshot);
+        metadata_transaction.execute(
+            "UPDATE vault_share_recipients SET status='revoked' WHERE share_id='shr_perf_snapshot' AND recipient_id='usr_perf_share_recipient'", &[],
+        ).await.unwrap();
+        let revoked = metadata_paging::load_transaction_page(
+            &metadata_transaction,
+            "usr_perf_share_recipient",
+            &metadata_request,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(
+            revoked.as_response_error().status_code(),
+            actix_web::http::StatusCode::CONFLICT
+        );
+        metadata_transaction.rollback().await.unwrap();
+
+        let trashed_node_ids = vec![
+            "fil_perf_trash_parent".to_owned(),
+            "fil_perf_trash_child".to_owned(),
+        ];
         let metadata_rows = snapshot_client
             .query(
                 OWNED_METADATA_PLANS_QUERY,
@@ -9475,7 +9838,7 @@ mod tests {
             metadata_rows[0].get::<_, &str>("id"),
             "fil_perf_trash_parent"
         );
-        assert_eq!(metadata_rows[0].get::<_, i32>("depth"), 1);
+        assert_eq!(metadata_rows[0].get::<_, i32>("depth"), 0);
         assert_eq!(
             metadata_rows[1].get::<_, &str>("id"),
             "fil_perf_trash_child"
@@ -9572,9 +9935,8 @@ mod tests {
         assert!(MIGRATION_CLAIM_QUERY.contains("files.e2ee_state IN ('legacy', 'staged')"));
         assert!(MIGRATION_CLAIM_QUERY.contains("ORDER BY files.created_at, files.id"));
         assert!(MIGRATION_CLAIM_QUERY.contains("FOR UPDATE OF files SKIP LOCKED"));
-        assert!(MIGRATION_SUMMARY_QUERY.contains("e2ee_state = 'legacy'"));
-        assert!(MIGRATION_SUMMARY_QUERY.contains("e2ee_state = 'staged'"));
-        assert!(MIGRATION_SUMMARY_QUERY.contains("state <> 'complete'"));
+        assert!(MIGRATION_SUMMARY_QUERY.contains("vault_migration_progress"));
+        assert!(!MIGRATION_SUMMARY_QUERY.contains("count("));
 
         let vault_schema = include_str!("../../../database/init/002_e2ee.sql");
         assert!(vault_schema.contains("files_e2ee_migration_claim_idx"));
@@ -9711,7 +10073,7 @@ mod tests {
             "pub async fn create_share(",
             "pub async fn list_shares(",
         );
-        assert!(create_share.contains("SELECT entry_type FROM files"));
+        assert!(create_share.contains("SELECT entry_type FROM visible_files AS files"));
         assert!(create_share.contains("let counts_toward_shared ="));
         assert!(create_share.contains("recipient_id, counts_toward_shared"));
         assert!(create_share.contains("&counts_toward_shared"));
@@ -9913,5 +10275,783 @@ mod tests {
             },
             hash: [6_u8; 32],
         }
+    }
+}
+
+#[cfg(test)]
+mod account_cpu_tests {
+    use super::*;
+    use crate::state::VaultValidationService;
+    use actix_web::{App, http::StatusCode, test as actix_test};
+    use std::time::Duration;
+
+    fn maximum_setup_json() -> serde_json::Value {
+        let x25519 = [7_u8; 32];
+        let ed25519 = [9_u8; 32];
+        serde_json::json!({
+            "formatVersion": FORMAT_VERSION,
+            "kdf": {
+                "algorithm": ARGON2ID_ALGORITHM,
+                "salt": encode_bytes([1_u8; 16]),
+                "operations": ARGON2ID_OPERATIONS,
+                "memoryBytes": ARGON2ID_MEMORY_BYTES,
+                "outputBytes": ARGON2ID_OUTPUT_BYTES
+            },
+            "passwordWrapper": {"id": encode_bytes([2_u8; 16]), "ciphertext": encode_bytes([3_u8; 48])},
+            "recoveryWrapper": {
+                "salt": encode_bytes([4_u8; 16]),
+                "id": encode_bytes([5_u8; 16]),
+                "ciphertext": encode_bytes([6_u8; 48])
+            },
+            "identity": {
+                "keyVersion": 1,
+                "x25519PublicKey": encode_bytes(x25519),
+                "ed25519PublicKey": encode_bytes(ed25519),
+                "fingerprintSha256": encode_bytes(identity_fingerprint(&x25519, &ed25519)),
+                "privateRecordId": encode_bytes([8_u8; 16]),
+                "privateCiphertext": encode_bytes(vec![10_u8; MAX_IDENTITY_PRIVATE_CIPHERTEXT])
+            },
+            "accountStateRecordId": encode_bytes([11_u8; 16]),
+            "encryptedAccountState": encode_bytes(vec![12_u8; MAX_ACCOUNT_STATE_CIPHERTEXT])
+        })
+    }
+
+    fn maximum_envelope() -> Bytes {
+        let mut bytes = serde_json::to_vec(&maximum_setup_json()).unwrap();
+        // Unknown fields and whitespace are part of the existing JSON compatibility
+        // contract. This exercises the entire accepted envelope, not only its ciphertext.
+        bytes.resize(VAULT_ACCOUNT_JSON_LIMIT, b' ');
+        Bytes::from(bytes)
+    }
+
+    async fn collected_account_body(bytes: Bytes) -> Result<Bytes> {
+        let (request, payload) = actix_test::TestRequest::post()
+            .insert_header((CONTENT_TYPE, "application/json"))
+            .set_payload(bytes)
+            .to_http_parts();
+        require_account_json(&request)?;
+        crate::auth::read_control_body(&request, payload, VAULT_ACCOUNT_JSON_LIMIT).await
+    }
+
+    #[actix_web::test]
+    async fn account_decode_accepts_maximum_ciphertexts_and_envelope_off_worker() {
+        let service = VaultValidationService::new(1, 1, 1, 1);
+        let event_loop = std::thread::current().id();
+        let bytes = collected_account_body(maximum_envelope()).await.unwrap();
+        let material = offload_account_material(
+            &service,
+            "user",
+            bytes,
+            ContentEncoding::Identity,
+            move |body: VaultSetupRequest| {
+                assert_ne!(std::thread::current().id(), event_loop);
+                validate_setup_material(&body)
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            material.identity_private_ciphertext,
+            vec![10_u8; MAX_IDENTITY_PRIVATE_CIPHERTEXT]
+        );
+        assert_eq!(
+            material.encrypted_account_state,
+            vec![12_u8; MAX_ACCOUNT_STATE_CIPHERTEXT]
+        );
+        assert_eq!(material.account_state_record_id, Some(vec![11_u8; 16]));
+    }
+
+    #[actix_web::test]
+    async fn account_decode_preserves_rewrap_and_password_material() {
+        let service = VaultValidationService::new(1, 1, 1, 1);
+        let mut rewrap = maximum_setup_json();
+        rewrap["expectedVaultVersion"] = 7.into();
+        rewrap["recovery"] = true.into();
+        rewrap["proofSignature"] = encode_bytes([13_u8; 64]).into();
+        let bytes = collected_account_body(Bytes::from(serde_json::to_vec(&rewrap).unwrap()))
+            .await
+            .unwrap();
+        let material = offload_account_material(
+            &service,
+            "user",
+            bytes,
+            ContentEncoding::Identity,
+            |body: VaultRewrapRequest| validate_rewrap_material(&body),
+        )
+        .await
+        .unwrap();
+        assert_eq!(material.expected_vault_version, 7);
+        assert!(material.recovered_at);
+        assert_eq!(material.proof_signature, [13_u8; 64]);
+        assert_eq!(
+            material.encrypted_account_state.len(),
+            MAX_ACCOUNT_STATE_CIPHERTEXT
+        );
+        assert!(
+            material
+                .proof
+                .starts_with(b"aeralyth/vault-rewrap-proof/v1")
+        );
+
+        let bytes = Bytes::from(serde_json::to_vec(&rewrap).unwrap());
+        let material = offload_account_material(
+            &service,
+            "user",
+            bytes,
+            ContentEncoding::Identity,
+            |body: VaultPasswordRewrapRequest| validate_password_rewrap(&body),
+        )
+        .await
+        .unwrap();
+        assert_eq!(material.expected_vault_version, 7);
+        assert_eq!(material.password_ciphertext, vec![3_u8; 48]);
+
+        let change = serde_json::json!({
+            "currentCredential": encode_bytes([14_u8; 32]),
+            "newCredential": encode_bytes([15_u8; 32]),
+            "newSalt": encode_bytes([16_u8; 16]),
+            "vault": rewrap
+        });
+        let bytes = Bytes::from(serde_json::to_vec(&change).unwrap());
+        let material = offload_account_material(
+            &service,
+            "user",
+            bytes,
+            ContentEncoding::Identity,
+            validate_one_password_change,
+        )
+        .await
+        .unwrap();
+        assert_eq!(material.new_salt, [16_u8; 16]);
+        assert_eq!(material.vault.unwrap().expected_vault_version, 7);
+    }
+
+    #[actix_web::test]
+    async fn account_decode_rejects_oversize_malformed_and_invalid_material() {
+        let failure = collected_account_body(Bytes::from(vec![b' '; VAULT_ACCOUNT_JSON_LIMIT + 1]))
+            .await
+            .err()
+            .unwrap();
+        assert_eq!(
+            failure.as_response_error().status_code(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        let service = VaultValidationService::new(1, 1, 1, 1);
+        let malformed = offload_account_material(
+            &service,
+            "user",
+            Bytes::from_static(b"{"),
+            ContentEncoding::Identity,
+            |_: VaultSetupRequest| -> Result<()> {
+                panic!("malformed JSON must fail before material validation")
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(
+            malformed.as_response_error().status_code(),
+            StatusCode::BAD_REQUEST
+        );
+        for (field, value, expected_status) in [
+            (
+                "encryptedAccountState",
+                encode_bytes(vec![12_u8; MAX_ACCOUNT_STATE_CIPHERTEXT + 1]),
+                StatusCode::PAYLOAD_TOO_LARGE,
+            ),
+            (
+                "encryptedAccountState",
+                "%%%".to_owned(),
+                StatusCode::BAD_REQUEST,
+            ),
+        ] {
+            let mut invalid = maximum_setup_json();
+            invalid[field] = value.into();
+            let bytes = Bytes::from(serde_json::to_vec(&invalid).unwrap());
+            let failure = offload_account_material(
+                &service,
+                "user",
+                bytes,
+                ContentEncoding::Identity,
+                |body: VaultSetupRequest| validate_setup_material(&body),
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(failure.as_response_error().status_code(), expected_status);
+        }
+        let mut invalid = maximum_setup_json();
+        invalid["identity"]["fingerprintSha256"] = encode_bytes([0_u8; 32]).into();
+        let failure = offload_account_material(
+            &service,
+            "user",
+            Bytes::from(serde_json::to_vec(&invalid).unwrap()),
+            ContentEncoding::Identity,
+            |body: VaultSetupRequest| validate_setup_material(&body),
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(failure.to_string(), "identity fingerprint is invalid");
+    }
+
+    #[test]
+    fn account_decode_preserves_json_mime_acceptance() {
+        for content_type in [
+            "application/json",
+            "application/json; charset=utf-8",
+            "application/vnd.aeralyth+json",
+        ] {
+            let request = actix_test::TestRequest::post()
+                .insert_header((CONTENT_TYPE, content_type))
+                .to_http_request();
+            assert!(require_account_json(&request).is_ok());
+        }
+        for content_type in ["text/plain", "application/json broken", ""] {
+            let request = actix_test::TestRequest::post()
+                .insert_header((CONTENT_TYPE, content_type))
+                .to_http_request();
+            assert_eq!(
+                require_account_json(&request)
+                    .unwrap_err()
+                    .as_response_error()
+                    .status_code(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+    }
+
+    #[actix_web::test]
+    async fn account_decode_keeps_health_responsive_and_capacity_after_cancel() {
+        let service = VaultValidationService::new(1, 1, 1, 1);
+        let bytes = collected_account_body(maximum_envelope()).await.unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_service = service.clone();
+        let first = actix_web::rt::spawn(async move {
+            offload_account_material(
+                &first_service,
+                "first",
+                bytes,
+                ContentEncoding::Identity,
+                move |body: VaultSetupRequest| {
+                    let material = validate_setup_material(&body)?;
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(material)
+                },
+            )
+            .await
+        });
+        tokio::time::timeout(Duration::from_secs(5), started_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let app = actix_test::init_service(App::new().route(
+            "/health",
+            web::get().to(|| async { HttpResponse::Ok().finish() }),
+        ))
+        .await;
+        let health = tokio::time::timeout(
+            Duration::from_millis(250),
+            actix_test::call_service(
+                &app,
+                actix_test::TestRequest::get().uri("/health").to_request(),
+            ),
+        )
+        .await
+        .expect("the Actix event loop must serve health while account CPU work is active");
+        assert_eq!(health.status(), StatusCode::OK);
+        first.abort();
+        assert!(first.await.err().unwrap().is_cancelled());
+        let failure = offload_account_material(
+            &service,
+            "second",
+            Bytes::from_static(b"{}"),
+            ContentEncoding::Identity,
+            |_: serde_json::Value| -> Result<()> {
+                panic!("cancelled HTTP task must not release a running CPU worker's admission")
+            },
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(
+            failure.as_response_error().status_code(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        release_tx.send(()).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                if service.run("third", || ()).await.is_ok() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("admission must return after the blocking operation exits");
+    }
+    #[actix_web::test]
+    #[ignore = "requires PostgreSQL initialized through migration 028"]
+    async fn migration_claims_return_connections_with_one_slot_and_synchronized_claims() {
+        use actix_web::{cookie::Cookie, test::TestRequest};
+        use std::time::Duration;
+        for pool_size in [1_usize, 2] {
+            let state = crate::state::database_test_state(pool_size).await;
+            let suffix = random_id().unwrap();
+            let mut claims = Vec::new();
+            for index in 0..pool_size {
+                let user = format!("usr_phase_{suffix}_{index}");
+                let session = format!("ses_phase_{suffix}_{index}");
+                let node = format!("fil_phase_{suffix}_{index}");
+                let token = format!("token_{suffix}_{index}");
+                state.db.execute("INSERT INTO users(id,username,password_hash,role,status) VALUES($1,$1,'test','user','active')", &[&user]).await.unwrap();
+                let hash = crate::auth::hash_session_token(&token);
+                state.db.execute("INSERT INTO sessions(id,user_id,token_hash,csrf_token,expires_at) VALUES($1,$2,$3,'phase-csrf',now()+interval '1 hour')", &[&session,&user,&hash.as_slice()]).await.unwrap();
+                state.db.execute("INSERT INTO user_vaults(user_id,kdf_algorithm,kdf_salt,kdf_operations,kdf_memory_bytes,kdf_output_bytes,password_wrapper_id,password_root_ciphertext,recovery_salt,recovery_wrapper_id,recovery_root_ciphertext,identity_record_id,identity_private_ciphertext) VALUES($1,'argon2id13',gen_random_bytes(16),3,268435456,32,gen_random_bytes(16),gen_random_bytes(48),gen_random_bytes(16),gen_random_bytes(16),gen_random_bytes(48),gen_random_bytes(16),gen_random_bytes(96))", &[&user]).await.unwrap();
+                state.db.execute("INSERT INTO files(id,owner_id,original_name,storage_name,size_bytes,entry_type,e2ee_state) VALUES($1,$2,'tiny',$1,1,'file','legacy')", &[&node,&user]).await.unwrap();
+                claims.push((user, node, token));
+            }
+            let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(pool_size));
+            let futures = claims.iter().map(|(user, node, token)| {
+                let state = state.clone();
+                let barrier = barrier.clone();
+                let user = user.clone();
+                let node = node.clone();
+                let token = token.clone();
+                async move {
+                    let request = TestRequest::post()
+                        .app_data(state.clone())
+                        .cookie(Cookie::new(crate::auth::SESSION_COOKIE, token))
+                        .insert_header(("x-csrf-token", "phase-csrf"))
+                        .to_http_request();
+                    let (response, _) = crate::db::scope_request(async {
+                        require_principal(&state, &request).await.unwrap();
+                        barrier.wait().await; // Every pool slot is held by authentication here.
+                        claim_migration(state.clone(), request).await.unwrap()
+                    })
+                    .await;
+                    assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+                    let bytes = actix_web::body::to_bytes(response.into_body())
+                        .await
+                        .unwrap();
+                    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+                    assert_eq!(body["node"]["nodeId"], node);
+                    let row = state
+                        .db
+                        .query_one(
+                            "SELECT owner_id FROM vault_migrations WHERE node_id=$1",
+                            &[&node],
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(row.get::<_, String>(0), user);
+                }
+            });
+            tokio::time::timeout(
+                Duration::from_secs(3),
+                futures_util::future::join_all(futures),
+            )
+            .await
+            .expect("claims must not wait for a nested checkout");
+            assert_eq!(state.db.status().available, state.db.status().size);
+            for (user, _, token) in &claims {
+                state
+                    .db
+                    .execute("DELETE FROM files WHERE owner_id=$1", &[user])
+                    .await
+                    .unwrap();
+                let request = TestRequest::post()
+                    .app_data(state.clone())
+                    .cookie(Cookie::new(crate::auth::SESSION_COOKIE, token.clone()))
+                    .insert_header(("x-csrf-token", "phase-csrf"))
+                    .to_http_request();
+                let (response, _) = tokio::time::timeout(
+                    Duration::from_secs(1),
+                    crate::db::scope_request(claim_migration(state.clone(), request)),
+                )
+                .await
+                .expect("empty claim must not wait for another connection");
+                let response = response.unwrap();
+                assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+                let bytes = actix_web::body::to_bytes(response.into_body())
+                    .await
+                    .unwrap();
+                assert!(
+                    serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["node"].is_null()
+                );
+                state
+                    .db
+                    .execute("DELETE FROM users WHERE id=$1", &[user])
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(state.db.status().available, state.db.status().size);
+        }
+    }
+    fn compressed_account_body(bytes: &[u8], encoding: ContentEncoding) -> Bytes {
+        use std::io::Write;
+        let result = match encoding {
+            ContentEncoding::Gzip => {
+                let mut encoder =
+                    flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::fast());
+                encoder.write_all(bytes).unwrap();
+                encoder.finish().unwrap()
+            }
+            ContentEncoding::Deflate => {
+                let mut encoder =
+                    flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::fast());
+                encoder.write_all(bytes).unwrap();
+                encoder.finish().unwrap()
+            }
+            ContentEncoding::Brotli => {
+                let mut output = Vec::new();
+                {
+                    let mut encoder = brotli::CompressorWriter::new(&mut output, 8192, 1, 22);
+                    encoder.write_all(bytes).unwrap();
+                }
+                output
+            }
+            ContentEncoding::Zstd => zstd::stream::encode_all(bytes, 1).unwrap(),
+            _ => panic!("compression fixture must use a supported codec"),
+        };
+        Bytes::from(result)
+    }
+
+    #[actix_web::test]
+    async fn account_decode_preserves_compression_and_bounds_decompressed_bodies() {
+        let service = VaultValidationService::new(1, 1, 1, 1);
+        let bytes = maximum_envelope();
+        let mut oversized = bytes.to_vec();
+        oversized.push(b' ');
+        for encoding in [
+            ContentEncoding::Gzip,
+            ContentEncoding::Deflate,
+            ContentEncoding::Brotli,
+            ContentEncoding::Zstd,
+        ] {
+            let compressed = compressed_account_body(&bytes, encoding);
+            assert!(compressed.len() < VAULT_ACCOUNT_JSON_LIMIT);
+            let material = offload_account_material(
+                &service,
+                "user",
+                compressed,
+                encoding,
+                |body: VaultSetupRequest| validate_setup_material(&body),
+            )
+            .await
+            .unwrap();
+            assert_eq!(
+                material.encrypted_account_state.len(),
+                MAX_ACCOUNT_STATE_CIPHERTEXT
+            );
+            let overflow = offload_account_material(
+                &service,
+                "user",
+                compressed_account_body(&oversized, encoding),
+                encoding,
+                |_: VaultSetupRequest| -> Result<()> {
+                    panic!("expanded overflow must fail before JSON material validation")
+                },
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(
+                overflow.as_response_error().status_code(),
+                StatusCode::PAYLOAD_TOO_LARGE
+            );
+            let malformed = offload_account_material(
+                &service,
+                "user",
+                Bytes::from_static(b"invalid compressed data"),
+                encoding,
+                |_: VaultSetupRequest| -> Result<()> {
+                    panic!("invalid compression must fail before material validation")
+                },
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(
+                malformed.as_response_error().status_code(),
+                StatusCode::BAD_REQUEST
+            );
+        }
+    }
+
+    async fn account_test_session(state: &AppState) -> (String, String, String) {
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let user = format!("usr_cpu_{suffix}");
+        let session = format!("ses_cpu_{suffix}");
+        let token = format!("cpu-token-{suffix}");
+        let hash = crate::auth::hash_session_token(&token);
+        state.db.execute("INSERT INTO users(id, username, password_hash, role, status, auth_version) VALUES($1,$1,'original-hash','user','active',1)", &[&user]).await.unwrap();
+        state.db.execute("INSERT INTO sessions(id,user_id,token_hash,csrf_token,expires_at) VALUES($1,$2,$3,'csrf',now()+interval '1 hour')", &[&session,&user,&hash.as_slice()]).await.unwrap();
+        (user, session, token)
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn account_cpu_releases_database_and_revalidates_revoked_session() {
+        use actix_web::{FromRequest, cookie::Cookie};
+        let state = crate::state::database_test_state(1).await;
+        let (user, session, token) = account_test_session(&state).await;
+        let (request, mut payload) = actix_test::TestRequest::post()
+            .app_data(state.clone())
+            .insert_header((CONTENT_TYPE, "application/json"))
+            .cookie(Cookie::new(crate::auth::SESSION_COOKIE, token))
+            .set_payload(maximum_envelope())
+            .to_http_parts();
+        let body = web::Payload::from_request(&request, &mut payload)
+            .await
+            .unwrap();
+        let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let pending = crate::db::scope_request(async {
+            let principal = require_principal(&state, &request).await.unwrap();
+            let failure = parse_account_material(
+                &state,
+                &principal.id,
+                &request,
+                body,
+                move |body: VaultSetupRequest| {
+                    let material = validate_setup_material(&body)?;
+                    started_tx.send(()).unwrap();
+                    release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                    Ok(material)
+                },
+            )
+            .await
+            .err()
+            .unwrap();
+            assert_eq!(
+                failure.as_response_error().status_code(),
+                StatusCode::UNAUTHORIZED
+            );
+        });
+        let revoke = async {
+            started_rx.await.unwrap();
+            tokio::time::timeout(
+                Duration::from_millis(200),
+                state.db.query_one("SELECT 1", &[]),
+            )
+            .await
+            .expect("admitted account validation must release the only database connection")
+            .unwrap();
+            state
+                .db
+                .execute("DELETE FROM sessions WHERE id = $1", &[&session])
+                .await
+                .unwrap();
+            release_tx.send(()).unwrap();
+        };
+        tokio::join!(pending, revoke);
+        state
+            .db
+            .execute("DELETE FROM users WHERE id = $1", &[&user])
+            .await
+            .unwrap();
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn account_password_commit_rechecks_vault_after_concurrent_setup() {
+        use actix_web::{FromRequest, cookie::Cookie};
+        let state = crate::state::database_test_state(1).await;
+        let (user, _session, token) = account_test_session(&state).await;
+        let request = actix_test::TestRequest::post()
+            .app_data(state.clone())
+            .cookie(Cookie::new(crate::auth::SESSION_COOKIE, token.clone()))
+            .to_http_request();
+        let principal = require_principal(&state, &request).await.unwrap();
+        let configured: bool = state
+            .db
+            .query_one(
+                "SELECT EXISTS(SELECT 1 FROM user_vaults WHERE user_id = $1)",
+                &[&user],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(!configured);
+        let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
+        let password = async {
+            resume_rx.await.unwrap();
+            let mut client = state.db.get().await.unwrap();
+            let transaction = client.transaction().await.unwrap();
+            let failure = validate_password_account_state(&transaction, &principal, configured)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                failure.as_response_error().status_code(),
+                actix_web::http::StatusCode::CONFLICT
+            );
+            transaction.rollback().await.unwrap();
+        };
+        let configure = async {
+            let (request, mut payload) = actix_test::TestRequest::post()
+                .app_data(state.clone())
+                .insert_header((CONTENT_TYPE, "application/json"))
+                .insert_header(("x-csrf-token", "csrf"))
+                .cookie(Cookie::new(crate::auth::SESSION_COOKIE, token))
+                .set_payload(serde_json::to_vec(&maximum_setup_json()).unwrap())
+                .to_http_parts();
+            let body = web::Payload::from_request(&request, &mut payload)
+                .await
+                .unwrap();
+            let response = crate::db::scope_request(setup(state.clone(), request, body))
+                .await
+                .0
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            resume_tx.send(()).unwrap();
+        };
+        tokio::join!(password, configure);
+        let hash: String = state
+            .db
+            .query_one("SELECT password_hash FROM users WHERE id = $1", &[&user])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(hash, "original-hash");
+        state
+            .db
+            .execute("DELETE FROM users WHERE id = $1", &[&user])
+            .await
+            .unwrap();
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn account_lock_rejects_session_expiring_while_waiting() {
+        use actix_web::cookie::Cookie;
+        let state = crate::state::database_test_state(2).await;
+        let (user, session, token) = account_test_session(&state).await;
+        let request = actix_test::TestRequest::post()
+            .app_data(state.clone())
+            .cookie(Cookie::new(crate::auth::SESSION_COOKIE, token))
+            .to_http_request();
+        let principal = require_principal(&state, &request).await.unwrap();
+        let mut holder = state.db.get().await.unwrap();
+        let held = holder.transaction().await.unwrap();
+        held.query_one("SELECT id FROM users WHERE id = $1 FOR UPDATE", &[&user])
+            .await
+            .unwrap();
+        state.db.execute("UPDATE sessions SET expires_at = clock_timestamp() + interval '1 second' WHERE id = $1", &[&session]).await.unwrap();
+        let mut waiter = state.db.get().await.unwrap();
+        let waiting = waiter.transaction().await.unwrap();
+        let initially_valid: bool = waiting
+            .query_one(
+                "SELECT expires_at > now() FROM sessions WHERE id = $1",
+                &[&session],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert!(
+            initially_valid,
+            "session must be valid when this transaction starts"
+        );
+        let check = async {
+            let failure = lock_account_for_mutation(&waiting, &principal)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                failure.as_response_error().status_code(),
+                StatusCode::UNAUTHORIZED
+            );
+        };
+        let unlock = async {
+            tokio::time::sleep(Duration::from_millis(1100)).await;
+            held.rollback().await.unwrap();
+        };
+        tokio::join!(check, unlock);
+        waiting.rollback().await.unwrap();
+        drop(holder);
+        drop(waiter);
+        state
+            .db
+            .execute("DELETE FROM users WHERE id = $1", &[&user])
+            .await
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod control_lease_tests {
+    use super::*;
+    use actix_web::{FromRequest, cookie::Cookie, dev, test::TestRequest};
+    use futures_util::Stream;
+    use std::pin::Pin;
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn single_presign_does_not_revive_a_lease_expired_during_body_read() {
+        let state = crate::state::database_test_state(1).await;
+        let suffix = random_id().unwrap();
+        let user = format!("usr_lease_{suffix}");
+        let session = format!("ses_lease_{suffix}");
+        let upload = format!("upl_lease_{suffix}");
+        let node = format!("fil_lease_{suffix}");
+        let token = format!("token_{suffix}");
+        state.db.execute("INSERT INTO users(id,username,password_hash,role,status) VALUES($1,$1,'test','user','active')", &[&user]).await.unwrap();
+        let hash = crate::auth::hash_session_token(&token);
+        state.db.execute("INSERT INTO sessions(id,user_id,token_hash,csrf_token,expires_at) VALUES($1,$2,$3,'csrf',now()+interval '1 hour')", &[&session,&user,&hash.as_slice()]).await.unwrap();
+        state.db.execute("INSERT INTO vault_uploads(id,node_id,owner_id,entry_type,generation_number,generation_id,object_key,ciphertext_length,chunk_count,upload_mode,status,expires_at) VALUES($1,$2,$3,'file',1,gen_random_bytes(16),$1,100,1,'single','pending',now()+interval '1 hour')", &[&upload,&node,&user]).await.unwrap();
+        let request = TestRequest::post()
+            .app_data(state.clone())
+            .cookie(Cookie::new(crate::auth::SESSION_COOKIE, token))
+            .insert_header(("x-csrf-token", "csrf"))
+            .insert_header(("content-type", "application/json"))
+            .to_http_request();
+        let (body_started, started) = tokio::sync::oneshot::channel();
+        let (send, receive) = tokio::sync::oneshot::channel();
+        let stream = futures_util::stream::once(async move {
+            body_started.send(()).unwrap();
+            receive.await.unwrap();
+            Ok::<_, actix_web::error::PayloadError>(Bytes::from_static(
+                br#"{"checksumSha256":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="}"#,
+            ))
+        });
+        let mut payload = dev::Payload::from(Box::pin(stream) as Pin<Box<dyn Stream<Item = _>>>);
+        let payload = web::Payload::from_request(&request, &mut payload)
+            .await
+            .unwrap();
+        let signing = crate::db::scope_request(presign_content(
+            state.clone(),
+            request,
+            web::Path::from(upload.clone()),
+            payload,
+        ));
+        let expire = async {
+            started.await.unwrap();
+            state
+                .db
+                .execute(
+                    "UPDATE vault_uploads SET expires_at=now()-interval '1 second' WHERE id=$1",
+                    &[&upload],
+                )
+                .await
+                .unwrap();
+            send.send(()).unwrap();
+        };
+        let ((response, _), ()) = tokio::join!(signing, expire);
+        assert_eq!(
+            response.unwrap().status(),
+            actix_web::http::StatusCode::CONFLICT
+        );
+        let row=state.db.query_one("SELECT expires_at <= now() AS expired, checksum_sha256 IS NULL AS unsigned FROM vault_uploads WHERE id=$1", &[&upload]).await.unwrap();
+        assert!(row.get::<_, bool>("expired"));
+        assert!(row.get::<_, bool>("unsigned"));
+        state
+            .db
+            .execute("DELETE FROM users WHERE id=$1", &[&user])
+            .await
+            .unwrap();
     }
 }

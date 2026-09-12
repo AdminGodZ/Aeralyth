@@ -242,10 +242,12 @@ dependencies = [
  "aws-types",
  "base64 0.22.1",
  "bcrypt",
+ "brotli",
  "bytes",
  "deadpool-postgres",
  "dotenvy",
  "ed25519-dalek",
+ "flate2",
  "futures-util",
  "getrandom 0.4.3",
  "hmac 0.12.1",
@@ -259,6 +261,7 @@ dependencies = [
  "tokio-util",
  "tracing",
  "tracing-subscriber",
+ "zstd",
 ]
 
 [[package]]

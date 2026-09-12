@@ -1,9 +1,11 @@
-import { ExactStreamReader } from "@/features/vault/buffered-bytes";
 import {
   ciphertextChunkLength,
+  VAULT_CRYPTO_CHUNK_BYTES,
   type VaultDownloadPlan,
   type VaultManifest,
 } from "@/features/vault/protocol";
+import { ResumableDownload } from "@/features/vault/resumable-download";
+import { createTransferMetrics } from "@/features/vault/transfer-metrics";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
 import type { VaultDecryptionStart } from "@/features/vault/vault-messages";
 
@@ -75,7 +77,8 @@ export async function downloadEncryptedFile({
       );
     }
   }
-  const plaintextParts: BlobPart[] = [];
+  const plaintextParts: ArrayBuffer[] = [];
+  const metrics = createTransferMetrics();
 
   try {
     await decryptEncryptedFile({
@@ -84,6 +87,7 @@ export async function downloadEncryptedFile({
       client,
       signal,
       onProgress,
+      metrics,
       async write(plaintext) {
         if (writable) {
           await writable.write(plaintext);
@@ -92,11 +96,17 @@ export async function downloadEncryptedFile({
         }
       },
     });
+    signal?.throwIfAborted();
     if (writable) {
-      await writable.close();
+      await metrics.measure(
+        "sink",
+        () => writable?.close() ?? Promise.resolve(),
+      );
+      signal?.throwIfAborted();
       writable = null;
       if (originPrivateDownload) {
         const completed = await originPrivateDownload.fileHandle.getFile();
+        signal?.throwIfAborted();
         const cleanup = originPrivateDownload;
         triggerBlobDownload(completed, manifest.name, () =>
           cleanup.directory.removeEntry(cleanup.fileName),
@@ -106,6 +116,7 @@ export async function downloadEncryptedFile({
     } else {
       triggerBlobDownload(new Blob(plaintextParts), manifest.name);
     }
+    metrics.finish("completed");
     onProgress?.(100);
   } catch (error) {
     await writable?.abort(error).catch(() => undefined);
@@ -114,7 +125,10 @@ export async function downloadEncryptedFile({
         .removeEntry(originPrivateDownload.fileName)
         .catch(() => undefined);
     }
+    metrics.finish(signal?.aborted ? "canceled" : "failed");
     throw error;
+  } finally {
+    for (const plaintext of plaintextParts) new Uint8Array(plaintext).fill(0);
   }
 }
 
@@ -131,20 +145,79 @@ export async function readEncryptedFileBlob({
   signal?: AbortSignal;
   onProgress?(value: number): void;
 }): Promise<Blob> {
-  const plaintextParts: BlobPart[] = [];
+  const plaintextParts: ArrayBuffer[] = [];
+  try {
+    await decryptEncryptedFile({
+      plan,
+      manifest,
+      client,
+      signal,
+      onProgress,
+      write(plaintext) {
+        plaintextParts.push(plaintext);
+      },
+    });
+    signal?.throwIfAborted();
+    return new Blob(plaintextParts, {
+      type: manifest.mimeType ?? "application/octet-stream",
+    });
+  } finally {
+    for (const plaintext of plaintextParts) new Uint8Array(plaintext).fill(0);
+  }
+}
+
+/** A prefix authenticates complete AEAD chunks, but does not verify the full Merkle root. */
+export async function readEncryptedFilePrefix({
+  plan,
+  manifest,
+  client,
+  maxPlaintextBytes,
+  signal,
+  onProgress,
+}: {
+  plan: VaultDownloadPlan;
+  manifest: VaultManifest;
+  client: VaultCryptoClient;
+  maxPlaintextBytes: number;
+  signal?: AbortSignal;
+  onProgress?(value: number): void;
+}): Promise<{ blob: Blob; verification: "full" | "partial" }> {
+  if (!Number.isSafeInteger(maxPlaintextBytes) || maxPlaintextBytes < 1) {
+    throw new Error("The preview byte limit must be a positive integer.");
+  }
+  const selectedChunks =
+    maxPlaintextBytes >= manifest.plaintextBytes
+      ? plan.chunkCount
+      : Math.min(
+          plan.chunkCount,
+          Math.ceil(maxPlaintextBytes / VAULT_CRYPTO_CHUNK_BYTES),
+        );
+  const parts: BlobPart[] = [];
+  let remaining = maxPlaintextBytes;
   await decryptEncryptedFile({
     plan,
     manifest,
     client,
     signal,
     onProgress,
+    selectedChunks,
     write(plaintext) {
-      plaintextParts.push(plaintext);
+      // Blob snapshots just the displayed bytes and releases the rest of the
+      // authenticated crypto chunk before the next one is consumed.
+      const bytes = new Uint8Array(plaintext);
+      const selected = Math.min(bytes.length, remaining);
+      parts.push(new Blob([bytes.subarray(0, selected)]));
+      remaining -= selected;
+      bytes.fill(0);
     },
   });
-  return new Blob(plaintextParts, {
-    type: manifest.mimeType ?? "application/octet-stream",
-  });
+  signal?.throwIfAborted();
+  return {
+    blob: new Blob(parts, {
+      type: manifest.mimeType ?? "application/octet-stream",
+    }),
+    verification: selectedChunks === plan.chunkCount ? "full" : "partial",
+  };
 }
 
 export function readEncryptedFileStream({
@@ -161,11 +234,14 @@ export function readEncryptedFileStream({
   onProgress?(value: number): void;
 }): ReadableStream<Uint8Array> {
   const operation = new AbortController();
-  const abortFromParent = () => operation.abort(signal?.reason);
+  let demand = Promise.withResolvers<void>();
+  const abortFromParent = () => {
+    operation.abort(signal?.reason);
+    demand.resolve();
+  };
   if (signal?.aborted) abortFromParent();
   else signal?.addEventListener("abort", abortFromParent, { once: true });
 
-  let demand = Promise.withResolvers<void>();
   let producer: Promise<void> | null = null;
   let canceled = false;
 
@@ -221,6 +297,8 @@ async function decryptEncryptedFile({
   signal,
   onProgress,
   write,
+  selectedChunks = plan.chunkCount,
+  metrics: providedMetrics,
 }: {
   plan: VaultDownloadPlan;
   manifest: VaultManifest;
@@ -228,37 +306,47 @@ async function decryptEncryptedFile({
   signal?: AbortSignal;
   onProgress?(value: number): void;
   write(plaintext: ArrayBuffer): void | Promise<void>;
+  selectedChunks?: number;
+  metrics?: ReturnType<typeof createTransferMetrics>;
 }): Promise<void> {
   if (!plan.downloadUrl || manifest.entryType !== "file") {
     throw new Error("This vault node does not contain downloadable file data.");
   }
-  const network = new AbortController();
-  const abortNetwork = () => network.abort(signal?.reason);
-  if (signal?.aborted) abortNetwork();
-  else signal?.addEventListener("abort", abortNetwork, { once: true });
-
+  const metrics = providedMetrics ?? createTransferMetrics();
+  let outcome: "completed" | "failed" | "canceled" = "failed";
+  const endExclusive =
+    selectedChunks === plan.chunkCount
+      ? plan.ciphertextLength
+      : selectedChunks * (VAULT_CRYPTO_CHUNK_BYTES + 16);
+  const network = new ResumableDownload(plan, endExclusive, signal, (bytes) =>
+    metrics.addBytes(bytes),
+  );
   const startedPromise = client.startDecryption(plan);
-  const responsePromise = fetch(plan.downloadUrl, {
-    signal: network.signal,
-    cache: "no-store",
-  });
+  const responsePromise = metrics.measure("network", () => network.open());
   let sessionId: string | null = null;
-  let response: Response | null = null;
-  let reader: ExactStreamReader | null = null;
-  let chunkIndex = 0;
+  let lookahead: Promise<Uint8Array<ArrayBuffer>> | null = null;
+  let pendingWrite: Promise<void> | null = null;
+  let unconsumedPlaintext: ArrayBuffer | null = null;
   let received = 0;
+
+  const read = (index: number) => {
+    const reading = metrics.measure("network", () =>
+      network.readChunk(
+        ciphertextChunkLength(plan.ciphertextLength, plan.chunkCount, index),
+      ),
+    );
+    // Reads and writes can fail before the ordered consumer awaits them.
+    void reading.catch(() => undefined);
+    return reading;
+  };
 
   try {
     let started: VaultDecryptionStart;
     try {
-      [started, response] = await Promise.all([
-        startedPromise,
-        responsePromise,
-      ]);
+      [started] = await Promise.all([startedPromise, responsePromise]);
     } catch (error) {
-      network.abort(error);
-      const lateResponse = await responsePromise.catch(() => null);
-      await lateResponse?.body?.cancel(error).catch(() => undefined);
+      await network.cancel(error);
+      await responsePromise.catch(() => undefined);
       const lateSession = await startedPromise.catch(() => null);
       if (lateSession) {
         await client
@@ -268,56 +356,68 @@ async function decryptEncryptedFile({
       throw error;
     }
     sessionId = started.sessionId;
-    if (!response.ok || !response.body) {
-      throw new Error(
-        `Encrypted download failed with status ${response.status}.`,
-      );
-    }
-    reader = new ExactStreamReader(response.body.getReader());
+    if (selectedChunks > 0) lookahead = read(0);
 
-    while (chunkIndex < plan.chunkCount) {
-      const expected = ciphertextChunkLength(
-        plan.ciphertextLength,
-        plan.chunkCount,
-        chunkIndex,
+    for (let index = 0; index < selectedChunks; index += 1) {
+      const ciphertext = await lookahead;
+      lookahead = null;
+      if (!ciphertext) throw new Error("The encrypted download is incomplete.");
+      const ciphertextBytes = ciphertext.length;
+      // Exactly one read runs ahead. The worker remains strictly sequential;
+      // it may decrypt the next chunk while the preceding sink write settles.
+      if (index + 1 < selectedChunks) lookahead = read(index + 1);
+      const decrypted = await metrics.measure("decrypt", () =>
+        client.decryptChunk(sessionId as string, index, ciphertext.buffer),
       );
-      const ciphertext = await reader.readExactly(expected);
-      if (!ciphertext) {
-        throw new Error(
-          "The encrypted download ended before all chunks arrived.",
-        );
-      }
-      received += ciphertext.length;
-      const decrypted = await client.decryptChunk(
-        sessionId,
-        chunkIndex,
-        ciphertext.buffer,
-      );
-      await write(decrypted.plaintext);
-      chunkIndex += 1;
-      onProgress?.(Math.min(100, (received / plan.ciphertextLength) * 100));
+      unconsumedPlaintext = decrypted.plaintext;
+      await pendingWrite;
+      signal?.throwIfAborted();
+      const plaintext = unconsumedPlaintext;
+      unconsumedPlaintext = null;
+      pendingWrite = metrics.measure("sink", async () => {
+        try {
+          await write(plaintext);
+        } catch (error) {
+          new Uint8Array(plaintext).fill(0);
+          throw error;
+        }
+        received += ciphertextBytes;
+        metrics.addBytes(0, plaintext.byteLength);
+        onProgress?.(Math.min(99, (received / endExclusive) * 100));
+      });
+      void pendingWrite.catch(() => undefined);
     }
-
-    if (!(await reader.isAtEnd())) {
-      throw new Error(
-        "The encrypted download contains unexpected trailing data.",
+    await pendingWrite;
+    await metrics.measure("network", () => network.finish());
+    if (selectedChunks === plan.chunkCount) {
+      await metrics.measure("decrypt", () =>
+        client.finalizeDecryption(sessionId as string),
       );
+    } else {
+      await client.abortDecryption(sessionId);
     }
-    await client.finalizeDecryption(sessionId);
+    signal?.throwIfAborted();
     sessionId = null;
-    onProgress?.(100);
+    outcome = "completed";
+    if (!providedMetrics) onProgress?.(100);
   } catch (error) {
-    network.abort(error);
+    outcome = signal?.aborted ? "canceled" : "failed";
+    await network.cancel(error);
     if (sessionId) {
       await client.abortDecryption(sessionId).catch(() => undefined);
       sessionId = null;
     }
     throw error;
   } finally {
-    signal?.removeEventListener("abort", abortNetwork);
-    network.abort();
-    await reader?.cancel().catch(() => undefined);
+    await network.cancel();
+    const abandoned = await lookahead?.catch(() => null);
+    abandoned?.fill(0);
+    if (unconsumedPlaintext) new Uint8Array(unconsumedPlaintext).fill(0);
+    await pendingWrite?.catch(() => undefined);
+    if (!providedMetrics)
+      metrics.finish(signal?.aborted ? "canceled" : outcome);
   }
+  signal?.throwIfAborted();
 }
 
 function getSaveFilePicker(): SaveFilePicker | null {

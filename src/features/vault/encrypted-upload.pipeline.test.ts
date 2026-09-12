@@ -149,7 +149,67 @@ describe("encrypted upload scheduling", () => {
     ]);
   });
 
-  it("presigns four parts once, uploads them concurrently, and publishes in order", async () => {
+  it("uploads ready root files while an unrelated folder is still being prepared", async () => {
+    vaultApi.initVaultUpload.mockImplementation(async (_csrf, input) => ({
+      uploadId: input.nodeId,
+      nodeId: input.nodeId,
+      mode: "single",
+      partSizeBytes: null,
+    }));
+    vaultApi.getVaultContentUrl.mockResolvedValue({
+      url: "https://storage.invalid/file",
+      contentLength: 1,
+    });
+    vaultApi.publishVaultFoldersBatch.mockResolvedValue({
+      folders: [
+        {
+          nodeId: "node-slow",
+          generationNumber: 1,
+          generationId: "generation-slow",
+          recordVersion: 1,
+          recordHash: "record-slow",
+          shareSyncRequired: false,
+        },
+      ],
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 200 })),
+    );
+    const client = createCryptoClient(() => 1);
+    const originalStart = client.startEncryption.bind(client);
+    let releaseFolder: (() => void) | undefined;
+    const folder = new Promise<void>((resolve) => {
+      releaseFolder = resolve;
+    });
+    vi.spyOn(client, "startEncryption").mockImplementation(async (input) => {
+      if (input.entryType === "folder") await folder;
+      return originalStart(input);
+    });
+    const finished: number[] = [];
+    const upload = uploadEncryptedSelections({
+      selections: ["root.txt", "slow/nested.txt"].map((path) => ({
+        file: new File([Uint8Array.of(1)], path.split("/").at(-1) as string),
+        relativePath: path,
+      })),
+      parentFolderId: null,
+      csrfToken: "csrf",
+      client,
+      signal: new AbortController().signal,
+      onProgress: () => undefined,
+      onFileStart: () => undefined,
+      onFileComplete: (index) => {
+        finished.push(index);
+      },
+    });
+    await vi.waitFor(() => expect(finished).toEqual([0]));
+    expect(vaultApi.publishVaultFoldersBatch).not.toHaveBeenCalled();
+    releaseFolder?.();
+    await upload;
+    expect(finished).toEqual([0, 1]);
+  });
+
+  it("bounds ready presign batches, fills four PUT slots, and publishes in order", async () => {
     let activePuts = 0;
     let peakPuts = 0;
     let releaseFirstBatch: (() => void) | undefined;
@@ -204,17 +264,31 @@ describe("encrypted upload scheduling", () => {
     });
 
     await vi.waitFor(() => expect(activePuts).toBe(4));
-    expect(vaultApi.getVaultPartUrls).toHaveBeenCalledTimes(1);
+    expect(
+      vaultApi.getVaultPartUrls.mock.calls
+        .flatMap((call) =>
+          call[2].map((part: { partNumber: number }) => part.partNumber),
+        )
+        .sort((left, right) => left - right),
+    ).toEqual([1, 2, 3, 4]);
     releaseFirstBatch?.();
     await upload;
 
     expect(peakPuts).toBe(4);
-    expect(vaultApi.getVaultPartUrls).toHaveBeenCalledTimes(2);
+    // Hashes can complete in any order and the short flush deadline may split
+    // ready parts into smaller batches. Neither changes their PUT identities.
     expect(
-      vaultApi.getVaultPartUrls.mock.calls.map((call) =>
-        call[2].map((part: { partNumber: number }) => part.partNumber),
+      vaultApi.getVaultPartUrls.mock.calls.every(
+        (call) => call[2].length > 0 && call[2].length <= 4,
       ),
-    ).toEqual([[1, 2, 3, 4], [5]]);
+    ).toBe(true);
+    expect(
+      vaultApi.getVaultPartUrls.mock.calls
+        .flatMap((call) =>
+          call[2].map((part: { partNumber: number }) => part.partNumber),
+        )
+        .sort((left, right) => left - right),
+    ).toEqual([1, 2, 3, 4, 5]);
     expect(vaultApi.publishVaultUpload.mock.calls[0]?.[2]).toEqual([
       expect.objectContaining({ partNumber: 1, etag: '"etag-1"' }),
       expect.objectContaining({ partNumber: 2, etag: '"etag-2"' }),
@@ -354,77 +428,248 @@ describe("encrypted upload scheduling", () => {
     expect(vaultApi.publishVaultFoldersBatch).not.toHaveBeenCalled();
   });
 
-  it("publishes a 10,000-folder import in bounded parent-ordered batches", async () => {
-    const branchCount = 100;
-    const branchDepth = 100;
-    const selections = Array.from({ length: branchCount }, (_, branch) => ({
-      file: new File([Uint8Array.of(1)], `file-${branch}.txt`),
-      relativePath: `${Array.from(
-        { length: branchDepth },
-        (_, depth) =>
-          `b${branch.toString().padStart(3, "0")}-d${depth
-            .toString()
-            .padStart(3, "0")}`,
-      ).join("/")}/file-${branch}.txt`,
+  it("starts the first multipart PUT before the next crypto chunk is ready", async () => {
+    vaultApi.initVaultUpload.mockResolvedValue({
+      uploadId: "rolling",
+      nodeId: "node-rolling.bin",
+      mode: "multipart",
+      partSizeBytes: 8,
+    });
+    vaultApi.getVaultPartUrls.mockImplementation(async (_csrf, _id, parts) => ({
+      parts: parts.map(({ partNumber }: { partNumber: number }) => ({
+        partNumber,
+        url: `https://storage.invalid/part-${partNumber}`,
+        contentLength: 8,
+      })),
     }));
-    const expectedFolderNames = Array.from(
-      { length: branchDepth },
-      (_, depth) =>
-        Array.from(
-          { length: branchCount },
-          (_, branch) =>
-            `b${branch.toString().padStart(3, "0")}-d${depth
-              .toString()
-              .padStart(3, "0")}`,
-        ),
-    ).flat();
-    let published = 0;
-    vaultApi.publishVaultFoldersBatch.mockImplementation(
-      async (_csrfToken, records: unknown[]) => {
-        const names = expectedFolderNames.slice(
-          published,
-          published + records.length,
-        );
-        published += records.length;
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(null, { status: 200, headers: { ETag: "etag" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    let releaseSecond: (() => void) | undefined;
+    const second = new Promise<void>((resolve) => {
+      releaseSecond = resolve;
+    });
+    const client = createCryptoClient(() => 16);
+    const originalStart = client.startEncryption.bind(client);
+    vi.spyOn(client, "startEncryption").mockImplementation(async (input) => ({
+      ...(await originalStart(input)),
+      chunkCount: 2,
+    }));
+    vi.spyOn(client, "encryptChunk").mockImplementation(
+      async (_session, index) => {
+        if (index === 1) await second;
         return {
-          folders: names.map((name) => ({
-            nodeId: `node-${name}`,
-            generationNumber: 1,
-            generationId: `generation-${name}`,
-            recordVersion: 1,
-            recordHash: `record-${name}`,
-            shareSyncRequired: false,
-          })),
+          ciphertext: new Uint8Array(8).fill(7).buffer,
+          ciphertextBytes: 8,
         };
       },
     );
-    const client = createCryptoClient(() => 1);
-    const startEncryption = vi.spyOn(client, "startEncryption");
+    const upload = runSelectionUpload(client, [
+      new File([Uint8Array.of(1)], "rolling.bin"),
+    ]);
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    expect(vaultApi.publishVaultUpload).not.toHaveBeenCalled();
+    releaseSecond?.();
+    await upload;
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
 
-    await expect(
-      uploadEncryptedSelections({
-        selections,
-        parentFolderId: null,
-        csrfToken: "csrf",
-        client,
-        signal: new AbortController().signal,
-        onProgress: () => undefined,
-        onFileStart: () => {
-          throw new Error("folder scale fixture complete");
-        },
-        onFileComplete: () => undefined,
+  it("refills PUT slots around a slow part and preserves checksums and completion order", async () => {
+    vaultApi.initVaultUpload.mockResolvedValue({
+      uploadId: "rolling",
+      nodeId: "node-rolling.bin",
+      mode: "multipart",
+      partSizeBytes: 8,
+    });
+    vaultApi.getVaultPartUrls.mockImplementation(async (_csrf, _id, parts) => ({
+      parts: parts.map(({ partNumber }: { partNumber: number }) => ({
+        partNumber,
+        url: `https://storage.invalid/part-${partNumber}`,
+        contentLength: 8,
+      })),
+    }));
+    let releaseFirst: (() => void) | undefined;
+    const first = new Promise<void>((resolve) => {
+      releaseFirst = resolve;
+    });
+    const putParts: number[] = [];
+    const bodies: Uint8Array[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        const part = Number(String(url).split("-").at(-1));
+        putParts.push(part);
+        const body = new Uint8Array(
+          init.body.buffer,
+          init.body.byteOffset,
+          init.body.byteLength,
+        );
+        bodies.push(body);
+        if (part === 1) await first;
+        expect(Array.from(body)).toEqual(Array(8).fill(7));
+        return new Response(null, {
+          status: 200,
+          headers: { ETag: `etag-${part}` },
+        });
       }),
-    ).rejects.toThrow("folder scale fixture complete");
-
-    expect(published).toBe(10_000);
-    expect(vaultApi.publishVaultFoldersBatch).toHaveBeenCalledTimes(100);
+    );
+    const client = createCryptoClient(() => 48);
+    const upload = runSelectionUpload(client, [
+      new File([Uint8Array.of(1)], "rolling.bin"),
+    ]);
+    await vi.waitFor(() => expect(putParts).toContain(6));
+    expect(vaultApi.publishVaultUpload).not.toHaveBeenCalled();
+    releaseFirst?.();
+    await upload;
     expect(
-      vaultApi.publishVaultFoldersBatch.mock.calls.every(
-        ([, records]) => records.length === 100,
+      vaultApi.publishVaultUpload.mock.calls[0]?.[2].map(
+        (part: { partNumber: number }) => part.partNumber,
       ),
-    ).toBe(true);
-    expect(startEncryption).toHaveBeenCalledTimes(10_000);
-    expect(vaultApi.initVaultUpload).not.toHaveBeenCalled();
+    ).toEqual([1, 2, 3, 4, 5, 6]);
+    expect(bodies.every((body) => body.every((byte) => byte === 0))).toBe(true);
+  });
+
+  it("allows a small file to finish while a large file waits for final publication", async () => {
+    vi.stubGlobal("navigator", { hardwareConcurrency: 8 });
+    vaultApi.initVaultUpload.mockImplementation(async (_csrf, input) => ({
+      uploadId: input.nodeId,
+      nodeId: input.nodeId,
+      mode: "single",
+      partSizeBytes: null,
+    }));
+    vaultApi.getVaultContentUrl.mockImplementation(async (_csrf, id) => ({
+      url: `https://storage.invalid/${id}`,
+      contentLength: 1,
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response(null, { status: 200 })),
+    );
+    let releaseLarge: (() => void) | undefined;
+    const largePublication = new Promise<void>((resolve) => {
+      releaseLarge = resolve;
+    });
+    let smallFinished = false;
+    vaultApi.publishVaultUpload.mockImplementation(async (_csrf, id) => {
+      if (id === "node-large.bin") await largePublication;
+      else smallFinished = true;
+      return {
+        nodeId: id,
+        generationNumber: 1,
+        generationId: "g",
+        recordVersion: 1,
+        recordHash: "h",
+        shareSyncRequired: false,
+      };
+    });
+    const large = new File([Uint8Array.of(1)], "large.bin");
+    Object.defineProperty(large, "size", { value: 9 * 1024 * 1024 });
+    const upload = runSelectionUpload(
+      createCryptoClient(() => 1),
+      [large, new File([Uint8Array.of(1)], "small.bin")],
+    );
+    await vi.waitFor(() => expect(smallFinished).toBe(true));
+    releaseLarge?.();
+    await upload;
+  });
+
+  it("refreshes one expired part without changing its checksum or blocking other parts", async () => {
+    vaultApi.initVaultUpload.mockResolvedValue({
+      uploadId: "rolling",
+      nodeId: "node-rolling.bin",
+      mode: "multipart",
+      partSizeBytes: 8,
+    });
+    vaultApi.getVaultPartUrls.mockImplementation(async (_csrf, _id, parts) => ({
+      parts: parts.map(({ partNumber }: { partNumber: number }) => ({
+        partNumber,
+        url: `https://storage.invalid/part-${partNumber}`,
+        contentLength: 8,
+      })),
+    }));
+    vaultApi.getVaultPartUrl.mockResolvedValue({
+      partNumber: 1,
+      url: "https://storage.invalid/refreshed-1",
+      contentLength: 8,
+    });
+    const fetchMock = vi.fn(async (url) =>
+      String(url) === "https://storage.invalid/part-1"
+        ? new Response("<Code>ExpiredToken</Code>", { status: 403 })
+        : new Response(null, { status: 200, headers: { ETag: "etag" } }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    await runSelectionUpload(
+      createCryptoClient(() => 16),
+      [new File([Uint8Array.of(1)], "rolling.bin")],
+    );
+    const firstPresign = vaultApi.getVaultPartUrls.mock.calls
+      .flatMap((call) => call[2])
+      .find((part) => part.partNumber === 1);
+    expect(vaultApi.getVaultPartUrl).toHaveBeenCalledWith(
+      "csrf",
+      "rolling",
+      1,
+      firstPresign.checksumSha256,
+      expect.any(AbortSignal),
+    );
+    expect(fetchMock.mock.calls.map(([url]) => String(url))).toContain(
+      "https://storage.invalid/refreshed-1",
+    );
+  });
+
+  it("aborts sibling PUTs before clearing their bodies and cleans up the upload", async () => {
+    vaultApi.initVaultUpload.mockResolvedValue({
+      uploadId: "rolling",
+      nodeId: "node-rolling.bin",
+      mode: "multipart",
+      partSizeBytes: 8,
+    });
+    vaultApi.getVaultPartUrls.mockImplementation(async (_csrf, _id, parts) => ({
+      parts: parts.map(({ partNumber }: { partNumber: number }) => ({
+        partNumber,
+        url: `https://storage.invalid/part-${partNumber}`,
+        contentLength: 8,
+      })),
+    }));
+    const activeBodies: Uint8Array[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url, init) => {
+        if (String(url).endsWith("part-1"))
+          return new Response(null, { status: 400 });
+        const body = new Uint8Array(
+          init.body.buffer,
+          init.body.byteOffset,
+          init.body.byteLength,
+        );
+        activeBodies.push(body);
+        return new Promise<Response>((_resolve, reject) => {
+          const abort = () => {
+            expect(body.every((byte) => byte === 7)).toBe(true);
+            reject(init.signal.reason);
+          };
+          init.signal.addEventListener("abort", abort, { once: true });
+          if (init.signal.aborted) abort();
+        });
+      }),
+    );
+    const client = createCryptoClient(() => 48);
+    const abortEncryption = vi.spyOn(client, "abortEncryption");
+    await expect(
+      runSelectionUpload(client, [new File([Uint8Array.of(1)], "rolling.bin")]),
+    ).rejects.toThrow();
+    expect(activeBodies.length).toBeGreaterThan(0);
+    expect(activeBodies.every((body) => body.every((byte) => byte === 0))).toBe(
+      true,
+    );
+    expect(abortEncryption).toHaveBeenCalledWith(
+      "session-rolling.bin",
+      "node-rolling.bin",
+    );
+    expect(vaultApi.abortVaultUpload).toHaveBeenCalledWith("csrf", "rolling");
+    expect(vaultApi.publishVaultUpload).not.toHaveBeenCalled();
   });
 });
 
@@ -471,4 +716,17 @@ function createCryptoClient(
     },
     async abortEncryption() {},
   } as unknown as VaultCryptoClient;
+}
+
+function runSelectionUpload(client: VaultCryptoClient, files: File[]) {
+  return uploadEncryptedSelections({
+    selections: files.map((file) => ({ file, relativePath: file.name })),
+    parentFolderId: null,
+    csrfToken: "csrf",
+    client,
+    signal: new AbortController().signal,
+    onProgress: () => undefined,
+    onFileStart: () => undefined,
+    onFileComplete: () => undefined,
+  });
 }

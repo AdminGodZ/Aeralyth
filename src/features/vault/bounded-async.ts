@@ -156,6 +156,100 @@ export class BoundedBatchPipeline<Input, Output> {
   }
 }
 
+/**
+ * A single producer awaits each push, so backpressure retains at most its next
+ * input outside the byte budget. Completed slots refill independently.
+ */
+export class BoundedRollingPipeline<Input, Output> {
+  private readonly slots: WeightedSemaphore;
+  private readonly bytes: WeightedSemaphore;
+  private readonly inFlight = new Set<Promise<void>>();
+  private readonly output: Output[] = [];
+  private failure: unknown | typeof NO_FAILURE = NO_FAILURE;
+  private closed = false;
+  private nextIndex = 0;
+  private activeBytes = 0;
+
+  constructor(
+    concurrency: number,
+    readonly capacityBytes: number,
+    private readonly sizeOf: (input: Input) => number,
+    private readonly process: (input: Input) => Promise<Output>,
+    private readonly signal: AbortSignal,
+    private readonly onFailure: (error: unknown) => void,
+  ) {
+    this.slots = new WeightedSemaphore(concurrency);
+    this.bytes = new WeightedSemaphore(capacityBytes);
+  }
+
+  get processingBytes(): number {
+    return this.activeBytes;
+  }
+
+  async push(value: Input): Promise<void> {
+    this.assertOpen();
+    this.throwIfFailed();
+    const size = this.sizeOf(value);
+    const releaseSlot = await this.slots.acquire(1, this.signal);
+    let releaseBytes: (() => void) | undefined;
+    try {
+      releaseBytes = await this.bytes.acquire(size, this.signal);
+      this.assertOpen();
+      this.throwIfFailed();
+      if (this.signal.aborted) throw abortReason(this.signal);
+    } catch (error) {
+      releaseBytes?.();
+      releaseSlot();
+      throw error;
+    }
+
+    const index = this.nextIndex++;
+    this.activeBytes += size;
+    const work = Promise.resolve()
+      .then(() => this.process(value))
+      .then(
+        (output) => {
+          this.output[index] = output;
+        },
+        (error: unknown) => {
+          if (this.failure === NO_FAILURE) {
+            this.failure = error;
+            this.onFailure(error);
+          }
+        },
+      )
+      .finally(() => {
+        this.activeBytes -= size;
+        releaseBytes();
+        releaseSlot();
+        this.inFlight.delete(work);
+      });
+    this.inFlight.add(work);
+  }
+
+  async finish(): Promise<Output[]> {
+    this.assertOpen();
+    this.closed = true;
+    await Promise.all(this.inFlight);
+    this.throwIfFailed();
+    if (this.signal.aborted) throw abortReason(this.signal);
+    return this.output;
+  }
+
+  async stop(): Promise<void> {
+    this.closed = true;
+    await Promise.all(this.inFlight);
+  }
+
+  private assertOpen(): void {
+    if (this.closed) throw new Error("The bounded pipeline is closed.");
+  }
+
+  private throwIfFailed(): void {
+    if (this.failure !== NO_FAILURE) throw this.failure;
+  }
+}
+
 export function concurrencyForHardware(
   hardwareConcurrency: number | undefined,
   maximum: number,

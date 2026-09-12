@@ -1,0 +1,943 @@
+BEGIN
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+CREATE EXTENSION
+CREATE TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+DO
+DO
+DO
+DO
+CREATE TABLE
+NOTICE:  column "csrf_token" of relation "sessions" already exists, skipping
+ALTER TABLE
+CREATE TABLE
+CREATE TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+DO
+DO
+CREATE TABLE
+NOTICE:  column "counts_toward_shared" of relation "file_shares" already exists, skipping
+ALTER TABLE
+UPDATE 0
+CREATE TABLE
+NOTICE:  column "checksum_sha256" of relation "file_uploads" already exists, skipping
+ALTER TABLE
+ALTER TABLE
+NOTICE:  column "part_size_bytes" of relation "file_uploads" already exists, skipping
+NOTICE:  column "write_expires_at" of relation "file_uploads" already exists, skipping
+NOTICE:  constraint "file_uploads_part_size_check" of relation "file_uploads" does not exist, skipping
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+NOTICE:  constraint "file_uploads_status_check" of relation "file_uploads" does not exist, skipping
+ALTER TABLE
+ALTER TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+ALTER TABLE
+INSERT 0 0
+NOTICE:  column "multipart_upload_id" of relation "storage_deletion_jobs" already exists, skipping
+UPDATE 0
+UPDATE 0
+UPDATE 0
+CREATE TABLE
+INSERT 0 1
+INSERT 0 0
+CREATE FUNCTION
+DROP TRIGGER
+NOTICE:  trigger "users_file_counter_insert" for relation "users" does not exist, skipping
+CREATE TRIGGER
+CREATE FUNCTION
+NOTICE:  trigger "users_admin_counter_change" for relation "users" does not exist, skipping
+DROP TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "users_admin_counter_insert" for relation "users" does not exist, skipping
+DROP TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "users_admin_counter_delete" for relation "users" does not exist, skipping
+NOTICE:  trigger "users_admin_counter_update" for relation "users" does not exist, skipping
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+NOTICE:  trigger "invitations_admin_counter_change" for relation "invitations" does not exist, skipping
+DROP TRIGGER
+NOTICE:  trigger "invitations_admin_counter_insert" for relation "invitations" does not exist, skipping
+DROP TRIGGER
+DROP TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "invitations_admin_counter_delete" for relation "invitations" does not exist, skipping
+NOTICE:  trigger "invitations_admin_counter_update" for relation "invitations" does not exist, skipping
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+NOTICE:  trigger "files_counter_change" for relation "files" does not exist, skipping
+DROP TRIGGER
+DO
+CREATE FUNCTION
+NOTICE:  trigger "file_shares_counter_change" for relation "file_shares" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+UPDATE 0
+UPDATE 0
+INSERT 0 0
+UPDATE 1
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+INSERT 0 1
+INSERT 0 1
+COMMIT
+BEGIN
+CREATE TABLE
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ALTER TABLE
+DO
+CREATE TABLE
+CREATE TABLE
+CREATE INDEX
+CREATE TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+DO
+CREATE TABLE
+ALTER TABLE
+NOTICE:  column "checksum_sha256" of relation "vault_uploads" already exists, skipping
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+NOTICE:  column "record_hash" of relation "vault_shares" already exists, skipping
+ALTER TABLE
+CREATE TABLE
+CREATE TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+DO
+CREATE TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE INDEX
+NOTICE:  column "record_version" of relation "vault_share_wrappers" already exists, skipping
+CREATE TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+DO
+DO
+CREATE INDEX
+CREATE TABLE
+CREATE TABLE
+CREATE INDEX
+CREATE TABLE
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE FUNCTION
+DROP TRIGGER
+NOTICE:  trigger "vault_share_envelope_epoch_guard" for relation "vault_share_envelopes" does not exist, skipping
+DROP TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "vault_share_wrapper_epoch_guard" for relation "vault_share_wrappers" does not exist, skipping
+NOTICE:  trigger "vault_share_envelope_epoch_guard_insert" for relation "vault_share_envelopes" does not exist, skipping
+DROP TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "vault_share_envelope_epoch_guard_update" for relation "vault_share_envelopes" does not exist, skipping
+NOTICE:  trigger "vault_share_wrapper_epoch_guard_insert" for relation "vault_share_wrappers" does not exist, skipping
+NOTICE:  trigger "vault_share_wrapper_epoch_guard_update" for relation "vault_share_wrappers" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+INSERT 0 1
+COMMIT
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+CREATE INDEX
+CREATE TABLE
+CREATE INDEX
+NOTICE:  column "description" of relation "repositories" already exists, skipping
+ALTER TABLE
+DO
+BEGIN
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+CREATE TABLE
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ALTER TABLE
+ALTER TABLE
+DO
+DO
+CREATE FUNCTION
+NOTICE:  trigger "users_storage_usage_insert" for relation "users" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+DROP TRIGGER
+NOTICE:  trigger "files_counter_insert_statement" for relation "files" does not exist, skipping
+DROP TRIGGER
+NOTICE:  trigger "files_counter_update_statement" for relation "files" does not exist, skipping
+DROP TRIGGER
+NOTICE:  trigger "files_counter_delete_statement" for relation "files" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+NOTICE:  trigger "file_upload_reservation_immutable" for relation "file_uploads" does not exist, skipping
+NOTICE:  trigger "file_upload_reservation_update" for relation "file_uploads" does not exist, skipping
+DROP TRIGGER
+DROP TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "file_upload_reservation_delete" for relation "file_uploads" does not exist, skipping
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "vault_upload_reservation_immutable" for relation "vault_uploads" does not exist, skipping
+NOTICE:  trigger "vault_upload_reservation_update" for relation "vault_uploads" does not exist, skipping
+DROP TRIGGER
+NOTICE:  trigger "vault_upload_reservation_delete" for relation "vault_uploads" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+COMMIT
+CREATE EXTENSION
+BEGIN
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+DO
+CREATE INDEX
+CREATE FUNCTION
+INSERT 0 1
+COMMIT
+BEGIN
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ALTER TABLE
+CREATE INDEX
+INSERT 0 1
+COMMIT
+BEGIN
+CREATE TABLE
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+DO
+DROP INDEX
+NOTICE:  index "sessions_expires_at_idx" does not exist, skipping
+CREATE INDEX
+NOTICE:  relation "sessions_expiry_cleanup_idx" already exists, skipping
+INSERT 0 1
+COMMIT
+NOTICE:  relation "schema_migrations" already exists, skipping
+BEGIN
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+CREATE FUNCTION
+DROP TRIGGER
+DROP TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "users_admin_counter_change" for relation "users" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+DROP TRIGGER
+DROP TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "invitations_admin_counter_change" for relation "invitations" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+INSERT 0 1
+COMMIT
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+BEGIN
+NOTICE:  trigger "vault_share_envelope_epoch_guard" for relation "vault_share_envelopes" does not exist, skipping
+DROP TRIGGER
+NOTICE:  trigger "vault_share_wrapper_epoch_guard" for relation "vault_share_wrappers" does not exist, skipping
+DROP TRIGGER
+DROP TRIGGER
+DROP TRIGGER
+DROP TRIGGER
+DROP TRIGGER
+CREATE FUNCTION
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+INSERT 0 1
+COMMIT
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+BEGIN
+INSERT 0 1
+COMMIT
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+BEGIN
+CREATE TABLE
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ALTER TABLE
+ALTER TABLE
+DO
+UPDATE 0
+UPDATE 0
+UPDATE 0
+CREATE FUNCTION
+DROP TRIGGER
+DROP TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "file_shares_file_state_insert" for relation "file_shares" does not exist, skipping
+NOTICE:  trigger "file_shares_file_state_update" for relation "file_shares" does not exist, skipping
+NOTICE:  trigger "file_shares_file_state_delete" for relation "file_shares" does not exist, skipping
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+NOTICE:  trigger "vault_shares_file_state_insert" for relation "vault_shares" does not exist, skipping
+NOTICE:  trigger "vault_shares_file_state_update" for relation "vault_shares" does not exist, skipping
+DROP TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "vault_shares_file_state_delete" for relation "vault_shares" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+DROP TRIGGER
+NOTICE:  trigger "share_links_file_state_insert" for relation "share_links" does not exist, skipping
+NOTICE:  trigger "share_links_file_state_update" for relation "share_links" does not exist, skipping
+NOTICE:  trigger "share_links_file_state_delete" for relation "share_links" does not exist, skipping
+DROP TRIGGER
+DROP TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+NOTICE:  trigger "files_repository_counts_insert" for relation "files" does not exist, skipping
+DROP TRIGGER
+NOTICE:  trigger "files_repository_counts_update" for relation "files" does not exist, skipping
+DROP TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "files_repository_counts_delete" for relation "files" does not exist, skipping
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+INSERT 0 1
+COMMIT
+CREATE TABLE
+NOTICE:  relation "schema_migrations" already exists, skipping
+NOTICE:  index "files_updated_at_idx" does not exist, skipping
+NOTICE:  index "files_favorite_idx" does not exist, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+DROP INDEX
+DROP INDEX
+NOTICE:  index "files_recent_owner_idx" does not exist, skipping
+DROP INDEX
+NOTICE:  index "share_links_owner_root_page_idx" does not exist, skipping
+DROP INDEX
+CREATE INDEX
+DROP INDEX
+DROP INDEX
+NOTICE:  index "vault_shares_owner_root_page_idx" does not exist, skipping
+CREATE INDEX
+BEGIN
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+ assert_file_hierarchy_valid 
+-----------------------------
+ 
+(1 row)
+
+NOTICE:  trigger "files_hierarchy_insert_guard" for relation "files" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "files_hierarchy_update_guard" for relation "files" does not exist, skipping
+CREATE TRIGGER
+INSERT 0 1
+COMMIT
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+CREATE TABLE
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+CREATE EXTENSION
+DROP INDEX
+NOTICE:  index "users_username_trgm_idx" does not exist, skipping
+CREATE INDEX
+DROP INDEX
+NOTICE:  index "users_display_name_trgm_idx" does not exist, skipping
+CREATE INDEX
+NOTICE:  index "invitations_username_trgm_idx" does not exist, skipping
+DROP INDEX
+CREATE INDEX
+BEGIN
+CREATE TABLE
+DO
+COMMENT
+INSERT 0 1
+COMMIT
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+CREATE TABLE
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+NOTICE:  index "files_owner_parent_walk_idx" does not exist, skipping
+DROP INDEX
+CREATE INDEX
+BEGIN
+COMMENT
+INSERT 0 1
+COMMIT
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+BEGIN
+CREATE TABLE
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ALTER TABLE
+UPDATE 0
+ALTER TABLE
+DO
+COMMENT
+INSERT 0 1
+COMMIT
+BEGIN
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ALTER TABLE
+COMMENT
+INSERT 0 1
+COMMIT
+BEGIN
+CREATE TABLE
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ALTER TABLE
+CREATE FUNCTION
+DROP TRIGGER
+NOTICE:  trigger "share_links_legacy_token_rotation_guard" for relation "share_links" does not exist, skipping
+CREATE TRIGGER
+COMMENT
+INSERT 0 1
+COMMIT
+BEGIN
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  constraint "user_vaults_compact_account_state" of relation "user_vaults" does not exist, skipping
+ALTER TABLE
+ALTER TABLE
+INSERT 0 1
+COMMIT
+BEGIN
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+ALTER TABLE
+INSERT 0 1
+COMMIT
+BEGIN
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  column "lease_token" of relation "storage_deletion_jobs" already exists, skipping
+NOTICE:  column "dead_lettered_at" of relation "storage_deletion_jobs" already exists, skipping
+ALTER TABLE
+NOTICE:  column "lease_token" of relation "user_deletion_jobs" already exists, skipping
+NOTICE:  column "dead_lettered_at" of relation "user_deletion_jobs" already exists, skipping
+ALTER TABLE
+NOTICE:  column "completion_lease_token" of relation "file_uploads" already exists, skipping
+NOTICE:  column "completion_dead_lettered_at" of relation "file_uploads" already exists, skipping
+ALTER TABLE
+DROP INDEX
+CREATE INDEX
+DROP INDEX
+CREATE INDEX
+DROP INDEX
+CREATE INDEX
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "user_deletion_jobs" does not exist, skipping
+CREATE FUNCTION
+DROP TRIGGER
+CREATE TRIGGER
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "storage_deletion_jobs" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+DROP TRIGGER
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "file_uploads" does not exist, skipping
+CREATE TRIGGER
+DROP TRIGGER
+CREATE TRIGGER
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "vault_uploads" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "invitations" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "sessions" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+INSERT 0 1
+COMMIT
+BEGIN
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ALTER TABLE
+ALTER TABLE
+DO
+INSERT 0 1
+COMMIT
+BEGIN
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ALTER TABLE
+DO
+CREATE INDEX
+DROP TRIGGER
+NOTICE:  trigger "notify_aeralyth_trash_retention_file_insert" for relation "files" does not exist, skipping
+CREATE TRIGGER
+NOTICE:  trigger "notify_aeralyth_trash_retention_file_update" for relation "files" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_trash_retention_users" for relation "users" does not exist, skipping
+DROP TRIGGER
+CREATE TRIGGER
+DROP TRIGGER
+CREATE TRIGGER
+INSERT 0 1
+COMMIT
+BEGIN
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+CREATE TABLE
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE TABLE
+INSERT 0 1
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+DO
+CREATE FUNCTION
+CREATE FUNCTION
+INSERT 0 1
+COMMIT
+BEGIN
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ALTER TABLE
+UPDATE 1
+ALTER TABLE
+CREATE FUNCTION
+CREATE TRIGGER
+DROP TRIGGER
+CREATE TRIGGER
+INSERT 0 1
+COMMIT
+BEGIN
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+LOCK TABLE
+CREATE TABLE
+CREATE TABLE
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+ reconcile_vault_migration_progress 
+------------------------------------
+ 
+(1 row)
+
+INSERT 0 1
+COMMIT
+BEGIN
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+CREATE TABLE
+INSERT 0 1
+CREATE FUNCTION
+CREATE TRIGGER
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE VIEW
+CREATE FUNCTION
+CREATE TRIGGER
+CREATE FUNCTION
+CREATE TRIGGER
+CREATE FUNCTION
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+DO
+CREATE TRIGGER
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE FUNCTION
+CREATE TABLE
+CREATE INDEX
+CREATE FUNCTION
+CREATE TRIGGER
+CREATE VIEW
+CREATE TRIGGER
+INSERT 0 1
+COMMIT
+BEGIN
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+CREATE TABLE
+INSERT 0 0
+CREATE FUNCTION
+CREATE TABLE
+CREATE INDEX
+INSERT 0 0
+CREATE TABLE
+CREATE FUNCTION
+DROP TRIGGER
+DROP TRIGGER
+DROP TRIGGER
+DO
+CREATE FUNCTION
+CREATE TRIGGER
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE TABLE
+CREATE FUNCTION
+CREATE FUNCTION
+INSERT 0 1
+COMMIT
+BEGIN
+CREATE TABLE
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ALTER TABLE
+ALTER TABLE
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+INSERT 0 1
+COMMIT
+BEGIN
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+CREATE TABLE
+INSERT 0 1
+COMMIT
+BEGIN
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+ALTER TABLE
+UPDATE 0
+CREATE INDEX
+CREATE TABLE
+CREATE INDEX
+INSERT 0 1
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE FUNCTION
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+CREATE TRIGGER
+ refresh_trash_expiry_owners 
+-----------------------------
+ 
+(1 row)
+
+CREATE FUNCTION
+CREATE INDEX
+CREATE INDEX
+CREATE INDEX
+CREATE VIEW
+INSERT 0 1
+COMMIT
+BEGIN
+NOTICE:  relation "schema_migrations" already exists, skipping
+CREATE TABLE
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+CREATE TABLE
+CREATE TABLE
+CREATE INDEX
+CREATE INDEX
+CREATE FUNCTION
+CREATE TRIGGER
+CREATE TRIGGER
+CREATE FUNCTION
+INSERT 0 1
+COMMIT

@@ -1,6 +1,7 @@
 .git
 .github
 .next
+.worker-reports
 .vercel
 backend/target
 coverage

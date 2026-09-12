@@ -1,0 +1,730 @@
+Container: aeralyth-audit-db-suite-20260912
+Database: aeralyth_audit_chain_20260912134302_43981_7574
+Started: 2026-09-12T11:43:02Z
+NOTICE: legacy migration has no ledger entry: 003_share_links.sql
+NOTICE: legacy migration has no ledger entry: 004_repositories.sql
+NOTICE: legacy migration has no ledger entry: 005_repository_metadata.sql
+NOTICE: legacy migration has no ledger entry: 007_observability.sql
+Applying 001_auth.sql
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  column "csrf_token" of relation "sessions" already exists, skipping
+NOTICE:  column "counts_toward_shared" of relation "file_shares" already exists, skipping
+NOTICE:  column "checksum_sha256" of relation "file_uploads" already exists, skipping
+NOTICE:  column "part_size_bytes" of relation "file_uploads" already exists, skipping
+NOTICE:  column "write_expires_at" of relation "file_uploads" already exists, skipping
+NOTICE:  constraint "file_uploads_part_size_check" of relation "file_uploads" does not exist, skipping
+NOTICE:  constraint "file_uploads_status_check" of relation "file_uploads" does not exist, skipping
+NOTICE:  column "multipart_upload_id" of relation "storage_deletion_jobs" already exists, skipping
+NOTICE:  trigger "users_file_counter_insert" for relation "users" does not exist, skipping
+NOTICE:  trigger "users_admin_counter_change" for relation "users" does not exist, skipping
+NOTICE:  trigger "users_admin_counter_insert" for relation "users" does not exist, skipping
+NOTICE:  trigger "users_admin_counter_delete" for relation "users" does not exist, skipping
+NOTICE:  trigger "users_admin_counter_update" for relation "users" does not exist, skipping
+NOTICE:  trigger "invitations_admin_counter_change" for relation "invitations" does not exist, skipping
+NOTICE:  trigger "invitations_admin_counter_insert" for relation "invitations" does not exist, skipping
+NOTICE:  trigger "invitations_admin_counter_delete" for relation "invitations" does not exist, skipping
+NOTICE:  trigger "invitations_admin_counter_update" for relation "invitations" does not exist, skipping
+NOTICE:  trigger "files_counter_change" for relation "files" does not exist, skipping
+NOTICE:  trigger "file_shares_counter_change" for relation "file_shares" does not exist, skipping
+Applying 002_e2ee.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  column "checksum_sha256" of relation "vault_uploads" already exists, skipping
+NOTICE:  column "record_hash" of relation "vault_shares" already exists, skipping
+NOTICE:  column "record_version" of relation "vault_share_wrappers" already exists, skipping
+NOTICE:  trigger "vault_share_envelope_epoch_guard" for relation "vault_share_envelopes" does not exist, skipping
+NOTICE:  trigger "vault_share_wrapper_epoch_guard" for relation "vault_share_wrappers" does not exist, skipping
+NOTICE:  trigger "vault_share_envelope_epoch_guard_insert" for relation "vault_share_envelopes" does not exist, skipping
+NOTICE:  trigger "vault_share_envelope_epoch_guard_update" for relation "vault_share_envelopes" does not exist, skipping
+NOTICE:  trigger "vault_share_wrapper_epoch_guard_insert" for relation "vault_share_wrappers" does not exist, skipping
+NOTICE:  trigger "vault_share_wrapper_epoch_guard_update" for relation "vault_share_wrappers" does not exist, skipping
+Applying 003_share_links.sql
+Applying 004_repositories.sql
+Applying 005_repository_metadata.sql
+NOTICE:  column "description" of relation "repositories" already exists, skipping
+Applying 006_performance_ledger.sql
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+NOTICE:  trigger "users_storage_usage_insert" for relation "users" does not exist, skipping
+NOTICE:  trigger "files_counter_insert_statement" for relation "files" does not exist, skipping
+NOTICE:  trigger "files_counter_update_statement" for relation "files" does not exist, skipping
+NOTICE:  trigger "files_counter_delete_statement" for relation "files" does not exist, skipping
+NOTICE:  trigger "file_upload_reservation_immutable" for relation "file_uploads" does not exist, skipping
+NOTICE:  trigger "file_upload_reservation_update" for relation "file_uploads" does not exist, skipping
+NOTICE:  trigger "file_upload_reservation_delete" for relation "file_uploads" does not exist, skipping
+NOTICE:  trigger "vault_upload_reservation_immutable" for relation "vault_uploads" does not exist, skipping
+NOTICE:  trigger "vault_upload_reservation_update" for relation "vault_uploads" does not exist, skipping
+NOTICE:  trigger "vault_upload_reservation_delete" for relation "vault_uploads" does not exist, skipping
+Applying 007_observability.sql
+Applying 008_folder_manifest.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 009_upload_completion.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 010_session_performance.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  index "sessions_expires_at_idx" does not exist, skipping
+NOTICE:  relation "sessions_expiry_cleanup_idx" already exists, skipping
+Applying 011_admin_counter_triggers.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  trigger "users_admin_counter_change" for relation "users" does not exist, skipping
+NOTICE:  trigger "invitations_admin_counter_change" for relation "invitations" does not exist, skipping
+Applying 012_vault_query_performance.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+NOTICE:  trigger "vault_share_envelope_epoch_guard" for relation "vault_share_envelopes" does not exist, skipping
+NOTICE:  trigger "vault_share_wrapper_epoch_guard" for relation "vault_share_wrappers" does not exist, skipping
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+Applying 013_migration_identity_performance.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+Applying 014_navigation_hot_paths.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  trigger "file_shares_file_state_insert" for relation "file_shares" does not exist, skipping
+NOTICE:  trigger "file_shares_file_state_update" for relation "file_shares" does not exist, skipping
+NOTICE:  trigger "file_shares_file_state_delete" for relation "file_shares" does not exist, skipping
+NOTICE:  trigger "vault_shares_file_state_insert" for relation "vault_shares" does not exist, skipping
+NOTICE:  trigger "vault_shares_file_state_update" for relation "vault_shares" does not exist, skipping
+NOTICE:  trigger "vault_shares_file_state_delete" for relation "vault_shares" does not exist, skipping
+NOTICE:  trigger "share_links_file_state_insert" for relation "share_links" does not exist, skipping
+NOTICE:  trigger "share_links_file_state_update" for relation "share_links" does not exist, skipping
+NOTICE:  trigger "share_links_file_state_delete" for relation "share_links" does not exist, skipping
+NOTICE:  trigger "files_repository_counts_insert" for relation "files" does not exist, skipping
+NOTICE:  trigger "files_repository_counts_update" for relation "files" does not exist, skipping
+NOTICE:  trigger "files_repository_counts_delete" for relation "files" does not exist, skipping
+Applying 015_collection_hierarchy_performance.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+NOTICE:  index "files_updated_at_idx" does not exist, skipping
+NOTICE:  index "files_favorite_idx" does not exist, skipping
+NOTICE:  index "files_recent_owner_idx" does not exist, skipping
+NOTICE:  index "share_links_owner_root_page_idx" does not exist, skipping
+NOTICE:  index "vault_shares_owner_root_page_idx" does not exist, skipping
+ assert_file_hierarchy_valid 
+-----------------------------
+ 
+(1 row)
+
+NOTICE:  trigger "files_hierarchy_insert_guard" for relation "files" does not exist, skipping
+NOTICE:  trigger "files_hierarchy_update_guard" for relation "files" does not exist, skipping
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+Applying 016_admin_search_identifier_policy.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+NOTICE:  index "users_username_trgm_idx" does not exist, skipping
+NOTICE:  index "users_display_name_trgm_idx" does not exist, skipping
+NOTICE:  index "invitations_username_trgm_idx" does not exist, skipping
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+Applying 017_bounded_tree_operations.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+NOTICE:  index "files_owner_parent_walk_idx" does not exist, skipping
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+Applying 018_share_link_token_rotation.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 019_share_link_rollout_compatibility.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 020_share_link_legacy_writer_guard.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  trigger "share_links_legacy_token_rotation_guard" for relation "share_links" does not exist, skipping
+Applying 021_compact_account_state.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  constraint "user_vaults_compact_account_state" of relation "user_vaults" does not exist, skipping
+Applying 022_large_share_commitments.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 023_maintenance_coordination.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  column "lease_token" of relation "storage_deletion_jobs" already exists, skipping
+NOTICE:  column "dead_lettered_at" of relation "storage_deletion_jobs" already exists, skipping
+NOTICE:  column "lease_token" of relation "user_deletion_jobs" already exists, skipping
+NOTICE:  column "dead_lettered_at" of relation "user_deletion_jobs" already exists, skipping
+NOTICE:  column "completion_lease_token" of relation "file_uploads" already exists, skipping
+NOTICE:  column "completion_dead_lettered_at" of relation "file_uploads" already exists, skipping
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "user_deletion_jobs" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "storage_deletion_jobs" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "file_uploads" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "vault_uploads" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "invitations" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "sessions" does not exist, skipping
+Applying 024_one_password_auth.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 025_trash_retention.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  trigger "notify_aeralyth_trash_retention_file_insert" for relation "files" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_trash_retention_file_update" for relation "files" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_trash_retention_users" for relation "users" does not exist, skipping
+Applying 026_realtime_changes.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 027_flexible_retention_and_vault_lock.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 028_migration_progress.sql
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ reconcile_vault_migration_progress 
+------------------------------------
+ 
+(1 row)
+
+Applying 029_durable_tree_operations.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 030_repository_change_tracking.sql
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 031_realtime_background_audiences.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 032_bucket_usage_snapshots.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 034_indexed_trash_expiry.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ refresh_trash_expiry_owners 
+-----------------------------
+ 
+(1 row)
+
+Applying 035_multipart_reconciliation.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 036_maintenance_notifications.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+PASS: migration ledger contains 31 rows for 31 ledger-backed migrations among 35 numbered files
+Applying 001_auth.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 001-auth
+Applying 002_e2ee.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 002-e2ee
+Applying 003_share_links.sql
+NOTICE:  relation "share_links" already exists, skipping
+NOTICE:  relation "share_links_recipient_idx" already exists, skipping
+NOTICE:  column "share_link_id" of relation "file_uploads" already exists, skipping
+NOTICE:  column "replacement_file_id" of relation "file_uploads" already exists, skipping
+NOTICE:  relation "file_uploads_share_link_idx" already exists, skipping
+Applying 004_repositories.sql
+NOTICE:  relation "repositories" already exists, skipping
+NOTICE:  relation "repositories_owner_updated_idx" already exists, skipping
+Applying 005_repository_metadata.sql
+NOTICE:  column "description" of relation "repositories" already exists, skipping
+Applying 006_performance_ledger.sql
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+NOTICE:  relation "user_storage_usage" already exists, skipping
+NOTICE:  column "reservation_bytes" of relation "file_uploads" already exists, skipping
+NOTICE:  column "reservation_bytes" of relation "vault_uploads" already exists, skipping
+NOTICE:  trigger "files_counter_change" for relation "files" does not exist, skipping
+Applying 007_observability.sql
+NOTICE:  extension "pg_stat_statements" already exists, skipping
+Applying 008_folder_manifest.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 008-folder-manifest
+Applying 009_upload_completion.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 009-upload-completion
+Applying 010_session_performance.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 010-session-performance
+Applying 011_admin_counter_triggers.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 011-admin-counter-triggers
+Applying 012_vault_query_performance.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+Skipping already-applied migration 012-vault-query-performance
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+Applying 013_migration_identity_performance.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+Applying 014_navigation_hot_paths.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 014-navigation-hot-paths
+Applying 015_collection_hierarchy_performance.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+NOTICE:  index "files_updated_at_idx" does not exist, skipping
+NOTICE:  index "files_favorite_idx" does not exist, skipping
+NOTICE:  index "files_recent_owner_idx" does not exist, skipping
+Skipping already-applied migration 015-collection-hierarchy-performance
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+Applying 016_admin_search_identifier_policy.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+NOTICE:  extension "pg_trgm" already exists, skipping
+NOTICE:  relation "legacy_text_identifier_columns" already exists, skipping
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+Applying 017_bounded_tree_operations.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+Applying 018_share_link_token_rotation.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 018-share-link-token-rotation
+Applying 019_share_link_rollout_compatibility.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 019-share-link-rollout-compatibility
+Applying 020_share_link_legacy_writer_guard.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 020-share-link-legacy-writer-guard
+Applying 021_compact_account_state.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 021-compact-account-state
+Applying 022_large_share_commitments.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 022-large-share-commitments
+Applying 023_maintenance_coordination.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 023-maintenance-coordination
+Applying 024_one_password_auth.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 025_trash_retention.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 025-trash-retention
+Applying 026_realtime_changes.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 026-realtime-changes
+Applying 027_flexible_retention_and_vault_lock.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 027-flexible-retention-and-vault-lock
+Applying 028_migration_progress.sql
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 028-migration-progress
+Applying 029_durable_tree_operations.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 029-durable-tree-operations
+Applying 030_repository_change_tracking.sql
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 030-repository-change-tracking
+Applying 031_realtime_background_audiences.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 031-realtime-background-audiences
+Applying 032_bucket_usage_snapshots.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 032-bucket-usage-snapshots
+Applying 034_indexed_trash_expiry.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 034-indexed-trash-expiry
+Applying 035_multipart_reconciliation.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Applying 036_maintenance_notifications.sql
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 036-maintenance-notifications
+PASS: migration ledger contains 31 rows for 31 ledger-backed migrations among 35 numbered files
+PASS: full_replay preserved definitions, all application rows and worker checkpoints; zero application DML; hierarchy validator was not called
+Observed two 032-bucket-usage-snapshots migration sessions blocked together on their advisory lock
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+AUDIT_CHAIN_LOCK_READY
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 032-bucket-usage-snapshots
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+Skipping already-applied migration 032-bucket-usage-snapshots
+PASS: migration ledger contains 31 rows for 31 ledger-backed migrations among 35 numbered files
+PASS: concurrent_032_replay preserved definitions, all application rows and worker checkpoints; zero application DML; hierarchy validator was not called
+Observed two 035-multipart-reconciliation migration sessions blocked together on their advisory lock
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+AUDIT_CHAIN_LOCK_READY
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+PASS: migration ledger contains 31 rows for 31 ledger-backed migrations among 35 numbered files
+PASS: concurrent_035_replay preserved definitions, all application rows and worker checkpoints; zero application DML; hierarchy validator was not called
+database/init/001_auth.sql: OK
+database/init/002_e2ee.sql: OK
+database/init/003_share_links.sql: OK
+database/init/004_repositories.sql: OK
+database/init/005_repository_metadata.sql: OK
+database/init/006_performance_ledger.sql: OK
+database/init/007_observability.sql: OK
+database/init/008_folder_manifest.sql: OK
+database/init/009_upload_completion.sql: OK
+database/init/010_session_performance.sql: OK
+database/init/011_admin_counter_triggers.sql: OK
+database/init/012_vault_query_performance.sql: OK
+database/init/013_migration_identity_performance.sql: OK
+database/init/014_navigation_hot_paths.sql: OK
+database/init/015_collection_hierarchy_performance.sql: OK
+database/init/016_admin_search_identifier_policy.sql: OK
+database/init/017_bounded_tree_operations.sql: OK
+database/init/018_share_link_token_rotation.sql: OK
+database/init/019_share_link_rollout_compatibility.sql: OK
+database/init/020_share_link_legacy_writer_guard.sql: OK
+database/init/021_compact_account_state.sql: OK
+database/init/022_large_share_commitments.sql: OK
+database/init/023_maintenance_coordination.sql: OK
+database/init/024_one_password_auth.sql: OK
+database/init/025_trash_retention.sql: OK
+database/init/026_realtime_changes.sql: OK
+database/init/027_flexible_retention_and_vault_lock.sql: OK
+database/init/028_migration_progress.sql: OK
+database/init/029_durable_tree_operations.sql: OK
+database/init/030_repository_change_tracking.sql: OK
+database/init/031_realtime_background_audiences.sql: OK
+database/init/032_bucket_usage_snapshots.sql: OK
+database/init/034_indexed_trash_expiry.sql: OK
+database/init/035_multipart_reconciliation.sql: OK
+database/init/036_maintenance_notifications.sql: OK
+PASS: full migration chain audit completed at 2026-09-12T11:43:08Z

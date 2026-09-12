@@ -1,11 +1,16 @@
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  publishWorkerAsset,
+  restoreWorkerAssets,
+} from "./worker-asset-store.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const directory = resolve(root, "public/workers");
 await mkdir(directory, { recursive: true });
+await restoreWorkerAssets(root);
 
 const assets = [
   ["ZIP_CODEC_WORKER_URL", "zip-codec", "worker.js", "zip-web-worker.js"],
@@ -18,11 +23,7 @@ for (const [name, prefix, extension, source] of assets) {
   );
   const hash = createHash("sha256").update(bytes).digest("hex");
   const filename = `${prefix}.${hash}.${extension}`;
-  for (const old of await readdir(directory)) {
-    if (old.startsWith(`${prefix}.`) && old !== filename)
-      await rm(resolve(directory, old));
-  }
-  await writeFile(resolve(directory, filename), bytes);
+  await publishWorkerAsset(root, filename, bytes);
   exports.push(`export const ${name} =\n  "/workers/${filename}" as const;`);
 }
 await mkdir(resolve(root, "src/generated"), { recursive: true });

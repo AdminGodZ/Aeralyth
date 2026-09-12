@@ -5,7 +5,10 @@ import {
   isProbablyText,
   type RepositoryFilePresentation,
 } from "@/features/repositories/repository-file-types";
-import { readEncryptedFileBlob } from "@/features/vault/encrypted-download";
+import {
+  readEncryptedFileBlob,
+  readEncryptedFilePrefix,
+} from "@/features/vault/encrypted-download";
 import type { VaultManifest } from "@/features/vault/protocol";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
@@ -21,6 +24,7 @@ export type LoadedRepositoryFile = {
   mimeType: string | null;
   name: string;
   sizeBytes: number;
+  verification: "none" | "full" | "partial";
 };
 
 export type PreparedRepositoryFile = LoadedRepositoryFile & {
@@ -52,10 +56,6 @@ export async function loadRepositoryFile({
   if (entry.entryType !== "file") {
     throw new Error("Only repository files can be previewed.");
   }
-  if (entry.sizeBytes > MAX_REPOSITORY_PREVIEW_BYTES) {
-    throw new RepositoryPreviewTooLargeError(entry.sizeBytes);
-  }
-
   if (entry.e2eeState === "encrypted") {
     if (!vault.client) {
       throw new Error("Unlock the vault to preview this encrypted file.");
@@ -64,40 +64,68 @@ export async function loadRepositoryFile({
     if (manifest.entryType !== "file") {
       throw new Error("The encrypted repository metadata is inconsistent.");
     }
-    if (manifest.plaintextBytes > MAX_REPOSITORY_PREVIEW_BYTES) {
-      throw new RepositoryPreviewTooLargeError(manifest.plaintextBytes);
-    }
+    const budget = previewBudget(
+      manifest.name,
+      manifest.mimeType,
+      manifest.plaintextBytes,
+    );
     const plan = await getVaultDownloadPlan(entry.id, signal);
-    const blob = await readEncryptedFileBlob({
+    const options = {
       plan,
       manifest,
       client: vault.client,
       signal,
       onProgress,
-    });
+    };
+    const { blob, verification } =
+      budget < manifest.plaintextBytes
+        ? await readEncryptedFilePrefix({
+            ...options,
+            maxPlaintextBytes: budget,
+          })
+        : {
+            blob: await readEncryptedFileBlob(options),
+            verification: "full" as const,
+          };
     return {
       blob,
       lastModified: manifest.lastModified,
       mimeType: manifest.mimeType,
       name: manifest.name,
       sizeBytes: manifest.plaintextBytes,
+      verification,
     };
   }
 
+  const budget = previewBudget(resolvedName, entry.mimeType, entry.sizeBytes);
+  const partial = budget < entry.sizeBytes;
   const response = await fetch(
     `/api/files/${encodeURIComponent(entry.id)}/download`,
-    { signal, cache: "no-store" },
+    {
+      signal,
+      cache: "no-store",
+      ...(partial ? { headers: { Range: `bytes=0-${budget - 1}` } } : {}),
+    },
   );
   if (!response.ok) {
     throw new Error(`File preview failed (${response.status}).`);
   }
-  const blob = await readResponseBlob(response, entry.sizeBytes, onProgress);
+  const blob = await readResponseBlob({
+    response,
+    expectedBytes: Math.min(entry.sizeBytes, budget),
+    totalBytes: entry.sizeBytes,
+    byteLimit: budget,
+    partial,
+    signal,
+    onProgress,
+  });
   return {
     blob,
     lastModified: parseTimestamp(entry.updatedAt),
-    mimeType: blob.type || entry.mimeType,
+    mimeType: entry.mimeType,
     name: resolvedName,
-    sizeBytes: blob.size,
+    sizeBytes: entry.sizeBytes,
+    verification: "none",
   };
 }
 
@@ -125,16 +153,25 @@ export async function prepareRepositoryFile(
   let text: string | null = null;
   let textTruncated = false;
 
-  if (presentation.kind === "binary" && isProbablyText(bytes)) {
+  if (
+    presentation.kind === "binary" &&
+    isProbablyText(bytes, bytes.byteLength < file.sizeBytes)
+  ) {
     presentation = { kind: "text", label: "Text", language: "text" };
   }
   if (presentation.kind === "text" || presentation.kind === "markdown") {
-    const decoded = decodeRepositoryText(bytes);
+    const decoded = decodeRepositoryText(
+      bytes,
+      bytes.byteLength < file.sizeBytes,
+    );
     encoding = decoded.encoding;
     textTruncated =
-      file.blob.size > bytes.byteLength ||
+      file.sizeBytes > bytes.byteLength ||
       decoded.text.length > MAX_RENDERED_SOURCE_CHARACTERS;
     text = decoded.text.slice(0, MAX_RENDERED_SOURCE_CHARACTERS);
+    // Keep the display cap from splitting an otherwise valid surrogate pair.
+    if (textTruncated && /[\uD800-\uDBFF]$/u.test(text))
+      text = text.slice(0, -1);
   }
 
   return {
@@ -147,50 +184,106 @@ export async function prepareRepositoryFile(
   };
 }
 
-async function readResponseBlob(
-  response: Response,
-  expectedBytes: number,
-  onProgress?: (percentage: number | null) => void,
-): Promise<Blob> {
+function previewBudget(
+  name: string,
+  mimeType: string | null,
+  sizeBytes: number,
+) {
+  const { kind } = getRepositoryFilePresentation(name, mimeType);
+  if (kind === "text" || kind === "markdown" || kind === "binary") {
+    return MAX_REPOSITORY_TEXT_BYTES;
+  }
+  if (sizeBytes > MAX_REPOSITORY_PREVIEW_BYTES) {
+    throw new RepositoryPreviewTooLargeError(sizeBytes);
+  }
+  return MAX_REPOSITORY_PREVIEW_BYTES;
+}
+
+async function readResponseBlob({
+  response,
+  expectedBytes,
+  totalBytes,
+  byteLimit,
+  partial,
+  signal,
+  onProgress,
+}: {
+  response: Response;
+  expectedBytes: number;
+  totalBytes: number;
+  byteLimit: number;
+  partial: boolean;
+  signal?: AbortSignal;
+  onProgress?: (percentage: number | null) => void;
+}): Promise<Blob> {
+  signal?.throwIfAborted();
+  if (response.status === 206) {
+    const range = /^bytes 0-(\d+)\/(\d+)$/u.exec(
+      response.headers.get("content-range") ?? "",
+    );
+    if (
+      !partial ||
+      !range ||
+      Number(range[1]) + 1 !== expectedBytes ||
+      Number(range[2]) !== totalBytes
+    ) {
+      await response.body?.cancel();
+      throw new Error("The file preview returned an invalid byte range.");
+    }
+  }
   if (!response.body) {
-    const blob = await response.blob();
+    if (expectedBytes > 0) {
+      throw new Error("The file preview response did not contain file data.");
+    }
     onProgress?.(100);
-    return blob;
+    return new Blob([], { type: response.headers.get("content-type") ?? "" });
   }
 
-  const headerBytes = Number.parseInt(
-    response.headers.get("content-length") ?? "",
-    10,
-  );
-  const totalBytes =
-    Number.isFinite(headerBytes) && headerBytes > 0
-      ? headerBytes
-      : expectedBytes > 0
-        ? expectedBytes
-        : null;
   const reader = response.body.getReader();
   const chunks: Uint8Array<ArrayBuffer>[] = [];
   let receivedBytes = 0;
-
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    const chunk = Uint8Array.from(value);
-    chunks.push(chunk);
-    receivedBytes += chunk.byteLength;
-    onProgress?.(
-      totalBytes ? Math.min(99, (receivedBytes / totalBytes) * 100) : null,
-    );
-    if (receivedBytes > MAX_REPOSITORY_PREVIEW_BYTES) {
-      await reader.cancel();
-      throw new RepositoryPreviewTooLargeError(receivedBytes);
+  const cancel = () => {
+    void reader.cancel(signal?.reason).catch(() => undefined);
+  };
+  signal?.addEventListener("abort", cancel, { once: true });
+  try {
+    while (true) {
+      signal?.throwIfAborted();
+      const { done, value } = await reader.read();
+      signal?.throwIfAborted();
+      if (done) break;
+      const remaining = byteLimit - receivedBytes;
+      if (!partial && value.byteLength > remaining) {
+        throw new RepositoryPreviewTooLargeError(
+          receivedBytes + value.byteLength,
+        );
+      }
+      // Fetch gives each read its own immutable chunk. Retain that view instead
+      // of making a second application copy; Blob snapshots it before release.
+      const chunk =
+        value.byteLength > remaining ? value.subarray(0, remaining) : value;
+      chunks.push(chunk);
+      receivedBytes += chunk.byteLength;
+      onProgress?.(
+        expectedBytes
+          ? Math.min(99, (receivedBytes / expectedBytes) * 100)
+          : null,
+      );
+      if (partial && receivedBytes === byteLimit) break;
     }
+    if (receivedBytes !== expectedBytes) {
+      throw new Error("The file preview response was incomplete.");
+    }
+    onProgress?.(100);
+    return new Blob(chunks, {
+      type: response.headers.get("content-type") ?? "application/octet-stream",
+    });
+  } finally {
+    signal?.removeEventListener("abort", cancel);
+    await reader.cancel().catch(() => undefined);
+    reader.releaseLock();
+    chunks.length = 0;
   }
-
-  onProgress?.(100);
-  return new Blob(chunks, {
-    type: response.headers.get("content-type") ?? "application/octet-stream",
-  });
 }
 
 function parseTimestamp(value: string): number {

@@ -41,6 +41,10 @@ class FakeWorker {
       listener({ data: message });
     }
   }
+
+  fail(type: "error" | "messageerror"): void {
+    for (const listener of this.listeners.get(type) ?? []) listener({});
+  }
 }
 
 afterEach(() => {
@@ -49,6 +53,23 @@ afterEach(() => {
 });
 
 describe("browser archive worker", () => {
+  it.each(["error", "messageerror"] as const)(
+    "settles %s with an explicit recovery action and terminates the worker",
+    async (failure) => {
+      vi.stubGlobal("Worker", FakeWorker);
+      const result = createBrowserZip({
+        sources: [],
+        workerName: "test-zip",
+        errorMessage: "The archive failed.",
+        onProgress: () => undefined,
+      });
+      const worker = FakeWorker.current;
+      worker?.fail(failure);
+      await expect(result).rejects.toThrow("Reload the application");
+      expect(worker?.terminated).toBe(true);
+    },
+  );
+
   it("forwards progress and terminates after returning the ZIP", async () => {
     vi.stubGlobal("Worker", FakeWorker);
     const onProgress = vi.fn();

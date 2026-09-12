@@ -53,6 +53,12 @@ CREATE INDEX CONCURRENTLY vault_shares_owner_root_page_idx
   WHERE status IN ('active', 'rotating');
 \endif
 
+SELECT NOT EXISTS (
+  SELECT 1 FROM schema_migrations WHERE version = '015-collection-hierarchy-performance'
+) AS apply_migration \gset
+
+\if :apply_migration
+
 BEGIN;
 
 CREATE OR REPLACE FUNCTION assert_file_hierarchy_valid(changed_ids TEXT[])
@@ -215,5 +221,9 @@ VALUES ('015-collection-hierarchy-performance')
 ON CONFLICT (version) DO NOTHING;
 
 COMMIT;
+
+\else
+\echo 'Skipping already-applied migration 015-collection-hierarchy-performance'
+\endif
 
 SELECT pg_advisory_unlock(hashtextextended('aeralyth:migration:015-collection-hierarchy-performance', 0));

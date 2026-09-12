@@ -156,7 +156,13 @@ export function createBrowserZip({
       complete();
     };
     const abort = () => {
-      worker.postMessage({ type: "cancel" });
+      // Termination below cancels work even if the worker failed to deserialize
+      // a message or stopped before it could acknowledge cancellation.
+      try {
+        worker.postMessage({ type: "cancel" });
+      } catch {
+        // A failed worker must not prevent the caller's abort from settling.
+      }
       settle(() => reject(abortReason(signal)));
     };
     signal?.addEventListener("abort", abort, { once: true });
@@ -184,9 +190,17 @@ export function createBrowserZip({
         }
       },
     );
-    worker.addEventListener("error", () => {
-      settle(() => reject(new Error(errorMessage)));
-    });
+    const failWorker = () => {
+      settle(() =>
+        reject(
+          new Error(
+            `${errorMessage} Reload the application, then retry the archive.`,
+          ),
+        ),
+      );
+    };
+    worker.addEventListener("error", failWorker);
+    worker.addEventListener("messageerror", failWorker);
     try {
       worker.postMessage({
         type: "compress",

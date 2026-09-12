@@ -30,10 +30,22 @@
 		}
 	}
 
-	@workers path /workers/*
-	header @workers {
-		>Cache-Control "public, max-age=31536000, immutable"
-		>CDN-Cache-Control "public, max-age=31536000, immutable"
+	handle /workers/* {
+		root * /app/frontend/public
+		@existingWorker file
+		handle @existingWorker {
+			header {
+				Cache-Control "public, max-age=31536000, immutable"
+				CDN-Cache-Control "public, max-age=31536000, immutable"
+			}
+			file_server
+		}
+		handle {
+			# A missing release must remain recoverable after rollout. Never cache
+			# its 404 for the immutable asset's one-year lifetime.
+			header Cache-Control "no-store"
+			respond "Worker asset unavailable. Reload the application and retry." 404
+		}
 	}
 
 	@api path /api/* /health /health/* /metrics

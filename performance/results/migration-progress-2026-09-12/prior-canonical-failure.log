@@ -1,0 +1,7 @@
+Excerpt of root /tmp/aeralyth-backend-final-all-tests.log before the EXCEPT repair; the full suite reported 259 passed and 2 failed. This excerpt isolates the PERF-008 regression.
+
+---- routes::tree_walk::tests::bounded_tree_walk_reaches_scale_fixture stdout ----
+
+thread 'routes::tree_walk::tests::bounded_tree_walk_reaches_scale_fixture' (260656) panicked at src/routes/tree_walk.rs:408:18:
+bounded trash batches should execute: Error { kind: Db, cause: Some(DbError { severity: "ERROR", parsed_severity: Some(Error), code: SqlState(E57014), message: "canceling statement due to statement timeout", detail: None, hint: None, position: None, where_: Some("SQL statement \"UPDATE vault_migration_node_progress AS progress SET legacy = FALSE, staged = FALSE\n    FROM old_files AS previous\n    WHERE progress.owner_id = previous.owner_id AND progress.node_id = previous.id\n      AND (progress.legacy OR progress.staged)\n      AND NOT EXISTS (\n        SELECT 1 FROM new_files AS next\n        WHERE next.owner_id = previous.owner_id AND next.id = previous.id\n          AND next.e2ee_state = previous.e2ee_state\n      )\"\nPL/pgSQL function track_file_migration_progress() line 11 at SQL statement"), schema: None, table: None, column: None, datatype: None, constraint: None, file: Some("postgres.c"), line: Some(3444), routine: Some("ProcessInterrupts") }) }
+

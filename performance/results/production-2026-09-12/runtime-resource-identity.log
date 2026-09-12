@@ -1,0 +1,1 @@
+{"nanoCpus":2000000000,"memory":2147483648,"ports":{"8080/tcp":[{"HostIp":"127.0.0.1","HostPort":"58082"}]},"image":"sha256:0d1348f5ae29632604e17af13d7be8035727246ccdf4c3b4343d989b46f7ccc6"}

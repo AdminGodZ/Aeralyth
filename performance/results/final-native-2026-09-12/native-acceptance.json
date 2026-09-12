@@ -1,0 +1,137 @@
+{
+  "recordedAt": "2026-09-12T12:25:12.967430+00:00",
+  "scope": "Final native release and debug mixed/idle gates plus release database-stall self-test. Browser, metadata and image acceptance are separate records.",
+  "sourceCurrent": true,
+  "passed": true,
+  "steps": [
+    {
+      "profile": "release",
+      "binarySha256": "744a513655b7efd0a28d7cf406a077f59aa05e3939ec48ead58234b236b0e7e8",
+      "sourceSha256": "6a9494aa3f7e781e81289f0a3f10b1f1590f5988e563753c30489897c8beefab",
+      "passed": true,
+      "offered": 400,
+      "completed": 400,
+      "failed": 0,
+      "dropped": 0,
+      "mixedP99Ms": 50.024459000000206,
+      "memory": {
+        "source": "api-rss",
+        "initialBytes": 50413568,
+        "finalBytes": 53428224,
+        "peakBytes": 53428224,
+        "growthBytes": 3014656
+      },
+      "idleMaintenance": {
+        "durationMs": 2079.5757920000033,
+        "maximumRunsPerSecond": 10,
+        "workers": {
+          "encrypted upload expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "invitation expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "legacy upload expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "multipart reconciliation": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "session expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "storage deletion": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "trash expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "upload finalization": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "user deletion": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          }
+        },
+        "violations": []
+      }
+    },
+    {
+      "profile": "debug",
+      "binarySha256": "7729508bb391713a8e750daaf23e6d4afda23e7b1dd9578be2e632362ff41b3b",
+      "sourceSha256": "6a9494aa3f7e781e81289f0a3f10b1f1590f5988e563753c30489897c8beefab",
+      "passed": true,
+      "offered": 400,
+      "completed": 400,
+      "failed": 0,
+      "dropped": 0,
+      "mixedP99Ms": 52.39500000000044,
+      "memory": {
+        "source": "api-rss",
+        "initialBytes": 69926912,
+        "finalBytes": 74563584,
+        "peakBytes": 74563584,
+        "growthBytes": 4636672
+      },
+      "idleMaintenance": {
+        "durationMs": 2074.0176250000004,
+        "maximumRunsPerSecond": 10,
+        "workers": {
+          "encrypted upload expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "invitation expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "legacy upload expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "multipart reconciliation": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "session expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "storage deletion": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "trash expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "upload finalization": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "user deletion": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          }
+        },
+        "violations": []
+      }
+    }
+  ],
+  "releaseDatabaseStallSelfTest": {
+    "passed": true,
+    "expectedGateFailure": true,
+    "report": "release/database-stall.json",
+    "validationLog": "release/database-stall.stdout.log"
+  },
+  "sourceCurrentScope": "The Rust/Cargo application, migrations, binary, and exercised mixed-workload inputs remain current. The separate external observability probe changed after these runs; each artifact identity preserves that broader workload-manifest drift."
+}

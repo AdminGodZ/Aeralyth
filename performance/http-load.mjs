@@ -1,4 +1,5 @@
 import { performance } from "node:perf_hooks";
+import { latencySummary } from "./arrival-load.mjs";
 
 const targetValue =
   process.env.AERALYTH_PERF_URL ?? "http://127.0.0.1:8080/health";
@@ -12,6 +13,9 @@ const warmupRequests = nonNegativeInteger("AERALYTH_PERF_WARMUP_REQUESTS", 20);
 const timeoutMs = positiveNumber("AERALYTH_PERF_TIMEOUT_MS", 5_000);
 const maximumP95Ms = positiveNumber("AERALYTH_PERF_MAX_P95_MS", 250);
 const maximumErrorRate = nonNegativeNumber("AERALYTH_PERF_MAX_ERROR_RATE", 0);
+if (maximumErrorRate > 1) {
+  throw new Error("AERALYTH_PERF_MAX_ERROR_RATE must be at most 1.");
+}
 
 if (
   !isLoopback(target.hostname) &&
@@ -25,23 +29,27 @@ if (
 await runRequests(warmupRequests, Math.min(concurrency, warmupRequests || 1));
 const samples = await runRequests(requestCount, concurrency);
 const successful = samples.filter((sample) => sample.ok);
-const durations = successful
-  .map((sample) => sample.durationMs)
-  .sort((a, b) => a - b);
+const durations = samples.map((sample) => sample.durationMs);
 const failed = requestCount - successful.length;
 const errorRate = failed / requestCount;
 const result = {
   target: target.toString(),
+  workloadModel: "closed-loop-smoke",
   requests: requestCount,
+  offered: requestCount,
+  started: samples.length,
+  completed: samples.length,
+  dropped: 0,
   concurrency,
   successful: successful.length,
   failed,
   errorRate,
-  latencyMs: {
-    p50: percentile(durations, 0.5),
-    p95: percentile(durations, 0.95),
-    p99: percentile(durations, 0.99),
-    max: durations.at(-1) ?? null,
+  latencyMs: latencySummary(durations),
+  latencyByOutcomeMs: {
+    success: latencySummary(successful.map((sample) => sample.durationMs)),
+    failure: latencySummary(
+      samples.filter((sample) => !sample.ok).map((sample) => sample.durationMs),
+    ),
   },
   thresholds: {
     maximumP95Ms,
@@ -75,7 +83,7 @@ if (metricsToken) {
   }
 }
 
-if (durations.length === 0) {
+if (successful.length === 0) {
   throw new Error("The load check did not receive a successful response.");
 }
 if ((result.latencyMs.p95 ?? Number.POSITIVE_INFINITY) > maximumP95Ms) {
@@ -126,11 +134,6 @@ async function runRequests(count, workerCount) {
   );
   await Promise.all(workers);
   return results;
-}
-
-function percentile(sorted, fraction) {
-  if (sorted.length === 0) return null;
-  return sorted[Math.ceil(sorted.length * fraction) - 1];
 }
 
 function isLoopback(hostname) {

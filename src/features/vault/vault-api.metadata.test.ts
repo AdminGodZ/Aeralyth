@@ -37,11 +37,19 @@ describe("vault metadata plan API", () => {
     >(async () => Response.json({ plans: [] }, { status: 200 }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await getVaultMetadataPlans("csrf-token", ["fil_metadata"], 42);
+    await getVaultMetadataPlans(
+      "csrf-token",
+      ["fil_metadata"],
+      42,
+      undefined,
+      undefined,
+      "bound-version",
+    );
 
     expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({
       nodeIds: ["fil_metadata"],
       continuation: 42,
+      snapshot: "bound-version",
     });
   });
 

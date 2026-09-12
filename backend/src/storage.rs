@@ -3,6 +3,7 @@ use std::error::Error as StdError;
 use std::fmt;
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use aws_config::BehaviorVersion;
@@ -24,7 +25,7 @@ use aws_types::region::Region;
 use futures_util::future::{Either, select};
 use futures_util::{StreamExt, stream};
 use serde::Serialize;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, watch};
 use tokio::task::JoinSet;
 use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep};
 use tokio_postgres::{AsyncMessage, NoTls};
@@ -34,19 +35,21 @@ use crate::db::Database;
 use crate::e2ee::{UPLOAD_PART_BYTES, uses_vault_multipart_upload};
 use crate::observability::Metrics;
 use crate::upload_completion::{
-    FileUploadFinalizeOutcome, claim_file_upload_completions, completion_retry_delay_seconds,
-    defer_file_upload_completion, file_upload_metadata_matches, finalize_file_upload_record,
-    transition_file_upload_to_cleanup,
+    FileUploadFinalizeOutcome, UploadClaimCursor, claim_file_upload_completions,
+    completion_retry_delay_seconds, defer_file_upload_completion, file_upload_metadata_matches,
+    finalize_file_upload_record, lock_upload_claim_owners, transition_file_upload_to_cleanup,
 };
 
-const MULTIPART_RECONCILIATION_LOCK_ID: i64 = 4_133_797_884_291_001;
+const MULTIPART_SWEEP_PAGES_PER_TICK: usize = 4;
+const MULTIPART_PREPARE_BATCH_SIZE: usize = 64;
+const MULTIPART_SWEEP_LEASE_SECONDS: i64 = 120;
 const COUNTER_RECONCILIATION_LOCK_ID: i64 = 4_133_797_884_291_002;
 const STORAGE_OBJECT_PREFIX: &str = "users/";
 const USER_DELETION_BATCH_SIZE: i64 = 500;
 const USER_DELETION_BATCHES_PER_TICK: usize = 32;
 const SESSION_EXPIRY_BATCH_SIZE: i64 = 1_000;
 const SESSION_EXPIRY_BATCHES_PER_TICK: usize = 4;
-const TRASH_EXPIRY_BATCH_SIZE: i64 = 500;
+const TRASH_EXPIRY_BATCH_SIZE: i32 = 500;
 const TRASH_EXPIRY_BATCHES_PER_TICK: usize = 32;
 const MAINTENANCE_RESTART_DELAY: Duration = Duration::from_secs(1);
 const S3_REQUEST_CONNECT_TIMEOUT: Duration = Duration::from_secs(3);
@@ -58,42 +61,95 @@ const S3_MAINTENANCE_READ_TIMEOUT: Duration = Duration::from_secs(20);
 const S3_MAINTENANCE_OPERATION_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(20);
 const S3_MAINTENANCE_OPERATION_TIMEOUT: Duration = Duration::from_secs(60);
 const MULTIPART_LIFECYCLE_RULE_ID: &str = "aeralyth-abort-incomplete-multipart";
-const LIFECYCLE_BACKED_RECONCILIATION_INTERVAL: Duration = Duration::from_secs(24 * 60 * 60);
+
 const COUNTER_RECONCILIATION_BATCH_SIZE: i64 = 500;
 const STORAGE_JOB_LEASE_SECONDS: i64 = 5 * 60;
 const STORAGE_JOB_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const MAINTENANCE_DEAD_LETTER_ATTEMPTS: i32 = 12;
 const RETRY_DELAY_FLOOR_SECONDS: i64 = 10;
 const RETRY_DELAY_CAP_SECONDS: i64 = 60 * 60;
+const CANDIDATE_EXPIRED_VAULT_UPLOADS_QUERY: &str = "
+    WITH due AS MATERIALIZED (
+      SELECT id, owner_id, expires_at
+      FROM vault_uploads
+      WHERE status IN ('initializing', 'pending', 'completing', 'aborting')
+        AND expires_at <= $4::timestamptz
+        AND (expires_at, id) > (
+          COALESCE($2::timestamptz, '-infinity'::timestamptz), COALESCE($3::text, '')
+        )
+      ORDER BY expires_at, id
+      LIMIT $1
+    )
+    SELECT id, owner_id, expires_at FROM due ORDER BY expires_at, id
+";
+const CANDIDATE_EXPIRED_FILE_UPLOADS_QUERY: &str = "
+    WITH due AS MATERIALIZED (
+      SELECT id, owner_id, expires_at
+      FROM file_uploads
+      WHERE status IN ('initializing', 'pending', 'aborting')
+        AND expires_at <= $4::timestamptz
+        AND (expires_at, id) > (
+          COALESCE($2::timestamptz, '-infinity'::timestamptz), COALESCE($3::text, '')
+        )
+      ORDER BY expires_at, id
+      LIMIT $1
+    )
+    SELECT id, owner_id, expires_at FROM due ORDER BY expires_at, id
+";
 const CLAIM_EXPIRED_VAULT_UPLOADS_QUERY: &str = "
     WITH claimed AS (
       SELECT id
-      FROM vault_uploads
-      WHERE status IN ('initializing', 'pending', 'completing', 'aborting')
+      FROM vault_uploads AS uploads
+      WHERE id = ANY($1::text[]) AND owner_id = ANY($2::text[])
+        AND status IN ('initializing', 'pending', 'completing', 'aborting')
         AND expires_at <= now()
+        AND NOT EXISTS (
+          SELECT 1 FROM tree_operation_jobs AS jobs
+          WHERE jobs.owner_id = uploads.owner_id AND jobs.status IN ('pending', 'running')
+            AND (
+              tree_operation_ancestor(uploads.node_id, uploads.owner_id, jobs.root_id)
+              OR tree_operation_ancestor(uploads.parent_id, uploads.owner_id, jobs.root_id)
+            )
+        )
       ORDER BY expires_at, id
       LIMIT 25
       FOR UPDATE SKIP LOCKED
     )
     UPDATE vault_uploads AS uploads
-    SET status = 'aborting', expires_at = now() + interval '5 minutes'
+    SET status = 'aborting',
+        expires_at = CASE WHEN uploads.write_expires_at > now()
+          THEN uploads.write_expires_at ELSE now() + interval '5 minutes' END
     FROM claimed
     WHERE uploads.id = claimed.id
-    RETURNING uploads.id, uploads.object_key,
+    RETURNING uploads.id, uploads.owner_id, uploads.object_key,
               uploads.multipart_upload_id, uploads.write_expires_at
 ";
 const CLAIM_EXPIRED_FILE_UPLOADS_QUERY: &str = "
     WITH claimed AS (
       SELECT id
-      FROM file_uploads
-      WHERE status IN ('initializing', 'pending', 'aborting')
+      FROM file_uploads AS uploads
+      WHERE id = ANY($1::text[]) AND owner_id = ANY($2::text[])
+        AND status IN ('initializing', 'pending', 'aborting')
         AND expires_at <= now()
+        AND NOT EXISTS (
+          SELECT 1 FROM tree_operation_jobs AS jobs
+          WHERE jobs.owner_id = uploads.owner_id AND jobs.status IN ('pending', 'running')
+            AND (
+              tree_operation_ancestor(uploads.file_id, uploads.owner_id, jobs.root_id)
+              OR tree_operation_ancestor(uploads.parent_id, uploads.owner_id, jobs.root_id)
+              OR tree_operation_ancestor(uploads.replacement_file_id, uploads.owner_id, jobs.root_id)
+              OR EXISTS (
+                SELECT 1 FROM share_links AS links WHERE links.id = uploads.share_link_id
+                  AND tree_operation_ancestor(links.root_file_id, uploads.owner_id, jobs.root_id)
+              )
+            )
+        )
       ORDER BY expires_at, id
       LIMIT 25
       FOR UPDATE SKIP LOCKED
-    )
+    ), transitioned AS (
     UPDATE file_uploads AS uploads
-    SET expires_at = now() + interval '5 minutes'
+    SET status = 'aborting', expires_at = now() + interval '24 hours'
     FROM claimed
     WHERE uploads.id = claimed.id
     RETURNING
@@ -108,7 +164,25 @@ const CLAIM_EXPIRED_FILE_UPLOADS_QUERY: &str = "
       uploads.upload_mode,
       uploads.multipart_upload_id,
       uploads.status,
-      uploads.checksum_sha256
+      uploads.checksum_sha256,
+      uploads.write_expires_at
+    ), queued AS (
+      INSERT INTO storage_deletion_jobs (object_key, multipart_upload_id, available_at)
+      SELECT object_key, multipart_upload_id,
+        CASE WHEN upload_mode = 'single'
+          THEN GREATEST(COALESCE(write_expires_at, now()), now())
+          ELSE now()
+        END
+      FROM transitioned
+      ON CONFLICT (object_key) DO UPDATE SET
+        multipart_upload_id = COALESCE(
+          EXCLUDED.multipart_upload_id, storage_deletion_jobs.multipart_upload_id
+        ),
+        available_at = GREATEST(storage_deletion_jobs.available_at, EXCLUDED.available_at)
+      RETURNING object_key
+    )
+    SELECT transitioned.* FROM transitioned
+    WHERE (SELECT count(*) FROM queued) >= 0
 ";
 const CLAIM_STORAGE_DELETION_JOBS_QUERY: &str = "
     WITH claimed AS (
@@ -150,54 +224,7 @@ const COMPLETE_MIGRATION_CLEANUP_QUERY: &str = "
     SET state = 'complete', updated_at = now()
     WHERE legacy_object_key = $1 AND state = 'cleanup_queued'
 ";
-const EXPIRE_TRASH_BATCH_QUERY: &str = "
-    WITH targets AS MATERIALIZED (
-      SELECT files.id, files.owner_id, files.storage_name, files.entry_type,
-             uploads.upload_mode, uploads.write_expires_at
-      FROM files
-      INNER JOIN users ON users.id = files.owner_id
-      LEFT JOIN file_uploads AS uploads
-        ON uploads.file_id = files.id AND uploads.status = 'completed'
-      WHERE files.state = 'trashed'
-        AND files.trashed_at IS NOT NULL
-        AND files.trashed_at
-              + (users.trash_retention_minutes * interval '1 minute') <= now()
-        AND NOT EXISTS (
-          SELECT 1 FROM files AS children WHERE children.parent_id = files.id
-        )
-      ORDER BY files.trashed_at, files.id
-      LIMIT $1
-      FOR UPDATE OF files SKIP LOCKED
-    ), queued AS (
-      INSERT INTO storage_deletion_jobs (object_key, available_at)
-      SELECT
-        CASE
-          WHEN position('/' IN targets.storage_name) = 0
-            THEN targets.owner_id || '/' || targets.storage_name
-          ELSE targets.storage_name
-        END,
-        CASE
-          WHEN targets.upload_mode = 'single'
-            THEN GREATEST(COALESCE(targets.write_expires_at, now()), now())
-          ELSE now()
-        END
-      FROM targets
-      WHERE targets.entry_type = 'file'
-      ON CONFLICT (object_key) DO UPDATE SET
-        available_at = GREATEST(
-          storage_deletion_jobs.available_at,
-          EXCLUDED.available_at
-        )
-      RETURNING object_key
-    ), deleted AS (
-      DELETE FROM files AS entries
-      USING targets
-      WHERE entries.id = targets.id
-        AND (SELECT count(*) FROM queued) >= 0
-      RETURNING entries.id
-    )
-    SELECT count(*)::bigint AS deleted FROM deleted
-";
+const EXPIRE_TRASH_BATCH_QUERY: &str = "SELECT expire_trash_batch($1) AS deleted";
 const RECONCILE_USER_COUNTERS_PAGE_QUERY: &str = "
     WITH owners AS MATERIALIZED (
       SELECT id
@@ -623,8 +650,8 @@ const MAINTENANCE_SCHEDULES: &[MaintenanceSchedule] = &[
     MaintenanceSchedule {
         worker: MaintenanceWorker::MultipartReconciliation,
         initial_delay: Duration::from_secs(0),
-        interval: Duration::from_secs(60 * 60),
-        maximum_interval: Duration::from_secs(60 * 60),
+        interval: Duration::from_secs(2),
+        maximum_interval: Duration::from_secs(60),
     },
     MaintenanceSchedule {
         worker: MaintenanceWorker::CounterReconciliation,
@@ -635,13 +662,11 @@ const MAINTENANCE_SCHEDULES: &[MaintenanceSchedule] = &[
 ];
 
 fn effective_maintenance_schedule(
-    mut schedule: MaintenanceSchedule,
-    lifecycle_backstop_enabled: bool,
+    schedule: MaintenanceSchedule,
+    _lifecycle_backstop_enabled: bool,
 ) -> MaintenanceSchedule {
-    if schedule.worker == MaintenanceWorker::MultipartReconciliation && lifecycle_backstop_enabled {
-        schedule.interval = LIFECYCLE_BACKED_RECONCILIATION_INTERVAL;
-        schedule.maximum_interval = LIFECYCLE_BACKED_RECONCILIATION_INTERVAL;
-    }
+    // The durable sweep cursor stores its next full-scan deadline. The worker
+    // still wakes promptly to resume a segment or reclaim an interrupted abort.
     schedule
 }
 
@@ -653,6 +678,9 @@ pub enum Storage {
     S3 {
         client: aws_sdk_s3::Client,
         maintenance_client: aws_sdk_s3::Client,
+        maintenance_budget: Arc<Semaphore>,
+        namespace: String,
+        metrics: Metrics,
         bucket: String,
         legacy_root: PathBuf,
         presign_seconds: u64,
@@ -661,6 +689,17 @@ pub enum Storage {
         multipart_orphan_grace_seconds: u64,
         lifecycle_backstop_enabled: bool,
     },
+}
+
+pub struct MaintenanceProviderPermit {
+    _permit: OwnedSemaphorePermit,
+    metrics: Metrics,
+}
+
+impl Drop for MaintenanceProviderPermit {
+    fn drop(&mut self) {
+        self.metrics.maintenance_provider_finished();
+    }
 }
 
 #[derive(Debug)]
@@ -724,12 +763,14 @@ pub struct MultipartUploadPage {
     pub next_upload_id_marker: Option<String>,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MultipartIntentSource {
     File,
     Vault,
 }
 
+#[cfg(test)]
 #[derive(Debug)]
 struct MultipartIntent {
     source: MultipartIntentSource,
@@ -738,6 +779,7 @@ struct MultipartIntent {
     protected_until: SystemTime,
 }
 
+#[cfg(test)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum MultipartReconciliationAction {
     Keep,
@@ -783,13 +825,14 @@ impl Storage {
                 policy: S3RequestPolicy::Request,
             })
             .build();
+        let namespace = format!("{endpoint}|{bucket}");
         let maintenance_s3_config = aws_sdk_s3::config::Builder::from(&shared_config)
             .endpoint_url(endpoint)
             .force_path_style(config.s3_force_path_style)
             .timeout_config(S3RequestPolicy::Maintenance.timeout_config())
             .retry_config(S3RequestPolicy::Maintenance.retry_config())
             .interceptor(S3RetryMetricsInterceptor {
-                metrics,
+                metrics: metrics.clone(),
                 policy: S3RequestPolicy::Maintenance,
             })
             .build();
@@ -802,6 +845,11 @@ impl Storage {
         Ok(Self::S3 {
             client,
             maintenance_client,
+            maintenance_budget: Arc::new(Semaphore::new(
+                config.storage_maintenance_concurrency.max(1),
+            )),
+            namespace,
+            metrics,
             bucket,
             legacy_root: PathBuf::from(&config.storage_path),
             presign_seconds: config.storage_presign_seconds,
@@ -810,6 +858,36 @@ impl Storage {
             multipart_orphan_grace_seconds: config.storage_multipart_orphan_grace_seconds,
             lifecycle_backstop_enabled: config.s3_abort_incomplete_multipart_days.is_some(),
         })
+    }
+
+    /// Each permit covers exactly one provider operation, including its SDK retries.
+    /// All maintenance workers and bucket scans share this fair FIFO budget. Interactive
+    /// requests use their own client/admission, so cleanup cannot occupy their capacity.
+    pub async fn maintenance_provider_permit(&self) -> Option<MaintenanceProviderPermit> {
+        let Self::S3 {
+            maintenance_budget,
+            metrics,
+            ..
+        } = self
+        else {
+            return None;
+        };
+        let permit = Arc::clone(maintenance_budget)
+            .acquire_owned()
+            .await
+            .expect("maintenance provider budget remains open");
+        metrics.maintenance_provider_started();
+        Some(MaintenanceProviderPermit {
+            _permit: permit,
+            metrics: metrics.clone(),
+        })
+    }
+
+    fn reconciliation_namespace(&self) -> String {
+        match self {
+            Self::S3 { namespace, .. } => namespace.clone(),
+            Self::Local { .. } => "local".to_owned(),
+        }
     }
 
     fn lifecycle_backstop_enabled(&self) -> bool {
@@ -1092,6 +1170,7 @@ impl Storage {
                 next_upload_id_marker: None,
             });
         };
+        let _provider_permit = self.maintenance_provider_permit().await;
         let output = maintenance_client
             .list_multipart_uploads()
             .bucket(bucket)
@@ -1251,6 +1330,16 @@ impl Storage {
         object_key: &str,
         multipart_upload_id: &str,
     ) -> Result<(), StorageError> {
+        let _provider_permit = self.maintenance_provider_permit().await;
+        self.abort_multipart_admitted(object_key, multipart_upload_id)
+            .await
+    }
+
+    async fn abort_multipart_admitted(
+        &self,
+        object_key: &str,
+        multipart_upload_id: &str,
+    ) -> Result<(), StorageError> {
         let Self::S3 {
             maintenance_client,
             bucket,
@@ -1259,7 +1348,6 @@ impl Storage {
         else {
             return Ok(());
         };
-
         let result = maintenance_client
             .abort_multipart_upload()
             .bucket(bucket)
@@ -1319,6 +1407,11 @@ impl Storage {
                 let client = match policy {
                     S3RequestPolicy::Request => client,
                     S3RequestPolicy::Maintenance => maintenance_client,
+                };
+                let _provider_permit = if policy == S3RequestPolicy::Maintenance {
+                    self.maintenance_provider_permit().await
+                } else {
+                    None
                 };
                 let output = client
                     .head_object()
@@ -1414,6 +1507,7 @@ impl Storage {
                     return Ok(());
                 }
 
+                let _provider_permit = self.maintenance_provider_permit().await;
                 maintenance_client
                     .delete_object()
                     .bucket(bucket)
@@ -1484,6 +1578,7 @@ impl Storage {
                     .collect();
             }
         };
+        let _provider_permit = self.maintenance_provider_permit().await;
         let output = match maintenance_client
             .delete_objects()
             .bucket(bucket)
@@ -1737,6 +1832,7 @@ async fn run_maintenance_worker(
     storage_concurrency: usize,
     notifications: broadcast::Receiver<String>,
 ) {
+    let upload_claim_cursor = Arc::new(UploadClaimCursor::new(None));
     run_adaptive_task(
         schedule.worker,
         schedule.initial_delay,
@@ -1748,11 +1844,18 @@ async fn run_maintenance_worker(
             let db = db.clone();
             let storage = storage.clone();
             let metrics = metrics.clone();
+            let upload_claim_cursor = Arc::clone(&upload_claim_cursor);
             async move {
                 let started = Instant::now();
                 let outcome = schedule
                     .worker
-                    .run(&db, &storage, &metrics, storage_concurrency)
+                    .run(
+                        &db,
+                        &storage,
+                        &metrics,
+                        storage_concurrency,
+                        &upload_claim_cursor,
+                    )
                     .await;
                 let success = outcome.is_ok();
                 let iteration = match outcome {
@@ -1996,7 +2099,7 @@ impl MaintenanceWorker {
             }
             Self::SessionExpiry => "SELECT MIN(expires_at) AS next_at FROM sessions",
             Self::TrashExpiry => {
-                "SELECT MIN(files.trashed_at + (users.trash_retention_minutes * interval '1 minute')) AS next_at FROM files INNER JOIN users ON users.id = files.owner_id WHERE files.state = 'trashed' AND files.trashed_at IS NOT NULL"
+                "SELECT MIN(next_due_at) AS next_at FROM trash_expiry_owners WHERE next_due_at IS NOT NULL"
             }
             Self::MultipartReconciliation | Self::CounterReconciliation => return Ok(None),
         };
@@ -2015,14 +2118,23 @@ impl MaintenanceWorker {
         storage: &Storage,
         metrics: &Metrics,
         storage_concurrency: usize,
+        upload_claim_cursor: &UploadClaimCursor,
     ) -> Result<bool, Box<dyn StdError + Send + Sync>> {
         match self {
             Self::UserDeletion => process_user_deletion_jobs(db).await,
             Self::StorageDeletion => process_deletion_jobs(db, storage, storage_concurrency).await,
-            Self::UploadFinalization => reconcile_file_upload_completions(db, storage).await,
-            Self::LegacyUploadExpiry => expire_abandoned_uploads(db, storage).await,
+            Self::UploadFinalization => {
+                reconcile_file_upload_completions(db, storage, upload_claim_cursor).await
+            }
+            Self::LegacyUploadExpiry => expire_abandoned_uploads(db, upload_claim_cursor).await,
             Self::VaultUploadExpiry => {
-                expire_abandoned_vault_uploads(db, storage, storage_concurrency).await
+                expire_abandoned_vault_uploads(
+                    db,
+                    storage,
+                    storage_concurrency,
+                    upload_claim_cursor,
+                )
+                .await
             }
             Self::InvitationExpiry => expire_invitations_batch(db).await,
             Self::SessionExpiry => expire_sessions_batches(db).await,
@@ -2549,42 +2661,125 @@ fn user_deletion_statement(phase: &str) -> Option<&'static str> {
 
 struct ExpiredVaultUpload {
     id: String,
+    owner_id: String,
     object_key: Option<String>,
     multipart_upload_id: Option<String>,
     write_expires_at: Option<SystemTime>,
+}
+
+async fn claim_expired_uploads(
+    db: &Database,
+    candidate_query: &str,
+    claim_query: &str,
+    cursor: &UploadClaimCursor,
+) -> Result<Vec<tokio_postgres::Row>, Box<dyn StdError + Send + Sync>> {
+    let mut cursor = cursor.lock().await;
+    let mut next_cursor = cursor.clone();
+    let mut client = db.get().await?;
+    let transaction = client.transaction().await?;
+    // New arrivals belong to the next sweep. Otherwise a perpetually busy queue
+    // could keep extending this scan and prevent previously fenced rows behind
+    // the cursor from ever being reconsidered.
+    let sweep_cutoff = if let Some((_, _, cutoff)) = next_cursor.as_ref() {
+        *cutoff
+    } else {
+        transaction
+            .query_one("SELECT clock_timestamp() AS cutoff", &[])
+            .await?
+            .get::<_, SystemTime>("cutoff")
+    };
+    let mut uploads = Vec::new();
+    for _ in 0..4 {
+        let remaining = 25 - uploads.len() as i64;
+        if remaining == 0 {
+            break;
+        }
+        // Page the raw due index before ancestry checks or lock attempts. Keep
+        // the position across worker ticks so a fenced prefix cannot repeatedly
+        // consume the entire turn and starve healthy uploads later in the queue.
+        let candidates = transaction
+            .query(
+                candidate_query,
+                &[
+                    &remaining,
+                    &next_cursor.as_ref().map(|(expires_at, _, _)| *expires_at),
+                    &next_cursor.as_ref().map(|(_, id, _)| id.as_str()),
+                    &sweep_cutoff,
+                ],
+            )
+            .await?;
+        if candidates.is_empty() {
+            next_cursor = None;
+            break;
+        }
+        let end_of_queue = candidates.len() < remaining as usize;
+        let last = candidates.last().expect("nonempty expiry candidate page");
+        next_cursor = Some((last.get("expires_at"), last.get("id"), sweep_cutoff));
+        let upload_ids = candidates
+            .iter()
+            .map(|row| row.get::<_, String>("id"))
+            .collect::<Vec<_>>();
+        let mut owner_ids = candidates
+            .iter()
+            .map(|row| row.get::<_, String>("owner_id"))
+            .collect::<Vec<_>>();
+        owner_ids.sort_unstable();
+        owner_ids.dedup();
+        let admitted_owners = lock_upload_claim_owners(&transaction, &owner_ids).await?;
+        // A new statement sees fences published since candidate selection.
+        // Owner advisory + version locks precede upload row locks and remain
+        // held until both the lease and cleanup queue insertion commit.
+        if !admitted_owners.is_empty() {
+            uploads.extend(
+                transaction
+                    .query(claim_query, &[&upload_ids, &admitted_owners])
+                    .await?,
+            );
+        }
+        if end_of_queue {
+            next_cursor = None;
+            break;
+        }
+    }
+    transaction.commit().await?;
+    *cursor = next_cursor;
+    Ok(uploads)
 }
 
 async fn expire_abandoned_vault_uploads(
     db: &Database,
     storage: &Storage,
     storage_concurrency: usize,
+    cursor: &UploadClaimCursor,
 ) -> Result<bool, Box<dyn StdError + Send + Sync>> {
-    let uploads = db
-        .query(CLAIM_EXPIRED_VAULT_UPLOADS_QUERY, &[])
-        .await?
-        .into_iter()
-        .map(|upload| ExpiredVaultUpload {
-            id: upload.get("id"),
-            object_key: upload.get("object_key"),
-            multipart_upload_id: upload.get("multipart_upload_id"),
-            write_expires_at: upload.get("write_expires_at"),
-        })
-        .collect::<Vec<_>>();
+    let uploads = claim_expired_uploads(
+        db,
+        CANDIDATE_EXPIRED_VAULT_UPLOADS_QUERY,
+        CLAIM_EXPIRED_VAULT_UPLOADS_QUERY,
+        cursor,
+    )
+    .await?
+    .into_iter()
+    .map(|upload| ExpiredVaultUpload {
+        id: upload.get("id"),
+        owner_id: upload.get("owner_id"),
+        object_key: upload.get("object_key"),
+        multipart_upload_id: upload.get("multipart_upload_id"),
+        write_expires_at: upload.get("write_expires_at"),
+    })
+    .collect::<Vec<_>>();
 
     let outcomes = run_bounded_storage_tasks(uploads, storage_concurrency, |upload| async move {
         let ExpiredVaultUpload {
             id,
+            owner_id,
             object_key,
             multipart_upload_id,
             write_expires_at,
         } = upload;
 
         if write_expires_at.is_some_and(|expires_at| expires_at > SystemTime::now()) {
-            db.execute(
-                "UPDATE vault_uploads SET expires_at = write_expires_at WHERE id = $1 AND status = 'aborting'",
-                &[&id],
-            )
-            .await?;
+            // The claim already extended the lease past this write authorization.
             return Ok::<(), Box<dyn StdError + Send + Sync>>(());
         }
 
@@ -2610,11 +2805,34 @@ async fn expire_abandoned_vault_uploads(
 
         match cleanup {
             Ok(()) => {
-                db.execute(
-                    "UPDATE vault_uploads SET status = 'aborted' WHERE id = $1 AND status = 'aborting'",
-                    &[&id],
-                )
-                .await?;
+                let mut client = db.get().await?;
+                let transaction = client.transaction().await?;
+                let admitted_owners =
+                    lock_upload_claim_owners(&transaction, &[owner_id]).await?;
+                if !admitted_owners.is_empty() {
+                    transaction
+                        .execute(
+                            "WITH ready AS (
+                              SELECT id FROM vault_uploads AS uploads
+                              WHERE id = $1 AND owner_id = ANY($2::text[]) AND status = 'aborting'
+                                AND NOT EXISTS (
+                                  SELECT 1 FROM tree_operation_jobs AS jobs
+                                  WHERE jobs.owner_id = uploads.owner_id
+                                    AND jobs.status IN ('pending', 'running')
+                                    AND (
+                                      tree_operation_ancestor(uploads.node_id, uploads.owner_id, jobs.root_id)
+                                      OR tree_operation_ancestor(uploads.parent_id, uploads.owner_id, jobs.root_id)
+                                    )
+                                )
+                              FOR UPDATE SKIP LOCKED
+                            )
+                            UPDATE vault_uploads AS uploads SET status = 'aborted'
+                            FROM ready WHERE uploads.id = ready.id",
+                            &[&id, &admitted_owners],
+                        )
+                        .await?;
+                }
+                transaction.commit().await?;
             }
             Err(error) => {
                 log::warn!("encrypted upload {id} cleanup will retry: {error}");
@@ -2640,59 +2858,76 @@ async fn reconcile_orphaned_multipart_uploads(
     let Some(grace_seconds) = storage.multipart_orphan_grace_seconds() else {
         return Ok(false);
     };
-    let client = db.get().await?;
-    let lock_row = client
-        .query_one(
-            "SELECT pg_try_advisory_lock($1)",
-            &[&MULTIPART_RECONCILIATION_LOCK_ID],
+    let namespace = storage.reconciliation_namespace();
+    let mut did_work =
+        process_orphan_abort_claims(db, storage, metrics, &namespace, storage_concurrency).await?;
+    let lease = db
+        .query_opt(
+            "INSERT INTO multipart_reconciliation_progress (namespace, lease_token, lease_until)
+         VALUES ($1, gen_random_uuid()::text, now() + ($2::bigint * interval '1 second'))
+         ON CONFLICT (namespace) DO UPDATE SET lease_token = gen_random_uuid()::text,
+           lease_until = now() + ($2::bigint * interval '1 second'), updated_at = now()
+         WHERE multipart_reconciliation_progress.next_scan_at <= now()
+           AND (multipart_reconciliation_progress.lease_until IS NULL
+             OR multipart_reconciliation_progress.lease_until <= now())
+         RETURNING lease_token, key_marker, upload_id_marker",
+            &[&namespace, &MULTIPART_SWEEP_LEASE_SECONDS],
         )
         .await?;
-    let lock_acquired: bool = lock_row.get(0);
-
-    if !lock_acquired {
-        return Ok(false);
-    }
-
-    let sweep_result = sweep_orphaned_multipart_uploads(
-        &client,
+    let Some(lease) = lease else {
+        return Ok(did_work);
+    };
+    let token: String = lease.get("lease_token");
+    let key_marker: Option<String> = lease.get("key_marker");
+    let upload_id_marker: Option<String> = lease.get("upload_id_marker");
+    // The owned pooled client used by each Database query has already been returned.
+    // The durable token, rather than a session lock, fences every checkpoint.
+    let result = sweep_orphaned_multipart_uploads(
+        db,
         storage,
-        metrics,
+        &namespace,
+        &token,
+        key_marker,
+        upload_id_marker,
         grace_seconds,
-        storage_concurrency,
     )
     .await;
-    let unlock_result = client
-        .query_one(
-            "SELECT pg_advisory_unlock($1)",
-            &[&MULTIPART_RECONCILIATION_LOCK_ID],
-        )
-        .await;
-
-    if let Err(error) = unlock_result {
-        log::error!("could not release multipart reconciliation lock: {error}");
-        if sweep_result.is_ok() {
-            return Err(error.into());
-        }
-    }
-
-    sweep_result.map(|()| true)
+    let cooldown = if result.is_err() { 30_i64 } else { 0_i64 };
+    db.execute(
+        "UPDATE multipart_reconciliation_progress SET lease_token = NULL, lease_until = NULL,
+           next_scan_at = GREATEST(next_scan_at, now() + ($3::bigint * interval '1 second'))
+         WHERE namespace = $1 AND lease_token = $2",
+        &[&namespace, &token, &cooldown],
+    )
+    .await?;
+    did_work |= result?;
+    Ok(did_work)
 }
 
 async fn sweep_orphaned_multipart_uploads(
-    client: &deadpool_postgres::Client,
+    db: &Database,
     storage: &Storage,
-    metrics: &Metrics,
+    namespace: &str,
+    token: &str,
+    mut key_marker: Option<String>,
+    mut upload_id_marker: Option<String>,
     grace_seconds: u64,
-    storage_concurrency: usize,
-) -> Result<(), Box<dyn StdError + Send + Sync>> {
+) -> Result<bool, Box<dyn StdError + Send + Sync>> {
     let now = SystemTime::now().duration_since(UNIX_EPOCH)?.as_secs();
-    let cutoff = now.saturating_sub(grace_seconds);
-    let cutoff = i64::try_from(cutoff).unwrap_or(i64::MAX);
-    let mut key_marker: Option<String> = None;
-    let mut upload_id_marker: Option<String> = None;
-    let mut failures = ReconciliationFailures::default();
-
-    loop {
+    let cutoff = i64::try_from(now.saturating_sub(grace_seconds)).unwrap_or(i64::MAX);
+    let started = Instant::now();
+    for _ in 0..MULTIPART_SWEEP_PAGES_PER_TICK {
+        let renewed = db
+            .execute(
+                "UPDATE multipart_reconciliation_progress
+             SET lease_until = now() + ($3::bigint * interval '1 second')
+             WHERE namespace = $1 AND lease_token = $2 AND lease_until > now()",
+                &[&namespace, &token, &MULTIPART_SWEEP_LEASE_SECONDS],
+            )
+            .await?;
+        if renewed != 1 {
+            return Err(storage_message("multipart reconciliation lease was lost").into());
+        }
         let page = storage
             .multipart_upload_page(
                 STORAGE_OBJECT_PREFIX,
@@ -2700,173 +2935,151 @@ async fn sweep_orphaned_multipart_uploads(
                 upload_id_marker.as_deref(),
             )
             .await?;
-        let object_keys = page
-            .uploads
-            .iter()
-            .map(|upload| upload.object_key.clone())
-            .collect::<Vec<_>>();
-        let intent_rows = if object_keys.is_empty() {
-            Vec::new()
-        } else {
-            client
-                .query(
-                    "
-                        SELECT 'file'::text AS source, object_key, status,
-                               multipart_upload_id,
-                               GREATEST(expires_at, COALESCE(write_expires_at, expires_at))
-                                 AS protected_until
-                        FROM file_uploads
-                        WHERE object_key = ANY($1)
-                        UNION ALL
-                        SELECT 'vault'::text AS source, object_key, status,
-                               multipart_upload_id,
-                               GREATEST(expires_at, COALESCE(write_expires_at, expires_at))
-                                 AS protected_until
-                        FROM vault_uploads
-                        WHERE object_key = ANY($1)
-                    ",
-                    &[&object_keys],
-                )
-                .await?
-        };
-        let mut intents = HashMap::<String, Vec<MultipartIntent>>::new();
-        for row in intent_rows {
-            let source = match row.get::<_, String>("source").as_str() {
-                "file" => MultipartIntentSource::File,
-                "vault" => MultipartIntentSource::Vault,
-                _ => continue,
-            };
-            intents
-                .entry(row.get("object_key"))
-                .or_default()
-                .push(MultipartIntent {
-                    source,
-                    status: row.get("status"),
-                    upload_id: row.get("multipart_upload_id"),
-                    protected_until: row.get("protected_until"),
-                });
-        }
-
-        let mut aborts = Vec::new();
-        for upload in page.uploads {
-            if upload.initiated_epoch_seconds > cutoff {
-                continue;
-            }
-
-            let action = multipart_reconciliation_action(
-                &upload.object_key,
-                &upload.upload_id,
-                intents
-                    .get(&upload.object_key)
-                    .map(Vec::as_slice)
-                    .unwrap_or_default(),
-                SystemTime::now(),
-            );
-
-            if action == MultipartReconciliationAction::Keep {
-                continue;
-            }
-
-            if let MultipartReconciliationAction::Adopt(source) = action {
-                let statement = match source {
-                    MultipartIntentSource::File => {
-                        "UPDATE file_uploads SET multipart_upload_id = $1, status = 'pending', expires_at = now() + interval '24 hours' WHERE object_key = $2 AND status = 'initializing' AND multipart_upload_id IS NULL AND expires_at > now()"
-                    }
-                    MultipartIntentSource::Vault => {
-                        "UPDATE vault_uploads SET multipart_upload_id = $1, status = 'pending', expires_at = now() + interval '1 hour' WHERE object_key = $2 AND status = 'initializing' AND multipart_upload_id IS NULL AND expires_at > now()"
-                    }
-                };
-                let adopted = client
-                    .execute(statement, &[&upload.upload_id, &upload.object_key])
-                    .await?;
-
-                if adopted == 1 {
-                    log::warn!(
-                        "adopted multipart upload {} for durable {:?} intent {}",
-                        upload.upload_id,
-                        source,
-                        upload.object_key
-                    );
-                    continue;
-                }
-            }
-
-            let protected_after_race = client
-                .query_opt(
-                    "
-                        SELECT 1
-                        FROM (
-                          SELECT object_key, multipart_upload_id, status,
-                                 GREATEST(expires_at, COALESCE(write_expires_at, expires_at))
-                                   AS protected_until
-                          FROM file_uploads
-                          UNION ALL
-                          SELECT object_key, multipart_upload_id, status,
-                                 GREATEST(expires_at, COALESCE(write_expires_at, expires_at))
-                                   AS protected_until
-                          FROM vault_uploads
-                        ) AS intents
-                        WHERE object_key = $1
-                          AND status IN ('initializing', 'pending', 'completing', 'aborting')
-                          AND (multipart_upload_id = $2 OR protected_until > now())
-                        LIMIT 1
-                    ",
-                    &[&upload.object_key, &upload.upload_id],
-                )
-                .await?
-                .is_some();
-            if protected_after_race {
-                continue;
-            }
-
-            aborts.push(upload);
-        }
-
-        run_reconciliation_abort_page(
-            aborts,
-            storage_concurrency,
-            metrics,
-            &mut failures,
-            |upload| async move {
-                storage
-                    .abort_multipart(&upload.object_key, &upload.upload_id)
-                    .await?;
-                log::warn!(
-                    "aborted orphaned multipart upload {} for {}",
-                    upload.upload_id,
-                    upload.object_key
-                );
-                Ok::<(), StorageError>(())
-            },
-        )
-        .await;
-
-        let next_key_marker = page.next_key_marker;
-        let next_upload_id_marker = page.next_upload_id_marker;
-
-        if next_key_marker.is_none() {
-            break;
-        }
-        if next_key_marker == key_marker && next_upload_id_marker == upload_id_marker {
-            return Err(std::io::Error::other(
+        if page.next_key_marker.is_some()
+            && page.next_key_marker == key_marker
+            && page.next_upload_id_marker == upload_id_marker
+        {
+            return Err(storage_message(
                 "S3 multipart listing returned unchanged pagination markers",
             )
             .into());
         }
-
+        let candidates = page
+            .uploads
+            .into_iter()
+            .filter(|upload| upload.initiated_epoch_seconds <= cutoff)
+            .collect::<Vec<_>>();
+        // Prepare and hand off 64 candidates at a time. The SQL function adopts
+        // live intents and durably fences true orphans under their object locks.
+        for group in candidates.chunks(MULTIPART_PREPARE_BATCH_SIZE) {
+            let keys = group
+                .iter()
+                .map(|item| item.object_key.clone())
+                .collect::<Vec<_>>();
+            let ids = group
+                .iter()
+                .map(|item| item.upload_id.clone())
+                .collect::<Vec<_>>();
+            db.query_one(
+                "SELECT prepare_multipart_orphan_group($1, $2, $3, $4)",
+                &[&namespace, &token, &keys, &ids],
+            )
+            .await?;
+        }
+        let next_key_marker = page.next_key_marker;
+        let next_upload_id_marker = page.next_upload_id_marker;
+        let completed = next_key_marker.is_none();
+        let next_scan_seconds = if completed {
+            if storage.lifecycle_backstop_enabled() {
+                24 * 60 * 60_i64
+            } else {
+                60 * 60_i64
+            }
+        } else {
+            0_i64
+        };
+        let checkpointed = db
+            .execute(
+                "UPDATE multipart_reconciliation_progress
+             SET key_marker = $3, upload_id_marker = $4, updated_at = now(),
+                 next_scan_at = now() + ($5::bigint * interval '1 second')
+             WHERE namespace = $1 AND lease_token = $2 AND lease_until > now()",
+                &[
+                    &namespace,
+                    &token,
+                    &next_key_marker,
+                    &next_upload_id_marker,
+                    &next_scan_seconds,
+                ],
+            )
+            .await?;
+        if checkpointed != 1 {
+            return Err(storage_message("multipart reconciliation lease was lost").into());
+        }
         key_marker = next_key_marker;
         upload_id_marker = next_upload_id_marker;
+        if completed || started.elapsed() >= Duration::from_secs(15) {
+            break;
+        }
     }
-
-    failures.finish()
+    Ok(true)
 }
 
+async fn process_orphan_abort_claims(
+    db: &Database,
+    storage: &Storage,
+    metrics: &Metrics,
+    namespace: &str,
+    concurrency: usize,
+) -> Result<bool, Box<dyn StdError + Send + Sync>> {
+    let rows = db
+        .query(
+            "WITH selected AS (
+           SELECT namespace, object_key, upload_id FROM multipart_orphan_abort_claims
+           WHERE namespace = $1 AND next_attempt_at <= now()
+             AND (lease_until IS NULL OR lease_until <= now())
+           ORDER BY next_attempt_at, object_key, upload_id LIMIT $2 FOR UPDATE SKIP LOCKED
+         ) UPDATE multipart_orphan_abort_claims AS claims
+         SET lease_token = gen_random_uuid()::text, lease_until = now() + interval '120 seconds'
+         FROM selected WHERE claims.namespace = selected.namespace
+           AND claims.object_key = selected.object_key AND claims.upload_id = selected.upload_id
+         RETURNING claims.object_key, claims.upload_id, claims.lease_token",
+            &[
+                &namespace,
+                &i64::try_from(concurrency.clamp(1, 64)).unwrap_or(64),
+            ],
+        )
+        .await?;
+    let did_work = !rows.is_empty();
+    let outcomes = run_bounded_storage_tasks(rows, concurrency, |row| async move {
+        let object_key: String = row.get("object_key");
+        let upload_id: String = row.get("upload_id");
+        let lease_token: String = row.get("lease_token");
+        // Queue waiting never consumes a DB connection or a claim's provider window.
+        // Renew after admission and verify that no replacement worker owns this item.
+        let _provider_permit = storage.maintenance_provider_permit().await;
+        let renewed = db.execute(
+            "UPDATE multipart_orphan_abort_claims SET lease_until = now() + interval '120 seconds'
+             WHERE namespace = $1 AND object_key = $2 AND upload_id = $3 AND lease_token = $4",
+            &[&namespace, &object_key, &upload_id, &lease_token],
+        ).await?;
+        if renewed != 1 { return Ok::<(), Box<dyn StdError + Send + Sync>>(()); }
+        let result = storage.abort_multipart_admitted(&object_key, &upload_id).await;
+        drop(_provider_permit);
+        match result {
+            Ok(()) => { db.execute(
+                "DELETE FROM multipart_orphan_abort_claims
+                 WHERE namespace = $1 AND object_key = $2 AND upload_id = $3 AND lease_token = $4",
+                &[&namespace, &object_key, &upload_id, &lease_token],
+            ).await?; }
+            Err(error) => {
+                metrics.record_maintenance_item_failure("multipart reconciliation abort");
+                db.execute(
+                    "UPDATE multipart_orphan_abort_claims SET attempts = attempts + 1,
+                       lease_token = NULL, lease_until = NULL,
+                       next_attempt_at = now() + (LEAST(3600, 30 * power(2, LEAST(attempts, 7))) * interval '1 second')
+                     WHERE namespace = $1 AND object_key = $2 AND upload_id = $3 AND lease_token = $4",
+                    &[&namespace, &object_key, &upload_id, &lease_token],
+                ).await?;
+                tracing::warn!(%error, "multipart orphan abort deferred");
+            }
+        }
+        Ok(())
+    }).await;
+    for outcome in outcomes {
+        outcome?;
+    }
+    Ok(did_work)
+}
+
+#[cfg(test)]
 #[derive(Default)]
 struct ReconciliationFailures {
     count: usize,
     samples: Vec<String>,
 }
 
+#[cfg(test)]
 impl ReconciliationFailures {
     fn record(&mut self, message: String) {
         self.count = self.count.saturating_add(1);
@@ -2888,6 +3101,7 @@ impl ReconciliationFailures {
     }
 }
 
+#[cfg(test)]
 fn multipart_reconciliation_action(
     object_key: &str,
     upload_id: &str,
@@ -2923,6 +3137,7 @@ fn multipart_reconciliation_action(
     MultipartReconciliationAction::Abort
 }
 
+#[cfg(test)]
 fn active_multipart_status(status: &str) -> bool {
     matches!(
         status,
@@ -2930,6 +3145,7 @@ fn active_multipart_status(status: &str) -> bool {
     )
 }
 
+#[cfg(test)]
 fn intent_source_matches_key(source: MultipartIntentSource, object_key: &str) -> bool {
     match source {
         MultipartIntentSource::File => object_key.contains("/files/"),
@@ -2954,6 +3170,7 @@ where
         .await
 }
 
+#[cfg(test)]
 async fn run_reconciliation_abort_page<Items, Item, Operation, OperationFuture, Error>(
     items: Items,
     concurrency: usize,
@@ -3188,8 +3405,9 @@ async fn process_deletion_jobs(
 async fn reconcile_file_upload_completions(
     db: &Database,
     storage: &Storage,
+    cursor: &UploadClaimCursor,
 ) -> Result<bool, Box<dyn StdError + Send + Sync>> {
-    let uploads = claim_file_upload_completions(db, 25).await?;
+    let uploads = claim_file_upload_completions(db, 25, cursor).await?;
     let did_work = !uploads.is_empty();
 
     for upload in uploads {
@@ -3249,7 +3467,9 @@ async fn reconcile_file_upload_completions(
                 FileUploadFinalizeOutcome::Completed
                 | FileUploadFinalizeOutcome::AlreadyCompleted
                 | FileUploadFinalizeOutcome::Missing
-                | FileUploadFinalizeOutcome::StateChanged,
+                | FileUploadFinalizeOutcome::StateChanged
+                | FileUploadFinalizeOutcome::ParentUnavailable
+                | FileUploadFinalizeOutcome::Deferred,
             ) => {}
             Ok(FileUploadFinalizeOutcome::ReplacementMismatch) => {
                 transition_file_upload_to_cleanup(
@@ -3287,58 +3507,16 @@ async fn reconcile_file_upload_completions(
 
 async fn expire_abandoned_uploads(
     db: &Database,
-    _storage: &Storage,
+    cursor: &UploadClaimCursor,
 ) -> Result<bool, Box<dyn StdError + Send + Sync>> {
-    let uploads = db.query(CLAIM_EXPIRED_FILE_UPLOADS_QUERY, &[]).await?;
-    let did_work = !uploads.is_empty();
-
-    for upload in uploads {
-        let id: String = upload.get("id");
-
-        let mut client = db.get().await?;
-        let transaction = client.transaction().await?;
-        transaction
-            .execute(
-                "
-                    WITH transitioned AS (
-                      UPDATE file_uploads
-                      SET status = 'aborting',
-                          expires_at = now() + interval '24 hours'
-                      WHERE id = $1
-                        AND status IN ('initializing', 'pending', 'aborting')
-                      RETURNING object_key, multipart_upload_id, upload_mode, write_expires_at
-                    )
-                    INSERT INTO storage_deletion_jobs (
-                      object_key,
-                      multipart_upload_id,
-                      available_at
-                    )
-                    SELECT
-                      object_key,
-                      multipart_upload_id,
-                      CASE
-                        WHEN upload_mode = 'single'
-                          THEN GREATEST(COALESCE(write_expires_at, now()), now())
-                        ELSE now()
-                      END
-                    FROM transitioned
-                    ON CONFLICT (object_key) DO UPDATE SET
-                      multipart_upload_id = COALESCE(
-                        EXCLUDED.multipart_upload_id,
-                        storage_deletion_jobs.multipart_upload_id
-                      ),
-                      available_at = GREATEST(
-                        storage_deletion_jobs.available_at,
-                        EXCLUDED.available_at
-                      )
-                ",
-                &[&id],
-            )
-            .await?;
-        transaction.commit().await?;
-    }
-
-    Ok(did_work)
+    let uploads = claim_expired_uploads(
+        db,
+        CANDIDATE_EXPIRED_FILE_UPLOADS_QUERY,
+        CLAIM_EXPIRED_FILE_UPLOADS_QUERY,
+        cursor,
+    )
+    .await?;
+    Ok(!uploads.is_empty())
 }
 
 async fn expire_invitations_batch(db: &Database) -> Result<bool, Box<dyn StdError + Send + Sync>> {
@@ -3599,15 +3777,15 @@ mod tests {
 
     #[test]
     fn trash_expiry_is_bounded_leaf_first_and_queues_object_deletion() {
-        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("users.trash_retention_minutes"));
-        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("files.state = 'trashed'"));
-        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("NOT EXISTS"));
-        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("children.parent_id = files.id"));
-        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("LIMIT $1"));
-        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("FOR UPDATE OF files SKIP LOCKED"));
-        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("INSERT INTO storage_deletion_jobs"));
-        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("targets.write_expires_at"));
-        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("DELETE FROM files"));
+        let migration = include_str!("../../database/init/034_indexed_trash_expiry.sql");
+        assert!(EXPIRE_TRASH_BATCH_QUERY.contains("expire_trash_batch($1)"));
+        assert!(migration.contains("FOR SHARE OF users SKIP LOCKED"));
+        assert!(migration.contains("files_trash_leaf_owner_due_idx"));
+        assert!(migration.contains("trash_expiry_owners_due_idx"));
+        assert!(migration.contains("children.parent_id = files.id"));
+        assert!(migration.contains("FOR UPDATE OF files SKIP LOCKED"));
+        assert!(migration.contains("INSERT INTO storage_deletion_jobs"));
+        assert!(migration.contains("targets.write_expires_at"));
 
         let worker = MAINTENANCE_SCHEDULES
             .iter()
@@ -3851,10 +4029,10 @@ mod tests {
             .copied()
             .find(|schedule| schedule.worker == MaintenanceWorker::MultipartReconciliation)
             .expect("multipart reconciliation schedule should exist");
-        assert_eq!(base.interval, Duration::from_secs(60 * 60));
+        assert_eq!(base.interval, Duration::from_secs(2));
         assert_eq!(
             effective_maintenance_schedule(base, true).interval,
-            LIFECYCLE_BACKED_RECONCILIATION_INTERVAL
+            Duration::from_secs(2)
         );
         assert_eq!(
             effective_maintenance_schedule(base, false).interval,
@@ -3924,7 +4102,7 @@ mod tests {
     #[ignore = "requires a PostgreSQL test database"]
     async fn trash_expiry_executes_leaf_first_and_queues_file_objects() {
         let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
-        let (client, connection) = tokio_postgres::connect(&database_url, NoTls)
+        let (mut client, connection) = tokio_postgres::connect(&database_url, NoTls)
             .await
             .expect("postgres should be available");
         tokio::spawn(async move {
@@ -3932,66 +4110,51 @@ mod tests {
                 .await
                 .expect("postgres connection should remain healthy");
         });
-        client
+        let transaction = client
+            .transaction()
+            .await
+            .expect("transaction should begin");
+        transaction
             .batch_execute(
-                "CREATE TEMP TABLE users (
-                   id TEXT PRIMARY KEY,
-                   trash_retention_minutes INTEGER NOT NULL
-                 );
-                 CREATE TEMP TABLE files (
-                   id TEXT PRIMARY KEY,
-                   owner_id TEXT NOT NULL,
-                   storage_name TEXT NOT NULL,
-                   entry_type TEXT NOT NULL,
-                   state TEXT NOT NULL,
-                   trashed_at TIMESTAMPTZ,
-                   parent_id TEXT REFERENCES files(id) ON DELETE CASCADE
-                 );
-                 CREATE TEMP TABLE file_uploads (
-                   file_id TEXT,
-                   status TEXT,
-                   upload_mode TEXT,
-                   write_expires_at TIMESTAMPTZ
-                 );
-                 CREATE TEMP TABLE storage_deletion_jobs (
-                   object_key TEXT PRIMARY KEY,
-                   available_at TIMESTAMPTZ NOT NULL
-                 );
-                 INSERT INTO users (id, trash_retention_minutes)
-                 VALUES ('usr_trash_expiry', 1);
+                "INSERT INTO users (id, username, password_hash, role, trash_retention_minutes)
+                 VALUES ('usr_trash_expiry', 'trash_expiry_integration', 'test-only', 'user', 1);
                  INSERT INTO files (
-                   id, owner_id, storage_name, entry_type, state, trashed_at, parent_id
+                   id, owner_id, original_name, storage_name, size_bytes,
+                   entry_type, state, trashed_at, parent_id
                  ) VALUES
-                   ('folder', 'usr_trash_expiry', 'folder', 'folder', 'trashed',
-                    now() - interval '61 seconds', NULL),
-                   ('file', 'usr_trash_expiry', 'object-key', 'file', 'trashed',
-                    now() - interval '61 seconds', 'folder'),
-                   ('fresh', 'usr_trash_expiry', 'fresh-object', 'file', 'trashed',
-                    now() - interval '30 seconds', NULL),
-                   ('restored', 'usr_trash_expiry', 'restored-object', 'file', 'active',
-                    now() - interval '61 seconds', NULL);",
+                   ('fil_expiry_folder', 'usr_trash_expiry', 'folder', 'expiry-folder', 0,
+                    'folder', 'trashed', now() - interval '61 seconds', NULL),
+                   ('fil_expiry_file', 'usr_trash_expiry', 'file', 'expiry-object', 1,
+                    'file', 'trashed', now() - interval '61 seconds', 'fil_expiry_folder'),
+                   ('fil_expiry_fresh', 'usr_trash_expiry', 'fresh', 'expiry-fresh', 1,
+                    'file', 'trashed', now() - interval '30 seconds', NULL),
+                   ('fil_expiry_restored', 'usr_trash_expiry', 'restored', 'expiry-restored', 1,
+                    'file', 'active', now() - interval '61 seconds', NULL);",
             )
             .await
             .expect("trash expiry fixtures should initialize");
 
-        let first: i64 = client
+        let first: i64 = transaction
             .query_one(EXPIRE_TRASH_BATCH_QUERY, &[&TRASH_EXPIRY_BATCH_SIZE])
             .await
             .expect("expired leaf should delete")
             .get("deleted");
-        let second: i64 = client
+        let second: i64 = transaction
             .query_one(EXPIRE_TRASH_BATCH_QUERY, &[&TRASH_EXPIRY_BATCH_SIZE])
             .await
             .expect("newly empty parent should delete")
             .get("deleted");
-        let remaining: i64 = client
-            .query_one("SELECT count(*)::bigint AS count FROM files", &[])
+        let remaining: i64 = transaction
+            .query_one(
+                "SELECT count(*)::bigint AS count FROM files WHERE owner_id = 'usr_trash_expiry'",
+                &[],
+            )
             .await
             .expect("remaining files should count")
             .get("count");
-        let queued: i64 = client
+        let queued: i64 = transaction
             .query_one(
-                "SELECT count(*)::bigint AS count FROM storage_deletion_jobs",
+                "SELECT count(*)::bigint AS count FROM storage_deletion_jobs WHERE object_key = 'usr_trash_expiry/expiry-object'",
                 &[],
             )
             .await
@@ -3999,6 +4162,10 @@ mod tests {
             .get("count");
 
         assert_eq!((first, second, remaining, queued), (1, 1, 2, 1));
+        transaction
+            .rollback()
+            .await
+            .expect("fixtures should roll back");
     }
 
     #[actix_web::test]
@@ -4062,9 +4229,9 @@ mod tests {
         let sweep = source_between(
             source,
             "async fn sweep_orphaned_multipart_uploads(",
-            "#[derive(Default)]\nstruct ReconciliationFailures",
+            "#[cfg(test)]\n#[derive(Default)]\nstruct ReconciliationFailures",
         );
-        assert!(sweep.contains("run_reconciliation_abort_page("));
+        assert!(sweep.contains("prepare_multipart_orphan_group("));
         assert!(sweep.contains("key_marker = next_key_marker"));
     }
 
@@ -4091,6 +4258,214 @@ mod tests {
         assert_eq!(completed.len(), 40);
         assert_eq!(peak.load(Ordering::SeqCst), 4);
         assert_eq!(active.load(Ordering::SeqCst), 0);
+    }
+
+    #[actix_web::test]
+    async fn maintenance_provider_budget_caps_overlapping_workers_and_nested_aborts() {
+        use actix_web::{App, HttpRequest, HttpResponse, HttpServer, web};
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = (Arc::clone(&active), Arc::clone(&peak), Arc::clone(&calls));
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = HttpServer::new(move || {
+            let observed = observed.clone();
+            App::new().default_service(web::to(move |request: HttpRequest| {
+                let (active, peak, calls) = observed.clone();
+                async move {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    sleep(Duration::from_millis(15)).await;
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    if request.query_string().contains("uploads") {
+                        let entries = (1..=8).map(|id| format!(
+                            "<Upload><Key>users/test/files/object</Key><UploadId>upload-{id}</UploadId><Initiated>2020-01-01T00:00:00Z</Initiated></Upload>"
+                        )).collect::<String>();
+                        HttpResponse::Ok().content_type("application/xml").body(format!(
+                            "<ListMultipartUploadsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Bucket>test</Bucket><IsTruncated>false</IsTruncated>{entries}</ListMultipartUploadsResult>"
+                        ))
+                    } else if request.method() == actix_web::http::Method::HEAD {
+                        HttpResponse::Ok().insert_header(("content-length", "1")).finish()
+                    } else if request.query_string().contains("delete") {
+                        HttpResponse::Ok().content_type("application/xml").body(
+                            "<DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"/>"
+                        )
+                    } else {
+                        HttpResponse::NoContent().finish()
+                    }
+                }
+            }))
+        }).workers(1).listen(listener).unwrap().run();
+        let handle = server.handle();
+        let task = actix_web::rt::spawn(server);
+        let client = aws_sdk_s3::Client::from_conf(
+            aws_sdk_s3::config::Builder::new()
+                .behavior_version_latest()
+                .region(Region::new("us-east-1"))
+                .credentials_provider(Credentials::new("test", "test", None, None, "test"))
+                .endpoint_url(endpoint.clone())
+                .force_path_style(true)
+                .build(),
+        );
+        let config = Config::from_env().unwrap();
+        let metrics = Metrics::new(&config);
+        let storage = Storage::S3 {
+            client: client.clone(),
+            maintenance_client: client,
+            maintenance_budget: Arc::new(Semaphore::new(3)),
+            namespace: endpoint,
+            metrics: metrics.clone(),
+            bucket: "test".to_owned(),
+            legacy_root: PathBuf::new(),
+            presign_seconds: 60,
+            multipart_threshold_bytes: 1,
+            multipart_part_bytes: 1,
+            multipart_orphan_grace_seconds: 1,
+            lifecycle_backstop_enabled: false,
+        };
+        let objects = vec!["users/test/files/object".to_owned()];
+        let result = tokio::time::timeout(Duration::from_secs(5), async {
+            futures_util::join!(
+                storage.abort_multipart_uploads_for_key(&objects[0]),
+                storage.abort_multipart_uploads_for_key(&objects[0]),
+                storage.delete_object(&objects[0]),
+                storage.delete_objects(&objects),
+                storage.maintenance_object_metadata(&objects[0]),
+            )
+        })
+        .await
+        .expect("nested admission must not deadlock");
+        result.0.unwrap();
+        result.1.unwrap();
+        result.2.unwrap();
+        assert!(result.3.into_iter().all(|outcome| outcome.is_ok()));
+        result.4.unwrap();
+        assert_eq!(calls.load(Ordering::SeqCst), 21);
+        assert_eq!(peak.load(Ordering::SeqCst), 3);
+        assert_eq!(active.load(Ordering::SeqCst), 0);
+        assert!(
+            metrics
+                .render(&[])
+                .contains("aeralyth_maintenance_provider_in_flight 0")
+        );
+        handle.stop(true).await;
+        task.await.unwrap().unwrap();
+    }
+
+    #[actix_web::test]
+    async fn slow_multipart_listing_releases_the_only_maintenance_connection() {
+        use actix_web::{App, HttpResponse, HttpServer, web};
+        if std::env::var("AERALYTH_DATABASE_INTEGRATION_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let config = Config::from_env().unwrap();
+        let metrics = Metrics::new(&config);
+        let db = Database::create(
+            &config.database_url,
+            crate::db::DatabasePoolSettings {
+                role: crate::db::PoolRole::Maintenance,
+                max_size: 1,
+                min_size: 1,
+                checkout_queue_capacity: 4,
+                wait_timeout: Duration::from_secs(2),
+                max_lifetime: Duration::from_secs(1800),
+                lifetime_jitter: Duration::ZERO,
+            },
+            metrics.clone(),
+        )
+        .await
+        .unwrap();
+        let listing_started = Arc::new(tokio::sync::Notify::new());
+        let release_listing = Arc::new(tokio::sync::Notify::new());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = (
+            Arc::clone(&listing_started),
+            Arc::clone(&release_listing),
+            Arc::clone(&calls),
+        );
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = HttpServer::new(move || {
+            let observed = observed.clone();
+            App::new().default_service(web::to(move || {
+                let (started, release, calls) = observed.clone();
+                async move {
+                    calls.fetch_add(1, Ordering::SeqCst);
+                    started.notify_one();
+                    release.notified().await;
+                    HttpResponse::Ok().content_type("application/xml").body(
+                        "<ListMultipartUploadsResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\"><Bucket>test</Bucket><IsTruncated>false</IsTruncated></ListMultipartUploadsResult>"
+                    )
+                }
+            }))
+        }).workers(1).listen(listener).unwrap().run();
+        let handle = server.handle();
+        let server_task = actix_web::rt::spawn(server);
+        let client = aws_sdk_s3::Client::from_conf(
+            aws_sdk_s3::config::Builder::new()
+                .behavior_version_latest()
+                .region(Region::new("us-east-1"))
+                .credentials_provider(Credentials::new("test", "test", None, None, "test"))
+                .endpoint_url(endpoint.clone())
+                .force_path_style(true)
+                .build(),
+        );
+        let storage = Storage::S3 {
+            client: client.clone(),
+            maintenance_client: client,
+            maintenance_budget: Arc::new(Semaphore::new(2)),
+            namespace: endpoint.clone(),
+            metrics: metrics.clone(),
+            bucket: "test".to_owned(),
+            legacy_root: PathBuf::new(),
+            presign_seconds: 60,
+            multipart_threshold_bytes: 1,
+            multipart_part_bytes: 1,
+            multipart_orphan_grace_seconds: 1,
+            lifecycle_backstop_enabled: false,
+        };
+        let operation = {
+            let db = db.clone();
+            let storage = storage.clone();
+            let metrics = metrics.clone();
+            actix_web::rt::spawn(async move {
+                reconcile_orphaned_multipart_uploads(&db, &storage, &metrics, 2).await
+            })
+        };
+        tokio::time::timeout(Duration::from_secs(2), listing_started.notified())
+            .await
+            .unwrap();
+        let maintenance_read =
+            tokio::time::timeout(Duration::from_millis(250), db.query_one("SELECT 1", &[])).await;
+        release_listing.notify_one();
+        assert_eq!(
+            maintenance_read
+                .expect("listing must not pin the only maintenance connection")
+                .unwrap()
+                .get::<_, i32>(0),
+            1
+        );
+        operation.await.unwrap().unwrap();
+        assert!(
+            !reconcile_orphaned_multipart_uploads(&db, &storage, &metrics, 2)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "another replica must respect the shared full-scan deadline"
+        );
+        db.execute(
+            "DELETE FROM multipart_reconciliation_progress WHERE namespace=$1",
+            &[&endpoint],
+        )
+        .await
+        .unwrap();
+        handle.stop(true).await;
+        server_task.await.unwrap().unwrap();
     }
 
     fn intent(

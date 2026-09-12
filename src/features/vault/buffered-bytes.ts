@@ -78,7 +78,10 @@ export class ExactStreamReader {
   private offset = 0;
 
   constructor(
-    private readonly reader: ReadableStreamDefaultReader<Uint8Array>,
+    private readonly reader: Pick<
+      ReadableStreamDefaultReader<Uint8Array>,
+      "read" | "cancel"
+    >,
     private readonly allocate: ByteAllocator = (length) =>
       new Uint8Array(length),
   ) {}
@@ -98,31 +101,36 @@ export class ExactStreamReader {
     }
     let outputOffset = 0;
 
-    while (outputOffset < length) {
-      if (!this.pending || this.offset === this.pending.length) {
-        this.pending = null;
-        this.offset = 0;
-        const next = await this.reader.read();
-        if (next.done) {
-          output.fill(0);
-          return null;
+    try {
+      while (outputOffset < length) {
+        if (!this.pending || this.offset === this.pending.length) {
+          this.pending = null;
+          this.offset = 0;
+          const next = await this.reader.read();
+          if (next.done) {
+            output.fill(0);
+            return null;
+          }
+          if (next.value.length === 0) continue;
+          this.pending = next.value;
         }
-        if (next.value.length === 0) continue;
-        this.pending = next.value;
-      }
 
-      const pending = this.pending;
-      const copied = Math.min(
-        length - outputOffset,
-        pending.length - this.offset,
-      );
-      output.set(
-        pending.subarray(this.offset, this.offset + copied),
-        outputOffset,
-      );
-      pending.fill(0, this.offset, this.offset + copied);
-      this.offset += copied;
-      outputOffset += copied;
+        const pending = this.pending;
+        const copied = Math.min(
+          length - outputOffset,
+          pending.length - this.offset,
+        );
+        output.set(
+          pending.subarray(this.offset, this.offset + copied),
+          outputOffset,
+        );
+        pending.fill(0, this.offset, this.offset + copied);
+        this.offset += copied;
+        outputOffset += copied;
+      }
+    } catch (error) {
+      output.fill(0);
+      throw error;
     }
 
     return output;

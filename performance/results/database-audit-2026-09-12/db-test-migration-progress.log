@@ -1,0 +1,158 @@
+Command: npm run db:test:migration-progress
+
+> aeralyth@0.1.0 db:test:migration-progress
+> docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U aeralyth -d aeralyth < database/tests/migration_progress.sql
+
+BEGIN
+SET
+INSERT 0 2
+CREATE FUNCTION
+CREATE TABLE
+CREATE FUNCTION
+CREATE TRIGGER
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+INSERT 0 4
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+DO
+INSERT 0 2
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+TRUNCATE TABLE
+UPDATE 1
+UPDATE 1
+UPDATE 4
+DO
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+UPDATE 1
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+UPDATE 1
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+UPDATE 1
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+SAVEPOINT
+UPDATE 1
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ROLLBACK
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+UPDATE 1
+INSERT 0 1
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+DELETE 1
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+UPDATE 1
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+UPDATE 1
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+DELETE 1
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+INSERT 0 1
+DELETE 1
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+INSERT 0 1
+UPDATE 1
+ reconcile_vault_migration_progress 
+------------------------------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ reconcile_vault_migration_progress 
+------------------------------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+CREATE TABLE
+DO
+ nodes | reads | rows_examined 
+-------+-------+---------------
+  1000 |  1000 |          1000
+  2000 |  2000 |          2000
+(2 rows)
+
+DELETE 2
+DO
+ROLLBACK
+migration progress transitions, rollback, reconciliation, bulk writes and linear read scaling passed

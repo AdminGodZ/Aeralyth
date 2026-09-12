@@ -7,14 +7,11 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use tokio::fs::File as AsyncFile;
-use tokio_postgres::IsolationLevel;
 
 use crate::auth::{parse_json_body, require_csrf, require_principal, session_principal};
 use crate::routes::local_file_stream::local_file_stream;
 use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
-use crate::routes::tree_walk::{
-    MAX_TREE_MUTATION_NODES, TreeWalkScope, update_tree_state, walk_subtree,
-};
+use crate::routes::tree_jobs::{self, Action, MutationResult};
 use crate::state::AppState;
 use crate::timestamps;
 
@@ -66,7 +63,7 @@ const SHARE_ACCESS_CONTEXT_QUERY: &str = r#"
         roots.updated_at AS root_updated_at
       FROM share_links AS links
       INNER JOIN users AS owners ON owners.id = links.owner_id
-      INNER JOIN files AS roots ON roots.id = links.root_file_id
+      INNER JOIN visible_files AS roots ON roots.id = links.root_file_id
       WHERE links.token_hash = encode(digest($1::text, 'sha256'), 'hex')
         AND links.revoked_at IS NULL
         AND (links.expires_at IS NULL OR links.expires_at > now())
@@ -94,7 +91,7 @@ const SHARE_ACCESS_CONTEXT_QUERY: &str = r#"
         ARRAY[node.id]::text[] AS visited_ids,
         0::integer AS depth
       FROM requested
-      INNER JOIN files AS node ON node.id = requested.requested_node_id
+      INNER JOIN visible_files AS node ON node.id = requested.requested_node_id
       WHERE node.owner_id = requested.owner_id
         AND node.state = 'active'
         AND (
@@ -115,7 +112,7 @@ const SHARE_ACCESS_CONTEXT_QUERY: &str = r#"
         child.root_file_id,
         child.visited_ids || parent.id,
         child.depth + 1
-      FROM files AS parent
+      FROM visible_files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
       INNER JOIN requested ON requested.owner_id = parent.owner_id
       WHERE parent.state = 'active'
@@ -166,7 +163,7 @@ const SHARE_DOWNLOAD_CONTEXT_QUERY: &str = r#"
         links.expires_at
       FROM share_links AS links
       INNER JOIN users AS owners ON owners.id = links.owner_id
-      INNER JOIN files AS roots ON roots.id = links.root_file_id
+      INNER JOIN visible_files AS roots ON roots.id = links.root_file_id
       WHERE links.token_hash = encode(digest($1::text, 'sha256'), 'hex')
         AND links.revoked_at IS NULL
         AND (links.expires_at IS NULL OR links.expires_at > now())
@@ -186,7 +183,7 @@ const SHARE_DOWNLOAD_CONTEXT_QUERY: &str = r#"
         ARRAY[target.id]::text[] AS visited_ids,
         0::integer AS depth
       FROM share_grant
-      INNER JOIN files AS target ON target.id = $2
+      INNER JOIN visible_files AS target ON target.id = $2
       WHERE target.owner_id = share_grant.owner_id
         AND target.state = 'active'
         AND target.entry_type = 'file'
@@ -203,7 +200,7 @@ const SHARE_DOWNLOAD_CONTEXT_QUERY: &str = r#"
         child.root_file_id,
         child.visited_ids || parent.id,
         child.depth + 1
-      FROM files AS parent
+      FROM visible_files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
       INNER JOIN share_grant ON share_grant.owner_id = parent.owner_id
       WHERE parent.state = 'active'
@@ -411,14 +408,14 @@ pub async fn create(
         .query_opt(
             "
                 SELECT id, e2ee_state
-                FROM files
+                FROM visible_files AS files
                 WHERE id = $1 AND owner_id = $2 AND state = 'active'
                 LIMIT 1
             ",
             &[&body.file_id, &owner.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(root) = root else {
         return Ok(HttpResponse::NotFound().body("item not found"));
     };
@@ -443,7 +440,7 @@ pub async fn create(
                 &[&username],
             )
             .await
-            .map_err(error::ErrorInternalServerError)?;
+            .map_err(crate::db::http_error)?;
         let Some(recipient) = recipient else {
             return Ok(HttpResponse::NotFound().body("recipient not found"));
         };
@@ -465,7 +462,7 @@ pub async fn create(
         .db
         .query_one("SELECT gen_random_uuid()::text AS id", &[])
         .await
-        .map_err(error::ErrorInternalServerError)?
+        .map_err(crate::db::http_error)?
         .get("id");
     let token = token_for_link(
         &state.config.share_link_secret,
@@ -504,7 +501,7 @@ pub async fn create(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     Ok(HttpResponse::Created()
         .insert_header((CACHE_CONTROL, "private, no-store"))
@@ -570,7 +567,7 @@ pub async fn list_owned(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let has_more = rows.len() > OWNED_SHARE_LINK_PAGE_SIZE;
     rows.truncate(OWNED_SHARE_LINK_PAGE_SIZE);
     let next_cursor = if has_more {
@@ -626,11 +623,7 @@ pub async fn rotate(
     let owner = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let link_id = path.into_inner();
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .transaction()
         .await
@@ -695,7 +688,7 @@ pub async fn revoke(
             &[&path.into_inner(), &owner.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     Ok(HttpResponse::NoContent()
         .insert_header((CACHE_CONTROL, "private, no-store"))
@@ -841,42 +834,25 @@ pub async fn remove_entry(
     }
     let _recursive_permit = state.acquire_recursive_operation(&grant.owner_id).await?;
     require_shared_node(&state, &grant, &file_id, None).await?;
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let transaction = client
-        .build_transaction()
-        .isolation_level(IsolationLevel::RepeatableRead)
-        .start()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let tree = walk_subtree(
-        &transaction,
-        TreeWalkScope {
-            owner_id: &grant.owner_id,
-            root_id: &file_id,
-            root_state: Some("active"),
-            child_state: Some("active"),
-            e2ee_state: None,
-            max_nodes: MAX_TREE_MUTATION_NODES,
-        },
+    match tree_jobs::mutate(
+        &state.db,
+        &grant.owner_id,
+        &file_id,
+        Action::Trash,
+        Some("active"),
+        Some(tree_jobs::EditorAuthorization {
+            id: &grant.id,
+            token: &token,
+            access_scope: &grant.access_scope,
+            recipient_id: grant.recipient_id.as_deref(),
+        }),
     )
-    .await
-    .map_err(error::ErrorInternalServerError)?;
-    if tree.as_ref().is_some_and(|tree| tree.truncated) {
-        return Ok(HttpResponse::PayloadTooLarge().body("folder contains too many entries"));
+    .await?
+    {
+        MutationResult::Queued(job_id) => return Ok(tree_jobs::queued_response(job_id, &file_id)),
+        MutationResult::Missing => return Ok(HttpResponse::NotFound().finish()),
+        MutationResult::Complete => {}
     }
-    if let Some(tree) = tree {
-        update_tree_state(&transaction, &tree.nodes, &grant.owner_id, "trashed")
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-    }
-    transaction
-        .commit()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
 
     Ok(HttpResponse::NoContent()
         .insert_header((CACHE_CONTROL, "private, no-store"))
@@ -971,7 +947,7 @@ async fn get_share_access_context(
         .db
         .query(SHARE_ACCESS_CONTEXT_QUERY, &[&token, &requested_folder_id])
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(first_row) = rows.first() else {
         return Err(error::ErrorGone(
             "share link expired, revoked, or unavailable",
@@ -1018,7 +994,7 @@ async fn get_share_download_context(
         .db
         .query_opt(SHARE_DOWNLOAD_CONTEXT_QUERY, &[&token, &file_id])
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(row) = row else {
         return Err(error::ErrorGone(
             "share link expired, revoked, or unavailable",
@@ -1089,7 +1065,7 @@ async fn resolve_grant(state: &AppState, request: &HttpRequest, token: &str) -> 
                        links.expires_at
                 FROM share_links AS links
                 INNER JOIN users AS owners ON owners.id = links.owner_id
-                INNER JOIN files ON files.id = links.root_file_id
+                INNER JOIN visible_files AS files ON files.id = links.root_file_id
                 WHERE links.token_hash = encode(digest($1::text, 'sha256'), 'hex')
                   AND links.revoked_at IS NULL
                   AND (links.expires_at IS NULL OR links.expires_at > now())
@@ -1101,7 +1077,7 @@ async fn resolve_grant(state: &AppState, request: &HttpRequest, token: &str) -> 
             &[&token],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(row) = row else {
         return Err(error::ErrorGone(
             "share link expired, revoked, or unavailable",
@@ -1125,12 +1101,12 @@ async fn require_shared_node(
                 WITH RECURSIVE ancestors AS (
                   SELECT id, parent_id, entry_type,
                          ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
-                  FROM files
+                  FROM visible_files AS files
                   WHERE id = $1 AND owner_id = $2 AND state = 'active'
                   UNION ALL
                   SELECT parent.id, parent.parent_id, parent.entry_type,
                          child.visited_ids || parent.id, child.depth + 1
-                  FROM files AS parent
+                  FROM visible_files AS parent
                   INNER JOIN ancestors AS child ON child.parent_id = parent.id
                   WHERE parent.owner_id = $2 AND parent.state = 'active'
                     AND child.depth < 100
@@ -1145,7 +1121,7 @@ async fn require_shared_node(
             &[&node_id, &grant.owner_id, &grant.root_file_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(row) = row else {
         return Err(error::ErrorNotFound("shared item not found"));
     };
@@ -1174,7 +1150,7 @@ async fn list_shared_children(
                        updated_at,
                        CASE WHEN entry_type = 'folder' THEN 0 ELSE 1 END AS cursor_rank,
                        lower(original_name) AS cursor_name
-                FROM files
+                FROM visible_files AS files
                 WHERE owner_id = $1 AND parent_id = $2 AND state = 'active'
                   AND e2ee_state IN ('legacy', 'staged')
                   AND (
@@ -1202,7 +1178,7 @@ async fn list_shared_children(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let has_more = rows.len() > SHARED_ENTRY_PAGE_SIZE;
     rows.truncate(SHARED_ENTRY_PAGE_SIZE);
     let next_cursor = if has_more {
@@ -1432,7 +1408,7 @@ mod tests {
             .find("require_shared_node(")
             .expect("share removal authorization should be present");
         assert!(admission < recursive_query);
-        assert!(remove.contains("walk_subtree("));
+        assert!(remove.contains("tree_jobs::mutate("));
     }
 
     #[actix_web::test]

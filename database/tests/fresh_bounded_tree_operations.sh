@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Set this when the isolated Compose test service publishes a non-default port.
+test_database_port="${AERALYTH_TEST_DATABASE_PORT:-5432}"
+
 test_database="aeralyth_bounded_tree_${$}"
 scale_rows="${AERALYTH_TREE_SCALE:-100000}"
 
@@ -134,7 +137,9 @@ if [[ "${walk_index}" != "true" ]]; then
   exit 1
 fi
 
-DATABASE_URL="postgres://aeralyth:aeralyth@127.0.0.1:5432/${test_database}" \
+bash database/tests/apply_current_schema.sh "${test_database}"
+
+DATABASE_URL="postgres://aeralyth:aeralyth@127.0.0.1:${test_database_port}/${test_database}" \
   AERALYTH_TREE_EXPECTED_NODES="${expected_nodes}" \
   cargo test \
     --quiet \
@@ -144,7 +149,7 @@ DATABASE_URL="postgres://aeralyth:aeralyth@127.0.0.1:5432/${test_database}" \
     --ignored \
     --nocapture
 
-DATABASE_URL="postgres://aeralyth:aeralyth@127.0.0.1:5432/${test_database}" \
+DATABASE_URL="postgres://aeralyth:aeralyth@127.0.0.1:${test_database_port}/${test_database}" \
   cargo test \
     --quiet \
     --manifest-path backend/Cargo.toml \
@@ -152,7 +157,7 @@ DATABASE_URL="postgres://aeralyth:aeralyth@127.0.0.1:5432/${test_database}" \
     -- \
     --ignored
 
-DATABASE_URL="postgres://aeralyth:aeralyth@127.0.0.1:5432/${test_database}" \
+DATABASE_URL="postgres://aeralyth:aeralyth@127.0.0.1:${test_database_port}/${test_database}" \
   cargo test \
     --quiet \
     --manifest-path backend/Cargo.toml \

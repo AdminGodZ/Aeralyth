@@ -1,0 +1,359 @@
+{
+  "raw_report_sha256": "1fbfd634136e8e0a8bd083c65fca67bf05408df6ece3ca7c9af5ccc41dae9292",
+  "verified_samples": 4800,
+  "groups": [
+    {
+      "offered_requests_per_second": 100.0,
+      "profile": "shared_gate_counterfactual",
+      "bulk_completed_per_run": [99, 95, 93],
+      "bulk_completed_during_provider_per_run": [18, 18, 16],
+      "same_user": {
+        "offered": 600,
+        "successful": 495,
+        "rejected": 105,
+        "other_failures": 0,
+        "provider_window_offered": 111,
+        "provider_window_successful": 9,
+        "provider_window_rejected": 102,
+        "status_counts": {
+          "200": 495,
+          "503": 105
+        },
+        "successful_handler": {
+          "samples": 495,
+          "max_ms": 758.927,
+          "p50_ms": 6.048792,
+          "p95_ms": 9.704875,
+          "p99_ms": 744.143416
+        },
+        "successful_scheduled_to_complete": {
+          "samples": 495,
+          "max_ms": 761.746042,
+          "p50_ms": 8.2065,
+          "p95_ms": 11.333833,
+          "p99_ms": 745.8687080000001
+        },
+        "successful_started_during_provider": {
+          "samples": 9,
+          "max_ms": 758.927,
+          "p50_ms": 744.143416,
+          "p95_ms": 758.927,
+          "p99_ms": 758.927
+        },
+        "arrival_lag": {
+          "samples": 600,
+          "max_ms": 4.272749999999999,
+          "p50_ms": 1.6904590000000002,
+          "p95_ms": 3.08525,
+          "p99_ms": 3.231125
+        }
+      },
+      "other_user": {
+        "offered": 600,
+        "successful": 600,
+        "rejected": 0,
+        "other_failures": 0,
+        "provider_window_offered": 111,
+        "provider_window_successful": 111,
+        "provider_window_rejected": 0,
+        "status_counts": {
+          "200": 600
+        },
+        "successful_handler": {
+          "samples": 600,
+          "max_ms": 60.035167,
+          "p50_ms": 32.493165999999995,
+          "p95_ms": 49.086458,
+          "p99_ms": 53.812958
+        },
+        "successful_scheduled_to_complete": {
+          "samples": 600,
+          "max_ms": 60.888,
+          "p50_ms": 34.446125,
+          "p95_ms": 51.142792,
+          "p99_ms": 55.128
+        },
+        "successful_started_during_provider": {
+          "samples": 111,
+          "max_ms": 60.035167,
+          "p50_ms": 32.113166,
+          "p95_ms": 51.721834,
+          "p99_ms": 55.617625
+        },
+        "arrival_lag": {
+          "samples": 600,
+          "max_ms": 4.369542,
+          "p50_ms": 1.832083,
+          "p95_ms": 3.208458,
+          "p99_ms": 3.364
+        }
+      }
+    },
+    {
+      "offered_requests_per_second": 100.0,
+      "profile": "partitioned",
+      "bulk_completed_per_run": [132, 131, 123],
+      "bulk_completed_during_provider_per_run": [25, 24, 16],
+      "same_user": {
+        "offered": 600,
+        "successful": 584,
+        "rejected": 12,
+        "other_failures": 4,
+        "provider_window_offered": 111,
+        "provider_window_successful": 99,
+        "provider_window_rejected": 8,
+        "status_counts": {
+          "200": 584,
+          "503": 12,
+          "500": 4
+        },
+        "successful_handler": {
+          "samples": 584,
+          "max_ms": 248.82791600000002,
+          "p50_ms": 9.910375,
+          "p95_ms": 15.622250000000001,
+          "p99_ms": 43.278
+        },
+        "successful_scheduled_to_complete": {
+          "samples": 584,
+          "max_ms": 262.644209,
+          "p50_ms": 11.12275,
+          "p95_ms": 17.705917000000003,
+          "p99_ms": 44.264708999999996
+        },
+        "successful_started_during_provider": {
+          "samples": 99,
+          "max_ms": 248.82791600000002,
+          "p50_ms": 10.181707999999999,
+          "p95_ms": 55.660792,
+          "p99_ms": 248.82791600000002
+        },
+        "arrival_lag": {
+          "samples": 600,
+          "max_ms": 206.983417,
+          "p50_ms": 1.948417,
+          "p95_ms": 3.660875,
+          "p99_ms": 89.504875
+        }
+      },
+      "other_user": {
+        "offered": 600,
+        "successful": 584,
+        "rejected": 12,
+        "other_failures": 4,
+        "provider_window_offered": 111,
+        "provider_window_successful": 99,
+        "provider_window_rejected": 8,
+        "status_counts": {
+          "200": 584,
+          "503": 12,
+          "500": 4
+        },
+        "successful_handler": {
+          "samples": 584,
+          "max_ms": 269.00275,
+          "p50_ms": 9.788292,
+          "p95_ms": 14.888583,
+          "p99_ms": 56.173
+        },
+        "successful_scheduled_to_complete": {
+          "samples": 584,
+          "max_ms": 271.393167,
+          "p50_ms": 11.052459,
+          "p95_ms": 17.117041999999998,
+          "p99_ms": 56.906959
+        },
+        "successful_started_during_provider": {
+          "samples": 99,
+          "max_ms": 269.00275,
+          "p50_ms": 7.456666,
+          "p95_ms": 37.047999999999995,
+          "p99_ms": 269.00275
+        },
+        "arrival_lag": {
+          "samples": 600,
+          "max_ms": 208.133042,
+          "p50_ms": 2.084084,
+          "p95_ms": 3.830417,
+          "p99_ms": 89.531209
+        }
+      }
+    },
+    {
+      "offered_requests_per_second": 200.0,
+      "profile": "shared_gate_counterfactual",
+      "bulk_completed_per_run": [45, 46, 46],
+      "bulk_completed_during_provider_per_run": [17, 17, 17],
+      "same_user": {
+        "offered": 600,
+        "successful": 384,
+        "rejected": 216,
+        "other_failures": 0,
+        "provider_window_offered": 222,
+        "provider_window_successful": 9,
+        "provider_window_rejected": 213,
+        "status_counts": {
+          "200": 384,
+          "503": 216
+        },
+        "successful_handler": {
+          "samples": 384,
+          "max_ms": 755.56025,
+          "p50_ms": 5.97325,
+          "p95_ms": 10.526583,
+          "p99_ms": 750.3405
+        },
+        "successful_scheduled_to_complete": {
+          "samples": 384,
+          "max_ms": 757.465542,
+          "p50_ms": 7.468,
+          "p95_ms": 11.796583,
+          "p99_ms": 752.410333
+        },
+        "successful_started_during_provider": {
+          "samples": 9,
+          "max_ms": 755.56025,
+          "p50_ms": 748.47175,
+          "p95_ms": 755.56025,
+          "p99_ms": 755.56025
+        },
+        "arrival_lag": {
+          "samples": 600,
+          "max_ms": 2.900833,
+          "p50_ms": 1.440541,
+          "p95_ms": 2.402875,
+          "p99_ms": 2.6431660000000003
+        }
+      },
+      "other_user": {
+        "offered": 600,
+        "successful": 402,
+        "rejected": 198,
+        "other_failures": 0,
+        "provider_window_offered": 222,
+        "provider_window_successful": 155,
+        "provider_window_rejected": 67,
+        "status_counts": {
+          "200": 402,
+          "503": 198
+        },
+        "successful_handler": {
+          "samples": 402,
+          "max_ms": 57.179792,
+          "p50_ms": 37.902708,
+          "p95_ms": 46.441292000000004,
+          "p99_ms": 49.567333
+        },
+        "successful_scheduled_to_complete": {
+          "samples": 402,
+          "max_ms": 58.323625,
+          "p50_ms": 39.220875,
+          "p95_ms": 47.430666,
+          "p99_ms": 50.551333
+        },
+        "successful_started_during_provider": {
+          "samples": 155,
+          "max_ms": 48.428917,
+          "p50_ms": 35.74875,
+          "p95_ms": 46.00525,
+          "p99_ms": 47.714708
+        },
+        "arrival_lag": {
+          "samples": 600,
+          "max_ms": 3.0017910000000003,
+          "p50_ms": 1.542667,
+          "p95_ms": 2.531625,
+          "p99_ms": 2.74425
+        }
+      }
+    },
+    {
+      "offered_requests_per_second": 200.0,
+      "profile": "partitioned",
+      "bulk_completed_per_run": [69, 70, 70],
+      "bulk_completed_during_provider_per_run": [25, 26, 25],
+      "same_user": {
+        "offered": 600,
+        "successful": 595,
+        "rejected": 5,
+        "other_failures": 0,
+        "provider_window_offered": 222,
+        "provider_window_successful": 222,
+        "provider_window_rejected": 0,
+        "status_counts": {
+          "200": 595,
+          "503": 5
+        },
+        "successful_handler": {
+          "samples": 595,
+          "max_ms": 28.574583,
+          "p50_ms": 7.125375,
+          "p95_ms": 19.164583,
+          "p99_ms": 25.600875
+        },
+        "successful_scheduled_to_complete": {
+          "samples": 595,
+          "max_ms": 28.821625,
+          "p50_ms": 8.519583,
+          "p95_ms": 20.50775,
+          "p99_ms": 26.201792
+        },
+        "successful_started_during_provider": {
+          "samples": 222,
+          "max_ms": 18.644959,
+          "p50_ms": 7.779541,
+          "p95_ms": 15.163375,
+          "p99_ms": 18.068167
+        },
+        "arrival_lag": {
+          "samples": 600,
+          "max_ms": 2.4631250000000002,
+          "p50_ms": 1.16275,
+          "p95_ms": 1.977958,
+          "p99_ms": 2.304375
+        }
+      },
+      "other_user": {
+        "offered": 600,
+        "successful": 596,
+        "rejected": 4,
+        "other_failures": 0,
+        "provider_window_offered": 222,
+        "provider_window_successful": 222,
+        "provider_window_rejected": 0,
+        "status_counts": {
+          "200": 596,
+          "503": 4
+        },
+        "successful_handler": {
+          "samples": 596,
+          "max_ms": 35.995375,
+          "p50_ms": 7.006334000000001,
+          "p95_ms": 15.774166999999998,
+          "p99_ms": 25.9005
+        },
+        "successful_scheduled_to_complete": {
+          "samples": 596,
+          "max_ms": 36.79325,
+          "p50_ms": 8.509417000000001,
+          "p95_ms": 16.5965,
+          "p99_ms": 26.179125000000003
+        },
+        "successful_started_during_provider": {
+          "samples": 222,
+          "max_ms": 16.240707999999998,
+          "p50_ms": 6.9947919999999995,
+          "p95_ms": 14.460459,
+          "p99_ms": 15.341125
+        },
+        "arrival_lag": {
+          "samples": 600,
+          "max_ms": 2.553708,
+          "p50_ms": 1.257875,
+          "p95_ms": 2.0794170000000003,
+          "p99_ms": 2.3912500000000003
+        }
+      }
+    }
+  ]
+}

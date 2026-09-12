@@ -1,8 +1,10 @@
 mod admin;
+#[cfg(test)]
+mod admission_contention_tests;
 mod auth;
 mod avatar;
 mod conditional;
-mod events;
+pub(crate) mod events;
 mod files;
 mod health;
 mod invitations;
@@ -11,7 +13,9 @@ mod metrics;
 mod pagination;
 mod profile;
 mod repositories;
+mod session_bootstrap;
 mod share_links;
+pub(crate) mod tree_jobs;
 mod tree_walk;
 mod upload_reservations;
 mod vault;
@@ -35,6 +39,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
                 .service(
                     web::scope("/auth")
                         .route("/info", web::get().to(auth::info))
+                        .route("/bootstrap", web::get().to(session_bootstrap::bootstrap))
                         .route("/login", web::post().to(auth::login))
                         .route("/login-json", web::post().to(auth::login_json))
                         .route(
@@ -114,6 +119,8 @@ pub fn configure(config: &mut web::ServiceConfig) {
                     web::get().to(repositories::archive_manifest),
                 )
                 .route("/repositories/{id}", web::get().to(repositories::detail))
+                .route("/files/summary", web::get().to(files::summary))
+                .route("/files/operations/{id}", web::get().to(tree_jobs::status))
                 .route("/files", web::get().to(files::list_files))
                 .route(
                     "/files/folder-manifests",

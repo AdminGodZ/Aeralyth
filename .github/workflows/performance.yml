@@ -8,6 +8,12 @@ on:
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
+    inputs:
+      compare-debug:
+        description: Also measure the debug binary with the release/image workload
+        type: boolean
+        required: false
+        default: false
 
 permissions:
   contents: read
@@ -40,29 +46,117 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run worker:build
+      - run: node scripts/verify-worker-release.mjs
       - name: Verify generated worker manifest is current
         run: git diff --exit-code -- src/generated/worker-assets.ts
       - run: npx tsc --noEmit
       - run: npm run lint
       - run: npm test
       - run: npm run test:performance
+      - run: node --test performance/arrival-load.node-test.mjs
       - run: npm run build
+      - run: node scripts/verify-worker-release.mjs
+
+  database-audit:
+    name: Isolated database and backend regression suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      COMPOSE_FILE: database/tests/audit-compose.yml
+      COMPOSE_PROJECT_NAME: aeralyth-audit-ci
+      AERALYTH_TEST_CONTAINER: aeralyth-audit-db-suite-20260912
+      AERALYTH_TEST_DATABASE_PORT: "55434"
+      AERALYTH_DATABASE_INTEGRATION_TESTS: "1"
+      AERALYTH_E2EE_MODE: "off"
+      AERALYTH_COOKIE_SECURE: "false"
+      DATABASE_URL: postgres://aeralyth:aeralyth@127.0.0.1:55434/aeralyth
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - uses: dtolnay/rust-toolchain@1.98.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: backend
+      - run: npm ci
+      - name: Start the separate audit PostgreSQL service
+        run: docker compose up -d --wait postgres
+      - name: Run every package database regression
+        run: python3 database/tests/run_audit_suite.py
+      - name: Initialize a fresh current-schema database for backend regressions
+        run: |
+          mkdir -p performance/results/database-audit-2026-09-12
+          {
+            docker compose exec -T postgres createdb -U aeralyth aeralyth_audit_backend
+            for migration in database/init/[0-9][0-9][0-9]_*.sql; do
+              docker compose exec -T postgres psql -X -v ON_ERROR_STOP=1 \
+                -U aeralyth -d aeralyth_audit_backend \
+                -f "/docker-entrypoint-initdb.d/$(basename "$migration")"
+            done
+          } > performance/results/database-audit-2026-09-12/backend-init.log 2>&1
+      - name: Run backend unit and PostgreSQL integration regressions
+        env:
+          DATABASE_URL: postgres://aeralyth:aeralyth@127.0.0.1:55434/aeralyth_audit_backend
+        run: |
+          set -o pipefail
+          # The database suite already runs the bounded-tree test against its
+          # dedicated scale fixture. The relative admission benchmark runs in
+          # the controlled step below; every other ignored test is included.
+          cargo test --locked --manifest-path backend/Cargo.toml -- \
+            --include-ignored --test-threads=1 \
+            --skip bounded_tree_walk_reaches_scale_fixture \
+            --skip measure_provider_bulk_and_browse_admission_contention \
+            2>&1 | tee performance/results/database-audit-2026-09-12/backend-tests.log
+      - name: Measure admission contention on the isolated runner
+        if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+        env:
+          DATABASE_URL: postgres://aeralyth:aeralyth@127.0.0.1:55434/aeralyth_audit_backend
+          AERALYTH_ADMISSION_REPORT_DIR: ${{ github.workspace }}/performance/results/database-audit-2026-09-12/admission-contention
+        run: |
+          set -o pipefail
+          cargo test --locked --manifest-path backend/Cargo.toml \
+            measure_provider_bulk_and_browse_admission_contention -- \
+            --ignored --test-threads=1 --nocapture \
+            2>&1 | tee performance/results/database-audit-2026-09-12/admission-contention.log
+      - name: Preserve database and backend regression evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: database-audit-${{ github.sha }}
+          path: performance/results/database-audit-2026-09-12/
+          if-no-files-found: warn
+      - name: Stop and remove only the isolated audit database
+        if: always()
+        run: docker compose down --volumes --remove-orphans
 
   backend-and-database:
     name: Backend, migrations, and latency regressions
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 50
     env:
       AERALYTH_API_HOST: 127.0.0.1
       AERALYTH_API_PORT: "18080"
       AERALYTH_COOKIE_SECURE: "false"
       AERALYTH_E2EE_MODE: "off"
+      AERALYTH_DB_POOL_MAX: "8"
+      AERALYTH_DB_POOL_MIN: "2"
+      AERALYTH_DB_MAINTENANCE_POOL_MAX: "2"
       AERALYTH_METRICS_TOKEN: ci-only-performance-token-000000000
       AERALYTH_DATABASE_INTEGRATION_TESTS: "1"
       AERALYTH_PERF_USERNAME: admingod
       AERALYTH_PERF_PASSWORD: admingod
       AERALYTH_PERF_URL: http://127.0.0.1:18080/health
       AERALYTH_PERF_MAX_P95_MS: "500"
+      AERALYTH_PERF_ISOLATED: "1"
+      AERALYTH_PERF_DURATION_SECONDS: ${{ github.event_name == 'schedule' && '300' || '30' }}
+      AERALYTH_PERF_ARRIVAL_RATE: "10"
+      AERALYTH_PERF_CONCURRENCY: "32"
+      AERALYTH_PERF_MAX_P99_MS: "1000"
+      AERALYTH_PERF_TIMEOUT_MS: "5000"
+      AERALYTH_PERF_PROVIDER_HOSTS: aeralyth-s3-smoke:9000
+      AERALYTH_PERF_ROUTING: direct-actix
       DATABASE_URL: postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth
     steps:
       - uses: actions/checkout@v4
@@ -83,36 +177,59 @@ jobs:
       - run: npm run db:migrate
       - name: Verify every migration replays safely
         run: npm run db:migrate
-      - run: npm run db:test:migration-replay
-      - run: npm run db:test:realtime
-      - run: npm run db:test:flexible-settings
-      - run: npm run db:test:folder-manifest
-      - run: npm run db:test:folder-manifest-fresh
-      - run: npm run db:test:upload-completion-fresh
-      - run: npm run db:test:performance-ledger-concurrency
-      - run: npm run db:test:performance-ledger-fresh
-      - run: npm run db:test:session-counter-performance-fresh
-      - run: npm run db:test:vault-query-performance-fresh
-      - run: npm run db:test:migration-identity-performance-fresh
-      - run: npm run db:test:navigation-hot-paths-fresh
-      - run: npm run db:test:collection-hierarchy-performance-fresh
-      - run: npm run db:test:admin-search-identifier-performance-fresh
-      - run: npm run db:test:bounded-tree-operations-fresh
-      - run: npm run db:test:production-preflight-fresh
-      - run: cargo test --locked --manifest-path backend/Cargo.toml
-      - name: Run PostgreSQL query-contract tests
-        run: cargo test --locked --manifest-path backend/Cargo.toml database_query_contracts_prepare -- --ignored --test-threads=1
-      - name: Run PostgreSQL mutation-contract tests
-        run: cargo test --locked --manifest-path backend/Cargo.toml database_optimized_queries_execute -- --ignored --test-threads=1
-      - name: Verify minute-based trash expiry
-        run: cargo test --locked --manifest-path backend/Cargo.toml trash_expiry_executes_leaf_first_and_queues_file_objects -- --ignored --test-threads=1
-      - name: Verify password and share-token security transactions
+      - name: Start isolated S3-compatible storage
         run: |
-          cargo test --locked --manifest-path backend/Cargo.toml database_password_change_revokes_every_session_atomically -- --ignored --test-threads=1
-          cargo test --locked --manifest-path backend/Cargo.toml database_token_rotation_invalidates_the_old_token -- --ignored --test-threads=1
-      - name: Start API
+          echo '127.0.0.1 aeralyth-s3-smoke' | sudo tee --append /etc/hosts
+          docker run --detach --name aeralyth-s3-smoke \
+            --network aeralyth_default \
+            --publish 127.0.0.1:9000:9000 \
+            -e MINIO_ROOT_USER=aeralyth-ci-access \
+            -e MINIO_ROOT_PASSWORD=aeralyth-ci-secret-key-000000000 \
+            quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e \
+            server /data --address :9000 --console-address :9001
+          for attempt in $(seq 1 60); do
+            if docker exec aeralyth-s3-smoke mc alias set \
+              local http://127.0.0.1:9000 \
+              aeralyth-ci-access aeralyth-ci-secret-key-000000000 \
+              >/dev/null 2>&1
+            then
+              break
+            fi
+            sleep 1
+          done
+          docker exec aeralyth-s3-smoke mc ready local
+          docker exec aeralyth-s3-smoke mc mb --ignore-existing local/aeralyth-ci
+          cat >> "$GITHUB_ENV" <<'ENV'
+          AERALYTH_STORAGE_BACKEND=s3
+          AWS_ENDPOINT_URL=http://aeralyth-s3-smoke:9000
+          AWS_ACCESS_KEY_ID=aeralyth-ci-access
+          AWS_SECRET_ACCESS_KEY=aeralyth-ci-secret-key-000000000
+          AWS_S3_BUCKET_NAME=aeralyth-ci
+          AWS_DEFAULT_REGION=us-east-1
+          AWS_S3_URL_STYLE=path
+          ENV
+      - name: Build the release artifact for latency acceptance
+        run: cargo build --release --locked --manifest-path backend/Cargo.toml
+      - name: Record release identity and runner resources
         run: |
-          cargo run --locked --manifest-path backend/Cargo.toml > backend-performance.log 2>&1 &
+          mkdir -p performance-results
+          binary_sha="$(sha256sum backend/target/release/aeralyth-api | cut --delimiter=' ' --fields=1)"
+          echo "AERALYTH_PERF_BUILD_ID=$(git rev-parse HEAD):${binary_sha}" >> "$GITHUB_ENV"
+          perf_cpus="$(python3 -c 'import os; print(",".join(map(str, sorted(os.sched_getaffinity(0))[:2])))')"
+          echo "AERALYTH_PERF_CPU_SET=${perf_cpus}" >> "$GITHUB_ENV"
+          {
+            git rev-parse HEAD
+            sha256sum backend/target/release/aeralyth-api
+            rustc --version --verbose
+            lscpu
+            free --bytes
+            echo "AERALYTH_PERF_CPU_SET=${perf_cpus}"
+            echo 'AERALYTH_E2EE_MODE=migrate'
+            env | sort | grep -E '^AERALYTH_(API_(HOST|PORT)|DB_(POOL_(MAX|MIN)|MAINTENANCE_POOL_MAX)|STORAGE_BACKEND|PERF_(DURATION_SECONDS|ARRIVAL_RATE|CONCURRENCY|MAX_P99_MS|TIMEOUT_MS|ROUTING))='
+          } > performance-results/release-identity.txt
+      - name: Start the exact release API binary
+        run: |
+          taskset --cpu-list "$AERALYTH_PERF_CPU_SET" backend/target/release/aeralyth-api > backend-performance.log 2>&1 &
           echo $! > backend-performance.pid
           for attempt in $(seq 1 60); do
             if curl --fail --silent http://127.0.0.1:18080/health >/dev/null; then
@@ -126,6 +243,75 @@ jobs:
       - run: npm run perf:auth-before-body
       - run: npm run perf:auth-database-isolation
       - run: npm run test:realtime:live
+      - name: Run mixed workload against the release artifact
+        env:
+          AERALYTH_E2EE_MODE: migrate
+          AERALYTH_PERF_BUILD_PROFILE: release
+          AERALYTH_PERF_OUTPUT: performance-results/release-mixed.json
+        run: |
+          kill "$(cat backend-performance.pid)"
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "$(cat backend-performance.pid)" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if kill -0 "$(cat backend-performance.pid)" 2>/dev/null; then
+            echo 'The correctness API did not stop before the mixed workload.' >&2
+            exit 1
+          fi
+          taskset --cpu-list "$AERALYTH_PERF_CPU_SET" backend/target/release/aeralyth-api >> backend-performance.log 2>&1 &
+          echo $! > backend-performance.pid
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:18080/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent --show-error http://127.0.0.1:18080/health
+          export AERALYTH_PERF_API_PID="$(cat backend-performance.pid)"
+          node performance/mixed-load.mjs
+          AERALYTH_PERF_FAULT_OUTPUT=performance-results/release-database-stall.json \
+            node performance/mixed-load-self-test.mjs
+      - name: Compare the debug artifact with the same workload
+        if: github.event_name == 'workflow_dispatch' && inputs.compare-debug
+        env:
+          AERALYTH_E2EE_MODE: migrate
+          AERALYTH_PERF_BUILD_PROFILE: debug-comparison
+          AERALYTH_PERF_OUTPUT: performance-results/debug-mixed.json
+          AERALYTH_PERF_ENFORCE_THRESHOLDS: "0"
+        run: |
+          kill "$(cat backend-performance.pid)"
+          for attempt in $(seq 1 60); do
+            if ! kill -0 "$(cat backend-performance.pid)" 2>/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          if kill -0 "$(cat backend-performance.pid)" 2>/dev/null; then
+            echo 'The release API did not stop before the debug comparison.' >&2
+            exit 1
+          fi
+          cargo build --locked --manifest-path backend/Cargo.toml
+          binary_sha="$(sha256sum backend/target/debug/aeralyth-api | cut --delimiter=' ' --fields=1)"
+          export AERALYTH_PERF_BUILD_ID="$(git rev-parse HEAD):${binary_sha}"
+          {
+            git rev-parse HEAD
+            sha256sum backend/target/debug/aeralyth-api
+            echo "AERALYTH_PERF_CPU_SET=${AERALYTH_PERF_CPU_SET}"
+            echo "AERALYTH_E2EE_MODE=${AERALYTH_E2EE_MODE}"
+          } > performance-results/debug-identity.txt
+          taskset --cpu-list "$AERALYTH_PERF_CPU_SET" backend/target/debug/aeralyth-api > backend-debug-performance.log 2>&1 &
+          echo $! > backend-performance.pid
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent http://127.0.0.1:18080/health >/dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl --fail --silent --show-error http://127.0.0.1:18080/health
+          export AERALYTH_PERF_API_PID="$(cat backend-performance.pid)"
+          node performance/mixed-load.mjs
       - name: Show API log on failure
         if: failure()
         run: |
@@ -140,13 +326,27 @@ jobs:
           if test -f backend-performance.pid; then
             kill "$(cat backend-performance.pid)" 2>/dev/null || true
           fi
+          docker rm --force aeralyth-s3-smoke 2>/dev/null || true
+      - name: Preserve latency results and artifact identities
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: backend-performance-${{ github.sha }}
+          path: |
+            performance-results/
+            backend-performance.log
+            backend-debug-performance.log
+          if-no-files-found: warn
 
   production-image:
     name: Railway production image smoke test
     runs-on: ubuntu-latest
-    timeout-minutes: 40
+    timeout-minutes: 50
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
       - uses: docker/setup-buildx-action@v3
       - uses: docker/build-push-action@v6
         with:
@@ -160,8 +360,10 @@ jobs:
         run: docker compose up -d --wait postgres
       - name: Start isolated S3-compatible storage
         run: |
+          echo '127.0.0.1 aeralyth-s3-smoke' | sudo tee --append /etc/hosts
           docker run --detach --name aeralyth-s3-smoke \
             --network aeralyth_default \
+            --publish 127.0.0.1:9000:9000 \
             -e MINIO_ROOT_USER=aeralyth-ci-access \
             -e MINIO_ROOT_PASSWORD=aeralyth-ci-secret-key-000000000 \
             quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e \
@@ -202,8 +404,27 @@ jobs:
             -e AERALYTH_ENV=Production \
             aeralyth-ci:latest /app/scripts/migrate-production.sh
       - name: Verify production image on standard and colliding Railway ports
+        env:
+          AERALYTH_PERF_URL: http://127.0.0.1:18081/health
+          AERALYTH_PERF_USERNAME: admingod
+          AERALYTH_PERF_PASSWORD: production-ci-password
+          AERALYTH_METRICS_TOKEN: ci-only-metrics-token-0000000000000
+          AERALYTH_PERF_ISOLATED: "1"
+          AERALYTH_PERF_DURATION_SECONDS: ${{ github.event_name == 'schedule' && '300' || '30' }}
+          AERALYTH_PERF_ARRIVAL_RATE: "10"
+          AERALYTH_PERF_CONCURRENCY: "32"
+          AERALYTH_PERF_MAX_P95_MS: "500"
+          AERALYTH_PERF_MAX_P99_MS: "1000"
+          AERALYTH_PERF_TIMEOUT_MS: "5000"
+          AERALYTH_PERF_PROVIDER_HOSTS: aeralyth-s3-smoke:9000
+          AERALYTH_PERF_ROUTING: caddy
+          AERALYTH_PERF_BUILD_PROFILE: production-image
+          AERALYTH_PERF_OUTPUT: performance-results/production-image-mixed.json
+          AERALYTH_PERF_MEMORY_CONTAINER: aeralyth-production-smoke
+          DATABASE_URL: postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth
         run: |
           trap 'docker logs aeralyth-production-smoke 2>/dev/null || true' ERR
+          mkdir -p performance-results
           smoke_port() {
             public_port="$1"
             expected_api_port="$2"
@@ -228,12 +449,16 @@ jobs:
             }
             docker run --detach --name aeralyth-production-smoke \
               --network aeralyth_default \
+              --cpus=2 --memory=2g \
               --publish "18081:${public_port}" \
               -e PORT="${public_port}" \
               -e DATABASE_URL=postgres://aeralyth:aeralyth@postgres:5432/aeralyth \
               -e AERALYTH_ENV=production \
               -e AERALYTH_COOKIE_SECURE=true \
               -e AERALYTH_E2EE_MODE=migrate \
+              -e AERALYTH_DB_POOL_MAX=8 \
+              -e AERALYTH_DB_POOL_MIN=2 \
+              -e AERALYTH_DB_MAINTENANCE_POOL_MAX=2 \
               -e AERALYTH_STORAGE_BACKEND=s3 \
               -e AWS_ENDPOINT_URL=http://aeralyth-s3-smoke:9000 \
               -e AWS_ACCESS_KEY_ID=aeralyth-ci-access \
@@ -260,7 +485,21 @@ jobs:
             verify_worker "${vault_worker_path}"
             verify_worker "${zip_worker_path}"
             verify_worker "${checksum_worker_path}"
+            node scripts/test-worker-http.mjs http://127.0.0.1:18081
             docker logs aeralyth-production-smoke 2>&1 | grep "127.0.0.1:${expected_api_port}"
+            if test "${public_port}" = 8080; then
+              image_id="$(docker image inspect aeralyth-ci:latest --format '{{.Id}}')"
+              export AERALYTH_PERF_BUILD_ID="$(git rev-parse HEAD):${image_id}"
+              {
+                git rev-parse HEAD
+                docker image inspect aeralyth-ci:latest --format '{{.Id}}'
+                docker exec aeralyth-production-smoke sha256sum /app/bin/aeralyth-api
+                docker inspect aeralyth-production-smoke --format '{{json .HostConfig.NanoCpus}} {{json .HostConfig.Memory}} {{json .HostConfig.PortBindings}}'
+                docker exec aeralyth-production-smoke sh -c 'env | sort | grep -E "^(NODE_ENV|PORT|AERALYTH_(API_(HOST|PORT)|FRONTEND_PORT|DB_(POOL_(MAX|MIN)|MAINTENANCE_POOL_MAX)|E2EE_MODE|STORAGE_BACKEND))="'
+              } > performance-results/production-image-identity.txt
+              node performance/mixed-load.mjs
+              docker logs aeralyth-production-smoke > performance-results/production-image.log 2>&1
+            fi
             docker rm --force aeralyth-production-smoke
           }
           smoke_port 8080 8081
@@ -268,10 +507,19 @@ jobs:
       - name: Show container log on failure
         if: failure()
         run: |
-          docker logs aeralyth-production-smoke 2>/dev/null || true
+          mkdir -p performance-results
+          docker logs aeralyth-production-smoke > performance-results/production-image.log 2>&1 || true
+          cat performance-results/production-image.log
           docker logs aeralyth-s3-smoke 2>/dev/null || true
       - name: Stop production smoke services
         if: always()
         run: |
           docker rm --force aeralyth-production-smoke 2>/dev/null || true
           docker rm --force aeralyth-s3-smoke 2>/dev/null || true
+      - name: Preserve production latency results and artifact identity
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-performance-${{ github.sha }}
+          path: performance-results/
+          if-no-files-found: warn

@@ -1,0 +1,6 @@
+\set ON_ERROR_STOP on
+SET plan_cache_mode=force_generic_plan;
+PREPARE old_page(bigint,text,text[],text,bigint) AS SELECT child.id,child.parent_id,child.entry_type,parent.depth FROM tree_operation_nodes AS parent CROSS JOIN LATERAL (SELECT id,parent_id,entry_type FROM files WHERE owner_id=$2 AND parent_id=parent.node_id AND (parent.last_child_id IS NULL OR id > parent.last_child_id) AND ($4::text IS NULL OR state=$4) ORDER BY id LIMIT $5) AS child WHERE parent.job_id=$1 AND parent.node_id=ANY($3::text[]) ORDER BY parent.depth,parent.node_id,child.id LIMIT $5;
+EXPLAIN (ANALYZE,BUFFERS) EXECUTE old_page(1,'usr_tree_job_test',ARRAY['tree-job-root'],NULL,256);
+PREPARE seek_page(bigint,text,text[],text,bigint) AS SELECT child.id,child.parent_id,child.entry_type,parent.depth FROM tree_operation_nodes AS parent CROSS JOIN LATERAL (SELECT id,parent_id,entry_type FROM files WHERE owner_id=$2 AND parent_id=parent.node_id AND id > COALESCE(parent.last_child_id,'') AND ($4::text IS NULL OR state=$4) ORDER BY id LIMIT $5) AS child WHERE parent.job_id=$1 AND parent.node_id=ANY($3::text[]) ORDER BY parent.depth,parent.node_id,child.id LIMIT $5;
+EXPLAIN (ANALYZE,BUFFERS) EXECUTE seek_page(1,'usr_tree_job_test',ARRAY['tree-job-root'],NULL,256);

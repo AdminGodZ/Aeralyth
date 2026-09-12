@@ -1,0 +1,115 @@
+{
+  "verifiedAt": "2026-09-12T11:46:38.362Z",
+  "sourceHead": "fe9556cf9f011297e16500f18cdf04b991b35635",
+  "nextBuildId": "kLh0LsUQEgybZ5ZUu3iqk",
+  "framework": "Next.js 16.3.4",
+  "bundler": "Turbopack",
+  "buildFallbackUsed": false,
+  "tests": {
+    "full": {
+      "files": 76,
+      "passed": 511,
+      "failed": 0
+    },
+    "performance": {
+      "files": 6,
+      "passed": 45,
+      "failed": 0
+    },
+    "arrival": {
+      "passed": 10,
+      "failed": 0
+    }
+  },
+  "scriptSyntax": {
+    "nodeModules": 25,
+    "bashScripts": 24
+  },
+  "biome": {
+    "maximumFileBytes": 8388608,
+    "checkedFiles": 299,
+    "warnings": 0,
+    "note": "Raised size limit to include all large benchmark JSON records; formatted evidence JSON without changing parsed values."
+  },
+  "workerAssets": {
+    "identicalToStrictSnapshot": true,
+    "verifiedInputFiles": 13,
+    "verifiedEmittedAssets": 8,
+    "snapshotCommit": "d3eeda9d564523b7c3198b457017d8a7a53e1111"
+  },
+  "checks": [
+    {
+      "name": "lint",
+      "status": "passed",
+      "log": "performance/results/frontend-final-2026-09-12/lint.log",
+      "sha256": "e24f8a635b7a9de671c3c5eeb0e295f7886436f34ff61f94961384986d6335f3"
+    },
+    {
+      "name": "typescript",
+      "status": "passed",
+      "log": "performance/results/frontend-final-2026-09-12/typescript.log",
+      "sha256": "4b3968663d61a75375854e9aa34485e08626229a115ef33d790e5d5a36ef5e10"
+    },
+    {
+      "name": "tests",
+      "status": "passed",
+      "log": "performance/results/frontend-final-2026-09-12/tests.log",
+      "sha256": "42fb836d5fbd97f92f1b9756f0d27f32f3f16f6f8418bca21f6147a0b9e3c601"
+    },
+    {
+      "name": "performance",
+      "status": "passed",
+      "log": "performance/results/frontend-final-2026-09-12/performance.log",
+      "sha256": "d8d7b8349eacf4e561458b880df2fa6d447ba34b1b3997dcc00fc8980f971dda"
+    },
+    {
+      "name": "arrival",
+      "status": "passed",
+      "log": "performance/results/frontend-final-2026-09-12/arrival.log",
+      "sha256": "7c6ad6d8b835d9bafd8325c35131b2c2d256374a411f608f7d7ca81f6b18d013"
+    },
+    {
+      "name": "script-syntax",
+      "status": "passed",
+      "log": "performance/results/frontend-final-2026-09-12/script-syntax.log",
+      "sha256": "746cdbbdb4f267e76b5f82f39204a7e42b91a30265cca6b51f0a54509a700231"
+    },
+    {
+      "name": "railway-config",
+      "status": "passed",
+      "log": "performance/results/frontend-final-2026-09-12/railway-config.log",
+      "sha256": "877dcfd0787c6d21fae48a1e37c824f92ef59d7f8e149c09a606ebd2fb825e83"
+    },
+    {
+      "name": "caddy-config",
+      "status": "passed",
+      "log": "performance/results/frontend-final-2026-09-12/caddy-config.log",
+      "sha256": "0240c21ef236160b430a1b6d396b2750558aa441147e09759e35f3a116e7210f"
+    },
+    {
+      "name": "build",
+      "status": "passed",
+      "log": "performance/results/frontend-final-2026-09-12/build.log",
+      "sha256": "882838234a220e88b9ff37fa656a40bd2a8cab7cb0370413f811f80af2939413"
+    },
+    {
+      "name": "worker-content",
+      "status": "passed",
+      "log": "performance/results/frontend-final-2026-09-12/worker-content.log",
+      "sha256": "f06f4ec061232778ea56f345298543eec1c1720d1d526d722e5540384328ade3"
+    },
+    {
+      "name": "worker-strict-snapshot",
+      "status": "passed",
+      "log": "performance/results/frontend-final-2026-09-12/worker-strict-snapshot.log",
+      "sha256": "99c94ce43ad88067def547a988eaca25d915219674b9cb91aaeb0139808007f6"
+    },
+    {
+      "name": "diff-check",
+      "status": "passed",
+      "log": "performance/results/frontend-final-2026-09-12/diff-check.log",
+      "sha256": "f836588d5a118adbf0236010ae25c097d821cb217ebeebf7fa326166cc6e5545"
+    }
+  ],
+  "remainingBoundary": "Production image and full-stack browser/load evidence are separate from this frontend build verification. No source commit or remote deployment is claimed."
+}

@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Set this when the isolated Compose test service publishes a non-default port.
+test_database_port="${AERALYTH_TEST_DATABASE_PORT:-5432}"
+
 test_database="aeralyth_collection_hierarchy_${$}"
 scale_rows="${AERALYTH_COLLECTION_SCALE:-100000}"
 
@@ -136,14 +139,6 @@ if (( after_wal >= before_wal )); then
   exit 1
 fi
 
-DATABASE_URL="postgres://aeralyth:aeralyth@127.0.0.1:5432/${test_database}" \
-  cargo test \
-    --quiet \
-    --manifest-path backend/Cargo.toml \
-    database_query_contracts_prepare \
-    -- \
-    --ignored
-
 docker compose exec -T postgres psql \
   -v ON_ERROR_STOP=1 \
   -U aeralyth \
@@ -181,4 +176,14 @@ fi
 
 echo "write WAL bytes before/after: ${before_wal}/${after_wal}"
 echo "write time ms before/after: ${before_ms}/${after_ms}"
+bash database/tests/apply_current_schema.sh "${test_database}"
+
+DATABASE_URL="postgres://aeralyth:aeralyth@127.0.0.1:${test_database_port}/${test_database}" \
+  cargo test \
+    --quiet \
+    --manifest-path backend/Cargo.toml \
+    database_query_contracts_prepare \
+    -- \
+    --ignored
+
 echo "collection hierarchy checks passed at ${scale_rows} rows"

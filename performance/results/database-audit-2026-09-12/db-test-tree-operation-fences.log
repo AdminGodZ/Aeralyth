@@ -1,0 +1,39 @@
+Command: npm run db:test:tree-operation-fences
+
+> aeralyth@0.1.0 db:test:tree-operation-fences
+> docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U aeralyth -d aeralyth < database/tests/tree_operation_fences.sql
+
+BEGIN
+INSERT 0 2
+INSERT 0 4
+INSERT 0 1
+INSERT 0 1
+DO
+ set_config 
+------------
+ 1
+(1 row)
+
+UPDATE 1
+UPDATE 1
+DO
+UPDATE 1
+UPDATE 1
+ set_config 
+------------
+ 
+(1 row)
+
+DO
+INSERT 0 1
+ set_config 
+------------
+ 2
+(1 row)
+
+DELETE 1
+DELETE 1
+UPDATE 1
+DO
+ROLLBACK
+tree fence, ancestor writes, share guard, worker bypass, counter snapshots, root deletion passed

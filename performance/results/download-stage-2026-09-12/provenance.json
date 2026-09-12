@@ -1,0 +1,34 @@
+{
+  "startedAt": "2026-09-12T11:35:41.059Z",
+  "baselineRef": "fe9556cf9f011297e16500f18cdf04b991b35635",
+  "baselineRevision": "fe9556cf9f011297e16500f18cdf04b991b35635",
+  "baselineSourceSha256": "2b1a39936eea74ea31fb7036063dcc6808c589815b2f2b9c2faf675177367f38",
+  "sourceHashes": {
+    "src/features/vault/encrypted-download.ts": "7a79487f28994ccb6b6c595dea36f188ab8f60a09ad777194a265f46ff08a724",
+    "src/features/vault/resumable-download.ts": "7647ce98f0fa01c252779537c40bdd7443d125e95ca2a59f047dc8d9df677574",
+    "src/features/vault/buffered-bytes.ts": "b20b269a039d2853dd79ef1aaf1630076552fd1ab6fccdae7f25de3c342473ff",
+    "performance/download-stage-profile.ts": "3e6c32c35ca4c163fa1c17c998f9e715e82809dc7b0036d2e86577cb69ed4b93",
+    "performance/download-stage-profile.mjs": "50659ff816b25585e1d3cd4768a597de4b1f1c16df1abe13bce29c1eca14730f"
+  },
+  "host": {
+    "platform": "darwin",
+    "arch": "arm64",
+    "node": "v26.8.2",
+    "cpu": "Apple M5 Pro"
+  },
+  "command": [
+    "/opt/homebrew/Cellar/node/26.8.2/bin/node",
+    "/Users/timheld/Documents/Projects/Aeralyth/performance/download-stage-profile.mjs"
+  ],
+  "browserAvailability": {
+    "firefox": "not installed",
+    "webkit": "not installed",
+    "safari": "installed",
+    "chromium": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) HeadlessChrome/151.0.0.0 Safari/537.36",
+    "safariAutomation": {
+      "status": "unavailable",
+      "reason": "Could not create a session: You must enable 'Allow remote automation' in the Developer section of Safari Settings to control Safari via WebDriver."
+    }
+  },
+  "completedAt": "2026-09-12T11:35:56.007Z"
+}

@@ -1,0 +1,240 @@
+{
+  "startedAt": "2026-09-12T11:09:54.237235+00:00",
+  "image": "aeralyth-audit-20260912:current",
+  "container": "aeralyth-audit-production-20260912",
+  "steps": [
+    {
+      "name": "image-id",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.074,
+      "passed": true
+    },
+    {
+      "name": "binary-sha256",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.376,
+      "passed": true
+    },
+    {
+      "name": "fresh-image-migration-preflight",
+      "exitCode": 3,
+      "expectedExitCode": 3,
+      "elapsedSeconds": 1.763,
+      "passed": true
+    },
+    {
+      "name": "rotate-isolated-seed-password",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.123,
+      "passed": true
+    },
+    {
+      "name": "image-migration-replay-preflight",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 1.3,
+      "passed": true
+    },
+    {
+      "name": "start-standard",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.218,
+      "passed": true
+    },
+    {
+      "name": "runtime-resource-identity",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.038,
+      "passed": true
+    },
+    {
+      "name": "standard-health",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.02,
+      "passed": true
+    },
+    {
+      "name": "standard-api-health",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.019,
+      "passed": true
+    },
+    {
+      "name": "standard-login",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.036,
+      "passed": true
+    },
+    {
+      "name": "standard-worker-http",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.173,
+      "passed": true
+    },
+    {
+      "name": "standard-runtime-log",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.036,
+      "passed": true
+    },
+    {
+      "name": "http-smoke",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.171,
+      "passed": true
+    },
+    {
+      "name": "mixed-30s",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 48.15,
+      "passed": true
+    },
+    {
+      "name": "database-stall-acceptance",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 14.358,
+      "passed": true
+    },
+    {
+      "name": "mixed-300s",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 317.553,
+      "passed": true
+    },
+    {
+      "name": "standard-final-log",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.036,
+      "passed": true
+    },
+    {
+      "name": "stop-standard",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 2.527,
+      "passed": true
+    },
+    {
+      "name": "remove-standard",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.072,
+      "passed": true
+    },
+    {
+      "name": "start-colliding",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.22,
+      "passed": true
+    },
+    {
+      "name": "colliding-health",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.02,
+      "passed": true
+    },
+    {
+      "name": "colliding-api-health",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.019,
+      "passed": true
+    },
+    {
+      "name": "colliding-login",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.036,
+      "passed": true
+    },
+    {
+      "name": "colliding-worker-http",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.125,
+      "passed": true
+    },
+    {
+      "name": "colliding-runtime-log",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.037,
+      "passed": true
+    },
+    {
+      "name": "stop-colliding",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.483,
+      "passed": true
+    },
+    {
+      "name": "remove-colliding",
+      "exitCode": 0,
+      "expectedExitCode": 0,
+      "elapsedSeconds": 0.037,
+      "passed": true
+    }
+  ],
+  "passed": false,
+  "source": {
+    "timestamp": "2026-09-12T11:05:28.088123+00:00",
+    "baseCommit": "fe9556cf9f011297e16500f18cdf04b991b35635",
+    "trackedDiffSha256": "ff64219fc75ef27324efa8f2e612c4516aacbcce45db18b5fe89a8b9ac1a72a4",
+    "sourceManifestSha256": "a466c5401252061bc6483e153855ff3aa4d42a3cdb12d33bd368e1b10db61e6e",
+    "sourceFiles": 408,
+    "sourceBytes": 5466627,
+    "snapshot": "/private/tmp/aeralyth-production-source-20260912",
+    "excluded": "Ignored local files, .git, secret .env files, and changing performance/results validation outputs"
+  },
+  "imageId": "sha256:0d1348f5ae29632604e17af13d7be8035727246ccdf4c3b4343d989b46f7ccc6",
+  "binarySha256": "33c6d28c5493b8f366287d187e743189e28a4617d183024814531273b54efa40",
+  "nodeClient": "v26.8.2",
+  "providerDnsPreloadSha256": "d2f25931aa860d4ce4cb64a457bd4e644315a25e12e843706cff46e9015b3434",
+  "resources": {
+    "cpus": 2,
+    "memoryBytes": 2147483648,
+    "databasePoolMax": 8,
+    "maintenancePoolMax": 2,
+    "e2eeMode": "required",
+    "quotaBytes": 1073741824
+  },
+  "dockerRuntime": {
+    "nanoCpus": 2000000000,
+    "memory": 2147483648,
+    "ports": {
+      "8080/tcp": [
+        {
+          "HostIp": "127.0.0.1",
+          "HostPort": "58082"
+        }
+      ]
+    },
+    "image": "sha256:0d1348f5ae29632604e17af13d7be8035727246ccdf4c3b4343d989b46f7ccc6"
+  },
+  "finishedAt": "2026-09-12T11:16:26.370494+00:00",
+  "attempt": 1,
+  "finalAcceptance": false,
+  "sourceStatus": "Superseded integration snapshot. Subsequent auth, realtime, tree-job, metadata-paging, and migration fixes require the final artifact rerun.",
+  "gatesPassed": true,
+  "sourceCurrent": false,
+  "status": "initial-artifact-passed-final-source-pending",
+  "newFinding": "Runtime evidence revealed hundreds of empty maintenance iterations per second. A new idle-worker budget and notification fix must pass on the final image."
+}

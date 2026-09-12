@@ -50,6 +50,16 @@ export type CsrfState =
       status: "unavailable";
     };
 
+export type SessionBootstrapState =
+  | {
+      status: "ready";
+      user: CurrentUser;
+      csrfToken: string;
+      realtimeCursor: string;
+    }
+  | { status: "unauthorized" }
+  | { status: "unavailable" };
+
 export type AdminUser = {
   id: string;
   username: string;
@@ -99,6 +109,7 @@ export type AdminUsersState =
     }
   | {
       status: "unavailable";
+      retryable?: boolean;
     };
 
 export type InvitationDetails = {
@@ -220,6 +231,7 @@ export type FilesData = {
     favoriteFiles: number;
     sharedFiles: number;
     usedBytes: number;
+    treeOperationPending?: boolean;
   };
   storage: StorageStats;
   nextCursor: string | null;
@@ -236,6 +248,7 @@ export type FilesState =
     }
   | {
       status: "unavailable";
+      retryable?: boolean;
     };
 
 export type RepositoryRoot = {
@@ -268,7 +281,7 @@ export type RepositoriesState =
   | { status: "ready"; data: RepositoriesData }
   | { status: "unauthorized" }
   | { status: "not-found" }
-  | { status: "unavailable" };
+  | { status: "unavailable"; retryable?: boolean };
 
 export type RepositoryEntry = {
   id: string;
@@ -301,6 +314,7 @@ export type RepositoryDetailData = {
   summary: {
     totalFiles: number;
     totalFolders: number;
+    stale?: boolean;
   };
   entriesTruncated: boolean;
   nextCursor: string | null;
@@ -340,7 +354,7 @@ export type RepositoryDetailState =
   | { status: "ready"; data: RepositoryDetailData }
   | { status: "unauthorized" }
   | { status: "not-found" }
-  | { status: "unavailable" };
+  | { status: "unavailable"; retryable?: boolean };
 
 function getApiOrigin() {
   return process.env.AERALYTH_API_ORIGIN?.trim() || "http://127.0.0.1:8080";
@@ -393,6 +407,57 @@ function requestApi<T>(
   });
 }
 
+export async function getSessionBootstrapState(): Promise<SessionBootstrapState> {
+  const requestHeaders = await headers();
+
+  try {
+    return await requestApi<SessionBootstrapState>(
+      `${getApiOrigin()}/api/auth/bootstrap`,
+      {
+        headers: getForwardedHeaders(
+          requestHeaders,
+          requestHeaders.get("cookie"),
+        ),
+        cache: "no-store",
+      },
+      async (response) => {
+        if (response.status === 401) {
+          return { status: "unauthorized" };
+        }
+        if (!response.ok) {
+          return { status: "unavailable" };
+        }
+        const data = (await response.json()) as {
+          user?: CurrentUser;
+          csrfToken?: unknown;
+          realtimeCursor?: unknown;
+        };
+        if (
+          !data.user ||
+          typeof data.user.id !== "string" ||
+          !data.user.id ||
+          data.user.status !== "active" ||
+          typeof data.csrfToken !== "string" ||
+          !data.csrfToken ||
+          typeof data.realtimeCursor !== "string" ||
+          !/^(0|[1-9][0-9]{0,18})$/.test(data.realtimeCursor) ||
+          BigInt(data.realtimeCursor) > 9223372036854775807n
+        ) {
+          return { status: "unavailable" };
+        }
+        return {
+          status: "ready",
+          user: data.user,
+          csrfToken: data.csrfToken,
+          realtimeCursor: data.realtimeCursor,
+        };
+      },
+    );
+  } catch {
+    return { status: "unavailable" };
+  }
+}
+
 export async function getAuthState(): Promise<AuthState> {
   const requestHeaders = await headers();
   const cookie = requestHeaders.get("cookie");
@@ -427,6 +492,18 @@ export async function getAuthState(): Promise<AuthState> {
   }
 }
 
+function snapshotFailureState(status: number): {
+  status: "unavailable";
+  retryable: boolean;
+} {
+  // A rejected folder, cursor, or permission will not recover by polling the
+  // same request. Rate limits and backend failures can recover without input.
+  return {
+    status: "unavailable",
+    retryable: status < 400 || status >= 500 || status === 429,
+  };
+}
+
 export async function getAdminUsersState(options?: {
   usersCursor?: string;
   invitationsCursor?: string;
@@ -458,7 +535,7 @@ export async function getAdminUsersState(options?: {
         }
 
         if (!response.ok) {
-          return { status: "unavailable" };
+          return snapshotFailureState(response.status);
         }
 
         return {
@@ -607,7 +684,7 @@ export async function getStorageOverviewState(): Promise<StorageOverviewState> {
       async (response) => {
         if (response.status === 401) return { status: "unauthorized" };
         if (response.status === 403) return { status: "forbidden" };
-        if (!response.ok) return { status: "unavailable" };
+        if (!response.ok) return snapshotFailureState(response.status);
         const data: unknown = await response.json();
         return isStorageOverview(data)
           ? { status: "ready", data }
@@ -648,7 +725,7 @@ export async function getFilesState(
         }
 
         if (!response.ok) {
-          return { status: "unavailable" };
+          return snapshotFailureState(response.status);
         }
 
         const data = (await response.json()) as Partial<FilesData>;
@@ -687,7 +764,7 @@ export async function getRepositoriesState(
         }
 
         if (!response.ok) {
-          return { status: "unavailable" };
+          return snapshotFailureState(response.status);
         }
 
         const data = (await response.json()) as Partial<RepositoriesData>;
@@ -733,7 +810,7 @@ export async function getRepositoryDetailState(
         }
 
         if (!response.ok) {
-          return { status: "unavailable" };
+          return snapshotFailureState(response.status);
         }
 
         const data = (await response.json()) as Partial<RepositoryDetailData>;
@@ -779,6 +856,8 @@ function isRepositoryDetailData(
     data.summary !== undefined &&
     typeof data.summary.totalFiles === "number" &&
     typeof data.summary.totalFolders === "number" &&
+    (data.summary.stale === undefined ||
+      typeof data.summary.stale === "boolean") &&
     typeof data.entriesTruncated === "boolean" &&
     (typeof data.nextCursor === "string" || data.nextCursor === null) &&
     typeof data.hasMore === "boolean"

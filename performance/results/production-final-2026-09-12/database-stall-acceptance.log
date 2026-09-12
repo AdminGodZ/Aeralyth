@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "expectedGateFailure": [
+    "mixed: dropped 35/80",
+    "mixed/browse: p99 1812.03ms exceeds 1000ms"
+  ],
+  "mixedOffered": 80,
+  "mixedStarted": 45,
+  "mixedDropped": 35,
+  "mixedP99Ms": 1812.0281249999998,
+  "output": "/Users/timheld/Documents/Projects/Aeralyth/performance/results/production-final-2026-09-12/database-stall.json"
+}

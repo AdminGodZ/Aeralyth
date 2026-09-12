@@ -169,12 +169,14 @@ export class VaultApiError extends Error {
 const VAULT_RECURSIVE_OPERATION_ATTEMPTS = 4;
 const VAULT_RECURSIVE_OPERATION_RETRY_BASE_MS = 250;
 const vaultRecursiveOperationSlots = new WeightedSemaphore(1);
+const vaultInteractiveOperationSlots = new WeightedSemaphore(1);
 
 async function runVaultRecursiveOperation<T>(
   operation: () => Promise<T>,
   signal?: AbortSignal,
+  slots = vaultRecursiveOperationSlots,
 ): Promise<T> {
-  const release = await vaultRecursiveOperationSlots.acquire(1, signal);
+  const release = await slots.acquire(1, signal);
   try {
     let lastError: unknown;
     for (
@@ -251,13 +253,19 @@ export function getVaultStatus(signal?: AbortSignal): Promise<VaultStatus> {
   return vaultRequest("/api/vault", { signal });
 }
 
-export function mutateFileTree(
+export async function mutateFileTree(
   entryId: string,
   mutation: FileTreeMutation,
   csrfToken: string,
   signal?: AbortSignal,
 ): Promise<FileTreeMutationResponse> {
-  return runVaultRecursiveOperation(async () => {
+  const expectedStatus =
+    mutation === "trash"
+      ? "trashed"
+      : mutation === "restore"
+        ? "restored"
+        : "deleted";
+  const payload = await runVaultRecursiveOperation(async () => {
     const response = await fetch(
       `/api/files/${encodeURIComponent(entryId)}/${mutation}`,
       {
@@ -271,27 +279,79 @@ export function mutateFileTree(
         signal,
       },
     );
-    if (!response.ok) {
+    if (!response.ok)
       throw new VaultApiError(
         (await response.text()) || "The file operation failed.",
         response.status,
         response.headers.get("retry-after"),
       );
-    }
-
-    const payload =
-      (await response.json()) as Partial<FileTreeMutationResponse>;
-    const expectedStatus =
-      mutation === "trash"
-        ? "trashed"
-        : mutation === "restore"
-          ? "restored"
-          : "deleted";
-    if (payload.fileId !== entryId || payload.status !== expectedStatus) {
-      throw new Error("The file operation returned an invalid response.");
-    }
-    return payload as FileTreeMutationResponse;
+    return (await response.json()) as {
+      status?: string;
+      fileId?: string;
+      jobId?: string;
+    };
   }, signal);
+  if (payload.fileId !== entryId)
+    throw new Error("The file operation returned an invalid response.");
+  if (payload.status === expectedStatus)
+    return { status: expectedStatus, fileId: entryId };
+  if (
+    payload.status !== "queued" ||
+    !payload.jobId ||
+    !/^[0-9]+$/.test(payload.jobId)
+  ) {
+    throw new Error("The file operation returned an invalid response.");
+  }
+  // Cancellation stops observing. The server keeps the durable job and its fence.
+  // Polling never replays the original mutation, including after a transient outage.
+  let delay = 500;
+  for (;;) {
+    await waitForVaultCapacity(delay, signal);
+    let response: Response;
+    try {
+      response = await fetch(`/api/files/operations/${payload.jobId}`, {
+        credentials: "same-origin",
+        cache: "no-store",
+        signal,
+      });
+    } catch (error) {
+      if (
+        signal?.aborted ||
+        (error instanceof DOMException && error.name === "AbortError")
+      )
+        throw error;
+      delay = Math.min(5000, delay * 2);
+      continue;
+    }
+    if (!response.ok) {
+      if (response.status === 429 || response.status >= 500) {
+        delay = Math.min(5000, delay * 2);
+        continue;
+      }
+      throw new VaultApiError(
+        (await response.text()) || "Unable to check the file operation.",
+        response.status,
+        response.headers.get("retry-after"),
+      );
+    }
+    const progress = (await response.json()) as {
+      status?: string;
+      fileId?: string;
+      action?: string;
+    };
+    if (
+      progress.fileId !== entryId ||
+      progress.action !== mutation ||
+      !["pending", "running", "complete"].includes(progress.status ?? "")
+    ) {
+      throw new Error(
+        "The file operation returned an invalid progress response.",
+      );
+    }
+    if (progress.status === "complete")
+      return { status: expectedStatus, fileId: entryId };
+    delay = Math.min(3000, Math.round(delay * 1.25));
+  }
 }
 
 export function getUnlockMaterial(
@@ -534,7 +594,12 @@ export function getVaultMetadataPlans(
   continuation?: number,
   signal?: AbortSignal,
   purpose?: "sharePreparation",
-): Promise<{ plans: VaultMetadataPlan[]; continuation?: number }> {
+  snapshot?: string,
+): Promise<{
+  plans: VaultMetadataPlan[];
+  continuation?: number;
+  snapshot?: string;
+}> {
   return runVaultRecursiveOperation(
     () =>
       vaultMutation(
@@ -544,10 +609,12 @@ export function getVaultMetadataPlans(
           nodeIds,
           ...(continuation === undefined ? {} : { continuation }),
           ...(purpose ? { purpose } : {}),
+          ...(snapshot ? { snapshot } : {}),
         },
         signal,
       ),
     signal,
+    purpose ? vaultRecursiveOperationSlots : vaultInteractiveOperationSlots,
   );
 }
 
@@ -560,6 +627,7 @@ export async function getVaultSharePreparationPlans(
   for (let offset = 0; offset < nodes.length; offset += 100) {
     const page = nodes.slice(offset, offset + 100);
     let continuation: number | undefined;
+    let snapshot: string | undefined;
     do {
       const response = await getVaultMetadataPlans(
         csrfToken,
@@ -567,8 +635,20 @@ export async function getVaultSharePreparationPlans(
         continuation,
         signal,
         "sharePreparation",
+        snapshot,
       );
       for (const plan of response.plans) plans.set(plan.nodeId, plan);
+      if (
+        response.continuation !== undefined &&
+        (!Number.isSafeInteger(response.continuation) ||
+          response.continuation <= (continuation ?? -1))
+      ) {
+        throw new Error("The metadata plan continuation is invalid.");
+      }
+      if (snapshot && response.snapshot !== snapshot) {
+        throw new Error("The metadata snapshot changed. Refresh and retry.");
+      }
+      snapshot = response.snapshot;
       continuation = response.continuation;
     } while (continuation !== undefined);
   }

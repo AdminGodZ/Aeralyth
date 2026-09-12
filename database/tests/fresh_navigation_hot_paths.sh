@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# Set this when the isolated Compose test service publishes a non-default port.
+test_database_port="${AERALYTH_TEST_DATABASE_PORT:-5432}"
+
 test_database="aeralyth_navigation_hot_paths_${$}"
 scale_nodes="${AERALYTH_NAVIGATION_SCALE:-50000}"
 
@@ -101,14 +104,6 @@ do
     -f "/docker-entrypoint-initdb.d/${migration}" >/dev/null
 done
 
-DATABASE_URL="postgres://aeralyth:aeralyth@127.0.0.1:5432/${test_database}" \
-  cargo test \
-    --quiet \
-    --manifest-path backend/Cargo.toml \
-    database_query_contracts_prepare \
-    -- \
-    --ignored
-
 docker compose exec -T postgres psql \
   -v ON_ERROR_STOP=1 \
   -v scale_nodes="${scale_nodes}" \
@@ -158,5 +153,15 @@ if [[ "${replay_state}" != "1|12|1,1,1" ]]; then
   echo "navigation migration replay state is incorrect: ${replay_state}" >&2
   exit 1
 fi
+
+bash database/tests/apply_current_schema.sh "${test_database}"
+
+DATABASE_URL="postgres://aeralyth:aeralyth@127.0.0.1:${test_database_port}/${test_database}" \
+  cargo test \
+    --quiet \
+    --manifest-path backend/Cargo.toml \
+    database_query_contracts_prepare \
+    -- \
+    --ignored
 
 echo "navigation hot-path regression checks passed at ${scale_nodes} repository nodes"

@@ -1,0 +1,106 @@
+Command: npm run lint
+Started: 2026-09-12T11:44:59.836Z
+
+
+> aeralyth@0.1.0 lint
+> biome check
+
+performance/results/admission-2026-09-12/failed-matrix-before-error-diagnostics/recomputed-summary.json format ━━━━━━━━━━
+
+  × Formatter would have printed the following content:
+  
+      6   6 │         "offered_requests_per_second": 100.0,
+      7   7 │         "profile": "shared_gate_counterfactual",
+      8     │ - ······"bulk_completed_per_run":·[
+      9     │ - ········99,
+     10     │ - ········95,
+     11     │ - ········93
+     12     │ - ······],
+     13     │ - ······"bulk_completed_during_provider_per_run":·[
+     14     │ - ········18,
+     15     │ - ········18,
+     16     │ - ········16
+     17     │ - ······],
+          8 │ + ······"bulk_completed_per_run":·[99,·95,·93],
+          9 │ + ······"bulk_completed_during_provider_per_run":·[18,·18,·16],
+     18  10 │         "same_user": {
+     19  11 │           "offered": 600,
+    ······· │ 
+    101  93 │         "offered_requests_per_second": 100.0,
+    102  94 │         "profile": "partitioned",
+    103     │ - ······"bulk_completed_per_run":·[
+    104     │ - ········132,
+    105     │ - ········131,
+    106     │ - ········123
+    107     │ - ······],
+    108     │ - ······"bulk_completed_during_provider_per_run":·[
+    109     │ - ········25,
+    110     │ - ········24,
+    111     │ - ········16
+    112     │ - ······],
+         95 │ + ······"bulk_completed_per_run":·[132,·131,·123],
+         96 │ + ······"bulk_completed_during_provider_per_run":·[25,·24,·16],
+    113  97 │         "same_user": {
+    114  98 │           "offered": 600,
+    ······· │ 
+    199 183 │         "offered_requests_per_second": 200.0,
+    200 184 │         "profile": "shared_gate_counterfactual",
+    201     │ - ······"bulk_completed_per_run":·[
+    202     │ - ········45,
+    203     │ - ········46,
+    204     │ - ········46
+    205     │ - ······],
+    206     │ - ······"bulk_completed_during_provider_per_run":·[
+    207     │ - ········17,
+    208     │ - ········17,
+    209     │ - ········17
+    210     │ - ······],
+        185 │ + ······"bulk_completed_per_run":·[45,·46,·46],
+        186 │ + ······"bulk_completed_during_provider_per_run":·[17,·17,·17],
+    211 187 │         "same_user": {
+    212 188 │           "offered": 600,
+    ······· │ 
+    295 271 │         "offered_requests_per_second": 200.0,
+    296 272 │         "profile": "partitioned",
+    297     │ - ······"bulk_completed_per_run":·[
+    298     │ - ········69,
+    299     │ - ········70,
+    300     │ - ········70
+    301     │ - ······],
+    302     │ - ······"bulk_completed_during_provider_per_run":·[
+    303     │ - ········25,
+    304     │ - ········26,
+    305     │ - ········25
+    306     │ - ······],
+        273 │ + ······"bulk_completed_per_run":·[69,·70,·70],
+        274 │ + ······"bulk_completed_during_provider_per_run":·[25,·26,·25],
+    307 275 │         "same_user": {
+    308 276 │           "offered": 600,
+  
+
+performance/results/database-audit-2026-09-12/backend-final-v3-init.json format ━━━━━━━━━━━━━━━━━━━━
+
+  × Formatter would have printed the following content:
+  
+    40 40 │       "036_maintenance_notifications.sql": "b7961d1d20ad86eb0605a49deac774282b02277ffb044d97d0edd71d8ece1527"
+    41 41 │     },
+    42    │ - ··"users_and_ledger_counts":·[
+    43    │ - ····"1",
+    44    │ - ····"31"
+    45    │ - ··],
+       42 │ + ··"users_and_ledger_counts":·["1",·"31"],
+    46 43 │     "retained_for_backend_tests": true
+    47 44 │   }
+  
+
+Checked 298 files in 89ms. No fixes applied.
+Found 2 errors.
+check ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  × Some errors were emitted while running checks.
+  
+
+
+Finished: 2026-09-12T11:45:00.042Z
+Exit code: 1
+Signal: none

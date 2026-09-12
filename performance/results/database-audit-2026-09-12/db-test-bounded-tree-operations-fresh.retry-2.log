@@ -1,0 +1,173 @@
+psql:/docker-entrypoint-initdb.d/001_auth.sql:130: NOTICE:  column "csrf_token" of relation "sessions" already exists, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:207: NOTICE:  column "counts_toward_shared" of relation "file_shares" already exists, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:239: NOTICE:  column "checksum_sha256" of relation "file_uploads" already exists, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:242: NOTICE:  column "part_size_bytes" of relation "file_uploads" already exists, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:245: NOTICE:  column "write_expires_at" of relation "file_uploads" already exists, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:248: NOTICE:  constraint "file_uploads_part_size_check" of relation "file_uploads" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:255: NOTICE:  constraint "file_uploads_status_check" of relation "file_uploads" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:327: NOTICE:  column "multipart_upload_id" of relation "storage_deletion_jobs" already exists, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:394: NOTICE:  trigger "users_file_counter_insert" for relation "users" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:447: NOTICE:  trigger "users_admin_counter_change" for relation "users" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:448: NOTICE:  trigger "users_admin_counter_insert" for relation "users" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:449: NOTICE:  trigger "users_admin_counter_delete" for relation "users" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:450: NOTICE:  trigger "users_admin_counter_update" for relation "users" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:512: NOTICE:  trigger "invitations_admin_counter_change" for relation "invitations" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:513: NOTICE:  trigger "invitations_admin_counter_insert" for relation "invitations" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:514: NOTICE:  trigger "invitations_admin_counter_delete" for relation "invitations" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:515: NOTICE:  trigger "invitations_admin_counter_update" for relation "invitations" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:614: NOTICE:  trigger "files_counter_change" for relation "files" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:677: NOTICE:  trigger "file_shares_counter_change" for relation "file_shares" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/002_e2ee.sql:11: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/002_e2ee.sql:149: NOTICE:  column "checksum_sha256" of relation "vault_uploads" already exists, skipping
+psql:/docker-entrypoint-initdb.d/002_e2ee.sql:230: NOTICE:  column "record_hash" of relation "vault_shares" already exists, skipping
+psql:/docker-entrypoint-initdb.d/002_e2ee.sql:350: NOTICE:  column "record_version" of relation "vault_share_wrappers" already exists, skipping
+psql:/docker-entrypoint-initdb.d/002_e2ee.sql:527: NOTICE:  trigger "vault_share_envelope_epoch_guard" for relation "vault_share_envelopes" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/002_e2ee.sql:528: NOTICE:  trigger "vault_share_wrapper_epoch_guard" for relation "vault_share_wrappers" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/002_e2ee.sql:529: NOTICE:  trigger "vault_share_envelope_epoch_guard_insert" for relation "vault_share_envelopes" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/002_e2ee.sql:530: NOTICE:  trigger "vault_share_envelope_epoch_guard_update" for relation "vault_share_envelopes" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/002_e2ee.sql:531: NOTICE:  trigger "vault_share_wrapper_epoch_guard_insert" for relation "vault_share_wrappers" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/002_e2ee.sql:532: NOTICE:  trigger "vault_share_wrapper_epoch_guard_update" for relation "vault_share_wrappers" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/005_repository_metadata.sql:2: NOTICE:  column "description" of relation "repositories" already exists, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:12: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:121: NOTICE:  trigger "users_storage_usage_insert" for relation "users" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:342: NOTICE:  trigger "files_counter_insert_statement" for relation "files" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:343: NOTICE:  trigger "files_counter_update_statement" for relation "files" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:344: NOTICE:  trigger "files_counter_delete_statement" for relation "files" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:535: NOTICE:  trigger "file_upload_reservation_immutable" for relation "file_uploads" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:536: NOTICE:  trigger "file_upload_reservation_update" for relation "file_uploads" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:537: NOTICE:  trigger "file_upload_reservation_delete" for relation "file_uploads" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:553: NOTICE:  trigger "vault_upload_reservation_immutable" for relation "vault_uploads" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:554: NOTICE:  trigger "vault_upload_reservation_update" for relation "vault_uploads" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:555: NOTICE:  trigger "vault_upload_reservation_delete" for relation "vault_uploads" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/008_folder_manifest.sql:10: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/009_upload_completion.sql:10: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/010_session_performance.sql:10: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/010_session_performance.sql:52: NOTICE:  index "sessions_expires_at_idx" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/010_session_performance.sql:54: NOTICE:  relation "sessions_expiry_cleanup_idx" already exists, skipping
+psql:/docker-entrypoint-initdb.d/011_admin_counter_triggers.sql:10: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/011_admin_counter_triggers.sql:67: NOTICE:  trigger "users_admin_counter_change" for relation "users" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/011_admin_counter_triggers.sql:131: NOTICE:  trigger "invitations_admin_counter_change" for relation "invitations" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/012_vault_query_performance.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/012_vault_query_performance.sql:70: NOTICE:  trigger "vault_share_envelope_epoch_guard" for relation "vault_share_envelopes" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/012_vault_query_performance.sql:71: NOTICE:  trigger "vault_share_wrapper_epoch_guard" for relation "vault_share_wrappers" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/013_migration_identity_performance.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:10: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:210: NOTICE:  trigger "file_shares_file_state_insert" for relation "file_shares" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:211: NOTICE:  trigger "file_shares_file_state_update" for relation "file_shares" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:212: NOTICE:  trigger "file_shares_file_state_delete" for relation "file_shares" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:305: NOTICE:  trigger "vault_shares_file_state_insert" for relation "vault_shares" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:306: NOTICE:  trigger "vault_shares_file_state_update" for relation "vault_shares" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:307: NOTICE:  trigger "vault_shares_file_state_delete" for relation "vault_shares" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:435: NOTICE:  trigger "share_links_file_state_insert" for relation "share_links" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:436: NOTICE:  trigger "share_links_file_state_update" for relation "share_links" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:437: NOTICE:  trigger "share_links_file_state_delete" for relation "share_links" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:527: NOTICE:  trigger "files_repository_counts_insert" for relation "files" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:528: NOTICE:  trigger "files_repository_counts_update" for relation "files" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:529: NOTICE:  trigger "files_repository_counts_delete" for relation "files" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/015_collection_hierarchy_performance.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/015_collection_hierarchy_performance.sql:15: NOTICE:  index "files_updated_at_idx" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/015_collection_hierarchy_performance.sql:16: NOTICE:  index "files_favorite_idx" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/015_collection_hierarchy_performance.sql:17: NOTICE:  index "files_recent_owner_idx" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/015_collection_hierarchy_performance.sql:31: NOTICE:  index "share_links_owner_root_page_idx" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/015_collection_hierarchy_performance.sql:50: NOTICE:  index "vault_shares_owner_root_page_idx" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/015_collection_hierarchy_performance.sql:205: NOTICE:  trigger "files_hierarchy_insert_guard" for relation "files" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/015_collection_hierarchy_performance.sql:212: NOTICE:  trigger "files_hierarchy_update_guard" for relation "files" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/016_admin_search_identifier_policy.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/016_admin_search_identifier_policy.sql:23: NOTICE:  index "users_username_trgm_idx" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/016_admin_search_identifier_policy.sql:38: NOTICE:  index "users_display_name_trgm_idx" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/016_admin_search_identifier_policy.sql:53: NOTICE:  index "invitations_username_trgm_idx" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/017_bounded_tree_operations.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/017_bounded_tree_operations.sql:24: NOTICE:  index "files_owner_parent_walk_idx" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/018_share_link_token_rotation.sql:11: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/019_share_link_rollout_compatibility.sql:12: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/020_share_link_legacy_writer_guard.sql:11: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/020_share_link_legacy_writer_guard.sql:42: NOTICE:  trigger "share_links_legacy_token_rotation_guard" for relation "share_links" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/021_compact_account_state.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/021_compact_account_state.sql:20: NOTICE:  constraint "user_vaults_compact_account_state" of relation "user_vaults" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/022_large_share_commitments.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:21: NOTICE:  column "lease_token" of relation "storage_deletion_jobs" already exists, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:21: NOTICE:  column "dead_lettered_at" of relation "storage_deletion_jobs" already exists, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:25: NOTICE:  column "lease_token" of relation "user_deletion_jobs" already exists, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:25: NOTICE:  column "dead_lettered_at" of relation "user_deletion_jobs" already exists, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:29: NOTICE:  column "completion_lease_token" of relation "file_uploads" already exists, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:29: NOTICE:  column "completion_dead_lettered_at" of relation "file_uploads" already exists, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:56: NOTICE:  trigger "notify_aeralyth_maintenance" for relation "user_deletion_jobs" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:61: NOTICE:  trigger "notify_aeralyth_maintenance" for relation "storage_deletion_jobs" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:66: NOTICE:  trigger "notify_aeralyth_maintenance" for relation "file_uploads" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:71: NOTICE:  trigger "notify_aeralyth_maintenance" for relation "vault_uploads" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:76: NOTICE:  trigger "notify_aeralyth_maintenance" for relation "invitations" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:81: NOTICE:  trigger "notify_aeralyth_maintenance" for relation "sessions" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/024_one_password_auth.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/025_trash_retention.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/025_trash_retention.sql:39: NOTICE:  trigger "notify_aeralyth_trash_retention_file_insert" for relation "files" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/025_trash_retention.sql:44: NOTICE:  trigger "notify_aeralyth_trash_retention_file_update" for relation "files" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/025_trash_retention.sql:49: NOTICE:  trigger "notify_aeralyth_trash_retention_users" for relation "users" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/026_realtime_changes.sql:7: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/027_flexible_retention_and_vault_lock.sql:6: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/001_auth.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/002_e2ee.sql:11: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/003_share_links.sql:18: NOTICE:  relation "share_links" already exists, skipping
+psql:/docker-entrypoint-initdb.d/003_share_links.sql:25: NOTICE:  relation "share_links_recipient_idx" already exists, skipping
+psql:/docker-entrypoint-initdb.d/003_share_links.sql:31: NOTICE:  column "share_link_id" of relation "file_uploads" already exists, skipping
+psql:/docker-entrypoint-initdb.d/003_share_links.sql:34: NOTICE:  column "replacement_file_id" of relation "file_uploads" already exists, skipping
+psql:/docker-entrypoint-initdb.d/003_share_links.sql:37: NOTICE:  relation "file_uploads_share_link_idx" already exists, skipping
+psql:/docker-entrypoint-initdb.d/004_repositories.sql:10: NOTICE:  relation "repositories" already exists, skipping
+psql:/docker-entrypoint-initdb.d/004_repositories.sql:13: NOTICE:  relation "repositories_owner_updated_idx" already exists, skipping
+psql:/docker-entrypoint-initdb.d/005_repository_metadata.sql:2: NOTICE:  column "description" of relation "repositories" already exists, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:12: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:20: NOTICE:  relation "user_storage_usage" already exists, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:23: NOTICE:  column "reservation_bytes" of relation "file_uploads" already exists, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:26: NOTICE:  column "reservation_bytes" of relation "vault_uploads" already exists, skipping
+psql:/docker-entrypoint-initdb.d/006_performance_ledger.sql:341: NOTICE:  trigger "files_counter_change" for relation "files" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/007_observability.sql:1: NOTICE:  extension "pg_stat_statements" already exists, skipping
+psql:/docker-entrypoint-initdb.d/008_folder_manifest.sql:10: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/009_upload_completion.sql:10: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/010_session_performance.sql:10: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/011_admin_counter_triggers.sql:10: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/012_vault_query_performance.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/013_migration_identity_performance.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/014_navigation_hot_paths.sql:10: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/015_collection_hierarchy_performance.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/015_collection_hierarchy_performance.sql:15: NOTICE:  index "files_updated_at_idx" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/015_collection_hierarchy_performance.sql:16: NOTICE:  index "files_favorite_idx" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/015_collection_hierarchy_performance.sql:17: NOTICE:  index "files_recent_owner_idx" does not exist, skipping
+psql:/docker-entrypoint-initdb.d/016_admin_search_identifier_policy.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/016_admin_search_identifier_policy.sql:12: NOTICE:  extension "pg_trgm" already exists, skipping
+psql:/docker-entrypoint-initdb.d/016_admin_search_identifier_policy.sql:69: NOTICE:  relation "legacy_text_identifier_columns" already exists, skipping
+psql:/docker-entrypoint-initdb.d/017_bounded_tree_operations.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/018_share_link_token_rotation.sql:11: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/019_share_link_rollout_compatibility.sql:12: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/020_share_link_legacy_writer_guard.sql:11: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/021_compact_account_state.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/022_large_share_commitments.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/023_maintenance_coordination.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/024_one_password_auth.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/025_trash_retention.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/026_realtime_changes.sql:7: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/027_flexible_retention_and_vault_lock.sql:6: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/029_durable_tree_operations.sql:10: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/031_realtime_background_audiences.sql:6: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/032_bucket_usage_snapshots.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/034_indexed_trash_expiry.sql:6: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/035_multipart_reconciliation.sql:5: NOTICE:  relation "schema_migrations" already exists, skipping
+psql:/docker-entrypoint-initdb.d/036_maintenance_notifications.sql:5: NOTICE:  relation "schema_migrations" already exists, skipping
+
+running 1 test
+bounded tree scale: 100001 nodes; walk=544.807541ms; trash+restore=46.993085s; mutation_statements=42; slowest_mutation_statement=1.555475875s; delete_batch=659.210292ms
+.
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 258 filtered out; finished in 48.29s
+
+
+running 6 tests
+......
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 253 filtered out; finished in 0.06s
+
+
+running 4 tests
+....
+test result: ok. 4 passed; 0 failed; 0 ignored; 0 measured; 255 filtered out; finished in 0.34s
+
+psql:/docker-entrypoint-initdb.d/017_bounded_tree_operations.sql:8: NOTICE:  relation "schema_migrations" already exists, skipping
+bounded child page: 16384 rows in 4.171 ms using files_owner_parent_walk_idx
+bounded tree checks passed at 100001 total nodes

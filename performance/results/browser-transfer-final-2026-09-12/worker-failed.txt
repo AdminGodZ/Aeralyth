@@ -1,0 +1,63 @@
+Aeralyth
+
+FilesRepositoriesRecentFavoritesSharedTrashSettings
+
+System
+
+StorageUsers
+
+Sign out
+
+Repositories
+
+Project folders in a code-focused view
+
+AB
+
+audit_browser/Locked repositoryPrivate
+
+Code
+
+main3 files · 1 folder
+
+Created 3 minutes agoCode
+
+Locked repository
+
+Locked file
+
+# Unlock this repository file
+
+The file name and contents are encrypted. They will be decrypted only in this browser.
+
+Unlock vault
+
+## About
+
+No description provided.
+
+VisibilityPrivate
+
+Files3
+
+Folders1
+
+## Languages
+
+Unlock the vault to analyze encrypted filenames and sizes.
+
+Unlock vault
+
+## Unlock encrypted files
+
+Your account password unlocks encrypted files only in this browser.
+
+Account password
+
+Encrypted files unavailable
+
+The vault worker stopped unexpectedly. Unlock the vault again to recover. If this repeats, reload the page.
+
+Unlock
+
+Close

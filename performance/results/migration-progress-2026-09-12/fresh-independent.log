@@ -1,0 +1,123 @@
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ reconcile_vault_migration_progress 
+------------------------------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ reconcile_vault_migration_progress 
+------------------------------------
+ 
+(1 row)
+
+ assert_progress 
+-----------------
+ 
+(1 row)
+
+ nodes | reads | rows_examined 
+-------+-------+---------------
+  1000 |  1000 |          1000
+  2000 |  2000 |          2000
+(2 rows)
+
+migration progress transitions, rollback, reconciliation, bulk writes and linear read scaling passed
+ pg_sleep 
+----------
+ 
+(1 row)
+
+fresh/backfill/replay and concurrent migration progress checks passed

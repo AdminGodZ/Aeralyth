@@ -1,0 +1,17 @@
+{
+  "imageId": "sha256:949ecffa36245a27e920ad364dc3575e9977dece5109318648ebffe97ddaf290",
+  "binarySha256": "1b19353b42adc457ee1ee1cf57f22c47ab2526e9688042e98692da74226f33a4",
+  "source": {
+    "timestamp": "2026-09-12T12:11:46.542618+00:00",
+    "baseCommit": "fe9556cf9f011297e16500f18cdf04b991b35635",
+    "trackedDiffSha256": "1cf95ff672c1c74fb09d06ccf8c7acc69478cca8dd0be02383321b369be742ad",
+    "untrackedSourceManifestSha256": "5477feb5bdb6d2bf36fe231c09f3bd1390337f889e102f6812621f2682091376",
+    "untrackedSourceFiles": 93,
+    "sourceManifestSha256": "52f1f9832745cf4144b4cb5ceba79ce9e8a952a5819d9692e734afd042b45d38",
+    "sourceFiles": 431,
+    "sourceBytes": 5795046,
+    "snapshot": "/private/tmp/aeralyth-production-final-source-20260912",
+    "excluded": "Ignored local files, .git, secret .env files, and changing performance/results validation outputs"
+  },
+  "origin": "http://127.0.0.1:58082"
+}

@@ -1,0 +1,12 @@
+{
+  "passed": true,
+  "expectedGateFailure": [
+    "mixed: dropped 35/80",
+    "mixed/browse: p99 1810.37ms exceeds 1000ms"
+  ],
+  "mixedOffered": 80,
+  "mixedStarted": 45,
+  "mixedDropped": 35,
+  "mixedP99Ms": 1810.3708750000005,
+  "output": "performance/results/final-native-2026-09-12/release/database-stall.json"
+}

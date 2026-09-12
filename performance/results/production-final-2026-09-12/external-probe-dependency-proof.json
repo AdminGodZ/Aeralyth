@@ -1,0 +1,41 @@
+{
+  "externalHarness": "performance/observability-probe.mjs",
+  "classification": "Available in frontend build context but neither executed by the image build nor part of runtime or the executed production workload dependency graph",
+  "productionBuildCommands": {
+    "build": "next build",
+    "prebuild": "npm run worker:build",
+    "worker:build": "node scripts/write-zip-assets.mjs && npm run worker:zip && npm run worker:checksum && npm run worker:vault && node scripts/write-worker-assets.mjs"
+  },
+  "dockerRuntimeCopies": [
+    "frontend .next/standalone",
+    ".next/static",
+    "public",
+    "release binary",
+    "deployment/Caddyfile",
+    "database/init",
+    "database/production",
+    "scripts"
+  ],
+  "runtimeInspection": {
+    "command": "docker run --rm --entrypoint node IMAGE (recursive /app filename inspection)",
+    "resultFile": "external-probe-not-in-runtime.log",
+    "expected": {
+      "searched": "/app",
+      "found": []
+    }
+  },
+  "reviewedFiles": {
+    "Dockerfile": "f8377bbc62b830aab71e6c76afc7d6fbd27a9c5d6280a0411760ac38d68e6c69",
+    "package.json": "96399cd877b4bc0a3691a0d2b4903cdebd3cad5ad1017f9373c386b2335af233",
+    "next.config.ts": "afd2143a76618b45462c2e36f45b90f15ff8cdbf5fd6be837be1789b791db161",
+    "performance/mixed-load.mjs": "66563d4e05ab0ffab71d2e6a4ac13cd8fdeb5e695fdb6ecb488ee1dc5fe307bc",
+    "performance/mixed-fixture.mjs": "bb445cc5a1c956b8e3fbb57fef14f31493174cc84d5a3ac6799b1701f8859b42",
+    "performance/arrival-load.mjs": "4516bc18c72c96caae3bc97dc17289316126d9a03a9084823ba01781eac92391",
+    "performance/mixed-load-self-test.mjs": "3a97d379a2542b1bd30fb8919bc64fc2192e2784fd717ec12f45a366570ee096",
+    "performance/http-load.mjs": "b919cb9104b1e1f2baab866e8427355dc1dbb83470c6ddcc383741c3e09a1cbe"
+  },
+  "reviewResult": "No observability-probe import or invocation in package build hooks, Next config, scripts, or executed mixed workload modules. The exact final image has no file with that name under /app. Broad407-file before/after manifests retain its changed hash; separate406-file dependency identities exclude only this external harness.",
+  "reportHashSemantics": "Manifest digests bind canonical JSON data, not JSON report formatting bytes; per-file digests bind source bytes.",
+  "automaticTailwindScanningProof": "external-probe-tailwind-proof.json",
+  "currencyScope": "sourceCurrent covers the application/runtime and exercised workload sources in the406-file dependency manifest. It does not assert byte equivalence of the entire copied frontend build context or a rebuild of the current tree. The broader407-file manifest explicitly records the external observability probe change. Documentation/results are excluded and may be visible to automatic Tailwind scanning."
+}

@@ -1,0 +1,14 @@
+Command: docker run --rm -v /Users/timheld/Documents/Projects/Aeralyth/deployment/Caddyfile:/etc/caddy/Caddyfile:ro caddy:2.10.2-alpine caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
+Started: 2026-09-12T11:43:23.689Z
+
+{"level":"info","ts":1789213403.8707747,"msg":"using config from file","file":"/etc/caddy/Caddyfile"}
+{"level":"info","ts":1789213403.8714268,"msg":"adapted config to JSON","adapter":"caddyfile"}
+{"level":"info","ts":1789213403.871683,"logger":"http.auto_https","msg":"automatic HTTPS is completely disabled for server","server_name":"srv0"}
+{"level":"info","ts":1789213403.8719368,"logger":"tls.cache.maintenance","msg":"started background certificate maintenance","cache":"0x400005f900"}
+{"level":"info","ts":1789213403.8720272,"logger":"http","msg":"servers shutting down; grace period initiated","duration":30}
+{"level":"info","ts":1789213403.8721035,"logger":"tls.cache.maintenance","msg":"stopped background certificate maintenance","cache":"0x400005f900"}
+Valid configuration
+
+Finished: 2026-09-12T11:43:23.955Z
+Exit code: 0
+Signal: none

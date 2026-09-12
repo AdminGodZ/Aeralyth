@@ -1,0 +1,59 @@
+SET
+PREPARE
+                                                                               QUERY PLAN                                                                               
+------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=105424.47..105467.29 rows=17131 width=70) (actual time=6.293..6.293 rows=0.00 loops=1)
+   Buffers: shared hit=8 read=2
+   ->  Sort  (cost=105424.47..105852.74 rows=171310 width=70) (actual time=0.260..0.261 rows=0.00 loops=1)
+         Sort Key: parent.depth, parent.node_id, files.id
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=8 read=2
+         ->  Nested Loop  (cost=0.56..83504.27 rows=171310 width=70) (actual time=0.240..0.240 rows=0.00 loops=1)
+               Buffers: shared hit=2 read=2
+               ->  Function Scan on parent  (cost=0.01..0.11 rows=10 width=68) (actual time=0.011..0.011 rows=1.00 loops=1)
+               ->  Limit  (cost=0.55..8179.11 rows=17131 width=34) (actual time=0.226..0.227 rows=0.00 loops=1)
+                     Buffers: shared hit=2 read=2
+                     ->  Index Scan using files_owner_parent_walk_idx on files  (cost=0.55..81785.16 rows=171308 width=34) (actual time=0.223..0.224 rows=0.00 loops=1)
+                           Index Cond: ((owner_id = $1) AND (parent_id = parent.node_id) AND (id > COALESCE(parent.last_child_id, ''::text)))
+                           Filter: (($5 IS NULL) OR (state = $5))
+                           Index Searches: 1
+                           Buffers: shared hit=2 read=2
+ Planning:
+   Buffers: shared hit=622 read=11
+ Planning Time: 2.277 ms
+ JIT:
+   Functions: 16
+   Options: Inlining false, Optimization false, Expressions true, Deforming true
+   Timing: Generation 0.700 ms (Deform 0.365 ms), Inlining 0.000 ms, Optimization 0.339 ms, Emission 5.696 ms, Total 6.735 ms
+ Execution Time: 17.642 ms
+(24 rows)
+
+PREPARE
+                                                                                           QUERY PLAN                                                                                            
+-------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Limit  (cost=105424.47..105467.29 rows=17131 width=70) (actual time=5.605..5.606 rows=0.00 loops=1)
+   Buffers: shared hit=4
+   ->  Sort  (cost=105424.47..105852.74 rows=171310 width=70) (actual time=0.027..0.028 rows=0.00 loops=1)
+         Sort Key: parent.depth, parent.node_id, files.id
+         Sort Method: quicksort  Memory: 25kB
+         Buffers: shared hit=4
+         ->  Nested Loop  (cost=0.56..83504.27 rows=171310 width=70) (actual time=0.023..0.023 rows=0.00 loops=1)
+               Buffers: shared hit=4
+               ->  Function Scan on parent  (cost=0.01..0.11 rows=10 width=68) (actual time=0.008..0.009 rows=1.00 loops=1)
+               ->  Limit  (cost=0.55..8179.11 rows=17131 width=34) (actual time=0.013..0.013 rows=0.00 loops=1)
+                     Buffers: shared hit=4
+                     ->  Index Scan using files_owner_parent_walk_idx on files  (cost=0.55..81785.16 rows=171308 width=34) (actual time=0.009..0.009 rows=0.00 loops=1)
+                           Index Cond: ((ROW(owner_id, parent_id, id) > ROW($1, parent.node_id, COALESCE(parent.last_child_id, ''::text))) AND (owner_id = $1) AND (parent_id = parent.node_id))
+                           Filter: (($5 IS NULL) OR (state = $5))
+                           Index Searches: 1
+                           Buffers: shared hit=4
+ Planning:
+   Buffers: shared hit=9
+ Planning Time: 0.123 ms
+ JIT:
+   Functions: 18
+   Options: Inlining false, Optimization false, Expressions true, Deforming true
+   Timing: Generation 0.447 ms (Deform 0.120 ms), Inlining 0.000 ms, Optimization 0.260 ms, Emission 5.323 ms, Total 6.029 ms
+ Execution Time: 6.134 ms
+(24 rows)
+

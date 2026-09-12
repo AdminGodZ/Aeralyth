@@ -224,7 +224,7 @@ export function getFileExtension(name: string): string {
     : "";
 }
 
-export function isProbablyText(bytes: Uint8Array): boolean {
+export function isProbablyText(bytes: Uint8Array, partial = false): boolean {
   if (bytes.length === 0) return true;
   if (hasUnicodeBom(bytes) || looksLikeUtf16(bytes)) return true;
 
@@ -238,27 +238,36 @@ export function isProbablyText(bytes: Uint8Array): boolean {
   if (controlBytes / Math.min(bytes.length, 8192) > 0.02) return false;
 
   try {
-    new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, 8192));
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes.subarray(0, 8192), {
+      stream: partial || bytes.length > 8192,
+    });
     return true;
   } catch {
     return false;
   }
 }
 
-export function decodeRepositoryText(bytes: Uint8Array): {
+export function decodeRepositoryText(
+  bytes: Uint8Array,
+  partial = false,
+): {
   encoding: string;
   text: string;
 } {
   if (bytes[0] === 0xff && bytes[1] === 0xfe) {
     return {
       encoding: "UTF-16 LE",
-      text: new TextDecoder("utf-16le").decode(bytes.subarray(2)),
+      text: new TextDecoder("utf-16le").decode(bytes.subarray(2), {
+        stream: partial,
+      }),
     };
   }
   if (bytes[0] === 0xfe && bytes[1] === 0xff) {
     return {
       encoding: "UTF-16 BE",
-      text: new TextDecoder("utf-16be").decode(bytes.subarray(2)),
+      text: new TextDecoder("utf-16be").decode(bytes.subarray(2), {
+        stream: partial,
+      }),
     };
   }
   if (looksLikeUtf16(bytes)) {
@@ -267,7 +276,7 @@ export function decodeRepositoryText(bytes: Uint8Array): {
     const encoding = oddNulls > evenNulls ? "utf-16le" : "utf-16be";
     return {
       encoding: encoding === "utf-16le" ? "UTF-16 LE" : "UTF-16 BE",
-      text: new TextDecoder(encoding).decode(bytes),
+      text: new TextDecoder(encoding).decode(bytes, { stream: partial }),
     };
   }
 
@@ -275,7 +284,9 @@ export function decodeRepositoryText(bytes: Uint8Array): {
     bytes[0] === 0xef && bytes[1] === 0xbb && bytes[2] === 0xbf ? 3 : 0;
   return {
     encoding: "UTF-8",
-    text: new TextDecoder("utf-8").decode(bytes.subarray(offset)),
+    text: new TextDecoder("utf-8").decode(bytes.subarray(offset), {
+      stream: partial,
+    }),
   };
 }
 

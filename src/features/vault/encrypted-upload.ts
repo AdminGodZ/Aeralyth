@@ -7,15 +7,15 @@ import {
   uploadRequestErrorFromResponse,
 } from "@/features/uploads/upload-retry";
 import {
-  BoundedBatchPipeline,
+  BoundedRollingPipeline,
   detectedCryptoConcurrency,
-  mapWithConcurrency,
   WeightedSemaphore,
 } from "@/features/vault/bounded-async";
 import {
   ExactStreamReader,
   FixedSizeBufferAssembler,
 } from "@/features/vault/buffered-bytes";
+import { publishEncryptedFolderTree } from "@/features/vault/encrypted-folder-upload";
 import {
   asBufferSource,
   toArrayBuffer,
@@ -33,7 +33,6 @@ import {
   getVaultPartUrl,
   getVaultPartUrls,
   initVaultUpload,
-  publishVaultFoldersBatch,
   publishVaultUpload,
   type VaultCompletedPart,
   type VaultMigrationNode,
@@ -43,17 +42,16 @@ import type { VaultCryptoClient } from "@/features/vault/vault-client";
 
 const VAULT_PRESIGN_BATCH_SIZE = 4;
 const VAULT_UPLOAD_CONCURRENCY = 4;
-const VAULT_MULTIPART_LOOKAHEAD_PARTS = 1;
+const VAULT_PRESIGN_FLUSH_MS = 4;
 const VAULT_SMALL_FILE_CONCURRENCY_MAX = 3;
 const VAULT_CONCURRENT_FILE_MAX_BYTES = 8 * 1024 * 1024;
-const VAULT_FOLDER_PUBLICATION_BATCH_SIZE = 100;
 
 type PendingVaultPart = {
   partNumber: number;
   content: Uint8Array;
 };
 
-type MultipartUploadPipeline = BoundedBatchPipeline<
+type MultipartUploadPipeline = BoundedRollingPipeline<
   PendingVaultPart,
   VaultCompletedPart
 >;
@@ -99,76 +97,114 @@ export async function uploadEncryptedSelections({
   const folders = collectFolders(selections);
   const shareSyncBatchId = beginShareDirectorySyncBatch();
 
-  try {
-    await publishEncryptedFolderTree({
-      folders,
-      folderIds,
-      existingFolders: resolution?.existingFolders,
+  const fileConcurrency = detectedCryptoConcurrency(
+    VAULT_SMALL_FILE_CONCURRENCY_MAX,
+  );
+  const fileBudget = new WeightedSemaphore(fileConcurrency);
+  const operation = linkedAbortController(signal);
+  const filesByParent = new Map<string, number[]>();
+  const paths = selections.map((selection, index) => {
+    const path = normalizeRelativePath(
+      selection.relativePath || selection.file.name,
+    );
+    const parentPath = parentDirectory(path);
+    const children = filesByParent.get(parentPath) ?? [];
+    children.push(index);
+    filesByParent.set(parentPath, children);
+    return path;
+  });
+  const ready: number[] = [];
+  let nextReady = 0;
+  const active = new Set<Promise<void>>();
+  let failure: { error: unknown } | undefined;
+  const fail = (error: unknown) => {
+    failure ??= { error };
+    if (!operation.signal.aborted) operation.abort(error);
+  };
+  const uploadFile = async (fileIndex: number) => {
+    assertNotAborted(operation.signal);
+    onFileStart(fileIndex);
+    const selection = selections[fileIndex];
+    const path = paths[fileIndex];
+    const parentId = folderIds.get(parentDirectory(path));
+    if (parentId === undefined) {
+      throw new Error("The selected file hierarchy is invalid.");
+    }
+    let fileProcessedBytes = 0;
+    await uploadEncryptedEntry({
+      file: selection.file,
+      name: baseName(path),
+      parentId: parentId || null,
       csrfToken,
       client,
-      signal,
+      signal: operation.signal,
+      replacement: resolution?.replacementFiles.get(path),
       shareSyncBatchId,
+      // Keep large-file data exclusive until device profiling supports raising
+      // its buffer budget. Small init/finalization requests need no data permit.
+      acquireContentPermit: () =>
+        fileBudget.acquire(
+          selection.file.size <= VAULT_CONCURRENT_FILE_MAX_BYTES
+            ? 1
+            : fileConcurrency,
+          operation.signal,
+        ),
+      onChunk: (sourceBytes) => {
+        processedBytes += sourceBytes;
+        fileProcessedBytes += sourceBytes;
+        onProgress(processedBytes, totalBytes, fileIndex, fileProcessedBytes);
+      },
     });
-
-    const fileConcurrency = detectedCryptoConcurrency(
-      VAULT_SMALL_FILE_CONCURRENCY_MAX,
-    );
-    const fileBudget = new WeightedSemaphore(fileConcurrency);
-    const operation = linkedAbortController(signal);
-    try {
-      await mapWithConcurrency(
-        selections,
-        fileConcurrency,
-        async (selection, fileIndex) => {
-          const weight =
-            selection.file.size <= VAULT_CONCURRENT_FILE_MAX_BYTES
-              ? 1
-              : fileConcurrency;
-          const release = await fileBudget.acquire(weight, operation.signal);
-          try {
-            assertNotAborted(operation.signal);
-            onFileStart(fileIndex);
-            let fileProcessedBytes = 0;
-            const path = normalizeRelativePath(
-              selection.relativePath || selection.file.name,
-            );
-            const parentId = folderIds.get(parentDirectory(path));
-            if (parentId === undefined) {
-              throw new Error("The selected file hierarchy is invalid.");
-            }
-            await uploadEncryptedEntry({
-              file: selection.file,
-              name: baseName(path),
-              parentId: parentId || null,
-              csrfToken,
-              client,
-              signal: operation.signal,
-              replacement: resolution?.replacementFiles.get(path),
-              shareSyncBatchId,
-              onChunk: (sourceBytes) => {
-                processedBytes += sourceBytes;
-                fileProcessedBytes += sourceBytes;
-                onProgress(
-                  processedBytes,
-                  totalBytes,
-                  fileIndex,
-                  fileProcessedBytes,
-                );
-              },
-            });
-            onFileComplete(fileIndex);
-          } catch (error) {
-            if (!operation.signal.aborted) operation.abort(error);
-            throw error;
-          } finally {
-            release();
-          }
-        },
-      );
-    } finally {
-      operation.dispose();
+    onFileComplete(fileIndex);
+  };
+  const pump = () => {
+    while (
+      !operation.signal.aborted &&
+      active.size < fileConcurrency &&
+      nextReady < ready.length
+    ) {
+      const fileIndex = ready[nextReady++];
+      const work = uploadFile(fileIndex)
+        .catch(fail)
+        .finally(() => {
+          active.delete(work);
+          pump();
+        });
+      active.add(work);
     }
+  };
+  const onPublished = (path: string) => {
+    const indices = filesByParent.get(path);
+    if (!indices) return;
+    filesByParent.delete(path);
+    for (const index of indices) ready.push(index);
+    pump();
+  };
 
+  try {
+    onPublished("");
+    try {
+      await publishEncryptedFolderTree({
+        folders,
+        folderIds,
+        existingFolders: resolution?.existingFolders,
+        csrfToken,
+        client,
+        signal: operation.signal,
+        shareSyncBatchId,
+        priorityParents: new Set(filesByParent.keys()),
+        onPublished,
+      });
+    } catch (error) {
+      fail(error);
+    }
+    // Completion may schedule the next ready file; drain all started work before
+    // finishing the share-sync batch or propagating an operation failure.
+    while (active.size > 0) await Promise.all(active);
+    if (failure) throw failure.error;
+    assertNotAborted(operation.signal);
+    if (filesByParent.size > 0)
+      throw new Error("The selected file hierarchy is invalid.");
     const rootFolders = folders.filter((path) => !path.includes("/"));
     return {
       rootFolderId:
@@ -177,134 +213,8 @@ export async function uploadEncryptedSelections({
           : null,
     };
   } finally {
+    operation.dispose();
     void finishShareDirectorySyncBatch({ batchId: shareSyncBatchId, client });
-  }
-}
-
-type PendingEncryptedFolder = {
-  sessionId: string;
-  parentId: string | null;
-  complete: Awaited<ReturnType<VaultCryptoClient["finalizeEncryption"]>>;
-};
-
-async function publishEncryptedFolderTree({
-  folders,
-  folderIds,
-  existingFolders,
-  csrfToken,
-  client,
-  signal,
-  shareSyncBatchId,
-}: {
-  folders: string[];
-  folderIds: Map<string, string>;
-  existingFolders?: Map<string, ExistingUploadNode>;
-  csrfToken: string;
-  client: VaultCryptoClient;
-  signal: AbortSignal;
-  shareSyncBatchId: string;
-}): Promise<void> {
-  let pending: PendingEncryptedFolder[] = [];
-
-  const abortPending = async () => {
-    await Promise.allSettled(
-      pending.map(({ sessionId, complete }) =>
-        client.abortEncryption(sessionId, complete.nodeId),
-      ),
-    );
-  };
-  const flush = async () => {
-    if (pending.length === 0) return;
-    const batch = pending;
-    const response = await publishVaultFoldersBatch(
-      csrfToken,
-      batch.map(({ complete }) => complete.record),
-      signal,
-    );
-    if (response.folders.length !== batch.length) {
-      throw new Error(
-        "The encrypted folder publication response is incomplete.",
-      );
-    }
-    for (const [index, published] of response.folders.entries()) {
-      const { complete, parentId } = batch[index];
-      if (
-        published.nodeId !== complete.nodeId ||
-        published.generationNumber !== complete.generationNumber ||
-        published.generationId !== complete.generationId ||
-        published.recordVersion !== complete.recordVersion
-      ) {
-        throw new Error(
-          "The encrypted folder publication response is invalid.",
-        );
-      }
-      if (published.shareSyncRequired) {
-        enqueueShareDirectorySync({
-          csrfToken,
-          client,
-          batchId: shareSyncBatchId,
-          job: {
-            ...published,
-            contextCacheKey: parentId ?? published.nodeId,
-            entryType: "folder",
-          },
-        });
-      }
-    }
-    pending = [];
-  };
-
-  try {
-    for (const path of folders) {
-      assertNotAborted(signal);
-      const existing = existingFolders?.get(path);
-      if (existing) {
-        folderIds.set(path, existing.id);
-        continue;
-      }
-      const parentPath = parentDirectory(path);
-      const parentId = folderIds.get(parentPath);
-      if (parentId === undefined) {
-        throw new Error("The selected folder hierarchy is invalid.");
-      }
-      // Parent keys are intentionally prepared in order inside the worker. The
-      // signed records are published together once the bounded batch is ready.
-      // react-doctor-disable-next-line react-doctor/async-await-in-loop
-      const started = await client.startEncryption({
-        parentId: parentId || null,
-        entryType: "folder",
-        name: baseName(path),
-        mimeType: null,
-        plaintextBytes: 0,
-        lastModified: Date.now(),
-      });
-      let complete: Awaited<
-        ReturnType<VaultCryptoClient["finalizeEncryption"]>
-      >;
-      try {
-        // react-doctor-disable-next-line react-doctor/async-await-in-loop
-        complete = await client.finalizeEncryption(started.sessionId);
-      } catch (error) {
-        await client
-          .abortEncryption(started.sessionId, started.nodeId)
-          .catch(() => undefined);
-        throw error;
-      }
-      folderIds.set(path, complete.nodeId);
-      pending.push({
-        sessionId: started.sessionId,
-        parentId: parentId || null,
-        complete,
-      });
-      if (pending.length === VAULT_FOLDER_PUBLICATION_BATCH_SIZE) {
-        // react-doctor-disable-next-line react-doctor/async-await-in-loop
-        await flush();
-      }
-    }
-    await flush();
-  } catch (error) {
-    await abortPending();
-    throw error;
   }
 }
 
@@ -452,6 +362,7 @@ async function uploadEncryptedEntry({
   signal,
   replacement,
   shareSyncBatchId,
+  acquireContentPermit,
   onChunk,
 }: {
   file: File | null;
@@ -462,6 +373,7 @@ async function uploadEncryptedEntry({
   signal: AbortSignal;
   replacement?: ExistingUploadNode;
   shareSyncBatchId?: string;
+  acquireContentPermit?(): Promise<() => void>;
   onChunk(bytes: number): void;
 }): Promise<{ nodeId: string }> {
   const replacementVersion = getEncryptedReplacementVersion(replacement);
@@ -510,8 +422,12 @@ async function uploadEncryptedEntry({
   }
 
   try {
-    const parts = file
-      ? await encryptAndUploadFile({
+    let parts: VaultCompletedPart[] = [];
+    if (file) {
+      const releaseContent = await acquireContentPermit?.();
+      try {
+        assertNotAborted(signal);
+        parts = await encryptAndUploadFile({
           file,
           started,
           plan,
@@ -519,8 +435,11 @@ async function uploadEncryptedEntry({
           client,
           signal,
           onChunk,
-        })
-      : [];
+        });
+      } finally {
+        releaseContent?.();
+      }
+    }
     const completed = await client.finalizeEncryption(started.sessionId);
     const published = await publishVaultUpload(
       csrfToken,
@@ -607,7 +526,8 @@ async function encryptAndUploadFile({
   const multipart = createMultipartUploadPipeline(
     csrfToken,
     plan.uploadId,
-    pipelineAbort.signal,
+    pipelineAbort,
+    encryptedUploadBufferSize(plan, started.ciphertextLength),
   );
   let nextPartNumber = 1;
   let singleContent: Uint8Array | null = null;
@@ -670,10 +590,9 @@ async function encryptAndUploadFile({
     return await multipart.finish();
   } finally {
     pipelineAbort.abort();
-    const abandoned = await multipart.stop();
+    await multipart.stop();
     assembler.clear();
     singleContent?.fill(0);
-    for (const part of abandoned) part.content.fill(0);
     pipelineAbort.dispose();
   }
 }
@@ -707,7 +626,8 @@ async function encryptAndUploadStream({
   const multipart = createMultipartUploadPipeline(
     csrfToken,
     plan.uploadId,
-    pipelineAbort.signal,
+    pipelineAbort,
+    encryptedUploadBufferSize(plan, started.ciphertextLength),
   );
   let nextPartNumber = 1;
   let singleContent: Uint8Array | null = null;
@@ -781,10 +701,9 @@ async function encryptAndUploadStream({
     return await multipart.finish();
   } finally {
     pipelineAbort.abort();
-    const abandoned = await multipart.stop();
+    await multipart.stop();
     assembler.clear();
     singleContent?.fill(0);
-    for (const part of abandoned) part.content.fill(0);
     pipelineAbort.dispose();
     await reader.cancel();
   }
@@ -805,13 +724,130 @@ function encryptedUploadBufferSize(
 function createMultipartUploadPipeline(
   csrfToken: string,
   uploadId: string,
-  signal: AbortSignal,
+  operation: ReturnType<typeof linkedAbortController>,
+  partBytes: number,
 ): MultipartUploadPipeline {
-  return new BoundedBatchPipeline(
-    VAULT_PRESIGN_BATCH_SIZE,
-    VAULT_MULTIPART_LOOKAHEAD_PARTS,
-    (batch) => uploadMultipartParts(csrfToken, uploadId, batch, signal),
+  const presign = createPartPresigner(csrfToken, uploadId, operation.signal);
+  // Four active bodies plus the producer's next part, its partial assembler,
+  // and one crypto chunk keep the previous four-part/one-lookahead ceiling.
+  return new BoundedRollingPipeline(
+    VAULT_UPLOAD_CONCURRENCY,
+    VAULT_UPLOAD_CONCURRENCY * partBytes,
+    (part: PendingVaultPart) => part.content.buffer.byteLength,
+    async (part) => {
+      try {
+        assertNotAborted(operation.signal);
+        const checksumSha256 = await sha256Base64(part.content);
+        const signed = await presign(part.partNumber, checksumSha256);
+        if (signed.contentLength !== part.content.length) {
+          throw new Error("The signed multipart length is invalid.");
+        }
+        const upload = await putEncryptedBytes(
+          signed.url,
+          part.content,
+          checksumSha256,
+          operation.signal,
+          async () => {
+            const refreshed = await getVaultPartUrl(
+              csrfToken,
+              uploadId,
+              part.partNumber,
+              checksumSha256,
+              operation.signal,
+            );
+            if (refreshed.contentLength !== part.content.length) {
+              throw new Error("The signed multipart length is invalid.");
+            }
+            return refreshed.url;
+          },
+        );
+        const etag = upload.headers.get("ETag")?.trim();
+        if (!etag) {
+          throw new Error(
+            "The storage service did not expose the multipart ETag header.",
+          );
+        }
+        return { partNumber: part.partNumber, etag, checksumSha256 };
+      } finally {
+        part.content.fill(0);
+      }
+    },
+    operation.signal,
+    (error) => operation.abort(error),
   );
+}
+
+function createPartPresigner(
+  csrfToken: string,
+  uploadId: string,
+  signal: AbortSignal,
+) {
+  type SignedPart = Awaited<ReturnType<typeof getVaultPartUrl>>;
+  type Pending = {
+    partNumber: number;
+    checksumSha256: string;
+    resolve(value: SignedPart): void;
+    reject(error: unknown): void;
+  };
+  let pending: Pending[] = [];
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const flush = async () => {
+    const batch = pending;
+    pending = [];
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    signal.removeEventListener("abort", abort);
+    try {
+      assertNotAborted(signal);
+      const response = await getVaultPartUrls(
+        csrfToken,
+        uploadId,
+        batch.map(({ partNumber, checksumSha256 }) => ({
+          partNumber,
+          checksumSha256,
+        })),
+        signal,
+      );
+      const signed = new Map(
+        response.parts.map((part) => [part.partNumber, part]),
+      );
+      if (
+        signed.size !== batch.length ||
+        batch.some((part) => !signed.has(part.partNumber))
+      ) {
+        throw new Error("The signed multipart batch is incomplete.");
+      }
+      for (const part of batch) {
+        const value = signed.get(part.partNumber);
+        if (value) part.resolve(value);
+      }
+    } catch (error) {
+      for (const part of batch) part.reject(error);
+    }
+  };
+  const abort = () => {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+    for (const part of pending) {
+      part.reject(
+        signal.reason ??
+          new DOMException("The operation was aborted.", "AbortError"),
+      );
+    }
+    pending = [];
+  };
+  return (partNumber: number, checksumSha256: string): Promise<SignedPart> => {
+    assertNotAborted(signal);
+    return new Promise((resolve, reject) => {
+      pending.push({ partNumber, checksumSha256, resolve, reject });
+      if (pending.length === VAULT_PRESIGN_BATCH_SIZE) {
+        void flush();
+      } else if (timer === undefined) {
+        signal.addEventListener("abort", abort, { once: true });
+        timer = setTimeout(() => void flush(), VAULT_PRESIGN_FLUSH_MS);
+      }
+    });
+  };
 }
 
 async function queueMultipartBuffers(
@@ -862,91 +898,6 @@ async function uploadSingle(
     });
   } finally {
     content.fill(0);
-  }
-}
-
-async function uploadMultipartParts(
-  csrfToken: string,
-  uploadId: string,
-  pending: PendingVaultPart[],
-  signal: AbortSignal,
-): Promise<VaultCompletedPart[]> {
-  if (pending.length < 1 || pending.length > VAULT_PRESIGN_BATCH_SIZE) {
-    throw new Error("The encrypted multipart batch is invalid.");
-  }
-  try {
-    const prepared = await Promise.all(
-      pending.map(async (part) => ({
-        ...part,
-        checksumSha256: await sha256Base64(part.content),
-      })),
-    );
-    const response = await getVaultPartUrls(
-      csrfToken,
-      uploadId,
-      prepared.map((part) => ({
-        partNumber: part.partNumber,
-        checksumSha256: part.checksumSha256,
-      })),
-      signal,
-    );
-    const signedByPart = new Map(
-      response.parts.map((part) => [part.partNumber, part]),
-    );
-    if (signedByPart.size !== prepared.length) {
-      throw new Error("The signed multipart batch is incomplete.");
-    }
-    const completed: VaultCompletedPart[] = [];
-    for (
-      let offset = 0;
-      offset < prepared.length;
-      offset += VAULT_UPLOAD_CONCURRENCY
-    ) {
-      const uploaded = await Promise.all(
-        prepared
-          .slice(offset, offset + VAULT_UPLOAD_CONCURRENCY)
-          .map(async (part) => {
-            const signed = signedByPart.get(part.partNumber);
-            if (!signed || signed.contentLength !== part.content.length) {
-              throw new Error("The signed multipart length is invalid.");
-            }
-            const upload = await putEncryptedBytes(
-              signed.url,
-              part.content,
-              part.checksumSha256,
-              signal,
-              async () => {
-                const refreshed = await getVaultPartUrl(
-                  csrfToken,
-                  uploadId,
-                  part.partNumber,
-                  part.checksumSha256,
-                  signal,
-                );
-                if (refreshed.contentLength !== part.content.length) {
-                  throw new Error("The signed multipart length is invalid.");
-                }
-                return refreshed.url;
-              },
-            );
-            const etag = upload.headers.get("ETag")?.trim();
-            if (!etag) {
-              throw new Error(
-                "The storage service did not expose the multipart ETag header.",
-              );
-            }
-            return {
-              partNumber: part.partNumber,
-              etag,
-              checksumSha256: part.checksumSha256,
-            };
-          }),
-      );
-      completed.push(...uploaded);
-    }
-    return completed;
-  } finally {
-    for (const part of pending) part.content.fill(0);
   }
 }
 

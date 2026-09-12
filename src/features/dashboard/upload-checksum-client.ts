@@ -83,13 +83,17 @@ function getChecksumWorker(): Worker {
   worker.addEventListener("error", () => {
     failChecksumWorker(
       worker,
-      new Error("The upload checksum worker stopped unexpectedly."),
+      new Error(
+        "The upload checksum worker could not run. Reload the application, then retry the upload.",
+      ),
     );
   });
   worker.addEventListener("messageerror", () => {
     failChecksumWorker(
       worker,
-      new Error("The upload checksum worker returned an invalid response."),
+      new Error(
+        "The upload checksum worker returned an invalid response. Reload the application, then retry the upload.",
+      ),
     );
   });
   checksumWorker = worker;

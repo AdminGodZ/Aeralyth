@@ -99,6 +99,8 @@ describe("VaultMetadataResolver", () => {
       references.map((value) => value.nodeId),
       undefined,
       expect.any(AbortSignal),
+      undefined,
+      undefined,
     );
     expect(getCachedMetadata).toHaveBeenCalledOnce();
     expect(openMetadataPlans).toHaveBeenCalledOnce();
@@ -220,14 +222,18 @@ describe("VaultMetadataResolver", () => {
         peakRequests = Math.max(peakRequests, activeRequests);
         await Promise.resolve();
         activeRequests -= 1;
-        return { plans: plans.slice(0, 50), continuation: 50 };
+        return {
+          plans: plans.slice(0, 50),
+          continuation: 50,
+          snapshot: "version-one",
+        };
       })
       .mockImplementationOnce(async () => {
         activeRequests += 1;
         peakRequests = Math.max(peakRequests, activeRequests);
         await Promise.resolve();
         activeRequests -= 1;
-        return { plans: plans.slice(50) };
+        return { plans: plans.slice(50), snapshot: "version-one" };
       });
     const { client } = fakeClient();
     const resolver = new VaultMetadataResolver();
@@ -246,8 +252,34 @@ describe("VaultMetadataResolver", () => {
       references.map((value) => value.nodeId),
       50,
       expect.any(AbortSignal),
+      undefined,
+      "version-one",
     ]);
     expect(peakRequests).toBe(1);
+  });
+
+  it("rejects changed snapshot pages before publishing mixed metadata", async () => {
+    const references = [reference("fil_first"), reference("fil_second")];
+    apiMocks.getVaultMetadataPlans
+      .mockResolvedValueOnce({
+        plans: [planFor(references[0])],
+        continuation: 1,
+        snapshot: "first",
+      })
+      .mockResolvedValueOnce({
+        plans: [planFor(references[1])],
+        snapshot: "changed",
+      });
+    const { client, openMetadataPlans } = fakeClient();
+    const resolver = new VaultMetadataResolver();
+    await expect(
+      resolver.resolve(references, {
+        csrfToken: "csrf",
+        client,
+        openNode: vi.fn(async () => undefined),
+      }),
+    ).rejects.toThrow("metadata snapshot changed");
+    expect(openMetadataPlans).not.toHaveBeenCalled();
   });
 
   it("lets an abandoned navigation stop waiting without canceling shared plan warm-up", async () => {

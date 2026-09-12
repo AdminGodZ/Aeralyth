@@ -1,0 +1,1522 @@
+{
+  "recordedAt": "2026-09-12T12:37:21.365718+00:00",
+  "passed": true,
+  "backendSourceSha256": "6a9494aa3f7e781e81289f0a3f10b1f1590f5988e563753c30489897c8beefab",
+  "backendBinarySha256": "744a513655b7efd0a28d7cf406a077f59aa05e3939ec48ead58234b236b0e7e8",
+  "backendPidDuringCheck": 50750,
+  "frontendBuildId": "kLh0LsUQEgybZ5ZUu3iqk",
+  "frontendSourceHashes": {
+    "src/features/vault/encrypted-upload.ts": "cf2b368b32e4692cedf099f4b56d4d59ec4113462d2348b8543cd33774843994",
+    "src/features/vault/encrypted-download.ts": "7a79487f28994ccb6b6c595dea36f188ab8f60a09ad777194a265f46ff08a724",
+    "src/features/vault/resumable-download.ts": "7647ce98f0fa01c252779537c40bdd7443d125e95ca2a59f047dc8d9df677574",
+    "src/features/vault/vault-client.ts": "065cd515b236d1a9ad03b42153d912e64f710555c9264ea3d25ff72a0629b345",
+    "src/features/vault/vault-provider.tsx": "450d5ea3d3464983c4359093fb093d43e878802975813dd292bc9616bbb593a5",
+    "src/features/repositories/repository-file-loader.ts": "5277819fdc25ce3d3945f84a9c24f90949e52239aa7e9211316482fcb020a6de",
+    "src/features/repositories/repository-file-viewer.tsx": "a91658a2bdb54b3b9e00c58d339b11995d6d9c8df268c6a402f29c628befd469",
+    "src/generated/worker-assets.ts": "604168af812aba4d9b0eec39ba0d8a13f097c319ecc13d9b9b39f36d976ef86e"
+  },
+  "environment": {
+    "apiPort": 58083,
+    "frontendPort": 53001,
+    "fixtureProxyPort": 53000,
+    "storage": "isolated MinIO",
+    "browser": "isolated agent-browser Chromium",
+    "e2eeMode": "required",
+    "quotaBytes": 1073741824
+  },
+  "checks": {
+    "freshSignInAndVaultSetup": true,
+    "recoveryAcknowledged": true,
+    "smallEncryptedUploadBytes": 40,
+    "nestedFolderUploadFiles": 2,
+    "repositoryImportFiles": 3,
+    "repositoryImportNestedFolders": 1,
+    "largeEncryptedUploadPlaintextBytes": 41943040,
+    "preview": {
+      "displayBudgetBytes": 2097152,
+      "characterBudget": 500000,
+      "status": 206,
+      "range": "bytes=0-4194319",
+      "ciphertextFetchedBytes": 4194320,
+      "totalCiphertextBytes": 41943200,
+      "partialVerificationLabeled": true,
+      "fullOriginalDownloadControl": true,
+      "workerAndRenderingMeasurement": {
+        "cleaned": true,
+        "firstVisibleTextDomMs": 228.2999999988824,
+        "samples": [
+          {
+            "ciphertextBytes": 0,
+            "durationMs": 0.599999999627471,
+            "success": true,
+            "type": "startDecryption"
+          },
+          {
+            "ciphertextBytes": 4194320,
+            "durationMs": 9.900000000372527,
+            "success": true,
+            "type": "decryptChunk"
+          },
+          {
+            "ciphertextBytes": 0,
+            "durationMs": 1,
+            "success": true,
+            "type": "abortDecryption"
+          }
+        ],
+        "textAfterTwoFramesMs": 278.69999999925494,
+        "timedOut": false
+      }
+    },
+    "originalDownload": {
+      "plaintextBytes": 41943040,
+      "sha256": "3d81051e2fbef8baeff1f79f67d2b940f64855acb3f6e975fbda5c1beef68405",
+      "matchesSource": true,
+      "sink": "OPFS"
+    },
+    "workerFailure": {
+      "exactImmutableAssetBlocked": true,
+      "reloadWithExistingResumeEnteredLockedState": true,
+      "actionableError": true,
+      "subsequentUnlock": {
+        "actionableError": true,
+        "passwordCleared": true,
+        "unlockButtonEnabled": true
+      },
+      "blockRemoved": true,
+      "reloadStillRequiredExplicitUnlock": true,
+      "explicitUnlockSucceeded": true,
+      "postRecoveryDownload": {
+        "plaintextBytes": 41943040,
+        "sha256": "3d81051e2fbef8baeff1f79f67d2b940f64855acb3f6e975fbda5c1beef68405",
+        "matchesSource": true,
+        "sink": "OPFS"
+      },
+      "unexpectedPostRecoveryErrors": 0,
+      "unexpectedPostRecoveryConsoleMessages": 0
+    }
+  },
+  "cleanup": {
+    "probeCleanedBeforeOriginalDownload": true,
+    "networkBlockRemovedBeforeRecovery": true,
+    "browserClosed": true,
+    "noProductionSourceChange": true
+  },
+  "trace": {
+    "upload": [
+      {
+        "kind": "vault/uploads",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:28:09.00515712Z",
+        "durationMs": 13.583000000692438,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "120"
+        }
+      },
+      {
+        "kind": "vault/uploads/{id}/content-url",
+        "method": "POST",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.022112Z",
+        "durationMs": 5.3580000018747524,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "504"
+        }
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "OPTIONS",
+        "status": 204,
+        "startedAt": "2026-09-12T12:28:09.028290048Z",
+        "durationMs": 0.7980000002224696,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "PUT",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.028118016Z",
+        "durationMs": 3.388000001031556,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "0"
+        }
+      },
+      {
+        "kind": "vault/uploads/{id}/publish",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:28:09.034151936Z",
+        "durationMs": 23.565999999505003,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "205"
+        }
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.059416064Z",
+        "durationMs": 23.03200000004272,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.059485952Z",
+        "durationMs": 14.935000000499771,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.05951488Z",
+        "durationMs": 15.649000000569737,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.059535104Z",
+        "durationMs": 14.41100000038126,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.059561984Z",
+        "durationMs": 14.806999999679158,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.074996992Z",
+        "durationMs": 7.073000000014319,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.075316992Z",
+        "durationMs": 5.759999999284861,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.075460864Z",
+        "durationMs": 6.859000000822824,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.075606016Z",
+        "durationMs": 6.877999999806634,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.081462016Z",
+        "durationMs": 3.037999999525491,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "vault/nodes/metadata-plans",
+        "method": "POST",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.094252032Z",
+        "durationMs": 8.722999999843537,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1235"
+        }
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.341803008Z",
+        "durationMs": 20.642999999744355,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.34194304Z",
+        "durationMs": 11.642000000755651,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.342000128Z",
+        "durationMs": 10.920000001341105,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.342050048Z",
+        "durationMs": 11.633999998644228,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.342086912Z",
+        "durationMs": 11.291999999623979,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "files/summary",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.34333696Z",
+        "durationMs": 12.536000000561005,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "158"
+        }
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.354172928Z",
+        "durationMs": 7.892000001722947,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.35445504Z",
+        "durationMs": 8.26499999806052,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.35467008Z",
+        "durationMs": 7.93199999952782,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.35488512Z",
+        "durationMs": 6.439000000168453,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:28:09.362531072Z",
+        "durationMs": 2.061000001086737,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "files",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.295727872Z",
+        "durationMs": 2.930999998150859,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "886"
+        }
+      },
+      {
+        "kind": "vault/nodes/{id}/download-plan",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.301310976Z",
+        "durationMs": 4.191999999378692,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1686"
+        }
+      },
+      {
+        "kind": "vault/folders/batch",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:29:02.308856064Z",
+        "durationMs": 14.793000000055763,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "425"
+        }
+      },
+      {
+        "kind": "vault/uploads",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:29:02.324934912Z",
+        "durationMs": 9.70899999992433,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "120"
+        }
+      },
+      {
+        "kind": "vault/uploads",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:29:02.325103872Z",
+        "durationMs": 8.374999999843537,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "120"
+        }
+      },
+      {
+        "kind": "vault/uploads/{id}/content-url",
+        "method": "POST",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.33480704Z",
+        "durationMs": 4.178999999883934,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "504"
+        }
+      },
+      {
+        "kind": "vault/uploads/{id}/content-url",
+        "method": "POST",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.335952128Z",
+        "durationMs": 4.2119999986964975,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "504"
+        }
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "OPTIONS",
+        "status": 204,
+        "startedAt": "2026-09-12T12:29:02.339598848Z",
+        "durationMs": 0.9319999995857944,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "PUT",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.33941888Z",
+        "durationMs": 4.531999998262385,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "0"
+        }
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "OPTIONS",
+        "status": 204,
+        "startedAt": "2026-09-12T12:29:02.3421568Z",
+        "durationMs": 0.8379999993331732,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "PUT",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.341944064Z",
+        "durationMs": 3.1209999989292116,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "0"
+        }
+      },
+      {
+        "kind": "vault/uploads/{id}/publish",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:29:02.34544Z",
+        "durationMs": 21.08699999942421,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "205"
+        }
+      },
+      {
+        "kind": "vault/uploads/{id}/publish",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:29:02.367113984Z",
+        "durationMs": 19.230000000859146,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "205"
+        }
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.38732288Z",
+        "durationMs": 17.995999999908847,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.387379968Z",
+        "durationMs": 10.458999999719673,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.387404032Z",
+        "durationMs": 10.613000000212342,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.387428096Z",
+        "durationMs": 11.12599999903678,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.387446016Z",
+        "durationMs": 10.814999999879975,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.398304Z",
+        "durationMs": 6.671000000224798,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.398592Z",
+        "durationMs": 6.714000001432724,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.398785024Z",
+        "durationMs": 6.066000000194064,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.399015936Z",
+        "durationMs": 5.62399999946577,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.404929024Z",
+        "durationMs": 1.958000000970671,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "vault/nodes/metadata-plans",
+        "method": "POST",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.408859904Z",
+        "durationMs": 7.911000001874752,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1212"
+        }
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.604779008Z",
+        "durationMs": 18.981999999611755,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.604878848Z",
+        "durationMs": 10.938999999871477,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.60494592Z",
+        "durationMs": 11.160000000417698,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.604984064Z",
+        "durationMs": 11.281000000013737,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.60501504Z",
+        "durationMs": 11.346000000195811,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.616406016Z",
+        "durationMs": 7.310000000639586,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.616642048Z",
+        "durationMs": 7.575000000336906,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.616794112Z",
+        "durationMs": 7.606000000225962,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.616952832Z",
+        "durationMs": 7.564000001650653,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.624229888Z",
+        "durationMs": 3.8900000004295725,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.62445312Z",
+        "durationMs": 3.980000000516069,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "files/summary",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:02.876997888Z",
+        "durationMs": 4.6140000008238715,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "159"
+        }
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:03.456809984Z",
+        "durationMs": 25.637999999077643,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:03.45693312Z",
+        "durationMs": 12.082999999955064,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:03.456992Z",
+        "durationMs": 12.122999999470311,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:03.457037824Z",
+        "durationMs": 12.101999998884276,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:03.457078016Z",
+        "durationMs": 12.102000000880217,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:03.470370048Z",
+        "durationMs": 11.611000001084525,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:03.470633984Z",
+        "durationMs": 11.849999999089167,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:03.470829056Z",
+        "durationMs": 12.324000000772765,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:03.471023104Z",
+        "durationMs": 12.37600000071188,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:03.482512896Z",
+        "durationMs": 3.733999999858905,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:03.482781952Z",
+        "durationMs": 3.658999998590676,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "files/summary",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:03.736325888Z",
+        "durationMs": 4.478000000207685,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "159"
+        }
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:53.110306048Z",
+        "durationMs": 10.009000001031788,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:29:53.121385216Z",
+        "durationMs": 2.9740000002230516,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "files",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:17.468813824Z",
+        "durationMs": 4.32200000034878,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1378"
+        }
+      },
+      {
+        "kind": "vault/nodes/{id}/download-plan",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:17.473670912Z",
+        "durationMs": 3.936000000687316,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1162"
+        }
+      },
+      {
+        "kind": "vault/nodes/{id}/download-plan",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:17.477963008Z",
+        "durationMs": 2.7320000004346947,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1686"
+        }
+      },
+      {
+        "kind": "vault/folders/batch",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:30:17.483151872Z",
+        "durationMs": 14.630000000732835,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "425"
+        }
+      },
+      {
+        "kind": "vault/uploads",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:30:17.498992896Z",
+        "durationMs": 14.102000001829234,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "127"
+        }
+      },
+      {
+        "kind": "vault/uploads",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:30:17.4991168Z",
+        "durationMs": 10.12499999810534,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "120"
+        }
+      },
+      {
+        "kind": "vault/uploads",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:30:17.499183872Z",
+        "durationMs": 7.506000000859145,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "120"
+        }
+      },
+      {
+        "kind": "vault/uploads/{id}/content-url",
+        "method": "POST",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:17.508678912Z",
+        "durationMs": 4.3640000020465815,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "504"
+        }
+      },
+      {
+        "kind": "vault/uploads/{id}/content-url",
+        "method": "POST",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:17.51021696Z",
+        "durationMs": 4.8039999990350335,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "504"
+        }
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "OPTIONS",
+        "status": 204,
+        "startedAt": "2026-09-12T12:30:17.513657088Z",
+        "durationMs": 0.7019999995857943,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "PUT",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:17.51348992Z",
+        "durationMs": 3.368999999404303,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "0"
+        }
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "OPTIONS",
+        "status": 204,
+        "startedAt": "2026-09-12T12:30:17.51547904Z",
+        "durationMs": 0.9359999988683266,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "PUT",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:17.515335168Z",
+        "durationMs": 3.0930000023350583,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "0"
+        }
+      },
+      {
+        "kind": "vault/uploads/{id}/publish",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:30:17.518117888Z",
+        "durationMs": 26.78499999870162,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "205"
+        }
+      },
+      {
+        "kind": "vault/uploads/{id}/publish",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:30:17.545360128Z",
+        "durationMs": 27.860000001536218,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "205"
+        }
+      },
+      {
+        "kind": "vault/uploads/{id}/parts",
+        "method": "POST",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:17.641657088Z",
+        "durationMs": 4.689000000480213,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "668"
+        }
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "OPTIONS",
+        "status": 204,
+        "startedAt": "2026-09-12T12:30:17.855143168Z",
+        "durationMs": 1.0000000011976808,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "PUT",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:17.66570496Z",
+        "durationMs": 604.1459999997113,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "0"
+        }
+      },
+      {
+        "kind": "vault/uploads/{id}/parts",
+        "method": "POST",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.480763904Z",
+        "durationMs": 5.680999999040155,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "667"
+        }
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "PUT",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.493469952Z",
+        "durationMs": 156.32499999813038,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "0"
+        }
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.699047936Z",
+        "durationMs": 18.97000000115321,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.69910784Z",
+        "durationMs": 10.318999999648543,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.699132928Z",
+        "durationMs": 10.867999999892083,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.69916288Z",
+        "durationMs": 10.120000001742854,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.69918208Z",
+        "durationMs": 10.305999999581838,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "vault/uploads/{id}/publish",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:30:18.70001408Z",
+        "durationMs": 33.5640000014503,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "205"
+        }
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.71015808Z",
+        "durationMs": 5.410000000047846,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.71049088Z",
+        "durationMs": 5.441000001382083,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.71067904Z",
+        "durationMs": 5.1469999980211725,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.71089792Z",
+        "durationMs": 2.8120000007937196,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "repositories",
+        "method": "POST",
+        "status": 201,
+        "startedAt": "2026-09-12T12:30:18.734222848Z",
+        "durationMs": 4.02100000022247,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "454"
+        }
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.739179008Z",
+        "durationMs": 11.308000000066823,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "repositories/{id}/archive-manifest",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.761979136Z",
+        "durationMs": 11.663000001743319,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "2298"
+        }
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.762466816Z",
+        "durationMs": 2.7739999991118673,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "vault/nodes/metadata-plans",
+        "method": "POST",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.762964992Z",
+        "durationMs": 10.043000000267988,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "4938"
+        }
+      },
+      {
+        "kind": "vault/nodes/{id}/download-plan",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.774307072Z",
+        "durationMs": 2.7610000002224697,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1232"
+        }
+      },
+      {
+        "kind": "vault/nodes/{id}/download-plan",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.777851136Z",
+        "durationMs": 1.9909999996261905,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1761"
+        }
+      },
+      {
+        "kind": "vault/nodes/{id}/download-plan",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.780463104Z",
+        "durationMs": 2.0910000011521626,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1783"
+        }
+      },
+      {
+        "kind": "vault/nodes/{id}/download-plan",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.78454912Z",
+        "durationMs": 3.2899999999698486,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1756"
+        }
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.784818944Z",
+        "durationMs": 5.75300000088138,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.7848512Z",
+        "durationMs": 5.317000001289882,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:18.784871936Z",
+        "durationMs": 5.462000000805128,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:19.01792Z",
+        "durationMs": 13.113000000021886,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:19.017984Z",
+        "durationMs": 6.664999999415129,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:19.018011136Z",
+        "durationMs": 6.1069999986817125,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:19.018032128Z",
+        "durationMs": 6.185000000682776,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:19.018054912Z",
+        "durationMs": 7.242000000128639,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:19.025059072Z",
+        "durationMs": 5.912000000922359,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:19.025344Z",
+        "durationMs": 5.379000001467415,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:19.025456896Z",
+        "durationMs": 5.129999999431078,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:19.02581504Z",
+        "durationMs": 5.778000000169618,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:19.03106688Z",
+        "durationMs": 7.026000000812579,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:19.031241984Z",
+        "durationMs": 6.265000000139466,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:19.03148288Z",
+        "durationMs": 6.34399999843596,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:19.03179008Z",
+        "durationMs": 6.423999998628278,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "OPTIONS",
+        "status": 204,
+        "startedAt": "2026-09-12T12:30:19.467894016Z",
+        "durationMs": 0.8789999988279306,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      }
+    ],
+    "preview": [
+      {
+        "kind": "frontend-route",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:49.20121088Z",
+        "durationMs": 12.821000000435044,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "vault/nodes/{id}/download-plan",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:49.218363136Z",
+        "durationMs": 3.137000000859145,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1783"
+        }
+      },
+      {
+        "kind": "vault/nodes/{id}/download-plan",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:49.223881984Z",
+        "durationMs": 3.6239999993786913,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1783"
+        }
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "GET",
+        "status": 206,
+        "startedAt": "2026-09-12T12:30:49.228593152Z",
+        "durationMs": 19.895000001191512,
+        "requestHeaders": {
+          "range": "bytes=0-4194319"
+        },
+        "responseHeaders": {
+          "content-length": "4194320",
+          "content-range": "bytes 0-4194319/41943200"
+        }
+      },
+      {
+        "kind": "frontend-module",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:49.267623936Z",
+        "durationMs": 2.6049999997274718,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-module",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:49.2677888Z",
+        "durationMs": 5.218999999958556,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-module",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:49.278914816Z",
+        "durationMs": 23.422999999038062,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      },
+      {
+        "kind": "frontend-module",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:30:49.316780032Z",
+        "durationMs": 1.7479999999294522,
+        "requestHeaders": {},
+        "responseHeaders": {}
+      }
+    ],
+    "download": [
+      {
+        "kind": "vault/nodes/{id}/download-plan",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:32:14.592201984Z",
+        "durationMs": 3.1050000016625274,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1783"
+        }
+      },
+      {
+        "kind": "vault/nodes/{id}/download-plan",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:32:14.598643968Z",
+        "durationMs": 3.1630000007732306,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "1783"
+        }
+      },
+      {
+        "kind": "signed-provider-object",
+        "method": "GET",
+        "status": 200,
+        "startedAt": "2026-09-12T12:32:14.616962816Z",
+        "durationMs": 190.97800000062875,
+        "requestHeaders": {},
+        "responseHeaders": {
+          "content-length": "41943200"
+        }
+      }
+    ]
+  },
+  "limitations": [
+    "The CSS-visible text DOM measurement and two later animation frames are a rendering-opportunity proxy, not a compositor paint timestamp. This is a single local sample, not a production latency claim.",
+    "The temporary proxy permits the local plain-HTTP MinIO origin in CSP and removes upgrade-insecure-requests only from test responses. Production policy was unchanged.",
+    "The native save-file picker was hidden to choose the actual OPFS path. This browser run does not claim native picker, Safari or Firefox coverage.",
+    "The missing worker was deliberately blocked only in the isolated browser; expected fault messages were cleared after explicit recovery, before capturing the clean post-recovery error/console result.",
+    "A premature file-input action and a batch-parser wait-expression mistake were corrected in the browser harness before recording successful folder publication. Neither was an application failure.",
+    "The earlier source-bound browser record retains the real interrupted-range recovery and ETag mutation proofs; this final pass adds frozen-release smoke and worker/preview measurements."
+  ]
+}

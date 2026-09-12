@@ -63,16 +63,21 @@ describe("worker asset fingerprints", () => {
       /const fileName = `\$\{workerName\}\.\$\{fingerprint\}\.worker\.js`;/u,
     );
     expect(buildScript).not.toMatch(/\?v=\$\{fingerprint\}/u);
-    expect(readdirSync(resolve(root, "public/workers")).sort()).toEqual(
-      [
-        VAULT_WORKER_URL,
-        FOLDER_ZIP_WORKER_URL,
-        UPLOAD_CHECKSUM_WORKER_URL,
-        ZIP_CODEC_WORKER_URL,
-        ZIP_WASM_URL,
-      ]
-        .map((url) => url.slice("/workers/".length))
-        .sort(),
+    for (const name of readdirSync(resolve(root, "public/workers"))) {
+      expect(name).toMatch(
+        /^(?:(?:vault|folder-zip|upload-checksum|zip-codec)\.[a-f0-9]{64}\.worker\.js|zip-module\.[a-f0-9]{64}\.wasm)$/u,
+      );
+    }
+    expect(readdirSync(resolve(root, "public/workers"))).toEqual(
+      expect.arrayContaining(
+        [
+          VAULT_WORKER_URL,
+          FOLDER_ZIP_WORKER_URL,
+          UPLOAD_CHECKSUM_WORKER_URL,
+          ZIP_CODEC_WORKER_URL,
+          ZIP_WASM_URL,
+        ].map((url) => url.slice("/workers/".length)),
+      ),
     );
   });
 

@@ -35,27 +35,123 @@ pub(crate) enum FileUploadFinalizeOutcome {
     Missing,
     StateChanged,
     ReplacementMismatch,
+    ParentUnavailable,
+    Deferred,
+}
+
+// Position and fixed eligibility cutoff for one finite sweep. Keeping the
+// cutoff prevents continuous new arrivals from starving older fenced work.
+pub(crate) type UploadClaimCursor = tokio::sync::Mutex<Option<(SystemTime, String, SystemTime)>>;
+
+pub(crate) const UPLOAD_CLAIM_OWNERS_QUERY: &str = "
+    WITH candidates AS MATERIALIZED (
+      SELECT owner_id FROM tree_operation_owners WHERE owner_id = ANY($1)
+    ), admitted AS MATERIALIZED (
+      SELECT owner_id FROM candidates
+      WHERE pg_try_advisory_xact_lock_shared(hashtextextended('aeralyth:tree-operation:' || owner_id, 0))
+    )
+    SELECT owners.owner_id FROM admitted
+    JOIN tree_operation_owners AS owners ON owners.owner_id = admitted.owner_id
+    ORDER BY owners.owner_id FOR SHARE OF owners SKIP LOCKED
+";
+
+/// Acquire publication fences before upload row locks. The caller supplies only
+/// a bounded candidate batch; advisory locks must never be evaluated over a queue
+/// scan before its LIMIT. A publishing owner is skipped instead of blocking peers.
+pub(crate) async fn lock_upload_claim_owners(
+    transaction: &tokio_postgres::Transaction<'_>,
+    owner_ids: &[String],
+) -> Result<Vec<String>, tokio_postgres::Error> {
+    let rows = transaction
+        .query(UPLOAD_CLAIM_OWNERS_QUERY, &[&owner_ids])
+        .await?;
+    Ok(rows.into_iter().map(|row| row.get("owner_id")).collect())
 }
 
 pub(crate) async fn claim_file_upload_completions(
     db: &Database,
     limit: i64,
+    cursor: &UploadClaimCursor,
 ) -> Result<Vec<FileUploadRecord>, Box<dyn StdError + Send + Sync>> {
-    let rows = db
-        .query(
-            "
-                WITH claimed AS (
-                  SELECT id
-                  FROM file_uploads
-                  WHERE status = 'completing'
-                    AND completion_dead_lettered_at IS NULL
-                    AND completion_available_at <= now()
-                    AND (
-                      completion_locked_until IS NULL
-                      OR completion_locked_until <= now()
-                    )
-                  ORDER BY completion_available_at, id
-                  LIMIT $1
+    let limit = limit.clamp(0, 100);
+    if limit == 0 {
+        return Ok(Vec::new());
+    }
+    let mut cursor = cursor.lock().await;
+    let mut client = db.get().await?;
+    let transaction = client.transaction().await?;
+    let mut claimed = Vec::new();
+    let (mut after_due, mut after_id, sweep_cutoff) = match cursor.as_ref() {
+        Some((due, id, cutoff)) => (Some(*due), id.clone(), *cutoff),
+        None => (
+            None,
+            String::new(),
+            transaction
+                .query_one("SELECT clock_timestamp()", &[])
+                .await?
+                .get::<_, SystemTime>(0),
+        ),
+    };
+    // Refill around contended owners/rows without an unbounded maintenance turn.
+    for _ in 0..4 {
+        let remaining = limit - claimed.len() as i64;
+        if remaining == 0 {
+            break;
+        }
+        let candidates = transaction.query(
+            "SELECT uploads.id, uploads.owner_id, uploads.completion_available_at
+             FROM file_uploads AS uploads
+             WHERE uploads.status = 'completing'
+               AND uploads.completion_dead_lettered_at IS NULL
+               AND uploads.completion_available_at <= $4::timestamptz
+               AND (uploads.completion_locked_until IS NULL OR uploads.completion_locked_until <= now())
+               AND (uploads.completion_available_at, uploads.id) > (COALESCE($2::timestamptz, '-infinity'::timestamptz), $3::text)
+             ORDER BY uploads.completion_available_at, uploads.id LIMIT $1",
+            &[&remaining, &after_due, &after_id, &sweep_cutoff],
+        ).await?;
+        if candidates.is_empty() {
+            after_due = None;
+            after_id.clear();
+            break;
+        }
+        let last = candidates.last().expect("nonempty candidate page");
+        after_due = Some(last.get("completion_available_at"));
+        after_id = last.get("id");
+        let candidate_ids = candidates
+            .iter()
+            .map(|row| row.get::<_, String>("id"))
+            .collect::<Vec<_>>();
+        let mut owner_ids = candidates
+            .iter()
+            .map(|row| row.get::<_, String>("owner_id"))
+            .collect::<Vec<_>>();
+        owner_ids.sort();
+        owner_ids.dedup();
+        let locked_owners = lock_upload_claim_owners(&transaction, &owner_ids).await?;
+        // This separate statement takes a fresh READ COMMITTED snapshot after
+        // the owner fence. A publication that committed during selection is
+        // visible here, and no new publication can pass our shared owner locks.
+        let rows = transaction.query(
+            "WITH claimed AS (
+                  SELECT uploads.id FROM file_uploads AS uploads
+                  WHERE uploads.id = ANY($1) AND uploads.owner_id = ANY($2)
+                    AND uploads.status = 'completing'
+                    AND uploads.completion_dead_lettered_at IS NULL
+                    AND uploads.completion_available_at <= now()
+                    AND (uploads.completion_locked_until IS NULL OR uploads.completion_locked_until <= now())
+                    AND NOT EXISTS (
+                        SELECT 1 FROM tree_operation_jobs AS job
+                        LEFT JOIN share_links AS link ON link.id = uploads.share_link_id
+                        WHERE job.owner_id = uploads.owner_id
+                          AND job.status IN ('pending', 'running')
+                          AND (
+                            tree_operation_ancestor(uploads.file_id, uploads.owner_id, job.root_id)
+                            OR tree_operation_ancestor(uploads.parent_id, uploads.owner_id, job.root_id)
+                            OR tree_operation_ancestor(uploads.replacement_file_id, uploads.owner_id, job.root_id)
+                            OR tree_operation_ancestor(link.root_file_id, uploads.owner_id, job.root_id)
+                          )
+                      )
+                  ORDER BY uploads.completion_available_at, uploads.id
                   FOR UPDATE SKIP LOCKED
                 )
                 UPDATE file_uploads AS uploads
@@ -63,31 +159,19 @@ pub(crate) async fn claim_file_upload_completions(
                     completion_lease_token = gen_random_uuid()::text
                 FROM claimed
                 WHERE uploads.id = claimed.id
-                RETURNING
-                  uploads.id,
-                  uploads.file_id,
-                  uploads.owner_id,
-                  uploads.parent_id,
-                  uploads.original_name,
-                  uploads.object_key,
-                  uploads.mime_type,
-                  uploads.size_bytes,
-                  uploads.upload_mode,
-                  uploads.part_size_bytes,
-                  uploads.multipart_upload_id,
-                  uploads.status,
-                  uploads.checksum_sha256,
-                  uploads.share_link_id,
-                  uploads.replacement_file_id,
-                  uploads.expires_at,
-                  uploads.completion_attempts,
-                  uploads.completion_lease_token
-            ",
-            &[&limit],
-        )
-        .await?;
-
-    Ok(rows.into_iter().map(file_upload_from_row).collect())
+                RETURNING uploads.id, uploads.file_id, uploads.owner_id, uploads.parent_id,
+                  uploads.original_name, uploads.object_key, uploads.mime_type, uploads.size_bytes,
+                  uploads.upload_mode, uploads.part_size_bytes, uploads.multipart_upload_id,
+                  uploads.status, uploads.checksum_sha256, uploads.share_link_id,
+                  uploads.replacement_file_id, uploads.expires_at, uploads.completion_attempts,
+                  uploads.completion_lease_token",
+            &[&candidate_ids, &locked_owners],
+        ).await?;
+        claimed.extend(rows.into_iter().map(file_upload_from_row));
+    }
+    transaction.commit().await?;
+    *cursor = after_due.map(|due| (due, after_id, sweep_cutoff));
+    Ok(claimed)
 }
 
 pub(crate) async fn defer_file_upload_completion(
@@ -139,6 +223,37 @@ pub(crate) async fn finalize_file_upload_record(
 ) -> Result<FileUploadFinalizeOutcome, Box<dyn StdError + Send + Sync>> {
     let mut client = db.get().await?;
     let transaction = client.transaction().await?;
+    // Acquire the publication fence before the upload row, as tree workers do.
+    // Contended owners yield without blocking unrelated completion work.
+    let owner_gate: bool = transaction.query_one(
+        "SELECT pg_try_advisory_xact_lock_shared(hashtextextended('aeralyth:tree-operation:' || $1::text, 0))",
+        &[&upload.owner_id],
+    ).await?.get(0);
+    if !owner_gate || transaction.query_opt(
+        "SELECT version FROM tree_operation_owners WHERE owner_id = $1 FOR SHARE SKIP LOCKED",
+        &[&upload.owner_id],
+    ).await?.is_none() {
+        transaction.rollback().await?;
+        drop(client);
+        defer_file_upload_for_tree_operation(db, upload).await?;
+        return Ok(FileUploadFinalizeOutcome::Deferred);
+    }
+    // A separate command takes a fresh snapshot after the publication lock.
+    let fenced: bool = transaction.query_one(
+        "SELECT EXISTS (SELECT 1 FROM tree_operation_jobs AS jobs
+         WHERE jobs.owner_id = $1 AND jobs.status IN ('pending', 'running')
+           AND (tree_operation_ancestor($2, $1, jobs.root_id)
+             OR tree_operation_ancestor($3, $1, jobs.root_id)
+             OR tree_operation_ancestor($4, $1, jobs.root_id)
+             OR tree_operation_ancestor((SELECT root_file_id FROM share_links WHERE id = $5), $1, jobs.root_id)))",
+        &[&upload.owner_id, &upload.file_id, &upload.parent_id, &upload.replacement_file_id, &upload.share_link_id],
+    ).await?.get(0);
+    if fenced {
+        transaction.rollback().await?;
+        drop(client);
+        defer_file_upload_for_tree_operation(db, upload).await?;
+        return Ok(FileUploadFinalizeOutcome::Deferred);
+    }
     let current = transaction
         .query_opt(
             "SELECT status, completion_lease_token FROM file_uploads WHERE id = $1 AND owner_id = $2 FOR UPDATE",
@@ -163,8 +278,7 @@ pub(crate) async fn finalize_file_upload_record(
         return Ok(FileUploadFinalizeOutcome::StateChanged);
     }
 
-    let parent_folder_id = if let Some(replacement_file_id) = upload.replacement_file_id.as_deref()
-    {
+    let replacement = if let Some(replacement_file_id) = upload.replacement_file_id.as_deref() {
         let target = if upload.share_link_id.is_some() {
             transaction
                 .query_opt(
@@ -203,6 +317,55 @@ pub(crate) async fn finalize_file_upload_record(
             transaction.rollback().await?;
             return Ok(FileUploadFinalizeOutcome::ReplacementMismatch);
         };
+        Some(target)
+    } else {
+        None
+    };
+    let parent_folder_id = replacement.as_ref().map_or_else(
+        || upload.parent_id.clone(),
+        |target| target.get::<_, Option<String>>("parent_id"),
+    );
+    if let Some(parent_id) = parent_folder_id.as_deref() {
+        let parent_gate: bool = transaction.query_one(
+            "SELECT pg_try_advisory_xact_lock_shared(hashtextextended('aeralyth:file-parent-lifecycle:' || $1::text, 0))",
+            &[&parent_id],
+        ).await?.get(0);
+        if !parent_gate {
+            transaction.rollback().await?;
+            drop(client);
+            defer_file_upload_for_tree_operation(db, upload).await?;
+            return Ok(FileUploadFinalizeOutcome::Deferred);
+        }
+        let parent = transaction
+            .query_opt(
+                "SELECT id FROM files WHERE id = $1 AND owner_id = $2
+             AND state = 'active' AND entry_type = 'folder' FOR KEY SHARE",
+                &[&parent_id, &upload.owner_id],
+            )
+            .await?;
+        if parent.is_none() {
+            // Release the reservation and queue provider cleanup atomically.
+            // Signed single PUTs retain their existing write deadline.
+            transaction
+                .query_opt(
+                    FILE_UPLOAD_CLEANUP_QUERY,
+                    &[
+                        &upload.multipart_upload_id,
+                        &upload.id,
+                        &upload.owner_id,
+                        &upload.object_key,
+                        &vec!["completing".to_owned()],
+                        &Some(upload.completion_lease_token.as_str()),
+                    ],
+                )
+                .await?;
+            transaction.commit().await?;
+            return Ok(FileUploadFinalizeOutcome::ParentUnavailable);
+        }
+    }
+    if let (Some(target), Some(replacement_file_id)) =
+        (replacement, upload.replacement_file_id.as_deref())
+    {
         let previous_storage_name: String = target.get("storage_name");
         let previous_object_key = if previous_storage_name.contains('/') {
             previous_storage_name
@@ -250,7 +413,6 @@ pub(crate) async fn finalize_file_upload_record(
                 ],
             )
             .await?;
-        target.get::<_, Option<String>>("parent_id")
     } else {
         transaction
             .execute(
@@ -283,8 +445,7 @@ pub(crate) async fn finalize_file_upload_record(
                 ],
             )
             .await?;
-        upload.parent_id.clone()
-    };
+    }
     touch_ancestor_collections(&transaction, parent_folder_id.as_deref(), &upload.owner_id).await?;
     transaction
         .execute(
@@ -317,22 +478,28 @@ pub(crate) async fn finalize_file_upload_record(
     Ok(FileUploadFinalizeOutcome::Completed)
 }
 
-pub(crate) async fn transition_file_upload_to_cleanup(
+async fn defer_file_upload_for_tree_operation(
     db: &Database,
-    upload_id: &str,
-    owner_id: &str,
-    object_key: &str,
-    multipart_upload_id: Option<&str>,
-    from_statuses: &[&str],
-    lease_token: Option<&str>,
-) -> Result<bool, Box<dyn StdError + Send + Sync>> {
-    let statuses = from_statuses
-        .iter()
-        .map(|status| (*status).to_owned())
-        .collect::<Vec<_>>();
-    let transitioned = db
-        .query_opt(
-            "
+    upload: &FileUploadRecord,
+) -> Result<(), Box<dyn StdError + Send + Sync>> {
+    // This changes bookkeeping only, which the tree fence explicitly permits.
+    // Skip a row already held by a finishing worker, and never release its newer lease.
+    db.execute(
+        "WITH candidate AS (
+           SELECT id FROM file_uploads WHERE id=$1 AND owner_id=$2
+             AND status='completing' AND completion_lease_token=$3
+           FOR UPDATE SKIP LOCKED
+         ) UPDATE file_uploads uploads SET completion_available_at=now()+interval '1 second',
+           completion_locked_until=NULL, completion_lease_token=NULL,
+           completion_last_error='Waiting for a file tree operation'
+         FROM candidate WHERE uploads.id=candidate.id AND uploads.completion_lease_token=$3",
+        &[&upload.id, &upload.owner_id, &upload.completion_lease_token],
+    )
+    .await?;
+    Ok(())
+}
+
+const FILE_UPLOAD_CLEANUP_QUERY: &str = "
                 WITH transitioned AS (
                   UPDATE file_uploads
                   SET status = 'aborted',
@@ -371,7 +538,24 @@ pub(crate) async fn transition_file_upload_to_cleanup(
                     EXCLUDED.available_at
                   )
                 RETURNING object_key
-            ",
+            ";
+
+pub(crate) async fn transition_file_upload_to_cleanup(
+    db: &Database,
+    upload_id: &str,
+    owner_id: &str,
+    object_key: &str,
+    multipart_upload_id: Option<&str>,
+    from_statuses: &[&str],
+    lease_token: Option<&str>,
+) -> Result<bool, Box<dyn StdError + Send + Sync>> {
+    let statuses = from_statuses
+        .iter()
+        .map(|status| (*status).to_owned())
+        .collect::<Vec<_>>();
+    let transitioned = db
+        .query_opt(
+            FILE_UPLOAD_CLEANUP_QUERY,
             &[
                 &multipart_upload_id,
                 &upload_id,
@@ -461,6 +645,393 @@ mod tests {
         let remainder = &source[start..];
         let end = remainder.find(end).expect("end marker should exist");
         &remainder[..end]
+    }
+
+    #[actix_web::test]
+    async fn unavailable_parent_aborts_completion_atomically_without_losing_write_lease() {
+        if std::env::var("AERALYTH_DATABASE_INTEGRATION_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+        let config = crate::config::Config::from_env().unwrap();
+        let db = crate::db::Database::create(
+            &config.database_url,
+            crate::db::DatabasePoolSettings {
+                role: crate::db::PoolRole::Maintenance,
+                max_size: 1,
+                min_size: 1,
+                checkout_queue_capacity: 4,
+                wait_timeout: Duration::from_secs(2),
+                max_lifetime: Duration::from_secs(1800),
+                lifetime_jitter: Duration::ZERO,
+            },
+            crate::observability::Metrics::new(&config),
+        )
+        .await
+        .unwrap();
+        let suffix: String = db
+            .query_one("SELECT gen_random_uuid()::text", &[])
+            .await
+            .unwrap()
+            .get(0);
+        let owner = format!("usr_finalize_parent_{suffix}");
+        let parent = format!("fil_finalize_parent_{suffix}");
+        let file = format!("fil_finalize_child_{suffix}");
+        let upload_id = format!("upl_finalize_parent_{suffix}");
+        let object = format!("{owner}/object");
+        db.execute(
+            "INSERT INTO users(id,username,password_hash,role) VALUES($1,$1,'test-only','user')",
+            &[&owner],
+        )
+        .await
+        .unwrap();
+        db.execute("INSERT INTO files(id,owner_id,original_name,storage_name,size_bytes,entry_type) VALUES($1,$2,'Parent',$1,0,'folder')", &[&parent,&owner]).await.unwrap();
+        // Upload initialization reserves capacity before inserting its intent.
+        db.execute(
+            "UPDATE user_storage_usage SET reserved_bytes=4,pending_uploads=1 WHERE owner_id=$1",
+            &[&owner],
+        )
+        .await
+        .unwrap();
+        let row = db.query_one("INSERT INTO file_uploads(id,file_id,owner_id,parent_id,original_name,object_key,size_bytes,reservation_bytes,upload_mode,status,completion_lease_token,completion_locked_until,expires_at,write_expires_at)
+            VALUES($1,$2,$3,$4,'test.bin',$5,4,4,'single','completing','parent-lease',now()+interval '5 minutes',now()+interval '1 day',now()+interval '30 minutes') RETURNING *",
+            &[&upload_id,&file,&owner,&parent,&object]).await.unwrap();
+        let upload = super::file_upload_from_row(row);
+        let metadata = ObjectMetadata {
+            size_bytes: 4,
+            checksum_sha256: None,
+            etag: None,
+        };
+        assert_eq!(
+            db.query_one(
+                "SELECT reserved_bytes FROM user_storage_usage WHERE owner_id=$1",
+                &[&owner]
+            )
+            .await
+            .unwrap()
+            .get::<_, i64>(0),
+            4
+        );
+
+        // A concurrent parent lifecycle transaction is transient, never an abort.
+        let (mut blocker, connection) =
+            tokio_postgres::connect(&config.database_url, tokio_postgres::NoTls)
+                .await
+                .unwrap();
+        let connection_task = tokio::spawn(connection);
+        let transaction = blocker.transaction().await.unwrap();
+        transaction.query_one("SELECT pg_advisory_xact_lock(hashtextextended('aeralyth:file-parent-lifecycle:' || $1::text,0))", &[&parent]).await.unwrap();
+        let contended = tokio::time::timeout(
+            Duration::from_secs(1),
+            super::finalize_file_upload_record(&db, &upload, &metadata, 900),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(contended, super::FileUploadFinalizeOutcome::Deferred);
+        transaction.rollback().await.unwrap();
+        drop(blocker);
+        connection_task.await.unwrap().unwrap();
+        assert_eq!(
+            db.query_one("SELECT status FROM file_uploads WHERE id=$1", &[&upload_id])
+                .await
+                .unwrap()
+                .get::<_, String>(0),
+            "completing"
+        );
+
+        let deferred = db
+            .query_one(
+                "SELECT completion_lease_token IS NULL AS unlocked,
+            completion_available_at <= now()+interval '2 seconds' AS prompt_retry,
+            completion_attempts=0 AND completion_dead_lettered_at IS NULL AS retry_preserved
+            FROM file_uploads WHERE id=$1",
+                &[&upload_id],
+            )
+            .await
+            .unwrap();
+        assert!(deferred.get::<_, bool>("unlocked"));
+        assert!(deferred.get::<_, bool>("prompt_retry"));
+        assert!(deferred.get::<_, bool>("retry_preserved"));
+        db.execute(
+            "UPDATE file_uploads SET completion_lease_token='parent-lease' WHERE id=$1",
+            &[&upload_id],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "UPDATE files SET state='trashed',trashed_at=now() WHERE id=$1",
+            &[&parent],
+        )
+        .await
+        .unwrap();
+        let mut stale = upload.clone();
+        stale.completion_lease_token = "stale-lease".to_owned();
+        assert_eq!(
+            super::finalize_file_upload_record(&db, &stale, &metadata, 900)
+                .await
+                .unwrap(),
+            super::FileUploadFinalizeOutcome::StateChanged
+        );
+        assert_eq!(
+            super::finalize_file_upload_record(&db, &upload, &metadata, 900)
+                .await
+                .unwrap(),
+            super::FileUploadFinalizeOutcome::ParentUnavailable
+        );
+        let result = db.query_one("SELECT uploads.status, uploads.completion_lease_token IS NULL AS unlocked,
+            jobs.available_at >= uploads.write_expires_at AS lease_preserved,
+            usage.reserved_bytes, usage.pending_uploads,
+            NOT EXISTS(SELECT 1 FROM files WHERE id=$2) AS unpublished
+            FROM file_uploads uploads JOIN storage_deletion_jobs jobs ON jobs.object_key=uploads.object_key
+            JOIN user_storage_usage usage ON usage.owner_id=uploads.owner_id WHERE uploads.id=$1", &[&upload_id,&file]).await.unwrap();
+        assert_eq!(result.get::<_, String>("status"), "aborted");
+        assert!(result.get::<_, bool>("unlocked"));
+        assert!(result.get::<_, bool>("lease_preserved"));
+        assert!(result.get::<_, bool>("unpublished"));
+        assert_eq!(result.get::<_, i64>("reserved_bytes"), 0);
+        assert_eq!(result.get::<_, i64>("pending_uploads"), 0);
+        assert_eq!(
+            super::finalize_file_upload_record(&db, &upload, &metadata, 900)
+                .await
+                .unwrap(),
+            super::FileUploadFinalizeOutcome::StateChanged
+        );
+        db.execute("DELETE FROM users WHERE id=$1", &[&owner])
+            .await
+            .unwrap();
+        db.execute(
+            "DELETE FROM storage_deletion_jobs WHERE object_key=$1",
+            &[&object],
+        )
+        .await
+        .unwrap();
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires isolated PostgreSQL with the current migration chain"]
+    async fn completion_claim_skips_fenced_and_locked_owners_but_claims_siblings() {
+        use crate::config::Config;
+        use crate::db::{Database, DatabasePoolSettings, PoolRole};
+        use crate::observability::Metrics;
+
+        let cursor = super::UploadClaimCursor::new(None);
+        let config = Config::from_env().unwrap();
+        let db = Database::create(
+            &config.database_url,
+            DatabasePoolSettings {
+                role: PoolRole::Maintenance,
+                max_size: 4,
+                min_size: 1,
+                checkout_queue_capacity: 8,
+                wait_timeout: Duration::from_secs(2),
+                max_lifetime: Duration::from_secs(1800),
+                lifetime_jitter: Duration::ZERO,
+            },
+            Metrics::new(&config),
+        )
+        .await
+        .unwrap();
+        let owners = vec![
+            "usr_completion_claim_a".to_owned(),
+            "usr_completion_claim_b".to_owned(),
+            "usr_completion_claim_c".to_owned(),
+            "usr_completion_claim_d".to_owned(),
+        ];
+        db.execute("DELETE FROM users WHERE id = ANY($1)", &[&owners])
+            .await
+            .unwrap();
+        db.execute("INSERT INTO users(id,username,password_hash,role) SELECT id,id,'unused','user' FROM unnest($1::text[]) AS t(id)", &[&owners]).await.unwrap();
+        db.execute("INSERT INTO files(id,owner_id,original_name,storage_name,entry_type,state,size_bytes)
+            VALUES ('fil_completion_claim_root','usr_completion_claim_a','root','root','folder','active',0),
+            ('fil_completion_claim_sibling','usr_completion_claim_a','sibling','sibling','folder','active',0)", &[]).await.unwrap();
+        db.execute("INSERT INTO file_uploads(id,file_id,owner_id,parent_id,original_name,object_key,size_bytes,upload_mode,status,expires_at,completion_available_at)
+            VALUES ('upload_claim_fenced','fil_claim_future_a','usr_completion_claim_a','fil_completion_claim_root','a','claim/a',1,'single','completing',now()+interval '1 hour',now()-interval '10 minutes'),
+            ('upload_claim_sibling','fil_claim_future_b','usr_completion_claim_a','fil_completion_claim_sibling','b','claim/b',1,'single','completing',now()+interval '1 hour',now()-interval '9 minutes'),
+            ('upload_claim_other','fil_claim_future_c','usr_completion_claim_b',NULL,'c','claim/c',1,'single','completing',now()+interval '1 hour',now()-interval '8 minutes'),
+            ('upload_claim_advisory','fil_claim_future_d','usr_completion_claim_c',NULL,'d','claim/d',1,'single','completing',now()+interval '1 hour',now()-interval '11 minutes'),
+            ('upload_claim_owner_row','fil_claim_future_e','usr_completion_claim_d',NULL,'e','claim/e',1,'single','completing',now()+interval '1 hour',now()-interval '12 minutes')", &[]).await.unwrap();
+        db.execute("INSERT INTO file_uploads(id,file_id,owner_id,parent_id,original_name,object_key,size_bytes,upload_mode,status,expires_at,completion_available_at)
+            SELECT 'upload_claim_prefix_'||n, 'fil_claim_prefix_'||n, 'usr_completion_claim_a',
+              'fil_completion_claim_root', 'prefix_'||n, 'claim/prefix/'||n, 1, 'single', 'completing',
+              now()+interval '1 hour', now()-interval '20 minutes'
+            FROM generate_series(1,125) AS t(n)", &[]).await.unwrap();
+        db.execute("INSERT INTO tree_operation_jobs(owner_id,root_id,action) VALUES('usr_completion_claim_a','fil_completion_claim_root','trash')", &[]).await.unwrap();
+        let mut advisory_client = db.get().await.unwrap();
+        let advisory = advisory_client.transaction().await.unwrap();
+        advisory.query_one("SELECT pg_advisory_xact_lock(hashtextextended('aeralyth:tree-operation:usr_completion_claim_c',0))", &[]).await.unwrap();
+        let mut owner_client = db.get().await.unwrap();
+        let owner_lock = owner_client.transaction().await.unwrap();
+        owner_lock.query_one("SELECT version FROM tree_operation_owners WHERE owner_id='usr_completion_claim_d' FOR UPDATE", &[]).await.unwrap();
+
+        let prefix = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::claim_file_upload_completions(&db, 25, &cursor),
+        )
+        .await
+        .expect("one turn must bound its work on a large fenced prefix")
+        .unwrap();
+        assert!(prefix.is_empty());
+        assert!(
+            cursor
+                .lock()
+                .await
+                .as_ref()
+                .is_some_and(|(_, id, _)| id.starts_with("upload_claim_prefix_")),
+            "a bounded turn must preserve its seek position for the next call"
+        );
+        let records = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::claim_file_upload_completions(&db, 25, &cursor),
+        )
+        .await
+        .expect("busy owner publication and owner rows must not block other claims")
+        .expect("a fenced upload must not abort its peers with SQLSTATE 55000");
+        let mut ids = records
+            .iter()
+            .map(|record| record.id.as_str())
+            .collect::<Vec<_>>();
+        ids.sort();
+        assert_eq!(ids, vec!["upload_claim_other", "upload_claim_sibling"]);
+        assert!(
+            records
+                .iter()
+                .all(|record| !record.completion_lease_token.is_empty())
+        );
+        let unclaimed: i64 = db.query_one("SELECT count(*) FROM file_uploads WHERE id IN ('upload_claim_fenced','upload_claim_advisory','upload_claim_owner_row') AND completion_lease_token IS NULL AND completion_locked_until IS NULL", &[]).await.unwrap().get(0);
+        assert_eq!(unclaimed, 3);
+        advisory.rollback().await.unwrap();
+        owner_lock.rollback().await.unwrap();
+        drop(advisory_client);
+        drop(owner_client);
+        let mut released = Vec::new();
+        for _ in 0..2 {
+            released.extend(
+                super::claim_file_upload_completions(&db, 25, &cursor)
+                    .await
+                    .unwrap()
+                    .into_iter()
+                    .map(|record| record.id),
+            );
+        }
+        released.sort();
+        assert_eq!(
+            released,
+            vec!["upload_claim_advisory", "upload_claim_owner_row"]
+        );
+        // A cursor must also make progress when raw queue rows themselves are
+        // locked, so skipping their UPDATE cannot move their due timestamps.
+        db.execute("UPDATE tree_operation_jobs SET status='complete', completed_at=now() WHERE owner_id='usr_completion_claim_a'", &[]).await.unwrap();
+        let mut rows_client = db.get().await.unwrap();
+        let rows_lock = rows_client.transaction().await.unwrap();
+        rows_lock
+            .query(
+                "SELECT id FROM file_uploads WHERE id LIKE 'upload_claim_prefix_%' FOR UPDATE",
+                &[],
+            )
+            .await
+            .unwrap();
+        *cursor.lock().await = None;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                super::claim_file_upload_completions(&db, 25, &cursor)
+            )
+            .await
+            .expect("upload row locks must be skipped")
+            .unwrap()
+            .is_empty()
+        );
+        let after_locked_prefix = tokio::time::timeout(
+            Duration::from_secs(2),
+            super::claim_file_upload_completions(&db, 25, &cursor),
+        )
+        .await
+        .expect("the next bounded turn must seek beyond locked rows")
+        .unwrap();
+        assert_eq!(
+            after_locked_prefix
+                .iter()
+                .map(|row| row.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["upload_claim_fenced"]
+        );
+        rows_lock.rollback().await.unwrap();
+        drop(rows_client);
+        db.execute("DELETE FROM users WHERE id = ANY($1)", &[&owners])
+            .await
+            .unwrap();
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires isolated PostgreSQL with the current migration chain"]
+    async fn completion_claim_revisits_unfenced_work_under_continuous_arrivals() {
+        use crate::config::Config;
+        use crate::db::{Database, DatabasePoolSettings, PoolRole};
+        use crate::observability::Metrics;
+
+        let config = Config::from_env().unwrap();
+        let db = Database::create(
+            &config.database_url,
+            DatabasePoolSettings {
+                role: PoolRole::Maintenance,
+                max_size: 2,
+                min_size: 1,
+                checkout_queue_capacity: 4,
+                wait_timeout: Duration::from_secs(2),
+                max_lifetime: Duration::from_secs(1800),
+                lifetime_jitter: Duration::ZERO,
+            },
+            Metrics::new(&config),
+        )
+        .await
+        .unwrap();
+        let owners = vec![
+            "usr_completion_arrival_a".to_owned(),
+            "usr_completion_arrival_b".to_owned(),
+        ];
+        db.execute("DELETE FROM users WHERE id = ANY($1)", &[&owners])
+            .await
+            .unwrap();
+        db.execute("INSERT INTO users(id,username,password_hash,role) SELECT id,id,'unused','user' FROM unnest($1::text[]) AS t(id)", &[&owners]).await.unwrap();
+        db.execute("INSERT INTO files(id,owner_id,original_name,storage_name,entry_type,state,size_bytes) VALUES('fil_completion_arrival_root','usr_completion_arrival_a','root','root','folder','active',0)", &[]).await.unwrap();
+        db.execute("INSERT INTO file_uploads(id,file_id,owner_id,parent_id,original_name,object_key,size_bytes,upload_mode,status,expires_at,completion_available_at)
+            VALUES('upload_arrival_old','fil_arrival_old','usr_completion_arrival_a','fil_completion_arrival_root','old','arrival/old',1,'single','completing',now()+interval '1 hour',now()-interval '1 hour')", &[]).await.unwrap();
+        db.execute("INSERT INTO tree_operation_jobs(owner_id,root_id,action) VALUES('usr_completion_arrival_a','fil_completion_arrival_root','trash')", &[]).await.unwrap();
+        let arrival_sql = "INSERT INTO file_uploads(id,file_id,owner_id,original_name,object_key,size_bytes,upload_mode,status,expires_at,completion_available_at)
+            SELECT 'upload_arrival_'||$1::text||'_'||n, 'fil_arrival_'||$1::text||'_'||n,
+              'usr_completion_arrival_b', 'healthy', 'arrival/'||$1::text||'/'||n,
+              1, 'single', 'completing', now()+interval '1 hour', clock_timestamp()
+            FROM generate_series(1,25) AS t(n)";
+        db.execute(arrival_sql, &[&"initial"]).await.unwrap();
+        let cursor = super::UploadClaimCursor::new(None);
+        let first = super::claim_file_upload_completions(&db, 25, &cursor)
+            .await
+            .unwrap();
+        assert_eq!(first.len(), 25);
+        assert!(first.iter().all(|row| row.id != "upload_arrival_old"));
+        assert!(
+            cursor.lock().await.is_some(),
+            "a full batch retains the sweep position"
+        );
+        db.execute("UPDATE tree_operation_jobs SET status='complete',completed_at=now() WHERE owner_id='usr_completion_arrival_a'", &[]).await.unwrap();
+        let mut revisited = false;
+        for tick in 0..3 {
+            db.execute(arrival_sql, &[&tick.to_string()]).await.unwrap();
+            let rows = super::claim_file_upload_completions(&db, 25, &cursor)
+                .await
+                .unwrap();
+            if rows.iter().any(|row| row.id == "upload_arrival_old") {
+                revisited = true;
+                break;
+            }
+        }
+        assert!(
+            revisited,
+            "fresh due arrivals must not indefinitely hide older work behind the cursor"
+        );
+        db.execute("DELETE FROM users WHERE id = ANY($1)", &[&owners])
+            .await
+            .unwrap();
     }
 
     #[test]
@@ -627,8 +1198,9 @@ mod tests {
             "pub(crate) async fn transition_file_upload_to_cleanup(",
             "#[cfg(test)]",
         );
-        assert!(transition.contains("SET status = 'aborted'"));
-        assert!(transition.contains("INSERT INTO storage_deletion_jobs"));
+        assert!(super::FILE_UPLOAD_CLEANUP_QUERY.contains("SET status = 'aborted'"));
+        assert!(transition.contains("FILE_UPLOAD_CLEANUP_QUERY"));
+        assert!(super::FILE_UPLOAD_CLEANUP_QUERY.contains("INSERT INTO storage_deletion_jobs"));
 
         let storage = include_str!("storage.rs");
         let finish_job = source_between(

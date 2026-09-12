@@ -1,0 +1,19 @@
+{
+  "timestamp": "2026-09-12T12:17:55.599Z",
+  "exitCode": 0,
+  "command": "docker build --progress=plain --tag aeralyth-audit-20260912:current /private/tmp/aeralyth-production-final-source-20260912",
+  "imageId": "sha256:949ecffa36245a27e920ad364dc3575e9977dece5109318648ebffe97ddaf290",
+  "imageArchitecture": "arm64",
+  "imageOS": "linux",
+  "imageSizeBytes": 146321035,
+  "imageCreatedAt": "2026-09-12T12:17:17.301985595Z",
+  "repoDigests": [
+    "aeralyth-audit-20260912@sha256:949ecffa36245a27e920ad364dc3575e9977dece5109318648ebffe97ddaf290"
+  ],
+  "binarySha256": "1b19353b42adc457ee1ee1cf57f22c47ab2526e9688042e98692da74226f33a4",
+  "runtimeNodeVersion": "22.23.2",
+  "sourceManifestSha256": "52f1f9832745cf4144b4cb5ceba79ce9e8a952a5819d9692e734afd042b45d38",
+  "buildInputSha256": "a3b9e1348b732c344ce74c3a0f8fd40f4cd881390be1b6658cf980ed30a55791",
+  "loadGateStatus": "all28 production acceptance steps passed",
+  "acceptanceReport": "acceptance.json"
+}

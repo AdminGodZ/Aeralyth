@@ -1,0 +1,42 @@
+{
+  "createdAtUnix": 1789214382.6721642,
+  "container": "aeralyth-audit-20260912",
+  "hostPort": 55432,
+  "migrationCount": 35,
+  "migrationManifest": "migration-source-sha256.json",
+  "databases": {
+    "aeralyth_audit_release_final": {
+      "apply": {
+        "passed": true,
+        "seconds": 1.733,
+        "log": "aeralyth_audit_release_final-apply.log"
+      },
+      "replay": {
+        "passed": true,
+        "seconds": 1.516,
+        "log": "aeralyth_audit_release_final-replay.log"
+      }
+    },
+    "aeralyth_audit_debug_final": {
+      "apply": {
+        "passed": true,
+        "seconds": 1.675,
+        "log": "aeralyth_audit_debug_final-apply.log"
+      },
+      "replay": {
+        "passed": true,
+        "seconds": 1.493,
+        "log": "aeralyth_audit_debug_final-replay.log"
+      }
+    }
+  },
+  "browserAccount": {
+    "database": "aeralyth_audit_release_final",
+    "username": "audit_browser",
+    "role": "admin",
+    "vaultCount": 0,
+    "fileCount": 0,
+    "log": "release-browser-account.log"
+  },
+  "sourceStillMatches": true
+}

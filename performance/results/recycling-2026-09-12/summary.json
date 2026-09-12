@@ -1,0 +1,44 @@
+{
+  "audit_issue": "PERF-024",
+  "scope": "Test-only recovery correction inside backend/src/db.rs cfg(test); production Verified recycling unchanged",
+  "source_sha256": "292f8032d1df6a72aa642018b2ccb94b1ebaeaa2c980844afd3e3459d0928d97",
+  "test_binary_sha256": "44f1c8e05240d2adfef46d88776400523ce474a6ba102cd1309762d696da4644",
+  "author_result": {
+    "passed": 2,
+    "failed": 0,
+    "ignored": 0,
+    "seconds": 2.35
+  },
+  "independent_reviewer": "/root/db_lifetimes/db_overload_review",
+  "independent_review": "approved; no remaining findings",
+  "independent_runs": [
+    {
+      "log": "independent-1.log",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": 2.29
+    },
+    {
+      "log": "independent-2.log",
+      "passed": 2,
+      "failed": 0,
+      "ignored": 0,
+      "seconds": 2.28
+    }
+  ],
+  "checks": {
+    "cargo_fmt_check": "passed",
+    "cargo_clippy_all_targets_deny_warnings": "passed"
+  },
+  "full_suite": "Original run 267 passed, 1 failed; complete corrected rerun is coordinated by root separately",
+  "limits": "Local debug binary and isolated PostgreSQL fault tests; not an HTTP or production throughput measurement",
+  "artifacts": {
+    "before-full-suite.log": "7f059ab4e49e9140451dfceb4374ef8758e3ea0fe9b991b570e038fee67e0cd5",
+    "clippy.log": "ec8c2485450f7338eb968ab86e33b1cc1a0dd2078a3a27539cc1b1b499b2f5cc",
+    "fmt.log": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "focused-author.log": "28df4313d9dbe8a01e46457cf06cdaa597d2f16d9d03649b05112ec65b790c31",
+    "independent-1.log": "c15098960cd0105af3eb91eba5f932d39fc2319f51031cb46a36a5cbe5ae963a",
+    "independent-2.log": "95520ea6057258f3c71773d0d3922fc7af3aa6d36f7dc1f054b68b2c5d29e94f"
+  }
+}

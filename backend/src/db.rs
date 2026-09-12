@@ -135,6 +135,31 @@ impl fmt::Display for DatabaseError {
 
 impl StdError for DatabaseError {}
 
+/// Preserve explicit checkout admission shedding as retryable HTTP overload.
+/// Pool, PostgreSQL and ambiguous-write errors retain their existing 500 status.
+pub(crate) fn http_error(error: DatabaseError) -> actix_web::Error {
+    if matches!(error, DatabaseError::Overloaded(_)) {
+        actix_web::error::InternalError::from_response(
+            error,
+            actix_web::HttpResponse::ServiceUnavailable()
+                .insert_header((actix_web::http::header::RETRY_AFTER, "1"))
+                .body("database connection capacity is busy; retry shortly"),
+        )
+        .into()
+    } else {
+        actix_web::error::ErrorInternalServerError(error)
+    }
+}
+
+/// Upload helpers also return provider/IO errors. Only an exact typed database
+/// error uses the mapping above; unrelated failures are not reclassified.
+pub(crate) fn boxed_http_error(error: Box<dyn StdError + Send + Sync>) -> actix_web::Error {
+    match error.downcast::<DatabaseError>() {
+        Ok(error) => http_error(*error),
+        Err(error) => actix_web::error::ErrorInternalServerError(error),
+    }
+}
+
 impl From<deadpool_postgres::PoolError> for DatabaseError {
     fn from(error: deadpool_postgres::PoolError) -> Self {
         Self::Pool(error)
@@ -153,6 +178,16 @@ impl Database {
         settings: DatabasePoolSettings,
         metrics: Metrics,
     ) -> Result<Self, Box<dyn StdError + Send + Sync>> {
+        Self::create_with_recycling(database_url, settings, metrics, RecyclingMethod::Verified)
+            .await
+    }
+
+    async fn create_with_recycling(
+        database_url: &str,
+        settings: DatabasePoolSettings,
+        metrics: Metrics,
+        recycling_method: RecyclingMethod,
+    ) -> Result<Self, Box<dyn StdError + Send + Sync>> {
         assert!(
             settings.max_size > 0
                 && settings.min_size <= settings.max_size
@@ -167,13 +202,8 @@ impl Database {
         postgres_config.options(
             "-c statement_timeout=10000 -c lock_timeout=3000 -c idle_in_transaction_session_timeout=15000",
         );
-        let manager = Manager::from_config(
-            postgres_config,
-            NoTls,
-            ManagerConfig {
-                recycling_method: RecyclingMethod::Verified,
-            },
-        );
+        let manager =
+            Manager::from_config(postgres_config, NoTls, ManagerConfig { recycling_method });
         let role = settings.role;
         let created_metrics = metrics.clone();
         let recycle_metrics = metrics.clone();
@@ -290,10 +320,8 @@ impl Database {
     }
 
     pub async fn release_request_connection(&self) {
-        if self.role == PoolRole::Request
-            && let Ok(slot) = REQUEST_CONNECTION.try_with(Arc::clone)
-        {
-            slot.clear().await;
+        if self.role == PoolRole::Request {
+            release_request_connection().await;
         }
     }
 
@@ -385,6 +413,14 @@ fn connection_jitter_seed(created_at: Instant) -> u64 {
     hasher.finish()
 }
 
+/// End the implicit database phase before reading a body or waiting for non-database
+/// admission. An explicitly owned client must still be scoped/dropped by its owner.
+pub async fn release_request_connection() {
+    if let Ok(slot) = REQUEST_CONNECTION.try_with(Arc::clone) {
+        slot.clear().await;
+    }
+}
+
 pub async fn scope_request<F, Output>(future: F) -> (Output, usize)
 where
     F: Future<Output = Output>,
@@ -455,6 +491,200 @@ mod tests {
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
+
+    #[actix_web::test]
+    #[ignore = "requires isolated PostgreSQL for authenticated post-gap checkout shedding"]
+    async fn authenticated_phase_revalidation_preserves_database_overload() {
+        let state = crate::state::database_test_state(1).await;
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let user = format!("usr_revalidation_overload_{suffix}");
+        let session = format!("ses_revalidation_overload_{suffix}");
+        let token = format!("revalidation-overload-token-{suffix}");
+        let token_hash = crate::auth::hash_session_token(&token);
+        state
+            .db
+            .execute(
+                "INSERT INTO users(id,username,password_hash,role,status) VALUES($1,$1,'test','user','active')",
+                &[&user],
+            )
+            .await
+            .unwrap();
+        state
+            .db
+            .execute(
+                "INSERT INTO sessions(id,user_id,token_hash,csrf_token,expires_at) VALUES($1,$2,$3,'csrf',now()+interval '1 hour')",
+                &[&session, &user, &token_hash.as_slice()],
+            )
+            .await
+            .unwrap();
+        let request = actix_web::test::TestRequest::get()
+            .cookie(actix_web::cookie::Cookie::new(
+                crate::auth::SESSION_COOKIE,
+                token,
+            ))
+            .to_http_request();
+        let (response, _) = super::scope_request(async {
+            let principal = crate::auth::require_principal(&state, &request)
+                .await
+                .expect("first request phase must authenticate against PostgreSQL");
+            assert_eq!(principal.id, user);
+            super::release_request_connection().await;
+
+            let held = state.db.get().await.unwrap();
+            let capacity = state.db.checkout_admission.available_permits();
+            let mut queued = Vec::new();
+            for _ in 0..capacity {
+                let database = state.db.clone();
+                queued.push(tokio::spawn(async move {
+                    drop(database.get().await?);
+                    Ok::<(), super::DatabaseError>(())
+                }));
+            }
+            tokio::time::timeout(Duration::from_millis(100), async {
+                while state.db.checkout_admission.available_permits() != 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("real checkout waiters must fill admission during the request gap");
+
+            let error = tokio::time::timeout(
+                Duration::from_millis(100),
+                crate::auth::revalidate_principal(&state, &request),
+            )
+            .await
+            .expect("phase revalidation must shed without waiting for the pool")
+            .expect_err("cached authentication must not bypass a fresh phase checkout");
+            let response = error.error_response();
+            drop(held);
+            for waiter in queued {
+                waiter
+                    .await
+                    .unwrap()
+                    .expect("the released connection must drain all admitted waiters");
+            }
+            assert_eq!(state.db.checkout_admission.available_permits(), capacity);
+            let recovered = crate::auth::require_principal(&state, &request)
+                .await
+                .expect("authentication must recover after temporary database overload");
+            assert_eq!(recovered.id, user);
+            response
+        })
+        .await;
+        state
+            .db
+            .execute("DELETE FROM users WHERE id=$1", &[&user])
+            .await
+            .unwrap();
+        assert_eq!(state.db.status().available, state.db.status().size);
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+        );
+        assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires isolated PostgreSQL for real full checkout queue"]
+    async fn full_database_queue_returns_retryable_authentication_overload() {
+        let state = crate::state::database_test_state(1).await;
+        let held = state.db.get().await.unwrap();
+        let capacity = state.db.checkout_admission.available_permits();
+        let mut queued = Vec::new();
+        for _ in 0..capacity {
+            let database = state.db.clone();
+            queued.push(tokio::spawn(async move {
+                drop(database.get().await?);
+                Ok::<(), super::DatabaseError>(())
+            }));
+        }
+        tokio::time::timeout(Duration::from_millis(100), async {
+            while state.db.checkout_admission.available_permits() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("actual checkout waiters should fill the bounded queue");
+        let request = actix_web::test::TestRequest::get()
+            .cookie(actix_web::cookie::Cookie::new(
+                crate::auth::SESSION_COOKIE,
+                "synthetic-overload-probe",
+            ))
+            .to_http_request();
+        let error = crate::auth::require_principal(&state, &request)
+            .await
+            .expect_err("full checkout admission must reject before the query");
+        let response = error.error_response();
+        let status = response.status();
+        let retry_after = response.headers().get("retry-after").cloned();
+        let read_error = state.db.query_one("SELECT 1", &[]).await.unwrap_err();
+        let read_response = super::http_error(read_error).error_response();
+        let upload_error = crate::upload_completion::defer_file_upload_completion(
+            &state.db,
+            "synthetic-upload",
+            "synthetic-owner",
+            "synthetic-lease",
+            "test provider gap",
+            1,
+        )
+        .await
+        .unwrap_err();
+        let upload_response = super::boxed_http_error(upload_error).error_response();
+        drop(held);
+        for waiter in queued {
+            waiter
+                .await
+                .unwrap()
+                .expect("released slot should drain the queue");
+        }
+        assert_eq!(state.db.checkout_admission.available_permits(), capacity);
+        eprintln!(
+            "full database queue authentication response: {status}, retry-after={retry_after:?}"
+        );
+        assert_eq!(status, actix_web::http::StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(retry_after.unwrap(), "1");
+        for response in [read_response, upload_response] {
+            assert_eq!(
+                response.status(),
+                actix_web::http::StatusCode::SERVICE_UNAVAILABLE
+            );
+            assert_eq!(response.headers().get("retry-after").unwrap(), "1");
+        }
+        let query_error = state.db.query_one("SELECT 1 / 0", &[]).await.unwrap_err();
+        let response = super::http_error(query_error).error_response();
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(response.headers().get("retry-after").is_none());
+    }
+
+    #[test]
+    fn database_overload_mapping_preserves_non_admission_failures() {
+        for error in [
+            deadpool_postgres::PoolError::Closed,
+            deadpool_postgres::PoolError::Timeout(deadpool_postgres::TimeoutType::Wait),
+        ] {
+            let response = super::http_error(super::DatabaseError::Pool(error)).error_response();
+            assert_eq!(
+                response.status(),
+                actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+            );
+            assert!(response.headers().get("retry-after").is_none());
+        }
+        let response = super::boxed_http_error(Box::new(std::io::Error::other(
+            "provider failure after possible publication",
+        )))
+        .error_response();
+        assert_eq!(
+            response.status(),
+            actix_web::http::StatusCode::INTERNAL_SERVER_ERROR
+        );
+        assert!(response.headers().get("retry-after").is_none());
+    }
 
     #[actix_web::test]
     async fn request_connection_is_initialized_once_and_can_be_handed_off() {
@@ -623,5 +853,431 @@ mod tests {
         for task in tasks {
             task.await.unwrap().unwrap();
         }
+    }
+    struct SafeReadRecovery {
+        failed_reads: usize,
+        terminated_backend_reads: usize,
+        elapsed: Duration,
+    }
+
+    // Fault injection signals termination before the driver's closed flag must be set.
+    // Retry only this harmless probe, retaining its successful client for any new write.
+    // A successful read on the signalled backend does not establish recovery.
+    async fn recover_safe_read(
+        db: &Database,
+        policy: &str,
+        phase: &str,
+        terminated_pid: Option<i32>,
+    ) -> (deadpool_postgres::Client, SafeReadRecovery) {
+        let started = tokio::time::Instant::now();
+        let deadline = started + Duration::from_secs(1);
+        let mut failed_reads = 0;
+        let mut terminated_backend_reads = 0;
+        let mut last_error = None;
+        loop {
+            let probe = async {
+                let client = db.get().await?;
+                let row =
+                    super::query_one_cached(&client, "SELECT 1, pg_backend_pid()", &[]).await?;
+                assert_eq!(row.get::<_, i32>(0), 1);
+                Ok::<_, super::DatabaseError>((client, row.get::<_, i32>(1)))
+            };
+            match tokio::time::timeout_at(deadline, probe).await {
+                Ok(Ok((client, pid))) if Some(pid) != terminated_pid => {
+                    return (
+                        client,
+                        SafeReadRecovery {
+                            failed_reads,
+                            terminated_backend_reads,
+                            elapsed: started.elapsed(),
+                        },
+                    );
+                }
+                Ok(Ok((client, _))) => {
+                    terminated_backend_reads += 1;
+                    drop(client);
+                }
+                Ok(Err(error)) => {
+                    failed_reads += 1;
+                    last_error = Some(error.to_string());
+                }
+                Err(_) => {
+                    failed_reads += 1;
+                    panic!(
+                        "safe-read recovery exceeded 1s: policy={policy} phase={phase} failed_reads={failed_reads} terminated_backend_reads={terminated_backend_reads} last_error={last_error:?}"
+                    );
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "safe-read recovery exceeded 1s: policy={policy} phase={phase} failed_reads={failed_reads} terminated_backend_reads={terminated_backend_reads} last_error={last_error:?}"
+            );
+            tokio::time::sleep_until(
+                (tokio::time::Instant::now() + Duration::from_millis(5)).min(deadline),
+            )
+            .await;
+        }
+    }
+
+    #[actix_web::test]
+    #[ignore = "explicit PostgreSQL recycling benchmark and fault injection"]
+    async fn compare_verified_and_fast_recycling_with_connection_faults() {
+        use super::RecyclingMethod;
+        use std::time::Instant;
+        let config = Config::from_env().unwrap();
+        let (admin, connection) =
+            tokio_postgres::connect(&config.database_url, tokio_postgres::NoTls)
+                .await
+                .unwrap();
+        actix_web::rt::spawn(async move {
+            let _ = connection.await;
+        });
+        admin
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS performance_recycling_writes(id bigint PRIMARY KEY)",
+            )
+            .await
+            .unwrap();
+        let settings = DatabasePoolSettings {
+            role: PoolRole::Request,
+            max_size: 1,
+            min_size: 1,
+            checkout_queue_capacity: 4,
+            wait_timeout: Duration::from_millis(250),
+            max_lifetime: Duration::from_secs(1800),
+            lifetime_jitter: Duration::from_secs(600),
+        };
+        for (policy, recycling) in [
+            ("verified", RecyclingMethod::Verified),
+            ("fast", RecyclingMethod::Fast),
+        ] {
+            let db = Database::create_with_recycling(
+                &config.database_url,
+                settings,
+                Metrics::new(&config),
+                recycling,
+            )
+            .await
+            .unwrap();
+            let mut checkout_us = Vec::new();
+            let mut request_us = Vec::new();
+            for sample in 0..520 {
+                let started = Instant::now();
+                let client = db.get().await.unwrap();
+                let checkout = started.elapsed().as_micros();
+                super::query_one_cached(&client, "SELECT 1", &[])
+                    .await
+                    .unwrap();
+                if sample >= 20 {
+                    checkout_us.push(checkout);
+                    request_us.push(started.elapsed().as_micros());
+                }
+                drop(client);
+            }
+            checkout_us.sort_unstable();
+            request_us.sort_unstable();
+            assert_eq!(checkout_us.len(), 500);
+            assert_eq!(request_us.len(), 500);
+            let mut failures = 0;
+            let mut terminated_backend_reads = 0;
+            let mut recovery_us = Vec::new();
+            for _ in 0..25 {
+                let client = db.get().await.unwrap();
+                let pid: i32 = client
+                    .query_one("SELECT pg_backend_pid()", &[])
+                    .await
+                    .unwrap()
+                    .get(0);
+                drop(client);
+                let terminated: bool = admin
+                    .query_one("SELECT pg_terminate_backend($1)", &[&pid])
+                    .await
+                    .unwrap()
+                    .get(0);
+                assert!(
+                    terminated,
+                    "the idle backend must receive the termination signal"
+                );
+                let (client, recovery) =
+                    recover_safe_read(&db, policy, "idle termination", Some(pid)).await;
+                failures += recovery.failed_reads;
+                terminated_backend_reads += recovery.terminated_backend_reads;
+                recovery_us.push(recovery.elapsed.as_micros());
+                drop(client);
+            }
+            assert_eq!(recovery_us.len(), 25);
+            recovery_us.sort_unstable();
+            // Interrupt an in-flight transaction; it must fail and never be replayed.
+            let id = if policy == "verified" { 1_i64 } else { 2_i64 };
+            admin
+                .execute(
+                    "DELETE FROM performance_recycling_writes WHERE id=$1",
+                    &[&id],
+                )
+                .await
+                .unwrap();
+            let mut client = db.get().await.unwrap();
+            let transaction = client.transaction().await.unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO performance_recycling_writes(id) VALUES($1)",
+                    &[&id],
+                )
+                .await
+                .unwrap();
+            let pid: i32 = transaction
+                .query_one("SELECT pg_backend_pid()", &[])
+                .await
+                .unwrap()
+                .get(0);
+            let terminated: bool = admin
+                .query_one("SELECT pg_terminate_backend($1)", &[&pid])
+                .await
+                .unwrap()
+                .get(0);
+            assert!(
+                terminated,
+                "the transaction backend must receive the termination signal"
+            );
+            assert!(transaction.commit().await.is_err());
+            drop(client);
+            let count: i64 = admin
+                .query_one(
+                    "SELECT count(*) FROM performance_recycling_writes WHERE id=$1",
+                    &[&id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(count, 0, "an interrupted transaction must not be replayed");
+            let (client, transaction_recovery) =
+                recover_safe_read(&db, policy, "interrupted transaction", Some(pid)).await;
+            // This is a new explicit write, attempted exactly once on the recovered client.
+            client
+                .execute(
+                    "INSERT INTO performance_recycling_writes(id) VALUES($1)",
+                    &[&id],
+                )
+                .await
+                .unwrap();
+            drop(client);
+            let count: i64 = admin
+                .query_one(
+                    "SELECT count(*) FROM performance_recycling_writes WHERE id=$1",
+                    &[&id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(count, 1, "an explicit successful write executes once");
+            admin
+                .execute(
+                    "DELETE FROM performance_recycling_writes WHERE id=$1",
+                    &[&id],
+                )
+                .await
+                .unwrap();
+            println!(
+                "recycling policy={policy} samples=500 checkout_p95_us={} checkout_p99_us={} request_p95_us={} request_p99_us={} terminated_idle=25 failed_reads={failures} terminated_backend_reads={terminated_backend_reads} recovery_p99_us={} interrupted_write_count=0 explicit_write_count=1 transaction_recovery_failed_reads={} transaction_recovery_terminated_backend_reads={} transaction_recovery_us={}",
+                checkout_us[474],
+                checkout_us[494],
+                request_us[474],
+                request_us[494],
+                recovery_us[24],
+                transaction_recovery.failed_reads,
+                transaction_recovery.terminated_backend_reads,
+                transaction_recovery.elapsed.as_micros()
+            );
+            assert_eq!(db.status().available, db.status().size);
+        }
+        admin
+            .batch_execute("DROP TABLE performance_recycling_writes")
+            .await
+            .unwrap();
+    }
+    async fn forward_faultable<R, W>(
+        mut source: R,
+        mut destination: W,
+        mut mode: tokio::sync::watch::Receiver<u8>,
+        server_responses: bool,
+    ) where
+        R: tokio::io::AsyncRead + Unpin,
+        W: tokio::io::AsyncWrite + Unpin,
+    {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut buffer = [0_u8; 8192];
+        loop {
+            if *mode.borrow() == 1 {
+                break;
+            }
+            tokio::select! {
+                result = source.read(&mut buffer) => {
+                    let Ok(length) = result else { break; };
+                    if length == 0 { break; }
+                    // Mode 2 simulates losing server acknowledgements while requests arrive.
+                    if !(server_responses && *mode.borrow() == 2)
+                        && destination.write_all(&buffer[..length]).await.is_err() { break; }
+                }
+                changed = mode.changed() => { if changed.is_err() { break; } }
+            }
+        }
+    }
+
+    #[actix_web::test]
+    #[ignore = "explicit PostgreSQL TCP partition and lost commit acknowledgement injection"]
+    async fn recycling_network_faults_never_replay_ambiguous_commits() {
+        use super::RecyclingMethod;
+        let config = Config::from_env().unwrap();
+        let pg = config
+            .database_url
+            .parse::<tokio_postgres::Config>()
+            .unwrap();
+        let target_host = match pg.get_hosts().first().unwrap() {
+            tokio_postgres::config::Host::Tcp(host) => host.clone(),
+            _ => panic!("fault test requires TCP PostgreSQL"),
+        };
+        let target_port = *pg.get_ports().first().unwrap_or(&5432);
+        let quote = |value: &str| format!("'{}'", value.replace('\\', "\\\\").replace('\'', "\\'"));
+        let (admin, admin_connection) =
+            tokio_postgres::connect(&config.database_url, tokio_postgres::NoTls)
+                .await
+                .unwrap();
+        actix_web::rt::spawn(async move {
+            let _ = admin_connection.await;
+        });
+        admin
+            .batch_execute(
+                "CREATE TABLE IF NOT EXISTS performance_network_writes(id bigint PRIMARY KEY)",
+            )
+            .await
+            .unwrap();
+        for (name, policy, id) in [
+            ("verified", RecyclingMethod::Verified, 10_i64),
+            ("fast", RecyclingMethod::Fast, 20_i64),
+        ] {
+            let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+                .await
+                .unwrap();
+            let proxy_port = listener.local_addr().unwrap().port();
+            let (mode, changes) = tokio::sync::watch::channel(0_u8);
+            let host = target_host.clone();
+            let proxy = actix_web::rt::spawn(async move {
+                while let Ok((downstream, _)) = listener.accept().await {
+                    if *changes.borrow() == 1 {
+                        continue;
+                    }
+                    let upstream = tokio::net::TcpStream::connect((host.as_str(), target_port))
+                        .await
+                        .unwrap();
+                    let changes = changes.clone();
+                    actix_web::rt::spawn(async move {
+                        let (client_read, client_write) = downstream.into_split();
+                        let (server_read, server_write) = upstream.into_split();
+                        tokio::join!(
+                            forward_faultable(client_read, server_write, changes.clone(), false),
+                            forward_faultable(server_read, client_write, changes, true)
+                        );
+                    });
+                }
+            });
+            let proxy_url = format!(
+                "host=127.0.0.1 port={proxy_port} user={} password={} dbname={}",
+                quote(pg.get_user().unwrap()),
+                quote(std::str::from_utf8(pg.get_password().unwrap_or_default()).unwrap()),
+                quote(pg.get_dbname().unwrap_or(pg.get_user().unwrap()))
+            );
+            let settings = DatabasePoolSettings {
+                role: PoolRole::Request,
+                max_size: 1,
+                min_size: 1,
+                checkout_queue_capacity: 4,
+                wait_timeout: Duration::from_millis(250),
+                max_lifetime: Duration::from_secs(1800),
+                lifetime_jitter: Duration::from_secs(600),
+            };
+            let db = Database::create_with_recycling(
+                &proxy_url,
+                settings,
+                Metrics::new(&config),
+                policy,
+            )
+            .await
+            .unwrap();
+            admin
+                .execute("DELETE FROM performance_network_writes WHERE id=$1", &[&id])
+                .await
+                .unwrap();
+            let mut client = db.get().await.unwrap();
+            let transaction = client.transaction().await.unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO performance_network_writes(id) VALUES($1)",
+                    &[&id],
+                )
+                .await
+                .unwrap();
+            mode.send(2).unwrap(); // Forward COMMIT but discard its acknowledgement.
+            let observer = async {
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    loop {
+                        let committed: i64 = admin
+                            .query_one(
+                                "SELECT count(*) FROM performance_network_writes WHERE id=$1",
+                                &[&id],
+                            )
+                            .await
+                            .unwrap()
+                            .get(0);
+                        if committed == 1 {
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                    }
+                })
+                .await
+                .expect("server must commit even though the reply was lost");
+                mode.send(1).unwrap(); // A network cut exposes the ambiguous result to the caller.
+            };
+            let (commit, ()) = tokio::join!(transaction.commit(), observer);
+            assert!(
+                commit.is_err(),
+                "lost acknowledgement must remain an error, never an automatic replay"
+            );
+            drop(client);
+            assert!(
+                db.query_one("SELECT 1", &[]).await.is_err(),
+                "partition must be visible"
+            );
+            mode.send(0).unwrap();
+            let (client, recovery) =
+                recover_safe_read(&db, name, "network restoration", None).await;
+            drop(client);
+            let count: i64 = admin
+                .query_one(
+                    "SELECT count(*) FROM performance_network_writes WHERE id=$1",
+                    &[&id],
+                )
+                .await
+                .unwrap()
+                .get(0);
+            assert_eq!(
+                count, 1,
+                "ambiguous committed write must exist exactly once"
+            );
+            println!(
+                "network_fault policy={name} ambiguous_commit_error=true committed_rows={count} restored_read_us={} recovery_failed_reads={}",
+                recovery.elapsed.as_micros(),
+                recovery.failed_reads
+            );
+            admin
+                .execute("DELETE FROM performance_network_writes WHERE id=$1", &[&id])
+                .await
+                .unwrap();
+            proxy.abort();
+        }
+        admin
+            .batch_execute("DROP TABLE performance_network_writes")
+            .await
+            .unwrap();
     }
 }

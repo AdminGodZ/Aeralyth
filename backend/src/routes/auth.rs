@@ -100,7 +100,7 @@ pub async fn info(
             &[&username],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     state.db.release_request_connection().await;
     let synthetic_salt = synthetic_auth_salt(&state, &username);
     let auth_version = row
@@ -171,7 +171,7 @@ pub async fn login(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     let location = safe_next_path(form.next.as_deref())
         .unwrap_or("/files")
@@ -242,7 +242,7 @@ pub async fn login_json(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let next = safe_next_path(body.next.as_deref())
         .unwrap_or("/files")
         .to_owned();
@@ -283,7 +283,7 @@ pub async fn enroll_one_password(
             &[&principal.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(row) = row else {
         return Ok(HttpResponse::Unauthorized().finish());
     };
@@ -323,7 +323,7 @@ pub async fn enroll_one_password(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if updated != 1 {
         return Ok(HttpResponse::Conflict().body("account authentication changed; sign in again"));
     }
@@ -345,7 +345,7 @@ pub async fn logout(
             &[&principal.session_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     Ok(HttpResponse::SeeOther()
         .insert_header((LOCATION, "/login"))
@@ -378,7 +378,7 @@ pub async fn csrf(state: web::Data<AppState>, request: HttpRequest) -> Result<Ht
             &[&principal.session_id, &csrf_token],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     if updated.is_none() {
         return Ok(HttpResponse::Unauthorized().finish());
@@ -398,7 +398,7 @@ pub async fn me(state: web::Data<AppState>, request: HttpRequest) -> Result<Http
     Ok(status.json(MeResponse { user }))
 }
 
-fn create_session_token() -> Result<String> {
+pub(super) fn create_session_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(error::ErrorInternalServerError)?;
     Ok(URL_SAFE_NO_PAD.encode(bytes))

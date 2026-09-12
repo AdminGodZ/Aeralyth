@@ -1,0 +1,211 @@
+{
+  "startedAtUnix": 1789211302.9169989,
+  "container": "aeralyth-audit-db-suite-20260912",
+  "project": "aeralyth-audit-db-suite",
+  "results": [
+    {
+      "name": "db:test:performance-ledger",
+      "exitCode": 0,
+      "durationSeconds": 5.47,
+      "log": "performance/results/database-audit-2026-09-12/db-test-performance-ledger.log"
+    },
+    {
+      "name": "db:test:performance-ledger-concurrency",
+      "exitCode": 0,
+      "durationSeconds": 1.049,
+      "log": "performance/results/database-audit-2026-09-12/db-test-performance-ledger-concurrency.log"
+    },
+    {
+      "name": "db:test:performance-ledger-fresh",
+      "exitCode": 0,
+      "durationSeconds": 7.451,
+      "log": "performance/results/database-audit-2026-09-12/db-test-performance-ledger-fresh.log"
+    },
+    {
+      "name": "db:test:migration-replay",
+      "exitCode": 0,
+      "durationSeconds": 1.089,
+      "log": "performance/results/database-audit-2026-09-12/db-test-migration-replay.log"
+    },
+    {
+      "name": "db:test:folder-manifest",
+      "exitCode": 0,
+      "durationSeconds": 0.224,
+      "log": "performance/results/database-audit-2026-09-12/db-test-folder-manifest.log"
+    },
+    {
+      "name": "db:test:folder-manifest-fresh",
+      "exitCode": 0,
+      "durationSeconds": 1.652,
+      "log": "performance/results/database-audit-2026-09-12/db-test-folder-manifest-fresh.log"
+    },
+    {
+      "name": "db:test:upload-completion-fresh",
+      "exitCode": 0,
+      "durationSeconds": 1.614,
+      "log": "performance/results/database-audit-2026-09-12/db-test-upload-completion-fresh.log"
+    },
+    {
+      "name": "db:test:session-counter-performance-fresh",
+      "exitCode": 0,
+      "durationSeconds": 18.65,
+      "log": "performance/results/database-audit-2026-09-12/db-test-session-counter-performance-fresh.log"
+    },
+    {
+      "name": "db:test:vault-query-performance-fresh",
+      "exitCode": 0,
+      "durationSeconds": 10.578,
+      "log": "performance/results/database-audit-2026-09-12/db-test-vault-query-performance-fresh.log"
+    },
+    {
+      "name": "db:test:migration-identity-performance-fresh",
+      "exitCode": 0,
+      "durationSeconds": 96.194,
+      "log": "performance/results/database-audit-2026-09-12/db-test-migration-identity-performance-fresh.log"
+    },
+    {
+      "name": "db:test:navigation-hot-paths-fresh",
+      "exitCode": 0,
+      "durationSeconds": 11.48,
+      "log": "performance/results/database-audit-2026-09-12/db-test-navigation-hot-paths-fresh.log"
+    },
+    {
+      "name": "db:test:collection-hierarchy-performance-fresh",
+      "exitCode": 0,
+      "durationSeconds": 24.162,
+      "log": "performance/results/database-audit-2026-09-12/db-test-collection-hierarchy-performance-fresh.log"
+    },
+    {
+      "name": "db:test:admin-search-identifier-performance-fresh",
+      "exitCode": 0,
+      "durationSeconds": 9.376,
+      "log": "performance/results/database-audit-2026-09-12/db-test-admin-search-identifier-performance-fresh.log"
+    },
+    {
+      "name": "db:test:bounded-tree-operations-fresh",
+      "exitCode": 101,
+      "durationSeconds": 33.305,
+      "log": "performance/results/database-audit-2026-09-12/db-test-bounded-tree-operations-fresh.log"
+    },
+    {
+      "name": "db:test:production-preflight-fresh",
+      "exitCode": 0,
+      "durationSeconds": 1.246,
+      "log": "performance/results/database-audit-2026-09-12/db-test-production-preflight-fresh.log"
+    },
+    {
+      "name": "db:test:realtime",
+      "exitCode": 0,
+      "durationSeconds": 9.904,
+      "log": "performance/results/database-audit-2026-09-12/db-test-realtime.log"
+    },
+    {
+      "name": "db:test:flexible-settings",
+      "exitCode": 0,
+      "durationSeconds": 4.032,
+      "log": "performance/results/database-audit-2026-09-12/db-test-flexible-settings.log"
+    },
+    {
+      "name": "db:test:migration-progress",
+      "exitCode": 0,
+      "durationSeconds": 5.117,
+      "log": "performance/results/database-audit-2026-09-12/db-test-migration-progress.log"
+    },
+    {
+      "name": "db:test:migration-progress-fresh",
+      "exitCode": 0,
+      "durationSeconds": 7.374,
+      "log": "performance/results/database-audit-2026-09-12/db-test-migration-progress-fresh.log"
+    },
+    {
+      "name": "db:test:repository-change-tracking",
+      "exitCode": 0,
+      "durationSeconds": 62.763,
+      "log": "performance/results/database-audit-2026-09-12/db-test-repository-change-tracking.log"
+    },
+    {
+      "name": "db:test:tree-operation-fences",
+      "exitCode": 0,
+      "durationSeconds": 0.428,
+      "log": "performance/results/database-audit-2026-09-12/db-test-tree-operation-fences.log"
+    },
+    {
+      "name": "db:test:realtime-background-audiences",
+      "exitCode": 0,
+      "durationSeconds": 9.416,
+      "log": "performance/results/database-audit-2026-09-12/db-test-realtime-background-audiences.log"
+    },
+    {
+      "name": "db:test:realtime-pruning",
+      "exitCode": 0,
+      "durationSeconds": 2.732,
+      "log": "performance/results/database-audit-2026-09-12/db-test-realtime-pruning.log"
+    },
+    {
+      "name": "db:test:indexed-trash-expiry",
+      "exitCode": 0,
+      "durationSeconds": 14.198,
+      "log": "performance/results/database-audit-2026-09-12/db-test-indexed-trash-expiry.log"
+    },
+    {
+      "name": "db:test:multipart-reconciliation",
+      "exitCode": 0,
+      "durationSeconds": 0.223,
+      "log": "performance/results/database-audit-2026-09-12/db-test-multipart-reconciliation.log"
+    },
+    {
+      "name": "db:test:bounded-tree-operations-fresh",
+      "exitCode": 101,
+      "durationSeconds": 78.369,
+      "log": "performance/results/database-audit-2026-09-12/db-test-bounded-tree-operations-fresh.retry-1.log"
+    },
+    {
+      "name": "db:test:bounded-tree-operations-fresh",
+      "exitCode": 0,
+      "log": "performance/results/database-audit-2026-09-12/db-test-bounded-tree-operations-fresh.retry-2.log",
+      "sourceSnapshot": "performance/results/database-audit-2026-09-12/migration-source-final.json",
+      "execution": "Equivalent package shell command independently executed by retention author; exit0 confirmed",
+      "approximateScriptDurationSeconds": 95.391,
+      "durationSeconds": null,
+      "rustScaleTestDurationSeconds": 48.29,
+      "timingMethod": "Whole-script estimate from log birth to final write; Rust test duration from test runner"
+    },
+    {
+      "name": "db:test:maintenance-notifications",
+      "exitCode": 0,
+      "durationSeconds": null,
+      "log": "performance/results/database-audit-2026-09-12/maintenance-notifications.log",
+      "sourceSnapshot": "performance/results/database-audit-2026-09-12/migration-source-final.json",
+      "execution": "Equivalent package Python command executed by independent test author;87 assertions; exit0 confirmed"
+    },
+    {
+      "name": "db:test:indexed-trash-expiry",
+      "exitCode": 0,
+      "durationSeconds": null,
+      "log": "performance/results/database-audit-2026-09-12/indexed-trash-expiry-final-independent.log",
+      "sourceSnapshot": "performance/results/database-audit-2026-09-12/migration-source-final.json",
+      "execution": "Equivalent package shell command rerun independently on final35migration schema"
+    },
+    {
+      "name": "db:test:expired-upload-claim-fences",
+      "exitCode": 0,
+      "durationSeconds": null,
+      "log": "performance/results/database-audit-2026-09-12/expired-upload-claim-fences-independent-final.log",
+      "sourceSnapshot": "performance/results/database-audit-2026-09-12/migration-source-handoff.json",
+      "execution": "Equivalent package Python command independently rerun;16 actual PostgreSQL scenarios; exit0 confirmed",
+      "workerSqlSha256": "685cb53b8a661863c56547689e3d0032dd7cdffa6ae0717082e91c5f85c2c886"
+    },
+    {
+      "name": "db:test:migration-progress-bulk-fresh",
+      "exitCode": 0,
+      "durationSeconds": null,
+      "log": "performance/results/migration-progress-2026-09-12/bulk-regression.log",
+      "evidence": "performance/results/migration-progress-2026-09-12/bulk-results.json",
+      "execution": "Author executed equivalent isolated full-chain setup and the exact bulk SQL; wrapper independently reviewed and bash syntax checked, not separately rerun",
+      "migrationSha256": "d4dff9325e52ff506e46f925feb8e02a1c806f34f569864637c37e2175c70f55"
+    }
+  ],
+  "currentPassed": 28,
+  "testEntries": 28,
+  "countMethod": "Derived from all current package.json scripts beginning db:test:"
+}

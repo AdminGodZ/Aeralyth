@@ -1,0 +1,64 @@
+Command: node /private/tmp/aeralyth-script-syntax-check.mjs
+Started: 2026-09-12T11:42:58.401Z
+
+Node syntax: 25 modules passed.
+Bash syntax: 24 scripts passed.
+{
+  "modules": [
+    "performance/arrival-load.mjs",
+    "performance/arrival-load.node-test.mjs",
+    "performance/auth-before-body.mjs",
+    "performance/auth-database-isolation.mjs",
+    "performance/download-stage-profile.mjs",
+    "performance/http-load.mjs",
+    "performance/mixed-fixture.mjs",
+    "performance/mixed-load-self-test.mjs",
+    "performance/mixed-load.mjs",
+    "performance/observability-probe.mjs",
+    "performance/profile-encrypted-upload.mjs",
+    "performance/profile-folder-preparation.mjs",
+    "performance/profile-legacy-preview.mjs",
+    "performance/realtime-smoke.mjs",
+    "performance/results/metadata-2026-09-12/measure.mjs",
+    "scripts/benchmark-worker-browser.mjs",
+    "scripts/measure-worker-assets.mjs",
+    "scripts/test-fixtures/production-worker-browser-checks.mjs",
+    "scripts/test-fixtures/production-worker-host.mjs",
+    "scripts/test-worker-http.mjs",
+    "scripts/validate-railway-config.mjs",
+    "scripts/verify-worker-release.mjs",
+    "scripts/worker-asset-store.mjs",
+    "scripts/write-worker-assets.mjs",
+    "scripts/write-zip-assets.mjs"
+  ],
+  "shells": [
+    "database/tests/apply_current_schema.sh",
+    "database/tests/audit_migration_chain.sh",
+    "database/tests/auth_principal_benchmark.sh",
+    "database/tests/concurrent_reservations.sh",
+    "database/tests/flexible_settings.sh",
+    "database/tests/fresh_admin_search_identifier_performance.sh",
+    "database/tests/fresh_bounded_tree_operations.sh",
+    "database/tests/fresh_collection_hierarchy_performance.sh",
+    "database/tests/fresh_folder_manifest.sh",
+    "database/tests/fresh_migration_identity_performance.sh",
+    "database/tests/fresh_migration_progress.sh",
+    "database/tests/fresh_migration_progress_bulk.sh",
+    "database/tests/fresh_navigation_hot_paths.sh",
+    "database/tests/fresh_performance_ledger.sh",
+    "database/tests/fresh_production_preflight.sh",
+    "database/tests/fresh_session_counter_performance.sh",
+    "database/tests/fresh_upload_completion.sh",
+    "database/tests/fresh_vault_query_performance.sh",
+    "database/tests/indexed_trash_expiry.sh",
+    "database/tests/migration_replay.sh",
+    "database/tests/realtime_changes.sh",
+    "database/tests/repository_change_tracking.sh",
+    "scripts/migrate-production.sh",
+    "scripts/start-production.sh"
+  ]
+}
+
+Finished: 2026-09-12T11:42:59.236Z
+Exit code: 0
+Signal: none

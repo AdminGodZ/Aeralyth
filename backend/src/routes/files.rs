@@ -1,8 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 
-use actix_web::http::header::{
-    ACCEPT, CACHE_CONTROL, CONTENT_DISPOSITION, CONTENT_LENGTH, CONTENT_TYPE, LOCATION,
-};
+use actix_web::http::header::{ACCEPT, CACHE_CONTROL, CONTENT_LENGTH, LOCATION};
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{
     Engine as _,
@@ -16,14 +14,12 @@ use tokio_postgres::IsolationLevel;
 
 use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
 use crate::db::{query_cached, query_one_cached, query_opt_cached};
-use crate::routes::local_file_stream::local_file_stream;
+use crate::routes::local_file_stream::local_download_response;
 use crate::routes::share_links::{
     EditorShareGrant, editor_grant_from_header, editor_parent, validate_editor_replacement,
 };
-use crate::routes::tree_walk::{
-    MAX_TREE_MUTATION_NODES, TREE_MUTATION_BATCH_SIZE, TreeWalkScope, update_tree_state,
-    walk_subtree,
-};
+use crate::routes::tree_jobs::{self, Action, MutationResult};
+use crate::routes::tree_walk::{TREE_MUTATION_BATCH_SIZE, TreeWalkScope, walk_subtree};
 use crate::routes::upload_reservations::{reservation_amount, reserve_upload_capacity};
 use crate::state::{AppState, LoadShedError};
 use crate::storage::UploadedPart;
@@ -271,6 +267,7 @@ pub struct FilesSummary {
     favorite_files: i64,
     shared_files: i64,
     used_bytes: i64,
+    tree_operation_pending: bool,
 }
 
 #[derive(Serialize)]
@@ -406,10 +403,13 @@ pub async fn list_files(
         .is_some_and(|folder_id| !folder_id.trim().is_empty())
         && matches!(view, "files" | "shared")
     {
-        Some(state.acquire_recursive_operation(&user.id).await?)
+        Some(state.acquire_interactive_operation(&user.id).await?)
     } else {
         None
     };
+    if _recursive_permit.is_some() {
+        crate::auth::revalidate_principal(&state, &request).await?;
+    }
     let folder_context = match view {
         "files" => resolve_owned_folder_context(&state, &user, query.folder.as_deref()).await?,
         "shared" => resolve_shared_folder_context(&state, &user, query.folder.as_deref()).await?,
@@ -474,7 +474,7 @@ pub async fn storage_overview(
             ),
             "bucketName": if is_s3 { state.config.s3_bucket.as_deref() } else { None },
             "region": if is_s3 { Some(state.config.s3_region.as_str()) } else { None },
-            "bucketUsage": state.bucket_usage.read(&state.storage),
+            "bucketUsage": state.bucket_usage.read(&state.storage).await,
         })))
 }
 
@@ -535,11 +535,7 @@ pub async fn create_folder_manifest(
         .find(|path| path.len() > 1)
         .and_then(|path| path.first())
         .cloned();
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .transaction()
         .await
@@ -633,11 +629,6 @@ pub async fn init_upload(
         .upload_control_limiter
         .try_acquire(&actor.owner_id)
         .map_err(|()| LoadShedError::too_many_requests("upload control capacity is full"))?;
-    let _recursive_permit = if actor.editor_grant.is_some() {
-        Some(state.acquire_recursive_operation(&actor.owner_id).await?)
-    } else {
-        None
-    };
 
     if state.config.e2ee_mode.is_enabled() {
         return Ok(HttpResponse::Conflict()
@@ -645,6 +636,16 @@ pub async fn init_upload(
     }
     let body =
         parse_json_body::<UploadInitRequest>(&request, body, UPLOAD_CONTROL_JSON_LIMIT).await?;
+    let mut _recursive_permit = if actor.editor_grant.is_some() {
+        Some(state.acquire_recursive_operation(&actor.owner_id).await?)
+    } else {
+        None
+    };
+    let actor = if actor.editor_grant.is_some() {
+        require_upload_actor(&state, &request, true).await?
+    } else {
+        actor
+    };
 
     if body.size_bytes > MAX_UPLOAD_BYTES {
         return Err(error::ErrorPayloadTooLarge("file exceeds the 2 GB limit"));
@@ -718,6 +719,7 @@ pub async fn init_upload(
             );
         }
 
+        drop(_recursive_permit.take());
         state.db.release_request_connection().await;
         let existing_parts =
             if let Some(multipart_upload_id) = existing.multipart_upload_id.as_deref() {
@@ -772,7 +774,7 @@ pub async fn init_upload(
     };
     let mut client = match state.db.get().await {
         Ok(client) => client,
-        Err(database_error) => return Err(error::ErrorInternalServerError(database_error)),
+        Err(database_error) => return Err(crate::db::http_error(database_error)),
     };
     let transaction = match client.transaction().await {
         Ok(transaction) => transaction,
@@ -784,7 +786,7 @@ pub async fn init_upload(
                 &transaction,
                 "
                     SELECT size_bytes
-                    FROM files
+                    FROM visible_files AS files
                     WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
                       AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
                     FOR UPDATE
@@ -798,7 +800,7 @@ pub async fn init_upload(
                 &transaction,
                 "
                     SELECT size_bytes
-                    FROM files
+                    FROM visible_files AS files
                     WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
                       AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
                       AND parent_id IS NOT DISTINCT FROM $3
@@ -898,6 +900,7 @@ pub async fn init_upload(
             // A failed COMMIT can leave the transaction connection unusable. Reconcile on a
             // fresh checkout so an acknowledged commit is never mistaken for a rollback.
             drop(client);
+            drop(_recursive_permit.take());
             state.db.release_request_connection().await;
             match state
                 .db
@@ -924,6 +927,7 @@ pub async fn init_upload(
             }
         }
     }
+    drop(_recursive_permit.take());
     state.db.release_request_connection().await;
 
     let prepared = match state
@@ -1013,7 +1017,7 @@ pub async fn init_upload(
                 None,
             )
             .await;
-            return Err(error::ErrorInternalServerError(database_error));
+            return Err(crate::db::http_error(database_error));
         }
     }
 
@@ -1298,7 +1302,7 @@ pub async fn presign_upload_content(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     if checksum_reserved != 1 {
         return Ok(HttpResponse::Conflict().body("upload checksum changed"));
@@ -1568,7 +1572,7 @@ pub async fn complete_upload(
             &[&upload.id, &upload.owner_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     let Some(claimed) = claimed else {
         let Some(current) = get_upload(&state, &actor, &upload.id).await? else {
@@ -1622,7 +1626,7 @@ pub async fn complete_upload(
                     delay,
                 )
                 .await
-                .map_err(error::ErrorInternalServerError)?;
+                .map_err(crate::db::boxed_http_error)?;
                 return Ok(
                     HttpResponse::Accepted().json(upload_complete_response(&upload, "completing"))
                 );
@@ -1654,7 +1658,7 @@ pub async fn complete_upload(
                     delay,
                 )
                 .await
-                .map_err(error::ErrorInternalServerError)?;
+                .map_err(crate::db::boxed_http_error)?;
                 return Ok(
                     HttpResponse::Accepted().json(upload_complete_response(&upload, "completing"))
                 );
@@ -1685,7 +1689,7 @@ pub async fn complete_upload(
         state.config.storage_presign_seconds,
     )
     .await
-    .map_err(error::ErrorInternalServerError)?
+    .map_err(crate::db::boxed_http_error)?
     {
         FileUploadFinalizeOutcome::Completed | FileUploadFinalizeOutcome::AlreadyCompleted => {}
         FileUploadFinalizeOutcome::Missing => {
@@ -1693,6 +1697,16 @@ pub async fn complete_upload(
         }
         FileUploadFinalizeOutcome::StateChanged => {
             return Err(error::ErrorConflict("upload is no longer completing"));
+        }
+        FileUploadFinalizeOutcome::Deferred => {
+            return Ok(
+                HttpResponse::Accepted().json(upload_complete_response(&upload, "completing"))
+            );
+        }
+        FileUploadFinalizeOutcome::ParentUnavailable => {
+            return Err(error::ErrorConflict(
+                "the upload parent folder is no longer available",
+            ));
         }
         FileUploadFinalizeOutcome::ReplacementMismatch => {
             enqueue_upload_cleanup(
@@ -1751,7 +1765,7 @@ pub(crate) const FOLDER_ARCHIVE_ACCESS_QUERY: &str = r#"
     WITH RECURSIVE ancestors AS (
       SELECT id, parent_id, owner_id,
              ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
-      FROM files
+      FROM visible_files AS files
       WHERE id = $1
         AND entry_type = 'folder'
         AND state = 'active'
@@ -1760,7 +1774,7 @@ pub(crate) const FOLDER_ARCHIVE_ACCESS_QUERY: &str = r#"
 
       SELECT parent.id, parent.parent_id, parent.owner_id,
              child.visited_ids || parent.id, child.depth + 1
-      FROM files AS parent
+      FROM visible_files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
       WHERE parent.owner_id = child.owner_id
         AND parent.state = 'active'
@@ -1808,7 +1822,7 @@ pub(crate) const FOLDER_ARCHIVE_ENTRIES_QUERY: &str = r#"
            files.e2ee_state, files.updated_at,
            files.current_generation_id AS vault_generation_id,
            heads.record_hash AS vault_record_hash
-    FROM files
+    FROM visible_files AS files
     LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
     WHERE files.owner_id = $2
       AND files.state = 'active'
@@ -1823,11 +1837,7 @@ pub async fn folder_archive_manifest(
     let user = require_principal(&state, &request).await?;
     let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let root_id = path.into_inner();
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .build_transaction()
         .isolation_level(IsolationLevel::RepeatableRead)
@@ -1994,7 +2004,8 @@ pub async fn download(
     query: web::Query<DownloadQuery>,
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
-    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    let _recursive_permit = state.acquire_interactive_operation(&user.id).await?;
+    crate::auth::revalidate_principal(&state, &request).await?;
     let expected_version = query
         .version
         .as_deref()
@@ -2004,6 +2015,7 @@ pub async fn download(
     else {
         return Ok(HttpResponse::NotFound().finish());
     };
+    drop(_recursive_permit);
     state.db.release_request_connection().await;
 
     if let Some(download_url) = state
@@ -2030,29 +2042,16 @@ pub async fn download(
     let stored_file = AsyncFile::open(file_path)
         .await
         .map_err(error::ErrorNotFound)?;
-    let size_bytes = stored_file
-        .metadata()
-        .await
-        .map_err(error::ErrorInternalServerError)?
-        .len();
-    let stream = local_file_stream(stored_file);
-
-    Ok(HttpResponse::Ok()
-        .insert_header((CACHE_CONTROL, "private, no-store"))
-        .insert_header((
-            CONTENT_TYPE,
-            file.mime_type
-                .unwrap_or_else(|| "application/octet-stream".to_owned()),
-        ))
-        .insert_header((
-            CONTENT_DISPOSITION,
-            format!(
-                "attachment; filename=\"{}\"",
-                file.original_name.replace('"', "")
-            ),
-        ))
-        .insert_header((CONTENT_LENGTH, size_bytes.to_string()))
-        .streaming(stream))
+    local_download_response(
+        &request,
+        stored_file,
+        &format!("{}\0{}", file.owner_id, file.storage_name),
+        file.mime_type
+            .as_deref()
+            .unwrap_or("application/octet-stream"),
+        &file.original_name,
+    )
+    .await
 }
 
 pub async fn share(
@@ -2093,7 +2092,7 @@ pub async fn share(
             &[&username],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?
+        .map_err(crate::db::http_error)?
     else {
         if wants_json {
             return Err(error::ErrorNotFound("recipient not found"));
@@ -2118,7 +2117,7 @@ pub async fn share(
         .query_opt(
             "
                 SELECT id, entry_type
-                FROM files
+                FROM visible_files AS files
                 WHERE id = $1
                   AND owner_id = $2
                   AND state = 'active'
@@ -2127,7 +2126,7 @@ pub async fn share(
             &[&file_id, &user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     let Some(owned_file) = owned_file else {
         if wants_json {
@@ -2151,7 +2150,7 @@ pub async fn share(
             &[&file_id, &user.id, &recipient_id, &counts_toward_shared],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     if wants_json {
         return Ok(HttpResponse::Ok().json(ShareResponse { recipient_username }));
@@ -2188,7 +2187,7 @@ pub async fn unshare(
                 &[&file_id, &user.id, &recipient_id],
             )
             .await
-            .map_err(error::ErrorInternalServerError)?;
+            .map_err(crate::db::http_error)?;
 
         return Ok(redirect("/files?file=unshared"));
     }
@@ -2204,7 +2203,7 @@ pub async fn unshare(
             &[&file_id, &user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     Ok(redirect("/shared?file=unshared"))
 }
@@ -2220,42 +2219,17 @@ pub async fn trash(
     let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let wants_json = request_wants_json(&request);
     let file_id = path.into_inner();
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let transaction = client
-        .build_transaction()
-        .isolation_level(IsolationLevel::RepeatableRead)
-        .start()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let tree = walk_subtree(
-        &transaction,
-        TreeWalkScope {
-            owner_id: &user.id,
-            root_id: &file_id,
-            root_state: Some("active"),
-            child_state: None,
-            e2ee_state: None,
-            max_nodes: MAX_TREE_MUTATION_NODES,
-        },
-    )
-    .await
-    .map_err(error::ErrorInternalServerError)?;
-    if tree.as_ref().is_some_and(|tree| tree.truncated) {
-        return Ok(HttpResponse::PayloadTooLarge().body("folder contains too many entries"));
+    match tree_jobs::mutate(&state.db, &user.id, &file_id, Action::Trash, None, None).await? {
+        MutationResult::Queued(job_id) => {
+            return Ok(if wants_json {
+                tree_jobs::queued_response(job_id, &file_id)
+            } else {
+                redirect("/files?file=processing")
+            });
+        }
+        MutationResult::Missing => return Ok(HttpResponse::NotFound().finish()),
+        MutationResult::Complete => {}
     }
-    if let Some(tree) = tree {
-        update_tree_state(&transaction, &tree.nodes, &user.id, "trashed")
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-    }
-    transaction
-        .commit()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
 
     if wants_json {
         return Ok(HttpResponse::Ok().json(FileMutationResponse {
@@ -2278,42 +2252,17 @@ pub async fn restore(
     let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let wants_json = request_wants_json(&request);
     let file_id = path.into_inner();
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let transaction = client
-        .build_transaction()
-        .isolation_level(IsolationLevel::RepeatableRead)
-        .start()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let tree = walk_subtree(
-        &transaction,
-        TreeWalkScope {
-            owner_id: &user.id,
-            root_id: &file_id,
-            root_state: Some("trashed"),
-            child_state: None,
-            e2ee_state: None,
-            max_nodes: MAX_TREE_MUTATION_NODES,
-        },
-    )
-    .await
-    .map_err(error::ErrorInternalServerError)?;
-    if tree.as_ref().is_some_and(|tree| tree.truncated) {
-        return Ok(HttpResponse::PayloadTooLarge().body("folder contains too many entries"));
+    match tree_jobs::mutate(&state.db, &user.id, &file_id, Action::Restore, None, None).await? {
+        MutationResult::Queued(job_id) => {
+            return Ok(if wants_json {
+                tree_jobs::queued_response(job_id, &file_id)
+            } else {
+                redirect("/files?file=processing")
+            });
+        }
+        MutationResult::Missing => return Ok(HttpResponse::NotFound().finish()),
+        MutationResult::Complete => {}
     }
-    if let Some(tree) = tree {
-        update_tree_state(&transaction, &tree.nodes, &user.id, "active")
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-    }
-    transaction
-        .commit()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
 
     if wants_json {
         return Ok(HttpResponse::Ok().json(FileMutationResponse {
@@ -2351,7 +2300,7 @@ pub async fn toggle_favorite(
             &[&file_id, &user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     if wants_json {
         return match updated {
@@ -2376,52 +2325,17 @@ pub async fn delete(
     let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
     let wants_json = request_wants_json(&request);
     let file_id = path.into_inner();
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let transaction = client
-        .build_transaction()
-        .isolation_level(IsolationLevel::RepeatableRead)
-        .start()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let Some(mut tree) = walk_subtree(
-        &transaction,
-        TreeWalkScope {
-            owner_id: &user.id,
-            root_id: &file_id,
-            root_state: Some("trashed"),
-            child_state: None,
-            e2ee_state: None,
-            max_nodes: MAX_TREE_MUTATION_NODES,
-        },
-    )
-    .await
-    .map_err(error::ErrorInternalServerError)?
-    else {
-        return Ok(redirect("/trash?file=missing"));
-    };
-    if tree.truncated {
-        return Ok(HttpResponse::PayloadTooLarge().body("folder contains too many entries"));
+    match tree_jobs::mutate(&state.db, &user.id, &file_id, Action::Delete, None, None).await? {
+        MutationResult::Queued(job_id) => {
+            return Ok(if wants_json {
+                tree_jobs::queued_response(job_id, &file_id)
+            } else {
+                redirect("/files?file=processing")
+            });
+        }
+        MutationResult::Missing => return Ok(HttpResponse::NotFound().finish()),
+        MutationResult::Complete => {}
     }
-    tree.nodes
-        .sort_unstable_by(|left, right| right.depth.cmp(&left.depth).then(left.id.cmp(&right.id)));
-    for nodes in tree.nodes.chunks(TREE_MUTATION_BATCH_SIZE) {
-        let ids = nodes
-            .iter()
-            .map(|node| node.id.as_str())
-            .collect::<Vec<_>>();
-        transaction
-            .query_one(DELETE_TREE_BATCH_QUERY, &[&ids, &user.id])
-            .await
-            .map_err(error::ErrorInternalServerError)?;
-    }
-    transaction
-        .commit()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
 
     if wants_json {
         return Ok(HttpResponse::Ok().json(FileMutationResponse {
@@ -2446,7 +2360,7 @@ async fn validate_folder(
         .query_opt(
             "
                 SELECT id
-                FROM files
+                FROM visible_files AS files
                 WHERE id = $1
                   AND owner_id = $2
                   AND entry_type = 'folder'
@@ -2456,7 +2370,7 @@ async fn validate_folder(
             &[&folder_id, &owner_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     folder
         .map(|row| row.get("id"))
@@ -2468,7 +2382,7 @@ const OWNED_FOLDER_CONTEXT_QUERY: &str = "
     WITH RECURSIVE ancestors AS (
       SELECT id, original_name, parent_id, e2ee_state, current_generation_id,
              ARRAY[id]::text[] AS visited_ids, 0 AS depth
-      FROM files
+      FROM visible_files AS files
       WHERE id = $1
         AND owner_id = $2
         AND entry_type = 'folder'
@@ -2479,7 +2393,7 @@ const OWNED_FOLDER_CONTEXT_QUERY: &str = "
       SELECT parent.id, parent.original_name, parent.parent_id,
              parent.e2ee_state, parent.current_generation_id,
              child.visited_ids || parent.id, child.depth + 1
-      FROM files AS parent
+      FROM visible_files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
       WHERE parent.owner_id = $2
         AND child.depth < 100
@@ -2509,7 +2423,7 @@ async fn resolve_owned_folder_context(
         .db
         .query(OWNED_FOLDER_CONTEXT_QUERY, &[&folder_id, &user.id])
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if rows.is_empty() {
         return Err(error::ErrorNotFound("folder not found"));
     }
@@ -2525,7 +2439,7 @@ const SHARED_FOLDER_CONTEXT_QUERY: &str = "
       SELECT id, original_name, parent_id, owner_id, e2ee_state,
              current_generation_id,
              ARRAY[id]::text[] AS visited_ids, 0 AS depth
-      FROM files
+      FROM visible_files AS files
       WHERE id = $1 AND entry_type = 'folder' AND state = 'active'
 
       UNION ALL
@@ -2534,7 +2448,7 @@ const SHARED_FOLDER_CONTEXT_QUERY: &str = "
              parent.owner_id, parent.e2ee_state,
              parent.current_generation_id,
              child.visited_ids || parent.id, child.depth + 1
-      FROM files AS parent
+      FROM visible_files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
       WHERE parent.owner_id = child.owner_id AND parent.state = 'active'
         AND child.depth < 100
@@ -2593,7 +2507,7 @@ async fn resolve_shared_folder_context(
         .db
         .query(SHARED_FOLDER_CONTEXT_QUERY, &[&folder_id, &user.id])
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if rows.is_empty() {
         return Err(error::ErrorNotFound("shared folder not found"));
     }
@@ -2628,11 +2542,7 @@ async fn ensure_folder(
     name: &str,
 ) -> Result<String> {
     let parent_id = parent_id.map(str::to_owned);
-    let mut client = state
-        .db
-        .get()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
         .transaction()
         .await
@@ -2697,7 +2607,7 @@ async fn list_entries(
         "files" => "files.state = 'active' AND files.parent_id IS NOT DISTINCT FROM $2",
         "trash" => {
             "files.state = 'trashed' AND NOT EXISTS (
-              SELECT 1 FROM files AS parent
+              SELECT 1 FROM visible_files AS parent
               WHERE parent.id = files.parent_id AND parent.state = 'trashed'
             )"
         }
@@ -2769,7 +2679,7 @@ async fn list_entries(
               {rank}::integer AS cursor_rank,
               {name} AS cursor_name,
               {date} AS cursor_date
-            FROM files
+            FROM visible_files AS files
             LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
             WHERE files.owner_id = $1
               AND ($2::text IS NULL OR $2::text IS NOT NULL)
@@ -2800,7 +2710,7 @@ async fn list_entries(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     file_page_from_rows(
         rows,
@@ -2883,7 +2793,7 @@ async fn list_shared_entries(
               {name} AS cursor_name,
               {date} AS cursor_date
             FROM file_shares
-            INNER JOIN files ON files.id = file_shares.file_id
+            INNER JOIN visible_files AS files ON files.id = file_shares.file_id
             INNER JOIN users AS owners ON owners.id = files.owner_id
             LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
             WHERE file_shares.recipient_id = $1
@@ -2913,7 +2823,7 @@ async fn list_shared_entries(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     file_page_from_rows(rows, "shared", None, sort, direction, page_size)
 }
@@ -2963,11 +2873,11 @@ async fn list_shared_folder_entries(
             WITH RECURSIVE ancestors AS (
               SELECT id, parent_id, owner_id,
                      ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
-              FROM files WHERE id = $2
+              FROM visible_files AS files WHERE id = $2
               UNION ALL
               SELECT parent.id, parent.parent_id, parent.owner_id,
                      child.visited_ids || parent.id, child.depth + 1
-              FROM files AS parent
+              FROM visible_files AS parent
               INNER JOIN ancestors AS child ON child.parent_id = parent.id
               WHERE parent.owner_id = child.owner_id
                 AND child.depth < 100
@@ -3016,7 +2926,7 @@ async fn list_shared_folder_entries(
                    {name} AS cursor_name,
                    {date} AS cursor_date
             FROM access
-            INNER JOIN files ON files.owner_id = access.owner_id
+            INNER JOIN visible_files AS files ON files.owner_id = access.owner_id
               AND files.parent_id = $2 AND files.state = 'active'
             INNER JOIN users AS owners ON owners.id = files.owner_id
             LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
@@ -3045,7 +2955,7 @@ async fn list_shared_folder_entries(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     file_page_from_rows(rows, "shared", Some(folder_id), sort, direction, page_size)
 }
 
@@ -3172,6 +3082,16 @@ fn encode_file_cursor(cursor: &FileCursor) -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// Account counters have their own resource so unrelated folder changes do not
+/// require a new listing, breadcrumbs, or encrypted metadata resolution.
+pub async fn summary(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
+    let user = require_principal(&state, &request).await?;
+    let summary = get_summary(&state, &user).await?;
+    Ok(HttpResponse::Ok()
+        .insert_header(("Cache-Control", "private, no-store"))
+        .json(serde_json::json!({ "summary": summary })))
+}
+
 async fn get_summary(state: &AppState, user: &SessionPrincipal) -> Result<FilesSummary> {
     let row = state
         .db
@@ -3184,15 +3104,16 @@ async fn get_summary(state: &AppState, user: &SessionPrincipal) -> Result<FilesS
                   COALESCE(trashed_files, 0)::bigint AS trashed_files,
                   COALESCE(favorite_files, 0)::bigint AS favorite_files,
                   COALESCE(shared_files, 0)::bigint AS shared_files,
-                  COALESCE(used_bytes, 0)::bigint AS used_bytes
+                  COALESCE(used_bytes, 0)::bigint AS used_bytes,
+                  COALESCE(tree_operation_pending, false) AS tree_operation_pending
                 FROM users
-                LEFT JOIN user_file_counters ON user_file_counters.owner_id = users.id
+                LEFT JOIN visible_user_file_counters AS user_file_counters ON user_file_counters.owner_id = users.id
                 WHERE users.id = $1
             ",
             &[&user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     Ok(FilesSummary {
         total_files: row.get("total_files"),
@@ -3202,6 +3123,7 @@ async fn get_summary(state: &AppState, user: &SessionPrincipal) -> Result<FilesS
         favorite_files: row.get("favorite_files"),
         shared_files: row.get("shared_files"),
         used_bytes: row.get("used_bytes"),
+        tree_operation_pending: row.get("tree_operation_pending"),
     })
 }
 
@@ -3209,14 +3131,14 @@ pub(crate) const DOWNLOAD_FILE_QUERY: &str = r#"
     WITH RECURSIVE ancestors AS (
       SELECT id, parent_id, owner_id,
              ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
-      FROM files
+      FROM visible_files AS files
       WHERE id = $1
 
       UNION ALL
 
       SELECT parent.id, parent.parent_id, parent.owner_id,
              child.visited_ids || parent.id, child.depth + 1
-      FROM files AS parent
+      FROM visible_files AS parent
       INNER JOIN ancestors AS child ON child.parent_id = parent.id
       WHERE parent.owner_id = child.owner_id
         AND child.depth < 100
@@ -3227,7 +3149,7 @@ pub(crate) const DOWNLOAD_FILE_QUERY: &str = r#"
       files.original_name,
       files.storage_name,
       files.mime_type
-    FROM files
+    FROM visible_files AS files
     INNER JOIN users AS owners ON owners.id = files.owner_id
     WHERE files.id = $1
       AND files.state = 'active'
@@ -3264,7 +3186,7 @@ async fn get_download_file(
             &[&file_id, &user.id, &expected_version],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     Ok(row.map(|row| StoredFile {
         owner_id: row.get("owner_id"),
@@ -3346,7 +3268,7 @@ async fn get_upload(
             &[&upload_id, &actor.owner_id, &actor.share_link_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     Ok(row.map(file_upload_from_row))
 }
@@ -3415,7 +3337,7 @@ async fn find_resumable_upload(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     Ok(row.map(file_upload_from_row))
 }
@@ -3473,7 +3395,7 @@ async fn enqueue_upload_cleanup(
         lease_token,
     )
     .await
-    .map_err(error::ErrorInternalServerError)
+    .map_err(crate::db::boxed_http_error)
 }
 
 fn upload_part_size(upload: &FileUploadRecord) -> Result<u64> {
@@ -3758,6 +3680,7 @@ mod tests {
                 .expect("recursive legacy handler source should remain inspectable");
             let admission = handler
                 .find("acquire_recursive_operation")
+                .or_else(|| handler.find("acquire_interactive_operation"))
                 .unwrap_or_else(|| panic!("{start} admission should be present"));
             let recursive_query = handler
                 .find(recursive_call)

@@ -3,41 +3,14 @@ use deadpool_postgres::GenericClient;
 use crate::db::execute_cached;
 
 pub(crate) const TOUCH_ANCESTOR_COLLECTIONS_QUERY: &str = r#"
-    WITH RECURSIVE ancestors AS (
-      SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids, 0::integer AS depth
-      FROM files
-      WHERE id = $1
-        AND owner_id = $2
-        AND entry_type = 'folder'
-        AND state = 'active'
-
-      UNION ALL
-
-      SELECT parent.id, parent.parent_id,
-             child.visited_ids || parent.id, child.depth + 1
-      FROM files AS parent
-      INNER JOIN ancestors AS child ON child.parent_id = parent.id
-      WHERE parent.owner_id = $2
-        AND parent.entry_type = 'folder'
-        AND parent.state = 'active'
-        AND child.depth < 100
-        AND NOT parent.id = ANY(child.visited_ids)
-    ), touched_folders AS (
-      UPDATE files AS folders
-      SET updated_at = now()
-      FROM ancestors
-      WHERE folders.id = ancestors.id
-        AND folders.owner_id = $2
-      RETURNING folders.id
-    )
-    UPDATE repositories
-    SET updated_at = now()
-    WHERE owner_id = $2
-      AND root_file_id IN (SELECT id FROM touched_folders)
+    INSERT INTO collection_timestamp_changes (owner_id, parent_id)
+    SELECT $2, id FROM files
+    WHERE id = $1 AND owner_id = $2 AND entry_type = 'folder' AND state = 'active'
+    ON CONFLICT (transaction_id, owner_id, parent_id) DO NOTHING
 "#;
 
-/// Marks the containing folder chain, and any repository rooted in that chain,
-/// as modified in the same transaction that publishes a file.
+/// Durably queues cosmetic collection timestamps. Content revisions are fenced
+/// synchronously by the database without locking every common ancestor.
 pub(crate) async fn touch_ancestor_collections<Client>(
     client: &Client,
     parent_id: Option<&str>,
@@ -65,19 +38,7 @@ mod tests {
     use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
     use tokio_postgres::NoTls;
 
-    use super::{TOUCH_ANCESTOR_COLLECTIONS_QUERY, touch_ancestor_collections};
-
-    #[test]
-    fn ancestor_collection_touch_is_scoped_and_cycle_bounded() {
-        assert!(TOUCH_ANCESTOR_COLLECTIONS_QUERY.contains("owner_id = $2"));
-        assert!(TOUCH_ANCESTOR_COLLECTIONS_QUERY.contains("state = 'active'"));
-        assert!(TOUCH_ANCESTOR_COLLECTIONS_QUERY.contains("child.depth < 100"));
-        assert!(
-            TOUCH_ANCESTOR_COLLECTIONS_QUERY.contains("NOT parent.id = ANY(child.visited_ids)")
-        );
-        assert!(TOUCH_ANCESTOR_COLLECTIONS_QUERY.contains("UPDATE files AS folders"));
-        assert!(TOUCH_ANCESTOR_COLLECTIONS_QUERY.contains("UPDATE repositories"));
-    }
+    use super::touch_ancestor_collections;
 
     #[actix_web::test]
     #[ignore = "requires an initialized PostgreSQL test database"]
@@ -149,6 +110,20 @@ mod tests {
         touch_ancestor_collections(&transaction, Some(&child_id), &owner_id)
             .await
             .expect("ancestor timestamps should update");
+
+        let queued: i64 = transaction
+            .query_one(
+                "SELECT count(*) FROM collection_timestamp_changes WHERE owner_id=$1",
+                &[&owner_id],
+            )
+            .await
+            .expect("timestamp work should be durable")
+            .get(0);
+        assert_eq!(queued, 1);
+        transaction
+            .query_one("SELECT collection_changes_dispatch()", &[])
+            .await
+            .expect("timestamp worker runs");
 
         let rows = transaction
             .query(

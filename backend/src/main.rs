@@ -10,16 +10,16 @@ mod realtime;
 mod routes;
 mod state;
 mod storage;
+#[cfg(test)]
+mod test_allocations;
 mod timestamps;
 mod upload_completion;
 mod vault_wire;
 
-use actix_web::http::header::{CONTENT_LENGTH, HeaderName, HeaderValue};
-use actix_web::{App, HttpServer, dev::Service, web};
+use actix_web::{App, HttpServer, web};
 use std::io;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tokio::sync::watch;
-use tracing::Instrument;
 
 use config::E2eeMode;
 use state::{
@@ -51,7 +51,7 @@ async fn main() -> std::io::Result<()> {
 
     let config = config::Config::from_env()
         .map_err(|error| io::Error::other(format!("invalid configuration: {error}")))?;
-    observability::init_logging(&config)
+    let _logging_guard = observability::init_logging(&config)
         .map_err(|error| io::Error::other(format!("failed to initialize logging: {error}")))?;
     let metrics = observability::Metrics::new(&config);
     let bind_addr = config.bind_addr();
@@ -119,6 +119,23 @@ async fn main() -> std::io::Result<()> {
     let maintenance_storage = storage.clone();
     let realtime_hub = realtime::RealtimeHub::new();
     let realtime_database_url = config.database_url.clone();
+    let (interactive_operation_limiter, recursive_operation_limiter) =
+        QueuedMutationLimiter::partition(
+            config.recursive_operation_concurrency,
+            config.recursive_operation_per_user,
+            config.recursive_operation_queue_capacity,
+            config.recursive_operation_per_user_queue_capacity,
+        );
+    let cpu_workers = std::thread::available_parallelism()
+        .map(std::num::NonZeroUsize::get)
+        .unwrap_or(4)
+        .saturating_sub(1)
+        .clamp(1, 8);
+    let (interactive_validation, vault_validation) =
+        VaultValidationService::partition(cpu_workers, 2, 32, 8);
+    let interactive_validation =
+        interactive_validation.observed(metrics.clone(), "interactive_cpu");
+    let vault_validation = vault_validation.observed(metrics.clone(), "publication_cpu");
     let state = web::Data::new(AppState {
         config: config.clone(),
         db,
@@ -128,128 +145,37 @@ async fn main() -> std::io::Result<()> {
         passwords,
         login_rate_limiter,
         storage,
-        bucket_usage: bucket_usage::BucketUsageCache::default(),
+        bucket_usage: bucket_usage::BucketUsageCache::new(maintenance_db.clone()),
         realtime: realtime_hub.clone(),
         upload_control_limiter: MutationLimiter::new(
             config.upload_control_concurrency,
             config.upload_control_per_user,
         ),
-        recursive_operation_limiter: QueuedMutationLimiter::new(
-            config.recursive_operation_concurrency,
-            config.recursive_operation_per_user,
-            config.recursive_operation_queue_capacity,
-            config.recursive_operation_per_user_queue_capacity,
-        ),
+        recursive_operation_limiter,
+        interactive_operation_limiter,
         storage_operations: AsyncOperationService::new(
             config.storage_operation_concurrency,
             config.storage_operation_per_user,
             config.storage_operation_queue_capacity,
             config.storage_operation_per_user_queue_capacity,
         ),
-        vault_validation: VaultValidationService::new(
-            std::thread::available_parallelism()
-                .map(std::num::NonZeroUsize::get)
-                .unwrap_or(4)
-                .saturating_sub(1)
-                .clamp(1, 8),
-            2,
-            32,
-            8,
-        ),
+        vault_validation,
+        interactive_validation,
     });
 
     tracing::info!(bind_addr, "starting Aeralyth API");
 
     let server_metrics = metrics.clone();
+    let realtime_metrics = metrics.clone();
     let maintenance_metrics = metrics;
     let server = HttpServer::new(move || {
         let request_metrics = server_metrics.clone();
         App::new()
             .app_data(state.clone())
-            .wrap_fn(move |request, service| {
-                let metrics = request_metrics.clone();
-                let method = request.method().as_str().to_owned();
-                let request_bytes = request
-                    .headers()
-                    .get(CONTENT_LENGTH)
-                    .and_then(|value| value.to_str().ok())
-                    .and_then(|value| value.parse::<u64>().ok())
-                    .unwrap_or(0);
-                let request_id = metrics.next_request_id();
-                let request_span = tracing::info_span!(
-                    "http_request",
-                    request_id = %request_id,
-                    method = %method,
-                    route = tracing::field::Empty,
-                    status = tracing::field::Empty,
-                );
-                let execution_span = request_span.clone();
-                let started = Instant::now();
-                let future = service.call(request);
-                async move {
-                    let (result, database_checkouts) = db::scope_request(future).await;
-                    let duration = started.elapsed();
-                    match result {
-                        Ok(mut response) => {
-                            let route = response
-                                .request()
-                                .match_pattern()
-                                .unwrap_or_else(|| "unmatched".to_owned());
-                            let status = response.status().as_u16();
-                            let response_bytes = response
-                                .headers()
-                                .get(CONTENT_LENGTH)
-                                .and_then(|value| value.to_str().ok())
-                                .and_then(|value| value.parse::<u64>().ok())
-                                .unwrap_or(0);
-                            request_span.record("route", route.as_str());
-                            request_span.record("status", status);
-                            let observation = observability::RequestObservation {
-                                method: &method,
-                                route: &route,
-                                status,
-                                duration,
-                                request_bytes,
-                                response_bytes,
-                                database_checkouts,
-                            };
-                            metrics.record_request(&observation);
-                            metrics.log_request(&request_id, &observation);
-                            response.response_mut().headers_mut().insert(
-                                HeaderName::from_static("x-request-id"),
-                                HeaderValue::from_str(&request_id)
-                                    .expect("generated request IDs are valid headers"),
-                            );
-                            response.response_mut().headers_mut().insert(
-                                HeaderName::from_static("server-timing"),
-                                HeaderValue::from_str(&format!(
-                                    "app;dur={:.3}",
-                                    duration.as_secs_f64() * 1_000.0,
-                                ))
-                                .expect("server timing is a valid header"),
-                            );
-                            Ok(response)
-                        }
-                        Err(error) => {
-                            request_span.record("route", "middleware_error");
-                            request_span.record("status", 500_u16);
-                            let observation = observability::RequestObservation {
-                                method: &method,
-                                route: "middleware_error",
-                                status: 500,
-                                duration,
-                                request_bytes,
-                                response_bytes: 0,
-                                database_checkouts,
-                            };
-                            metrics.record_request(&observation);
-                            metrics.log_request(&request_id, &observation);
-                            Err(error)
-                        }
-                    }
-                }
-                .instrument(execution_span)
-            })
+            .app_data(web::Data::new(request_metrics))
+            .wrap(actix_web::middleware::from_fn(
+                observability::observe_request,
+            ))
             .configure(routes::configure)
     })
     .client_request_timeout(HTTP_HEADER_TIMEOUT)
@@ -262,6 +188,11 @@ async fn main() -> std::io::Result<()> {
     let realtime = tokio::spawn(realtime::run(
         realtime_hub,
         realtime_database_url,
+        maintenance_shutdown_receiver.clone(),
+        realtime_metrics,
+    ));
+    let tree_jobs = tokio::spawn(routes::tree_jobs::run(
+        maintenance_db.clone(),
         maintenance_shutdown_receiver.clone(),
     ));
     let maintenance = tokio::spawn(storage::run_maintenance(
@@ -276,6 +207,9 @@ async fn main() -> std::io::Result<()> {
     let _ = maintenance_shutdown.send(true);
     if let Err(error) = realtime.await {
         tracing::error!(%error, "realtime runtime stopped unexpectedly");
+    }
+    if let Err(error) = tree_jobs.await {
+        tracing::error!(%error, "tree jobs runtime stopped unexpectedly");
     }
     if let Err(error) = maintenance.await {
         tracing::error!(%error, "maintenance runtime stopped unexpectedly");

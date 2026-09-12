@@ -1,0 +1,10 @@
+Bookkeeping lease release completed despite uncommitted exclusive owner publication: 21.39 ms
+Rejected fenced mutation: owner_id='bookkeep_review_f6f16609_other'
+Rejected fenced mutation: reservation_bytes=4
+Rejected fenced mutation: status='pending'
+Rejected fenced mutation: object_key='unexpected'
+Rejected fenced mutation: parent_id=NULL
+Rejected fenced mutation: completion_attempts=1
+Rejected fenced mutation: completion_dead_lettered_at=now()
+completing|3|0|t
+

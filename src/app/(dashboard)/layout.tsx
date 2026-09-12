@@ -10,10 +10,8 @@ export default async function DashboardLayout({
 }: {
   children: ReactNode;
 }) {
-  const [{ csrfToken, currentUser }, cookieStore] = await Promise.all([
-    getDashboardSession(),
-    cookies(),
-  ]);
+  const [{ csrfToken, currentUser, realtimeCursor }, cookieStore] =
+    await Promise.all([getDashboardSession(), cookies()]);
   const initialSidebarCollapsed =
     cookieStore.get("aeralyth_sidebar_collapsed")?.value === "1";
 
@@ -22,6 +20,7 @@ export default async function DashboardLayout({
       currentUser={currentUser}
       csrfToken={csrfToken}
       initialSidebarCollapsed={initialSidebarCollapsed}
+      realtimeCursor={realtimeCursor}
     >
       {children}
     </DashboardFrame>

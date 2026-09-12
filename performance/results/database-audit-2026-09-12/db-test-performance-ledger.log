@@ -1,0 +1,52 @@
+Command: npm run db:test:performance-ledger
+
+> aeralyth@0.1.0 db:test:performance-ledger
+> docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U aeralyth -d aeralyth < database/tests/performance_ledger.sql
+
+BEGIN
+INSERT 0 1
+      set_config      
+----------------------
+ usr_perf_ledger_1790
+(1 row)
+
+CREATE TABLE
+CREATE FUNCTION
+CREATE TRIGGER
+CREATE TRIGGER
+INSERT 0 10000
+DO
+TRUNCATE TABLE
+UPDATE 10000
+DO
+UPDATE 10000
+DO
+TRUNCATE TABLE
+UPDATE 10000
+DO
+TRUNCATE TABLE
+DELETE 10000
+DO
+TRUNCATE TABLE
+DO
+TRUNCATE TABLE
+UPDATE 10
+UPDATE 10
+DO
+UPDATE 10
+UPDATE 10
+DO
+DO
+UPDATE 1
+INSERT 0 1
+INSERT 0 1
+TRUNCATE TABLE
+DELETE 1
+DELETE 1
+DO
+ROLLBACK
+                   result                    
+---------------------------------------------
+ performance ledger regression checks passed
+(1 row)
+

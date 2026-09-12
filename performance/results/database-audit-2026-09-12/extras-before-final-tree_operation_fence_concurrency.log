@@ -1,0 +1,2 @@
+REPEATABLE READ: writer with pre-fence snapshot rejected with 40001
+READ COMMITTED: writer with pre-fence snapshot rejected with 55000

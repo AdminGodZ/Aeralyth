@@ -11,6 +11,9 @@ import {
 } from "@/features/dashboard/storage-overview";
 
 const measurementTime = new Intl.DateTimeFormat("en", {
+  year: "numeric",
+  month: "short",
+  day: "2-digit",
   hour: "2-digit",
   minute: "2-digit",
   second: "2-digit",
@@ -254,14 +257,14 @@ export function StorageContent({
                   : bucketUsage.status === "unavailable"
                     ? "Bucket usage is temporarily unavailable. We’ll retry shortly."
                     : bucketReady && bucketUsage.stale
-                      ? "Showing the last measurement. The latest refresh failed."
+                      ? `Showing an older measurement from ${measurementTime.format(bucketUsage.usage.measuredAt)} UTC.`
                       : bucketReady && bucketUsage.refreshing
                         ? "Updating bucket measurement…"
                         : bucketReady
                           ? `Measured at ${measurementTime.format(bucketUsage.usage.measuredAt)} UTC`
                           : null}
               </span>
-              <span>Completed objects · Refreshes every minute</span>
+              <span>Completed objects · Reconciles every 15 minutes</span>
             </div>
           </>
         )}

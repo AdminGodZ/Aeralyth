@@ -1,7 +1,15 @@
 import { createHash } from "node:crypto";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  copyFile,
+  mkdir,
+  readdir,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { publishWorkerAsset } from "./worker-asset-store.mjs";
 
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const generatedPath = resolve(projectRoot, "src/generated/worker-assets.ts");
@@ -23,16 +31,7 @@ const generatedExports = await Promise.all(
     );
     const fingerprint = createHash("sha256").update(bytes).digest("hex");
     const fileName = `${workerName}.${fingerprint}.worker.js`;
-    const oldFiles = (await readdir(publicWorkerDirectory)).filter(
-      (candidate) =>
-        candidate.startsWith(`${workerName}.`) && candidate !== fileName,
-    );
-    await Promise.all(
-      oldFiles.map((candidate) =>
-        rm(resolve(publicWorkerDirectory, candidate), { force: true }),
-      ),
-    );
-    await writeFile(resolve(publicWorkerDirectory, fileName), bytes);
+    await publishWorkerAsset(projectRoot, fileName, bytes);
     return [
       `export const ${exportName} =`,
       `  "/workers/${fileName}" as const;`,
@@ -45,6 +44,17 @@ await Promise.all(
     rm(resolve(publicDirectory, `${workerName}.worker.js`), { force: true }),
   ),
 );
+// Keep build inspection data and private source maps outside the public image.
+const reportsDirectory = resolve(projectRoot, ".worker-reports");
+await mkdir(reportsDirectory, { recursive: true });
+for (const fileName of await readdir(buildDirectory)) {
+  if (fileName.endsWith(".map") || fileName.endsWith(".meta.json")) {
+    await copyFile(
+      resolve(buildDirectory, fileName),
+      resolve(reportsDirectory, fileName),
+    );
+  }
+}
 await rm(buildDirectory, { recursive: true, force: true });
 
 const source = [

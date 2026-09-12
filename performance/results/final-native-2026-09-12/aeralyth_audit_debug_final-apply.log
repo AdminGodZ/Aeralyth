@@ -1,0 +1,343 @@
+FILE database/init/001_auth.sql SHA256 0194cbfce459ad5ea7eddc62f01adc568d7dac2d77f16ee55018c7b70bcf7c52
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  column "csrf_token" of relation "sessions" already exists, skipping
+NOTICE:  column "counts_toward_shared" of relation "file_shares" already exists, skipping
+NOTICE:  column "checksum_sha256" of relation "file_uploads" already exists, skipping
+NOTICE:  column "part_size_bytes" of relation "file_uploads" already exists, skipping
+NOTICE:  column "write_expires_at" of relation "file_uploads" already exists, skipping
+NOTICE:  constraint "file_uploads_part_size_check" of relation "file_uploads" does not exist, skipping
+NOTICE:  constraint "file_uploads_status_check" of relation "file_uploads" does not exist, skipping
+NOTICE:  column "multipart_upload_id" of relation "storage_deletion_jobs" already exists, skipping
+NOTICE:  trigger "users_file_counter_insert" for relation "users" does not exist, skipping
+NOTICE:  trigger "users_admin_counter_change" for relation "users" does not exist, skipping
+NOTICE:  trigger "users_admin_counter_insert" for relation "users" does not exist, skipping
+NOTICE:  trigger "users_admin_counter_delete" for relation "users" does not exist, skipping
+NOTICE:  trigger "users_admin_counter_update" for relation "users" does not exist, skipping
+NOTICE:  trigger "invitations_admin_counter_change" for relation "invitations" does not exist, skipping
+NOTICE:  trigger "invitations_admin_counter_insert" for relation "invitations" does not exist, skipping
+NOTICE:  trigger "invitations_admin_counter_delete" for relation "invitations" does not exist, skipping
+NOTICE:  trigger "invitations_admin_counter_update" for relation "invitations" does not exist, skipping
+NOTICE:  trigger "files_counter_change" for relation "files" does not exist, skipping
+NOTICE:  trigger "file_shares_counter_change" for relation "file_shares" does not exist, skipping
+FILE database/init/002_e2ee.sql SHA256 8a2073864970ceb491ab1d7bd188122ca53fd662d1fcf77b39f244e727d4f957
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  column "checksum_sha256" of relation "vault_uploads" already exists, skipping
+NOTICE:  column "record_hash" of relation "vault_shares" already exists, skipping
+NOTICE:  column "record_version" of relation "vault_share_wrappers" already exists, skipping
+NOTICE:  trigger "vault_share_envelope_epoch_guard" for relation "vault_share_envelopes" does not exist, skipping
+NOTICE:  trigger "vault_share_wrapper_epoch_guard" for relation "vault_share_wrappers" does not exist, skipping
+NOTICE:  trigger "vault_share_envelope_epoch_guard_insert" for relation "vault_share_envelopes" does not exist, skipping
+NOTICE:  trigger "vault_share_envelope_epoch_guard_update" for relation "vault_share_envelopes" does not exist, skipping
+NOTICE:  trigger "vault_share_wrapper_epoch_guard_insert" for relation "vault_share_wrappers" does not exist, skipping
+NOTICE:  trigger "vault_share_wrapper_epoch_guard_update" for relation "vault_share_wrappers" does not exist, skipping
+FILE database/init/003_share_links.sql SHA256 27b8b5b679ab9b96f56e57cc92946b6423c1300c1e436ff7ed9993bd3db78043
+FILE database/init/004_repositories.sql SHA256 9e788809ed0a8a38149fd7e71a70dfbc675fc21d84a890ed6028d6785c44f0c0
+FILE database/init/005_repository_metadata.sql SHA256 360c0582c2924ddde9a93985ffaa65193ede8db8e12dd932fba298454fad4f70
+NOTICE:  column "description" of relation "repositories" already exists, skipping
+FILE database/init/006_performance_ledger.sql SHA256 cde52b4a4e636fcbe19da9279342a15bf7344e8c363a69bb7e21dd997a150def
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+NOTICE:  trigger "users_storage_usage_insert" for relation "users" does not exist, skipping
+NOTICE:  trigger "files_counter_insert_statement" for relation "files" does not exist, skipping
+NOTICE:  trigger "files_counter_update_statement" for relation "files" does not exist, skipping
+NOTICE:  trigger "files_counter_delete_statement" for relation "files" does not exist, skipping
+NOTICE:  trigger "file_upload_reservation_immutable" for relation "file_uploads" does not exist, skipping
+NOTICE:  trigger "file_upload_reservation_update" for relation "file_uploads" does not exist, skipping
+NOTICE:  trigger "file_upload_reservation_delete" for relation "file_uploads" does not exist, skipping
+NOTICE:  trigger "vault_upload_reservation_immutable" for relation "vault_uploads" does not exist, skipping
+NOTICE:  trigger "vault_upload_reservation_update" for relation "vault_uploads" does not exist, skipping
+NOTICE:  trigger "vault_upload_reservation_delete" for relation "vault_uploads" does not exist, skipping
+FILE database/init/007_observability.sql SHA256 a83c35b59a2b535aeb0511d754612e26b512cce0a8a6303db3ff48d900109c69
+FILE database/init/008_folder_manifest.sql SHA256 c4cbdd07f5e350a7d57deedc4745b46bce8193bfbb575d976038ada415669790
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+FILE database/init/009_upload_completion.sql SHA256 61a18b569a2eeb6b47e5ae6b28266e62a598c9501cf97da8e713cb58c841f484
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+FILE database/init/010_session_performance.sql SHA256 29687bc13ab200d682d6cbbd5fc8540e4ab3bbb0e6c734a6cdeba022fbfe8273
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  index "sessions_expires_at_idx" does not exist, skipping
+NOTICE:  relation "sessions_expiry_cleanup_idx" already exists, skipping
+FILE database/init/011_admin_counter_triggers.sql SHA256 b8303b31b2918c2b3f1cab4c8003d91957c258e5fce1fa4f07b56752d43c33fb
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  trigger "users_admin_counter_change" for relation "users" does not exist, skipping
+NOTICE:  trigger "invitations_admin_counter_change" for relation "invitations" does not exist, skipping
+FILE database/init/012_vault_query_performance.sql SHA256 bd1519cb841992c8d074c14d87a039fa64b82f7073e0fc073764eeda249e9c75
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+NOTICE:  trigger "vault_share_envelope_epoch_guard" for relation "vault_share_envelopes" does not exist, skipping
+NOTICE:  trigger "vault_share_wrapper_epoch_guard" for relation "vault_share_wrappers" does not exist, skipping
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+FILE database/init/013_migration_identity_performance.sql SHA256 da6ad31214b96f0fd2f76d032855189f28a904b54f9a6812b6aa1aff55df4d0c
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+FILE database/init/014_navigation_hot_paths.sql SHA256 d7a0620d1ba261506783ebe7c51b0a441e978f55eb488a69ce8415cffcb22f0b
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  trigger "file_shares_file_state_insert" for relation "file_shares" does not exist, skipping
+NOTICE:  trigger "file_shares_file_state_update" for relation "file_shares" does not exist, skipping
+NOTICE:  trigger "file_shares_file_state_delete" for relation "file_shares" does not exist, skipping
+NOTICE:  trigger "vault_shares_file_state_insert" for relation "vault_shares" does not exist, skipping
+NOTICE:  trigger "vault_shares_file_state_update" for relation "vault_shares" does not exist, skipping
+NOTICE:  trigger "vault_shares_file_state_delete" for relation "vault_shares" does not exist, skipping
+NOTICE:  trigger "share_links_file_state_insert" for relation "share_links" does not exist, skipping
+NOTICE:  trigger "share_links_file_state_update" for relation "share_links" does not exist, skipping
+NOTICE:  trigger "share_links_file_state_delete" for relation "share_links" does not exist, skipping
+NOTICE:  trigger "files_repository_counts_insert" for relation "files" does not exist, skipping
+NOTICE:  trigger "files_repository_counts_update" for relation "files" does not exist, skipping
+NOTICE:  trigger "files_repository_counts_delete" for relation "files" does not exist, skipping
+FILE database/init/015_collection_hierarchy_performance.sql SHA256 80067aa5a67bc3164fcba27b913f419e12ec9cc6ea3ff088599280b1f94b7e99
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+NOTICE:  index "files_updated_at_idx" does not exist, skipping
+NOTICE:  index "files_favorite_idx" does not exist, skipping
+NOTICE:  index "files_recent_owner_idx" does not exist, skipping
+NOTICE:  index "share_links_owner_root_page_idx" does not exist, skipping
+NOTICE:  index "vault_shares_owner_root_page_idx" does not exist, skipping
+ assert_file_hierarchy_valid 
+-----------------------------
+ 
+(1 row)
+
+NOTICE:  trigger "files_hierarchy_insert_guard" for relation "files" does not exist, skipping
+NOTICE:  trigger "files_hierarchy_update_guard" for relation "files" does not exist, skipping
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+FILE database/init/016_admin_search_identifier_policy.sql SHA256 52676c51caf8e1da756cad4b8f9a4b2dc4a09bfc832d1d0589a8f329d92453b1
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+NOTICE:  index "users_username_trgm_idx" does not exist, skipping
+NOTICE:  index "users_display_name_trgm_idx" does not exist, skipping
+NOTICE:  index "invitations_username_trgm_idx" does not exist, skipping
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+FILE database/init/017_bounded_tree_operations.sql SHA256 75f437c74bd8e3f34b4804d199f4ef3fa3a8f7230a330fa5a31a2e87e149d880
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_lock 
+------------------
+ 
+(1 row)
+
+NOTICE:  index "files_owner_parent_walk_idx" does not exist, skipping
+ pg_advisory_unlock 
+--------------------
+ t
+(1 row)
+
+FILE database/init/018_share_link_token_rotation.sql SHA256 5c13bb5bb8e48a3154dd80f4c59b66b224b6cd2c16c4583351155f940b6b3d89
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+FILE database/init/019_share_link_rollout_compatibility.sql SHA256 09147a1b7094eb2962aafff0ce7cf5779c884b00753df0107a28d017f7c3bc73
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+FILE database/init/020_share_link_legacy_writer_guard.sql SHA256 627b583fc3ea13df29bffe4743799b3c984951a6e4c78d35e2f4d010a8373dc6
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  trigger "share_links_legacy_token_rotation_guard" for relation "share_links" does not exist, skipping
+FILE database/init/021_compact_account_state.sql SHA256 357815912d658962d74a77dc460dd47bb76b7c5ce7e1135ea0c2b21b44627dc6
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  constraint "user_vaults_compact_account_state" of relation "user_vaults" does not exist, skipping
+FILE database/init/022_large_share_commitments.sql SHA256 c12405bcc6c5aa6257b7e766802740023d7ae79691655cbc3a42192a180a71f0
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+FILE database/init/023_maintenance_coordination.sql SHA256 6f9d21c88b09afab151f02343912285669d6d001f82b458efc67c115f97ac195
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  column "lease_token" of relation "storage_deletion_jobs" already exists, skipping
+NOTICE:  column "dead_lettered_at" of relation "storage_deletion_jobs" already exists, skipping
+NOTICE:  column "lease_token" of relation "user_deletion_jobs" already exists, skipping
+NOTICE:  column "dead_lettered_at" of relation "user_deletion_jobs" already exists, skipping
+NOTICE:  column "completion_lease_token" of relation "file_uploads" already exists, skipping
+NOTICE:  column "completion_dead_lettered_at" of relation "file_uploads" already exists, skipping
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "user_deletion_jobs" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "storage_deletion_jobs" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "file_uploads" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "vault_uploads" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "invitations" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_maintenance" for relation "sessions" does not exist, skipping
+FILE database/init/024_one_password_auth.sql SHA256 fb43cd479c4db9250e769a8cec92c1bdf858b9d0d5ea90adbf82f2d6d04b5824
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+FILE database/init/025_trash_retention.sql SHA256 54eca41d396b78ebbc1cd081b83a439589174282e21839f7c96fc7a31ce9e3c3
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  trigger "notify_aeralyth_trash_retention_file_insert" for relation "files" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_trash_retention_file_update" for relation "files" does not exist, skipping
+NOTICE:  trigger "notify_aeralyth_trash_retention_users" for relation "users" does not exist, skipping
+FILE database/init/026_realtime_changes.sql SHA256 8cc72cb8a38fb39ee5d1407d678f15ae21f2423ac6ac85ca709f4d797a760720
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+FILE database/init/027_flexible_retention_and_vault_lock.sql SHA256 1c68dcf8b37f8f9fff9692662447f5eb84f01830b4189330b92995cf3447a356
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+FILE database/init/028_migration_progress.sql SHA256 d4dff9325e52ff506e46f925feb8e02a1c806f34f569864637c37e2175c70f55
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ reconcile_vault_migration_progress 
+------------------------------------
+ 
+(1 row)
+
+FILE database/init/029_durable_tree_operations.sql SHA256 775e7a6a5c451c434077ed82fc733a2fe4be1e5ea6c2a0c3abdd3ecd1b3c90db
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+FILE database/init/030_repository_change_tracking.sql SHA256 d12ae90554242db71a50a05375fe66cdcd9eed8d5e35a1b75bc92f054d433dca
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+FILE database/init/031_realtime_background_audiences.sql SHA256 09824dbfadfdeeb273f85f8a30776b5920af2c61e4435dea79de084972fbff46
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+FILE database/init/032_bucket_usage_snapshots.sql SHA256 2902b8eb43addd38840d18308993ddd02d7c65538e577cd29a81fd3bc3820f97
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+FILE database/init/034_indexed_trash_expiry.sql SHA256 c5945b11ae078303aed24fa0f80e5e10fe9f1cb75c563315b5528cefa4c3e3ff
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ refresh_trash_expiry_owners 
+-----------------------------
+ 
+(1 row)
+
+FILE database/init/035_multipart_reconciliation.sql SHA256 a8d5b65a959eb5c0ce95a3b1ccadfbef26e3c1da3c823fe24ea228e506b08ec1
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+FILE database/init/036_maintenance_notifications.sql SHA256 b7961d1d20ad86eb0605a49deac774282b02277ffb044d97d0edd71d8ece1527
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+

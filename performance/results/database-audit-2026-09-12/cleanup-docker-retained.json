@@ -1,0 +1,549 @@
+{
+  "capturedAtUtc": "2026-09-12T13:00:11.313120+00:00",
+  "mode": "read-only verification following automatic approval rejection; no Docker mutation performed",
+  "containers": [
+    {
+      "id": "153d72b51279ea65595076978a1e52b053773df5ad9abd3f5d0726ec457f17b0",
+      "name": "/aeralyth-audit-db-suite-20260912",
+      "running": true,
+      "created": "2026-09-12T11:05:07.91865951Z",
+      "startedAt": "2026-09-12T11:05:08.052413843Z",
+      "mounts": [
+        {
+          "Destination": "/aeralyth-migrations",
+          "Mode": "ro",
+          "Propagation": "rprivate",
+          "RW": false,
+          "Source": "/Users/timheld/Documents/Projects/Aeralyth/database/init",
+          "Type": "bind"
+        },
+        {
+          "Destination": "/var/lib/postgresql",
+          "Driver": "local",
+          "Mode": "",
+          "Name": "4463f12963892db7ee061df18d0f0273a475a8d9cd6cbf07b77a6f9a51ed0898",
+          "Propagation": "",
+          "RW": true,
+          "Source": "/var/lib/docker/volumes/4463f12963892db7ee061df18d0f0273a475a8d9cd6cbf07b77a6f9a51ed0898/_data",
+          "Type": "volume"
+        }
+      ],
+      "ports": {
+        "5432/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "55434"
+          }
+        ]
+      },
+      "networks": {
+        "aeralyth-audit-db-suite_default": {
+          "Aliases": ["aeralyth-audit-db-suite-20260912", "postgres"],
+          "DNSNames": [
+            "aeralyth-audit-db-suite-20260912",
+            "postgres",
+            "153d72b51279"
+          ],
+          "DriverOpts": null,
+          "EndpointID": "c5f025d431e0ced4734b7b7735c02fbe928eebf11d0d7fdd42c3d22fef4f532f",
+          "Gateway": "172.21.0.1",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "172.21.0.2",
+          "IPPrefixLen": 16,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "be:be:37:c5:22:b5",
+          "NetworkID": "af5edf12e3e7d86f82ca69b9921077ce0b2cc2c266c83725407fec30328b0eab"
+        }
+      }
+    },
+    {
+      "id": "62a74a0cbd912ad99e47336868556c866b59ed8aa6a53748d88cc996611370f8",
+      "name": "/aeralyth-audit-s3-20260912",
+      "running": true,
+      "created": "2026-09-12T10:46:20.476748251Z",
+      "startedAt": "2026-09-12T10:46:20.514391418Z",
+      "mounts": [
+        {
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "",
+          "Name": "b128e34ef8eb435f79db6ee917120f4e3b63349b7f36a017da243792bf9b705d",
+          "Propagation": "",
+          "RW": true,
+          "Source": "/var/lib/docker/volumes/b128e34ef8eb435f79db6ee917120f4e3b63349b7f36a017da243792bf9b705d/_data",
+          "Type": "volume"
+        }
+      ],
+      "ports": {
+        "9000/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "59000"
+          }
+        ]
+      },
+      "networks": {
+        "aeralyth-audit-integration-20260912": {
+          "Aliases": [],
+          "DNSNames": ["aeralyth-audit-s3-20260912", "62a74a0cbd91"],
+          "DriverOpts": {},
+          "EndpointID": "a2d7de303c90c7d9bc9c9eed1f1e367ce2631ce9f63d27df607eef4f78e2bd32",
+          "Gateway": "172.20.0.1",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": {},
+          "IPAddress": "172.20.0.3",
+          "IPPrefixLen": 16,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "26:6e:2c:f8:bf:77",
+          "NetworkID": "f4b8d55c99eb6c4e6ac30a4311f4c1e9466e840f7c94bbc89671947aa8e955a7"
+        },
+        "bridge": {
+          "Aliases": null,
+          "DNSNames": null,
+          "DriverOpts": null,
+          "EndpointID": "1721ee40e159af7585dddc50ee479a374a9f45fcb1719f6f1d360672d03c366c",
+          "Gateway": "172.17.0.1",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "172.17.0.3",
+          "IPPrefixLen": 16,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "ba:c0:f7:e8:bf:9f",
+          "NetworkID": "a2272e0985ea05b06aa38298e624f4dcd5b827bb73de2c427547cba8ed641418"
+        }
+      }
+    },
+    {
+      "id": "832beb83fb65bf8422d43ebe8681960419e7f9899b7d2da8b62cda7c8281c30b",
+      "name": "/aeralyth-audit-20260912",
+      "running": true,
+      "created": "2026-09-12T10:43:16.535739208Z",
+      "startedAt": "2026-09-12T10:43:16.56715Z",
+      "mounts": [
+        {
+          "Destination": "/var/lib/postgresql",
+          "Driver": "local",
+          "Mode": "",
+          "Name": "e6e80fad3f207d95821b161c774ec3fcb5bef1c0f3882d4c5fbdc22514f3eb7f",
+          "Propagation": "",
+          "RW": true,
+          "Source": "/var/lib/docker/volumes/e6e80fad3f207d95821b161c774ec3fcb5bef1c0f3882d4c5fbdc22514f3eb7f/_data",
+          "Type": "volume"
+        }
+      ],
+      "ports": {
+        "5432/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "55432"
+          }
+        ]
+      },
+      "networks": {
+        "aeralyth-audit-integration-20260912": {
+          "Aliases": [],
+          "DNSNames": ["aeralyth-audit-20260912", "832beb83fb65"],
+          "DriverOpts": {},
+          "EndpointID": "1fd3c823004a76a3e078d8056673dc43815326e80b108e923259d54d9611f421",
+          "Gateway": "172.20.0.1",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": {},
+          "IPAddress": "172.20.0.2",
+          "IPPrefixLen": 16,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "fa:3e:da:98:a8:fe",
+          "NetworkID": "f4b8d55c99eb6c4e6ac30a4311f4c1e9466e840f7c94bbc89671947aa8e955a7"
+        },
+        "bridge": {
+          "Aliases": null,
+          "DNSNames": null,
+          "DriverOpts": null,
+          "EndpointID": "c4e93c5e500673643c8502e9ad190019a139346370c2f744caf6fc3cd701b021",
+          "Gateway": "172.17.0.1",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "172.17.0.2",
+          "IPPrefixLen": 16,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "ea:68:d5:6c:8e:cb",
+          "NetworkID": "a2272e0985ea05b06aa38298e624f4dcd5b827bb73de2c427547cba8ed641418"
+        }
+      }
+    },
+    {
+      "id": "28fb4f26c05fe66fd75909aa626ae74368c01c2bee547976a7d1a410203b002b",
+      "name": "/m324-gitlab-runner",
+      "running": false,
+      "created": "2026-09-10T18:02:30.801078717Z",
+      "startedAt": "2026-09-10T18:02:30.835875384Z",
+      "mounts": [
+        {
+          "Destination": "/etc/gitlab-runner",
+          "Mode": "",
+          "Propagation": "rprivate",
+          "RW": true,
+          "Source": "/Users/timheld/Documents/Codex/2026-09-10/i-h/work/runner-config",
+          "Type": "bind"
+        },
+        {
+          "Destination": "/home/gitlab-runner",
+          "Driver": "local",
+          "Mode": "",
+          "Name": "4faa2dc332a36613dbcf95a41a6e7d6cb466581ec3dea7db4da2d1409bf4d959",
+          "Propagation": "",
+          "RW": true,
+          "Source": "/var/lib/docker/volumes/4faa2dc332a36613dbcf95a41a6e7d6cb466581ec3dea7db4da2d1409bf4d959/_data",
+          "Type": "volume"
+        },
+        {
+          "Destination": "/var/run/docker.sock",
+          "Mode": "",
+          "Propagation": "rprivate",
+          "RW": true,
+          "Source": "/var/run/docker.sock",
+          "Type": "bind"
+        }
+      ],
+      "ports": {},
+      "networks": {
+        "bridge": {
+          "Aliases": null,
+          "DNSNames": null,
+          "DriverOpts": null,
+          "EndpointID": "",
+          "Gateway": "",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "",
+          "IPPrefixLen": 0,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "",
+          "NetworkID": "cb0b12204a270c384ffa5a93acfa4e400214a0eb4b84a74d8b2ebbc60e567810"
+        }
+      }
+    },
+    {
+      "id": "9bf5ebb64fbc5c5ac706ee14850e30389ad55f7c75dfb4c82e34778c18e3dfaa",
+      "name": "/aeralyth-postgres",
+      "running": true,
+      "created": "2026-08-29T19:57:18.230381343Z",
+      "startedAt": "2026-09-12T10:42:17.221895167Z",
+      "mounts": [
+        {
+          "Destination": "/docker-entrypoint-initdb.d",
+          "Mode": "ro",
+          "Propagation": "rprivate",
+          "RW": false,
+          "Source": "/host_mnt/Users/timheld/Documents/Projects/Aeralyth/database/init",
+          "Type": "bind"
+        },
+        {
+          "Destination": "/var/lib/postgresql",
+          "Driver": "local",
+          "Mode": "rw",
+          "Name": "aeralyth_aeralyth-postgres-data",
+          "Propagation": "",
+          "RW": true,
+          "Source": "/var/lib/docker/volumes/aeralyth_aeralyth-postgres-data/_data",
+          "Type": "volume"
+        }
+      ],
+      "ports": {
+        "5432/tcp": [
+          {
+            "HostIp": "0.0.0.0",
+            "HostPort": "5432"
+          },
+          {
+            "HostIp": "::",
+            "HostPort": "5432"
+          }
+        ]
+      },
+      "networks": {
+        "aeralyth_default": {
+          "Aliases": ["aeralyth-postgres", "postgres"],
+          "DNSNames": ["aeralyth-postgres", "postgres", "9bf5ebb64fbc"],
+          "DriverOpts": null,
+          "EndpointID": "1f36e536caf113521791b4473e010702352b37d9132a583f3f36e6eef53c4d81",
+          "Gateway": "172.19.0.1",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "172.19.0.2",
+          "IPPrefixLen": 16,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "42:75:31:b6:ac:aa",
+          "NetworkID": "37165be6ac5f908486e122f23517a41911cb70df1d9aada33cab3ff570e8cb37"
+        }
+      }
+    },
+    {
+      "id": "d2b35a15cc9dd1b451ff7c80f3e48f887ab833b221f1878eb1ed776b16ffe2ac",
+      "name": "/adminsearch-nextjs-1",
+      "running": false,
+      "created": "2026-07-31T22:18:32.472257554Z",
+      "startedAt": "2026-08-19T14:30:42.363510544Z",
+      "mounts": [],
+      "ports": {},
+      "networks": {
+        "adminsearch_default": {
+          "Aliases": ["adminsearch-nextjs-1", "nextjs"],
+          "DNSNames": ["adminsearch-nextjs-1", "nextjs", "d2b35a15cc9d"],
+          "DriverOpts": null,
+          "EndpointID": "",
+          "Gateway": "",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "",
+          "IPPrefixLen": 0,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "",
+          "NetworkID": "b23d9399e8adeb5e250fd4a4b07fc420ecf335207b3fba31d2edec908708b260"
+        }
+      }
+    },
+    {
+      "id": "10baec00da7f0e87f2f33c19c2b8c63c12cf72db4d2ea3f2b5397da3e030dfed",
+      "name": "/adminsearch-valkey-1",
+      "running": false,
+      "created": "2026-07-31T20:14:37.991902793Z",
+      "startedAt": "2026-08-19T14:30:42.363802252Z",
+      "mounts": [],
+      "ports": {},
+      "networks": {
+        "adminsearch_default": {
+          "Aliases": ["adminsearch-valkey-1", "valkey"],
+          "DNSNames": ["adminsearch-valkey-1", "valkey", "10baec00da7f"],
+          "DriverOpts": null,
+          "EndpointID": "",
+          "Gateway": "",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "",
+          "IPPrefixLen": 0,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "",
+          "NetworkID": "b23d9399e8adeb5e250fd4a4b07fc420ecf335207b3fba31d2edec908708b260"
+        }
+      }
+    },
+    {
+      "id": "98ae03f0e5b52c2674dda7fa65473a88d98077c901837864d9bdb687e22430aa",
+      "name": "/adminsearch-caddy-1",
+      "running": false,
+      "created": "2026-07-31T20:10:08.847863918Z",
+      "startedAt": "2026-08-19T14:30:48.006291172Z",
+      "mounts": [
+        {
+          "Destination": "/config",
+          "Driver": "local",
+          "Mode": "rw",
+          "Name": "adminsearch_caddy-config",
+          "Propagation": "",
+          "RW": true,
+          "Source": "/var/lib/docker/volumes/adminsearch_caddy-config/_data",
+          "Type": "volume"
+        },
+        {
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "rw",
+          "Name": "adminsearch_caddy-data",
+          "Propagation": "",
+          "RW": true,
+          "Source": "/var/lib/docker/volumes/adminsearch_caddy-data/_data",
+          "Type": "volume"
+        },
+        {
+          "Destination": "/etc/caddy/Caddyfile",
+          "Mode": "ro",
+          "Propagation": "rprivate",
+          "RW": false,
+          "Source": "/Users/timheld/Documents/Projects/AdminSearch/docker/caddy/Caddyfile",
+          "Type": "bind"
+        }
+      ],
+      "ports": {},
+      "networks": {
+        "adminsearch_default": {
+          "Aliases": ["adminsearch-caddy-1", "caddy"],
+          "DNSNames": ["adminsearch-caddy-1", "caddy", "98ae03f0e5b5"],
+          "DriverOpts": null,
+          "EndpointID": "",
+          "Gateway": "",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "",
+          "IPPrefixLen": 0,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "",
+          "NetworkID": "b23d9399e8adeb5e250fd4a4b07fc420ecf335207b3fba31d2edec908708b260"
+        }
+      }
+    },
+    {
+      "id": "f696bb05c53cb7cd1668f04955b566e6e0db17ac0c481113ac1a47f5fa5d1967",
+      "name": "/adminsearch-searxng-core-1",
+      "running": false,
+      "created": "2026-07-31T20:10:08.74411946Z",
+      "startedAt": "2026-08-19T14:30:48.008651463Z",
+      "mounts": [
+        {
+          "Destination": "/etc/searxng",
+          "Mode": "rw",
+          "Propagation": "rprivate",
+          "RW": true,
+          "Source": "/Users/timheld/Documents/Projects/AdminSearch/searxng/core-config",
+          "Type": "bind"
+        },
+        {
+          "Destination": "/var/cache/searxng",
+          "Driver": "local",
+          "Mode": "rw",
+          "Name": "adminsearch_searxng-cache",
+          "Propagation": "",
+          "RW": true,
+          "Source": "/var/lib/docker/volumes/adminsearch_searxng-cache/_data",
+          "Type": "volume"
+        }
+      ],
+      "ports": {},
+      "networks": {
+        "adminsearch_default": {
+          "Aliases": ["adminsearch-searxng-core-1", "searxng-core"],
+          "DNSNames": [
+            "adminsearch-searxng-core-1",
+            "searxng-core",
+            "f696bb05c53c"
+          ],
+          "DriverOpts": null,
+          "EndpointID": "",
+          "Gateway": "",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "",
+          "IPPrefixLen": 0,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "",
+          "NetworkID": "b23d9399e8adeb5e250fd4a4b07fc420ecf335207b3fba31d2edec908708b260"
+        }
+      }
+    }
+  ],
+  "auditVolumeAttachments": {
+    "4463f12963892db7ee061df18d0f0273a475a8d9cd6cbf07b77a6f9a51ed0898": [
+      "153d72b51279ea65595076978a1e52b053773df5ad9abd3f5d0726ec457f17b0"
+    ],
+    "b128e34ef8eb435f79db6ee917120f4e3b63349b7f36a017da243792bf9b705d": [
+      "62a74a0cbd912ad99e47336868556c866b59ed8aa6a53748d88cc996611370f8"
+    ],
+    "e6e80fad3f207d95821b161c774ec3fcb5bef1c0f3882d4c5fbdc22514f3eb7f": [
+      "832beb83fb65bf8422d43ebe8681960419e7f9899b7d2da8b62cda7c8281c30b"
+    ]
+  },
+  "auditNetworks": [
+    {
+      "id": "af5edf12e3e7d86f82ca69b9921077ce0b2cc2c266c83725407fec30328b0eab",
+      "name": "aeralyth-audit-db-suite_default",
+      "attachedContainerIds": [
+        "153d72b51279ea65595076978a1e52b053773df5ad9abd3f5d0726ec457f17b0"
+      ]
+    },
+    {
+      "id": "f4b8d55c99eb6c4e6ac30a4311f4c1e9466e840f7c94bbc89671947aa8e955a7",
+      "name": "aeralyth-audit-integration-20260912",
+      "attachedContainerIds": [
+        "62a74a0cbd912ad99e47336868556c866b59ed8aa6a53748d88cc996611370f8",
+        "832beb83fb65bf8422d43ebe8681960419e7f9899b7d2da8b62cda7c8281c30b"
+      ]
+    }
+  ],
+  "exactAuditContainerIdsStillPresent": true,
+  "allAuditVolumesExclusive": true,
+  "allAuditNetworksExclusive": true,
+  "protectedDevelopmentContainerId": "9bf5ebb64fbc5c5ac706ee14850e30389ad55f7c75dfb4c82e34778c18e3dfaa",
+  "commands": [
+    {
+      "argv": ["docker", "ps", "-aq", "--no-trunc"],
+      "exitCode": 0,
+      "stdout": "153d72b51279ea65595076978a1e52b053773df5ad9abd3f5d0726ec457f17b0\n62a74a0cbd912ad99e47336868556c866b59ed8aa6a53748d88cc996611370f8\n832beb83fb65bf8422d43ebe8681960419e7f9899b7d2da8b62cda7c8281c30b\n28fb4f26c05fe66fd75909aa626ae74368c01c2bee547976a7d1a410203b002b\n9bf5ebb64fbc5c5ac706ee14850e30389ad55f7c75dfb4c82e34778c18e3dfaa\nd2b35a15cc9dd1b451ff7c80f3e48f887ab833b221f1878eb1ed776b16ffe2ac\n10baec00da7f0e87f2f33c19c2b8c63c12cf72db4d2ea3f2b5397da3e030dfed\n98ae03f0e5b52c2674dda7fa65473a88d98077c901837864d9bdb687e22430aa\nf696bb05c53cb7cd1668f04955b566e6e0db17ac0c481113ac1a47f5fa5d1967\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "docker",
+        "inspect",
+        "--format",
+        "{\"id\":{{json .Id}},\"name\":{{json .Name}},\"running\":{{json .State.Running}},\"created\":{{json .Created}},\"startedAt\":{{json .State.StartedAt}},\"mounts\":{{json .Mounts}},\"ports\":{{json .NetworkSettings.Ports}},\"networks\":{{json .NetworkSettings.Networks}}}",
+        "153d72b51279ea65595076978a1e52b053773df5ad9abd3f5d0726ec457f17b0",
+        "62a74a0cbd912ad99e47336868556c866b59ed8aa6a53748d88cc996611370f8",
+        "832beb83fb65bf8422d43ebe8681960419e7f9899b7d2da8b62cda7c8281c30b",
+        "28fb4f26c05fe66fd75909aa626ae74368c01c2bee547976a7d1a410203b002b",
+        "9bf5ebb64fbc5c5ac706ee14850e30389ad55f7c75dfb4c82e34778c18e3dfaa",
+        "d2b35a15cc9dd1b451ff7c80f3e48f887ab833b221f1878eb1ed776b16ffe2ac",
+        "10baec00da7f0e87f2f33c19c2b8c63c12cf72db4d2ea3f2b5397da3e030dfed",
+        "98ae03f0e5b52c2674dda7fa65473a88d98077c901837864d9bdb687e22430aa",
+        "f696bb05c53cb7cd1668f04955b566e6e0db17ac0c481113ac1a47f5fa5d1967"
+      ],
+      "exitCode": 0,
+      "stdout": "{\"id\":\"153d72b51279ea65595076978a1e52b053773df5ad9abd3f5d0726ec457f17b0\",\"name\":\"/aeralyth-audit-db-suite-20260912\",\"running\":true,\"created\":\"2026-09-12T11:05:07.91865951Z\",\"startedAt\":\"2026-09-12T11:05:08.052413843Z\",\"mounts\":[{\"Destination\":\"/aeralyth-migrations\",\"Mode\":\"ro\",\"Propagation\":\"rprivate\",\"RW\":false,\"Source\":\"/Users/timheld/Documents/Projects/Aeralyth/database/init\",\"Type\":\"bind\"},{\"Destination\":\"/var/lib/postgresql\",\"Driver\":\"local\",\"Mode\":\"\",\"Name\":\"4463f12963892db7ee061df18d0f0273a475a8d9cd6cbf07b77a6f9a51ed0898\",\"Propagation\":\"\",\"RW\":true,\"Source\":\"/var/lib/docker/volumes/4463f12963892db7ee061df18d0f0273a475a8d9cd6cbf07b77a6f9a51ed0898/_data\",\"Type\":\"volume\"}],\"ports\":{\"5432/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"55434\"}]},\"networks\":{\"aeralyth-audit-db-suite_default\":{\"Aliases\":[\"aeralyth-audit-db-suite-20260912\",\"postgres\"],\"DNSNames\":[\"aeralyth-audit-db-suite-20260912\",\"postgres\",\"153d72b51279\"],\"DriverOpts\":null,\"EndpointID\":\"c5f025d431e0ced4734b7b7735c02fbe928eebf11d0d7fdd42c3d22fef4f532f\",\"Gateway\":\"172.21.0.1\",\"GlobalIPv6Address\":\"\",\"GlobalIPv6PrefixLen\":0,\"GwPriority\":0,\"IPAMConfig\":null,\"IPAddress\":\"172.21.0.2\",\"IPPrefixLen\":16,\"IPv6Gateway\":\"\",\"Links\":null,\"MacAddress\":\"be:be:37:c5:22:b5\",\"NetworkID\":\"af5edf12e3e7d86f82ca69b9921077ce0b2cc2c266c83725407fec30328b0eab\"}}}\n{\"id\":\"62a74a0cbd912ad99e47336868556c866b59ed8aa6a53748d88cc996611370f8\",\"name\":\"/aeralyth-audit-s3-20260912\",\"running\":true,\"created\":\"2026-09-12T10:46:20.476748251Z\",\"startedAt\":\"2026-09-12T10:46:20.514391418Z\",\"mounts\":[{\"Destination\":\"/data\",\"Driver\":\"local\",\"Mode\":\"\",\"Name\":\"b128e34ef8eb435f79db6ee917120f4e3b63349b7f36a017da243792bf9b705d\",\"Propagation\":\"\",\"RW\":true,\"Source\":\"/var/lib/docker/volumes/b128e34ef8eb435f79db6ee917120f4e3b63349b7f36a017da243792bf9b705d/_data\",\"Type\":\"volume\"}],\"ports\":{\"9000/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"59000\"}]},\"networks\":{\"aeralyth-audit-integration-20260912\":{\"Aliases\":[],\"DNSNames\":[\"aeralyth-audit-s3-20260912\",\"62a74a0cbd91\"],\"DriverOpts\":{},\"EndpointID\":\"a2d7de303c90c7d9bc9c9eed1f1e367ce2631ce9f63d27df607eef4f78e2bd32\",\"Gateway\":\"172.20.0.1\",\"GlobalIPv6Address\":\"\",\"GlobalIPv6PrefixLen\":0,\"GwPriority\":0,\"IPAMConfig\":{},\"IPAddress\":\"172.20.0.3\",\"IPPrefixLen\":16,\"IPv6Gateway\":\"\",\"Links\":null,\"MacAddress\":\"26:6e:2c:f8:bf:77\",\"NetworkID\":\"f4b8d55c99eb6c4e6ac30a4311f4c1e9466e840f7c94bbc89671947aa8e955a7\"},\"bridge\":{\"Aliases\":null,\"DNSNames\":null,\"DriverOpts\":null,\"EndpointID\":\"1721ee40e159af7585dddc50ee479a374a9f45fcb1719f6f1d360672d03c366c\",\"Gateway\":\"172.17.0.1\",\"GlobalIPv6Address\":\"\",\"GlobalIPv6PrefixLen\":0,\"GwPriority\":0,\"IPAMConfig\":null,\"IPAddress\":\"172.17.0.3\",\"IPPrefixLen\":16,\"IPv6Gateway\":\"\",\"Links\":null,\"MacAddress\":\"ba:c0:f7:e8:bf:9f\",\"NetworkID\":\"a2272e0985ea05b06aa38298e624f4dcd5b827bb73de2c427547cba8ed641418\"}}}\n{\"id\":\"832beb83fb65bf8422d43ebe8681960419e7f9899b7d2da8b62cda7c8281c30b\",\"name\":\"/aeralyth-audit-20260912\",\"running\":true,\"created\":\"2026-09-12T10:43:16.535739208Z\",\"startedAt\":\"2026-09-12T10:43:16.56715Z\",\"mounts\":[{\"Destination\":\"/var/lib/postgresql\",\"Driver\":\"local\",\"Mode\":\"\",\"Name\":\"e6e80fad3f207d95821b161c774ec3fcb5bef1c0f3882d4c5fbdc22514f3eb7f\",\"Propagation\":\"\",\"RW\":true,\"Source\":\"/var/lib/docker/volumes/e6e80fad3f207d95821b161c774ec3fcb5bef1c0f3882d4c5fbdc22514f3eb7f/_data\",\"Type\":\"volume\"}],\"ports\":{\"5432/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"55432\"}]},\"networks\":{\"aeralyth-audit-integration-20260912\":{\"Aliases\":[],\"DNSNames\":[\"aeralyth-audit-20260912\",\"832beb83fb65\"],\"DriverOpts\":{},\"EndpointID\":\"1fd3c823004a76a3e078d8056673dc43815326e80b108e923259d54d9611f421\",\"Gateway\":\"172.20.0.1\",\"GlobalIPv6Address\":\"\",\"GlobalIPv6PrefixLen\":0,\"GwPriority\":0,\"IPAMConfig\":{},\"IPAddress\":\"172.20.0.2\",\"IPPrefixLen\":16,\"IPv6Gateway\":\"\",\"Links\":null,\"MacAddress\":\"fa:3e:da:98:a8:fe\",\"NetworkID\":\"f4b8d55c99eb6c4e6ac30a4311f4c1e9466e840f7c94bbc89671947aa8e955a7\"},\"bridge\":{\"Aliases\":null,\"DNSNames\":null,\"DriverOpts\":null,\"EndpointID\":\"c4e93c5e500673643c8502e9ad190019a139346370c2f744caf6fc3cd701b021\",\"Gateway\":\"172.17.0.1\",\"GlobalIPv6Address\":\"\",\"GlobalIPv6PrefixLen\":0,\"GwPriority\":0,\"IPAMConfig\":null,\"IPAddress\":\"172.17.0.2\",\"IPPrefixLen\":16,\"IPv6Gateway\":\"\",\"Links\":null,\"MacAddress\":\"ea:68:d5:6c:8e:cb\",\"NetworkID\":\"a2272e0985ea05b06aa38298e624f4dcd5b827bb73de2c427547cba8ed641418\"}}}\n{\"id\":\"28fb4f26c05fe66fd75909aa626ae74368c01c2bee547976a7d1a410203b002b\",\"name\":\"/m324-gitlab-runner\",\"running\":false,\"created\":\"2026-09-10T18:02:30.801078717Z\",\"startedAt\":\"2026-09-10T18:02:30.835875384Z\",\"mounts\":[{\"Destination\":\"/etc/gitlab-runner\",\"Mode\":\"\",\"Propagation\":\"rprivate\",\"RW\":true,\"Source\":\"/Users/timheld/Documents/Codex/2026-09-10/i-h/work/runner-config\",\"Type\":\"bind\"},{\"Destination\":\"/home/gitlab-runner\",\"Driver\":\"local\",\"Mode\":\"\",\"Name\":\"4faa2dc332a36613dbcf95a41a6e7d6cb466581ec3dea7db4da2d1409bf4d959\",\"Propagation\":\"\",\"RW\":true,\"Source\":\"/var/lib/docker/volumes/4faa2dc332a36613dbcf95a41a6e7d6cb466581ec3dea7db4da2d1409bf4d959/_data\",\"Type\":\"volume\"},{\"Destination\":\"/var/run/docker.sock\",\"Mode\":\"\",\"Propagation\":\"rprivate\",\"RW\":true,\"Source\":\"/var/run/docker.sock\",\"Type\":\"bind\"}],\"ports\":{},\"networks\":{\"bridge\":{\"Aliases\":null,\"DNSNames\":null,\"DriverOpts\":null,\"EndpointID\":\"\",\"Gateway\":\"\",\"GlobalIPv6Address\":\"\",\"GlobalIPv6PrefixLen\":0,\"GwPriority\":0,\"IPAMConfig\":null,\"IPAddress\":\"\",\"IPPrefixLen\":0,\"IPv6Gateway\":\"\",\"Links\":null,\"MacAddress\":\"\",\"NetworkID\":\"cb0b12204a270c384ffa5a93acfa4e400214a0eb4b84a74d8b2ebbc60e567810\"}}}\n{\"id\":\"9bf5ebb64fbc5c5ac706ee14850e30389ad55f7c75dfb4c82e34778c18e3dfaa\",\"name\":\"/aeralyth-postgres\",\"running\":true,\"created\":\"2026-08-29T19:57:18.230381343Z\",\"startedAt\":\"2026-09-12T10:42:17.221895167Z\",\"mounts\":[{\"Destination\":\"/docker-entrypoint-initdb.d\",\"Mode\":\"ro\",\"Propagation\":\"rprivate\",\"RW\":false,\"Source\":\"/host_mnt/Users/timheld/Documents/Projects/Aeralyth/database/init\",\"Type\":\"bind\"},{\"Destination\":\"/var/lib/postgresql\",\"Driver\":\"local\",\"Mode\":\"rw\",\"Name\":\"aeralyth_aeralyth-postgres-data\",\"Propagation\":\"\",\"RW\":true,\"Source\":\"/var/lib/docker/volumes/aeralyth_aeralyth-postgres-data/_data\",\"Type\":\"volume\"}],\"ports\":{\"5432/tcp\":[{\"HostIp\":\"0.0.0.0\",\"HostPort\":\"5432\"},{\"HostIp\":\"::\",\"HostPort\":\"5432\"}]},\"networks\":{\"aeralyth_default\":{\"Aliases\":[\"aeralyth-postgres\",\"postgres\"],\"DNSNames\":[\"aeralyth-postgres\",\"postgres\",\"9bf5ebb64fbc\"],\"DriverOpts\":null,\"EndpointID\":\"1f36e536caf113521791b4473e010702352b37d9132a583f3f36e6eef53c4d81\",\"Gateway\":\"172.19.0.1\",\"GlobalIPv6Address\":\"\",\"GlobalIPv6PrefixLen\":0,\"GwPriority\":0,\"IPAMConfig\":null,\"IPAddress\":\"172.19.0.2\",\"IPPrefixLen\":16,\"IPv6Gateway\":\"\",\"Links\":null,\"MacAddress\":\"42:75:31:b6:ac:aa\",\"NetworkID\":\"37165be6ac5f908486e122f23517a41911cb70df1d9aada33cab3ff570e8cb37\"}}}\n{\"id\":\"d2b35a15cc9dd1b451ff7c80f3e48f887ab833b221f1878eb1ed776b16ffe2ac\",\"name\":\"/adminsearch-nextjs-1\",\"running\":false,\"created\":\"2026-07-31T22:18:32.472257554Z\",\"startedAt\":\"2026-08-19T14:30:42.363510544Z\",\"mounts\":[],\"ports\":{},\"networks\":{\"adminsearch_default\":{\"Aliases\":[\"adminsearch-nextjs-1\",\"nextjs\"],\"DNSNames\":[\"adminsearch-nextjs-1\",\"nextjs\",\"d2b35a15cc9d\"],\"DriverOpts\":null,\"EndpointID\":\"\",\"Gateway\":\"\",\"GlobalIPv6Address\":\"\",\"GlobalIPv6PrefixLen\":0,\"GwPriority\":0,\"IPAMConfig\":null,\"IPAddress\":\"\",\"IPPrefixLen\":0,\"IPv6Gateway\":\"\",\"Links\":null,\"MacAddress\":\"\",\"NetworkID\":\"b23d9399e8adeb5e250fd4a4b07fc420ecf335207b3fba31d2edec908708b260\"}}}\n{\"id\":\"10baec00da7f0e87f2f33c19c2b8c63c12cf72db4d2ea3f2b5397da3e030dfed\",\"name\":\"/adminsearch-valkey-1\",\"running\":false,\"created\":\"2026-07-31T20:14:37.991902793Z\",\"startedAt\":\"2026-08-19T14:30:42.363802252Z\",\"mounts\":[],\"ports\":{},\"networks\":{\"adminsearch_default\":{\"Aliases\":[\"adminsearch-valkey-1\",\"valkey\"],\"DNSNames\":[\"adminsearch-valkey-1\",\"valkey\",\"10baec00da7f\"],\"DriverOpts\":null,\"EndpointID\":\"\",\"Gateway\":\"\",\"GlobalIPv6Address\":\"\",\"GlobalIPv6PrefixLen\":0,\"GwPriority\":0,\"IPAMConfig\":null,\"IPAddress\":\"\",\"IPPrefixLen\":0,\"IPv6Gateway\":\"\",\"Links\":null,\"MacAddress\":\"\",\"NetworkID\":\"b23d9399e8adeb5e250fd4a4b07fc420ecf335207b3fba31d2edec908708b260\"}}}\n{\"id\":\"98ae03f0e5b52c2674dda7fa65473a88d98077c901837864d9bdb687e22430aa\",\"name\":\"/adminsearch-caddy-1\",\"running\":false,\"created\":\"2026-07-31T20:10:08.847863918Z\",\"startedAt\":\"2026-08-19T14:30:48.006291172Z\",\"mounts\":[{\"Destination\":\"/config\",\"Driver\":\"local\",\"Mode\":\"rw\",\"Name\":\"adminsearch_caddy-config\",\"Propagation\":\"\",\"RW\":true,\"Source\":\"/var/lib/docker/volumes/adminsearch_caddy-config/_data\",\"Type\":\"volume\"},{\"Destination\":\"/data\",\"Driver\":\"local\",\"Mode\":\"rw\",\"Name\":\"adminsearch_caddy-data\",\"Propagation\":\"\",\"RW\":true,\"Source\":\"/var/lib/docker/volumes/adminsearch_caddy-data/_data\",\"Type\":\"volume\"},{\"Destination\":\"/etc/caddy/Caddyfile\",\"Mode\":\"ro\",\"Propagation\":\"rprivate\",\"RW\":false,\"Source\":\"/Users/timheld/Documents/Projects/AdminSearch/docker/caddy/Caddyfile\",\"Type\":\"bind\"}],\"ports\":{},\"networks\":{\"adminsearch_default\":{\"Aliases\":[\"adminsearch-caddy-1\",\"caddy\"],\"DNSNames\":[\"adminsearch-caddy-1\",\"caddy\",\"98ae03f0e5b5\"],\"DriverOpts\":null,\"EndpointID\":\"\",\"Gateway\":\"\",\"GlobalIPv6Address\":\"\",\"GlobalIPv6PrefixLen\":0,\"GwPriority\":0,\"IPAMConfig\":null,\"IPAddress\":\"\",\"IPPrefixLen\":0,\"IPv6Gateway\":\"\",\"Links\":null,\"MacAddress\":\"\",\"NetworkID\":\"b23d9399e8adeb5e250fd4a4b07fc420ecf335207b3fba31d2edec908708b260\"}}}\n{\"id\":\"f696bb05c53cb7cd1668f04955b566e6e0db17ac0c481113ac1a47f5fa5d1967\",\"name\":\"/adminsearch-searxng-core-1\",\"running\":false,\"created\":\"2026-07-31T20:10:08.74411946Z\",\"startedAt\":\"2026-08-19T14:30:48.008651463Z\",\"mounts\":[{\"Destination\":\"/etc/searxng\",\"Mode\":\"rw\",\"Propagation\":\"rprivate\",\"RW\":true,\"Source\":\"/Users/timheld/Documents/Projects/AdminSearch/searxng/core-config\",\"Type\":\"bind\"},{\"Destination\":\"/var/cache/searxng\",\"Driver\":\"local\",\"Mode\":\"rw\",\"Name\":\"adminsearch_searxng-cache\",\"Propagation\":\"\",\"RW\":true,\"Source\":\"/var/lib/docker/volumes/adminsearch_searxng-cache/_data\",\"Type\":\"volume\"}],\"ports\":{},\"networks\":{\"adminsearch_default\":{\"Aliases\":[\"adminsearch-searxng-core-1\",\"searxng-core\"],\"DNSNames\":[\"adminsearch-searxng-core-1\",\"searxng-core\",\"f696bb05c53c\"],\"DriverOpts\":null,\"EndpointID\":\"\",\"Gateway\":\"\",\"GlobalIPv6Address\":\"\",\"GlobalIPv6PrefixLen\":0,\"GwPriority\":0,\"IPAMConfig\":null,\"IPAddress\":\"\",\"IPPrefixLen\":0,\"IPv6Gateway\":\"\",\"Links\":null,\"MacAddress\":\"\",\"NetworkID\":\"b23d9399e8adeb5e250fd4a4b07fc420ecf335207b3fba31d2edec908708b260\"}}}\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "docker",
+        "network",
+        "inspect",
+        "af5edf12e3e7d86f82ca69b9921077ce0b2cc2c266c83725407fec30328b0eab"
+      ],
+      "exitCode": 0,
+      "stdout": "[\n    {\n        \"Name\": \"aeralyth-audit-db-suite_default\",\n        \"Id\": \"af5edf12e3e7d86f82ca69b9921077ce0b2cc2c266c83725407fec30328b0eab\",\n        \"Created\": \"2026-09-12T11:05:07.872394176Z\",\n        \"Scope\": \"local\",\n        \"Driver\": \"bridge\",\n        \"EnableIPv4\": true,\n        \"EnableIPv6\": false,\n        \"IPAM\": {\n            \"Driver\": \"default\",\n            \"Options\": null,\n            \"Config\": [\n                {\n                    \"Subnet\": \"172.21.0.0/16\",\n                    \"Gateway\": \"172.21.0.1\"\n                }\n            ]\n        },\n        \"Internal\": false,\n        \"Attachable\": false,\n        \"Ingress\": false,\n        \"ConfigFrom\": {\n            \"Network\": \"\"\n        },\n        \"ConfigOnly\": false,\n        \"Options\": {\n            \"com.docker.network.enable_ipv4\": \"true\",\n            \"com.docker.network.enable_ipv6\": \"false\"\n        },\n        \"Labels\": {\n            \"com.docker.compose.config-hash\": \"626212c151292dcc171650330981e1676dd2cd6837a4af27c02bd8d70747986f\",\n            \"com.docker.compose.network\": \"default\",\n            \"com.docker.compose.project\": \"aeralyth-audit-db-suite\",\n            \"com.docker.compose.version\": \"5.5.1\"\n        },\n        \"Containers\": {\n            \"153d72b51279ea65595076978a1e52b053773df5ad9abd3f5d0726ec457f17b0\": {\n                \"Name\": \"aeralyth-audit-db-suite-20260912\",\n                \"EndpointID\": \"c5f025d431e0ced4734b7b7735c02fbe928eebf11d0d7fdd42c3d22fef4f532f\",\n                \"MacAddress\": \"be:be:37:c5:22:b5\",\n                \"IPv4Address\": \"172.21.0.2/16\",\n                \"IPv6Address\": \"\"\n            }\n        },\n        \"Status\": {\n            \"IPAM\": {\n                \"Subnets\": {\n                    \"172.21.0.0/16\": {\n                        \"IPsInUse\": 4,\n                        \"DynamicIPsAvailable\": 65532\n                    }\n                }\n            }\n        }\n    }\n]\n",
+      "stderr": ""
+    },
+    {
+      "argv": [
+        "docker",
+        "network",
+        "inspect",
+        "f4b8d55c99eb6c4e6ac30a4311f4c1e9466e840f7c94bbc89671947aa8e955a7"
+      ],
+      "exitCode": 0,
+      "stdout": "[\n    {\n        \"Name\": \"aeralyth-audit-integration-20260912\",\n        \"Id\": \"f4b8d55c99eb6c4e6ac30a4311f4c1e9466e840f7c94bbc89671947aa8e955a7\",\n        \"Created\": \"2026-09-12T11:02:41.241345261Z\",\n        \"Scope\": \"local\",\n        \"Driver\": \"bridge\",\n        \"EnableIPv4\": true,\n        \"EnableIPv6\": false,\n        \"IPAM\": {\n            \"Driver\": \"default\",\n            \"Options\": {},\n            \"Config\": [\n                {\n                    \"Subnet\": \"172.20.0.0/16\",\n                    \"Gateway\": \"172.20.0.1\"\n                }\n            ]\n        },\n        \"Internal\": false,\n        \"Attachable\": false,\n        \"Ingress\": false,\n        \"ConfigFrom\": {\n            \"Network\": \"\"\n        },\n        \"ConfigOnly\": false,\n        \"Options\": {\n            \"com.docker.network.enable_ipv4\": \"true\",\n            \"com.docker.network.enable_ipv6\": \"false\"\n        },\n        \"Labels\": {},\n        \"Containers\": {\n            \"62a74a0cbd912ad99e47336868556c866b59ed8aa6a53748d88cc996611370f8\": {\n                \"Name\": \"aeralyth-audit-s3-20260912\",\n                \"EndpointID\": \"a2d7de303c90c7d9bc9c9eed1f1e367ce2631ce9f63d27df607eef4f78e2bd32\",\n                \"MacAddress\": \"26:6e:2c:f8:bf:77\",\n                \"IPv4Address\": \"172.20.0.3/16\",\n                \"IPv6Address\": \"\"\n            },\n            \"832beb83fb65bf8422d43ebe8681960419e7f9899b7d2da8b62cda7c8281c30b\": {\n                \"Name\": \"aeralyth-audit-20260912\",\n                \"EndpointID\": \"1fd3c823004a76a3e078d8056673dc43815326e80b108e923259d54d9611f421\",\n                \"MacAddress\": \"fa:3e:da:98:a8:fe\",\n                \"IPv4Address\": \"172.20.0.2/16\",\n                \"IPv6Address\": \"\"\n            }\n        },\n        \"Status\": {\n            \"IPAM\": {\n                \"Subnets\": {\n                    \"172.20.0.0/16\": {\n                        \"IPsInUse\": 5,\n                        \"DynamicIPsAvailable\": 65531\n                    }\n                }\n            }\n        }\n    }\n]\n",
+      "stderr": ""
+    }
+  ]
+}

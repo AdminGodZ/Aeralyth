@@ -1,0 +1,1277 @@
+{
+  "recordedAt": "2026-09-12T12:46:11.644125+00:00",
+  "passed": true,
+  "sameWorkloadConfiguration": {
+    "durationSeconds": 30,
+    "baselineSeconds": 5,
+    "recoverySeconds": 5,
+    "arrivalRate": 10,
+    "concurrency": 32,
+    "timeoutMs": 5000,
+    "idleSeconds": 2,
+    "idleSettleMs": 1000
+  },
+  "sameFixture": {
+    "rows": 1000,
+    "depth": 16,
+    "streams": 8,
+    "sharedUsers": 1,
+    "uploadBytes": 65536,
+    "encryptedMetadata": true,
+    "expiredSessions": 250,
+    "providerCleanupJobs": 32
+  },
+  "results": [
+    {
+      "artifact": "debug",
+      "report": "performance/results/final-native-2026-09-12/debug/mixed.json",
+      "timestamp": "2026-09-12T12:21:02.747Z",
+      "identity": "fe9556cf9f011297e16500f18cdf04b991b35635:6a9494aa3f7e781e81289f0a3f10b1f1590f5988e563753c30489897c8beefab:7729508bb391713a8e750daaf23e6d4afda23e7b1dd9578be2e632362ff41b3b",
+      "routing": "direct-actix",
+      "offered": 400,
+      "completed": 400,
+      "failed": 0,
+      "dropped": 0,
+      "phaseP99Ms": {
+        "baseline": 53.23054200000024,
+        "mixed": 52.39500000000044,
+        "recovery": 53.59633400000166
+      },
+      "mixedOperations": {
+        "browse": {
+          "offered": 100,
+          "started": 100,
+          "completed": 100,
+          "successful": 100,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 100,
+              "mean": 11.559904270000443,
+              "p50": 11.027082999999038,
+              "p95": 16.19912500000646,
+              "p99": 19.621916000000056,
+              "max": 19.635874999999942
+            },
+            "success": {
+              "count": 100,
+              "mean": 11.559904270000443,
+              "p50": 11.027082999999038,
+              "p95": 16.19912500000646,
+              "p99": 19.621916000000056,
+              "max": 19.635874999999942
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 100,
+            "mean": 10.497821199999853,
+            "p50": 9.921958999999333,
+            "p95": 14.702125000003434,
+            "p99": 18.53162500000144,
+            "max": 19.030624999999418
+          },
+          "startDelayMs": {
+            "count": 100,
+            "mean": 1.0556113200005712,
+            "p50": 1.024583000005805,
+            "p95": 2.2162909999988187,
+            "p99": 2.3859579999989364,
+            "max": 2.7132500000006985
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "browse-shared": {
+          "offered": 50,
+          "started": 50,
+          "completed": 50,
+          "successful": 50,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 50,
+              "mean": 20.264600560000435,
+              "p50": 20.224458000000595,
+              "p95": 27.590957999998864,
+              "p99": 33.306124999999156,
+              "max": 33.306124999999156
+            },
+            "success": {
+              "count": 50,
+              "mean": 20.264600560000435,
+              "p50": 20.224458000000595,
+              "p95": 27.590957999998864,
+              "p99": 33.306124999999156,
+              "max": 33.306124999999156
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 50,
+            "mean": 19.171967619999776,
+            "p50": 18.761208000003535,
+            "p95": 26.398959000001923,
+            "p99": 32.11466699999983,
+            "max": 32.11466699999983
+          },
+          "startDelayMs": {
+            "count": 50,
+            "mean": 1.0859846800002924,
+            "p50": 1.217666000000463,
+            "p95": 2.1762500000004366,
+            "p99": 2.4336659999989934,
+            "max": 2.4336659999989934
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "metadata": {
+          "offered": 75,
+          "started": 75,
+          "completed": 75,
+          "successful": 75,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 75,
+              "mean": 38.37727352000031,
+              "p50": 37.056790999999066,
+              "p95": 48.48224999999911,
+              "p99": 50.877958000000945,
+              "max": 50.877958000000945
+            },
+            "success": {
+              "count": 75,
+              "mean": 38.37727352000031,
+              "p50": 37.056790999999066,
+              "p95": 48.48224999999911,
+              "p99": 50.877958000000945,
+              "max": 50.877958000000945
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 75,
+            "mean": 37.228741186666475,
+            "p50": 35.96429199999693,
+            "p95": 47.37066699999559,
+            "p99": 50.62800000000061,
+            "max": 50.62800000000061
+          },
+          "startDelayMs": {
+            "count": 75,
+            "mean": 1.1417435333338897,
+            "p50": 1.2609159999992698,
+            "p95": 1.899874999999156,
+            "p99": 2.5616659999996045,
+            "max": 2.5616659999996045
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "publication": {
+          "offered": 25,
+          "started": 25,
+          "completed": 25,
+          "successful": 25,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 25,
+              "mean": 49.681291320000526,
+              "p50": 48.6919160000034,
+              "p95": 59.090666000000056,
+              "p99": 68.17625000000044,
+              "max": 68.17625000000044
+            },
+            "success": {
+              "count": 25,
+              "mean": 49.681291320000526,
+              "p50": 48.6919160000034,
+              "p95": 59.090666000000056,
+              "p99": 68.17625000000044,
+              "max": 68.17625000000044
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 25,
+            "mean": 48.522108319999894,
+            "p50": 47.90875000000233,
+            "p95": 58.59562499999993,
+            "p99": 66.35308299999997,
+            "max": 66.35308299999997
+          },
+          "startDelayMs": {
+            "count": 25,
+            "mean": 1.1539663200005452,
+            "p50": 1.077207999998791,
+            "p95": 2.578625000000102,
+            "p99": 2.6501250000001164,
+            "max": 2.6501250000001164
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "realtime-sync": {
+          "offered": 25,
+          "started": 25,
+          "completed": 25,
+          "successful": 25,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 25,
+              "mean": 3.5977863600006095,
+              "p50": 3.6382080000039423,
+              "p95": 5.189374999998108,
+              "p99": 5.384874999999738,
+              "max": 5.384874999999738
+            },
+            "success": {
+              "count": 25,
+              "mean": 3.5977863600006095,
+              "p50": 3.6382080000039423,
+              "p95": 5.189374999998108,
+              "p99": 5.384874999999738,
+              "max": 5.384874999999738
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 25,
+            "mean": 2.4938816799994674,
+            "p50": 2.513582999999926,
+            "p95": 3.280125000004773,
+            "p99": 3.440499999996973,
+            "max": 3.440499999996973
+          },
+          "startDelayMs": {
+            "count": 25,
+            "mean": 1.0970363600001292,
+            "p50": 0.938624999998865,
+            "p95": 2.615666000001511,
+            "p99": 2.7062909999986005,
+            "max": 2.7062909999986005
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "maintenance": {
+          "offered": 25,
+          "started": 25,
+          "completed": 25,
+          "successful": 25,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 25,
+              "mean": 17.66401632000023,
+              "p50": 16.989832999999635,
+              "p95": 23.143165999999837,
+              "p99": 23.664291000000958,
+              "max": 23.664291000000958
+            },
+            "success": {
+              "count": 25,
+              "mean": 17.66401632000023,
+              "p50": 16.989832999999635,
+              "p95": 23.143165999999837,
+              "p99": 23.664291000000958,
+              "max": 23.664291000000958
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 25,
+            "mean": 16.368503199999832,
+            "p50": 16.349874999999884,
+            "p95": 21.338041999999405,
+            "p99": 22.842540999999983,
+            "max": 22.842540999999983
+          },
+          "startDelayMs": {
+            "count": 25,
+            "mean": 1.2898029600002336,
+            "p50": 1.2981660000004922,
+            "p95": 2.562207999999373,
+            "p99": 2.7492910000000848,
+            "max": 2.7492910000000848
+          },
+          "dropReasons": {},
+          "errors": {}
+        }
+      },
+      "memory": {
+        "source": "api-rss",
+        "initialBytes": 69926912,
+        "finalBytes": 74563584,
+        "peakBytes": 74563584,
+        "growthBytes": 4636672
+      },
+      "idleMaintenance": {
+        "durationMs": 2074.0176250000004,
+        "maximumRunsPerSecond": 10,
+        "workers": {
+          "encrypted upload expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "invitation expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "legacy upload expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "multipart reconciliation": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "session expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "storage deletion": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "trash expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "upload finalization": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "user deletion": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          }
+        },
+        "violations": []
+      },
+      "fixtureVerification": {
+        "expiredSessionsRemaining": 0,
+        "providerJobsRemaining": 0,
+        "providerJobsFailed": 0,
+        "oldestProviderJobMs": 0,
+        "expiredUploadsRemaining": 0,
+        "streamFrames": 192,
+        "streamErrors": 0,
+        "oldestSseFrameAgeMs": 4457.762875,
+        "published": 25,
+        "transferredBytes": 3277600,
+        "maintenanceStarted": 31,
+        "clientRssBytes": 134135808
+      },
+      "thresholds": {
+        "maximumP99Ms": 1000,
+        "maximumErrorRate": 0,
+        "maximumDroppedRate": 0,
+        "maximumMemoryGrowthBytes": 268435456,
+        "enforceTiming": true,
+        "maximumIdleMaintenanceRunsPerSecond": 10
+      }
+    },
+    {
+      "artifact": "release",
+      "report": "performance/results/final-native-2026-09-12/release/mixed.json",
+      "timestamp": "2026-09-12T12:19:14.264Z",
+      "identity": "fe9556cf9f011297e16500f18cdf04b991b35635:6a9494aa3f7e781e81289f0a3f10b1f1590f5988e563753c30489897c8beefab:744a513655b7efd0a28d7cf406a077f59aa05e3939ec48ead58234b236b0e7e8",
+      "routing": "direct-actix",
+      "offered": 400,
+      "completed": 400,
+      "failed": 0,
+      "dropped": 0,
+      "phaseP99Ms": {
+        "baseline": 42.3647919999994,
+        "mixed": 50.024459000000206,
+        "recovery": 47.17095800000243
+      },
+      "mixedOperations": {
+        "browse": {
+          "offered": 100,
+          "started": 100,
+          "completed": 100,
+          "successful": 100,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 100,
+              "mean": 10.939629500001155,
+              "p50": 10.54816700000083,
+              "p95": 15.104584000000614,
+              "p99": 16.668000000001484,
+              "max": 16.95783400000073
+            },
+            "success": {
+              "count": 100,
+              "mean": 10.939629500001155,
+              "p50": 10.54816700000083,
+              "p95": 15.104584000000614,
+              "p99": 16.668000000001484,
+              "max": 16.95783400000073
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 100,
+            "mean": 9.458869160000013,
+            "p50": 9.103957999999693,
+            "p95": 13.442457999997714,
+            "p99": 15.014624999999796,
+            "max": 15.481458999998722
+          },
+          "startDelayMs": {
+            "count": 100,
+            "mean": 1.4748707500008096,
+            "p50": 1.4795420000009472,
+            "p95": 2.3301250000004075,
+            "p99": 2.4396670000023732,
+            "max": 2.456500000000233
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "browse-shared": {
+          "offered": 50,
+          "started": 50,
+          "completed": 50,
+          "successful": 50,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 50,
+              "mean": 17.151258660001186,
+              "p50": 17.44329199999993,
+              "p95": 22.171041999999943,
+              "p99": 30.300167000001238,
+              "max": 30.300167000001238
+            },
+            "success": {
+              "count": 50,
+              "mean": 17.151258660001186,
+              "p50": 17.44329199999993,
+              "p95": 22.171041999999943,
+              "p99": 30.300167000001238,
+              "max": 30.300167000001238
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 50,
+            "mean": 15.688034939999888,
+            "p50": 16.157083999998576,
+            "p95": 20.063000000000102,
+            "p99": 28.103416000001744,
+            "max": 28.103416000001744
+          },
+          "startDelayMs": {
+            "count": 50,
+            "mean": 1.4567712000012398,
+            "p50": 1.565042000001995,
+            "p95": 2.3758750000051805,
+            "p99": 2.4246670000029553,
+            "max": 2.4246670000029553
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "metadata": {
+          "offered": 75,
+          "started": 75,
+          "completed": 75,
+          "successful": 75,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 75,
+              "mean": 35.69362982666799,
+              "p50": 35.068333999999595,
+              "p95": 46.48804200000086,
+              "p99": 50.024459000000206,
+              "max": 50.024459000000206
+            },
+            "success": {
+              "count": 75,
+              "mean": 35.69362982666799,
+              "p50": 35.068333999999595,
+              "p95": 46.48804200000086,
+              "p99": 50.024459000000206,
+              "max": 50.024459000000206
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 75,
+            "mean": 34.20441332000007,
+            "p50": 33.381499999999505,
+            "p95": 44.80495900000096,
+            "p99": 48.52491700000246,
+            "max": 48.52491700000246
+          },
+          "startDelayMs": {
+            "count": 75,
+            "mean": 1.4838242266676873,
+            "p50": 1.5434999999997672,
+            "p95": 2.336042000002635,
+            "p99": 2.4319590000013704,
+            "max": 2.4319590000013704
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "publication": {
+          "offered": 25,
+          "started": 25,
+          "completed": 25,
+          "successful": 25,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 25,
+              "mean": 46.87770364000091,
+              "p50": 46.29375000000073,
+              "p95": 59.14837500000067,
+              "p99": 59.88774999999987,
+              "max": 59.88774999999987
+            },
+            "success": {
+              "count": 25,
+              "mean": 46.87770364000091,
+              "p50": 46.29375000000073,
+              "p95": 59.14837500000067,
+              "p99": 59.88774999999987,
+              "max": 59.88774999999987
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 25,
+            "mean": 45.400196639999415,
+            "p50": 44.812792000004265,
+            "p95": 57.307207999998354,
+            "p99": 59.116416000000754,
+            "max": 59.116416000000754
+          },
+          "startDelayMs": {
+            "count": 25,
+            "mean": 1.4723436800010676,
+            "p50": 1.5165839999990567,
+            "p95": 2.283000000003085,
+            "p99": 2.3884999999991123,
+            "max": 2.3884999999991123
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "realtime-sync": {
+          "offered": 25,
+          "started": 25,
+          "completed": 25,
+          "successful": 25,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 25,
+              "mean": 3.916055240001151,
+              "p50": 3.7899170000018785,
+              "p95": 5.065042000001995,
+              "p99": 5.298416999998153,
+              "max": 5.298416999998153
+            },
+            "success": {
+              "count": 25,
+              "mean": 3.916055240001151,
+              "p50": 3.7899170000018785,
+              "p95": 5.065042000001995,
+              "p99": 5.298416999998153,
+              "max": 5.298416999998153
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 25,
+            "mean": 2.342090079999689,
+            "p50": 2.282082999998238,
+            "p95": 2.8503750000018044,
+            "p99": 2.869582999999693,
+            "max": 2.869582999999693
+          },
+          "startDelayMs": {
+            "count": 25,
+            "mean": 1.5677836800014484,
+            "p50": 1.549709000002622,
+            "p95": 2.4399170000033337,
+            "p99": 2.4729170000027807,
+            "max": 2.4729170000027807
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "maintenance": {
+          "offered": 25,
+          "started": 25,
+          "completed": 25,
+          "successful": 25,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 25,
+              "mean": 16.863456880001102,
+              "p50": 17.425209000000905,
+              "p95": 20.465000000000146,
+              "p99": 20.939250000003085,
+              "max": 20.939250000003085
+            },
+            "success": {
+              "count": 25,
+              "mean": 16.863456880001102,
+              "p50": 17.425209000000905,
+              "p95": 20.465000000000146,
+              "p99": 20.939250000003085,
+              "max": 20.939250000003085
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 25,
+            "mean": 15.443776639999923,
+            "p50": 15.87920799999847,
+            "p95": 18.88824999999997,
+            "p99": 18.932166000000507,
+            "max": 18.932166000000507
+          },
+          "startDelayMs": {
+            "count": 25,
+            "mean": 1.4134569600018585,
+            "p50": 1.486125000003085,
+            "p95": 2.3401670000021113,
+            "p99": 2.468417000003683,
+            "max": 2.468417000003683
+          },
+          "dropReasons": {},
+          "errors": {}
+        }
+      },
+      "memory": {
+        "source": "api-rss",
+        "initialBytes": 50413568,
+        "finalBytes": 53428224,
+        "peakBytes": 53428224,
+        "growthBytes": 3014656
+      },
+      "idleMaintenance": {
+        "durationMs": 2079.5757920000033,
+        "maximumRunsPerSecond": 10,
+        "workers": {
+          "encrypted upload expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "invitation expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "legacy upload expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "multipart reconciliation": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "session expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "storage deletion": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "trash expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "upload finalization": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "user deletion": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          }
+        },
+        "violations": []
+      },
+      "fixtureVerification": {
+        "expiredSessionsRemaining": 0,
+        "providerJobsRemaining": 0,
+        "providerJobsFailed": 0,
+        "oldestProviderJobMs": 0,
+        "expiredUploadsRemaining": 0,
+        "streamFrames": 168,
+        "streamErrors": 0,
+        "oldestSseFrameAgeMs": 3987.9227919999976,
+        "published": 25,
+        "transferredBytes": 3277600,
+        "maintenanceStarted": 31,
+        "clientRssBytes": 148619264
+      },
+      "thresholds": {
+        "maximumP99Ms": 1000,
+        "maximumErrorRate": 0,
+        "maximumDroppedRate": 0,
+        "maximumMemoryGrowthBytes": 268435456,
+        "enforceTiming": true,
+        "maximumIdleMaintenanceRunsPerSecond": 10
+      }
+    },
+    {
+      "artifact": "production-image",
+      "report": "performance/results/production-final-2026-09-12/mixed-30s.json",
+      "timestamp": "2026-09-12T12:44:31.159Z",
+      "identity": "fe9556cf9f011297e16500f18cdf04b991b35635:52f1f9832745cf4144b4cb5ceba79ce9e8a952a5819d9692e734afd042b45d38:sha256:949ecffa36245a27e920ad364dc3575e9977dece5109318648ebffe97ddaf290",
+      "routing": "caddy",
+      "offered": 400,
+      "completed": 400,
+      "failed": 0,
+      "dropped": 0,
+      "phaseP99Ms": {
+        "baseline": 35.20729200000005,
+        "mixed": 45.161583000000974,
+        "recovery": 31.652416999997513
+      },
+      "mixedOperations": {
+        "browse": {
+          "offered": 100,
+          "started": 100,
+          "completed": 100,
+          "successful": 100,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 100,
+              "mean": 11.332021359999363,
+              "p50": 12.21612499999901,
+              "p95": 14.191458000001148,
+              "p99": 15.058207999998558,
+              "max": 15.735874999998487
+            },
+            "success": {
+              "count": 100,
+              "mean": 11.332021359999363,
+              "p50": 12.21612499999901,
+              "p95": 14.191458000001148,
+              "p99": 15.058207999998558,
+              "max": 15.735874999998487
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 100,
+            "mean": 10.08772339000012,
+            "p50": 11.26154200000019,
+            "p95": 12.689292000002752,
+            "p99": 13.021749999999884,
+            "max": 14.1998339999991
+          },
+          "startDelayMs": {
+            "count": 100,
+            "mean": 1.2376246799993351,
+            "p50": 0.8729999999995925,
+            "p95": 2.625499999998283,
+            "p99": 2.7214999999996508,
+            "max": 2.7445000000006985
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "browse-shared": {
+          "offered": 50,
+          "started": 50,
+          "completed": 50,
+          "successful": 50,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 50,
+              "mean": 16.98163131999965,
+              "p50": 15.81224999999904,
+              "p95": 23.470707999998922,
+              "p99": 25.886624999999185,
+              "max": 25.886624999999185
+            },
+            "success": {
+              "count": 50,
+              "mean": 16.98163131999965,
+              "p50": 15.81224999999904,
+              "p95": 23.470707999998922,
+              "p99": 25.886624999999185,
+              "max": 25.886624999999185
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 50,
+            "mean": 15.733067459999875,
+            "p50": 15.126750000003085,
+            "p95": 22.582416999999623,
+            "p99": 25.28099999999904,
+            "max": 25.28099999999904
+          },
+          "startDelayMs": {
+            "count": 50,
+            "mean": 1.2419171399992774,
+            "p50": 0.905665999998746,
+            "p95": 2.4718749999992724,
+            "p99": 2.7526249999991705,
+            "max": 2.7526249999991705
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "metadata": {
+          "offered": 75,
+          "started": 75,
+          "completed": 75,
+          "successful": 75,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 75,
+              "mean": 27.9134235333328,
+              "p50": 28.33258299999943,
+              "p95": 33.30649999999878,
+              "p99": 34.30749999999898,
+              "max": 34.30749999999898
+            },
+            "success": {
+              "count": 75,
+              "mean": 27.9134235333328,
+              "p50": 28.33258299999943,
+              "p95": 33.30649999999878,
+              "p99": 34.30749999999898,
+              "max": 34.30749999999898
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 75,
+            "mean": 26.64288775999965,
+            "p50": 27.295374999997875,
+            "p95": 31.56791599999997,
+            "p99": 32.35350000000108,
+            "max": 32.35350000000108
+          },
+          "startDelayMs": {
+            "count": 75,
+            "mean": 1.2644046533328948,
+            "p50": 0.8474159999987023,
+            "p95": 2.522040999996534,
+            "p99": 2.732040999999299,
+            "max": 2.732040999999299
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "publication": {
+          "offered": 25,
+          "started": 25,
+          "completed": 25,
+          "successful": 25,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 25,
+              "mean": 41.31993803999961,
+              "p50": 41.30674999999974,
+              "p95": 51.18045799999891,
+              "p99": 66.19179099999928,
+              "max": 66.19179099999928
+            },
+            "success": {
+              "count": 25,
+              "mean": 41.31993803999961,
+              "p50": 41.30674999999974,
+              "p95": 51.18045799999891,
+              "p99": 66.19179099999928,
+              "max": 66.19179099999928
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 25,
+            "mean": 40.05249835999966,
+            "p50": 40.38912499999424,
+            "p95": 48.66125000000102,
+            "p99": 65.31483300000036,
+            "max": 65.31483300000036
+          },
+          "startDelayMs": {
+            "count": 25,
+            "mean": 1.261804559999946,
+            "p50": 1.0310830000016722,
+            "p95": 2.5232079999987036,
+            "p99": 2.528416000001016,
+            "max": 2.528416000001016
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "realtime-sync": {
+          "offered": 25,
+          "started": 25,
+          "completed": 25,
+          "successful": 25,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 25,
+              "mean": 3.8135863999991853,
+              "p50": 3.8314160000008997,
+              "p95": 4.7479999999995925,
+              "p99": 4.762624999999389,
+              "max": 4.762624999999389
+            },
+            "success": {
+              "count": 25,
+              "mean": 3.8135863999991853,
+              "p50": 3.8314160000008997,
+              "p95": 4.7479999999995925,
+              "p99": 4.762624999999389,
+              "max": 4.762624999999389
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 25,
+            "mean": 2.5297382399999333,
+            "p50": 2.330915999998979,
+            "p95": 3.4185420000030717,
+            "p99": 3.713917000000947,
+            "max": 3.713917000000947
+          },
+          "startDelayMs": {
+            "count": 25,
+            "mean": 1.2788446799996018,
+            "p50": 0.9478749999980209,
+            "p95": 2.5022079999980633,
+            "p99": 2.7035409999989497,
+            "max": 2.7035409999989497
+          },
+          "dropReasons": {},
+          "errors": {}
+        },
+        "maintenance": {
+          "offered": 25,
+          "started": 25,
+          "completed": 25,
+          "successful": 25,
+          "failed": 0,
+          "dropped": 0,
+          "errorRate": 0,
+          "droppedRate": 0,
+          "latencyMs": {
+            "all": {
+              "count": 25,
+              "mean": 14.00711123999943,
+              "p50": 14.886875000000146,
+              "p95": 17.19829099999879,
+              "p99": 17.210500000001048,
+              "max": 17.210500000001048
+            },
+            "success": {
+              "count": 25,
+              "mean": 14.00711123999943,
+              "p50": 14.886875000000146,
+              "p95": 17.19829099999879,
+              "p99": 17.210500000001048,
+              "max": 17.210500000001048
+            },
+            "failure": {
+              "count": 0,
+              "mean": null,
+              "p50": null,
+              "p95": null,
+              "p99": null,
+              "max": null
+            }
+          },
+          "serviceMs": {
+            "count": 25,
+            "mean": 12.468090039999588,
+            "p50": 13.252540999999837,
+            "p95": 15.03087499999856,
+            "p99": 15.538292000001093,
+            "max": 15.538292000001093
+          },
+          "startDelayMs": {
+            "count": 25,
+            "mean": 1.5325679999993735,
+            "p50": 1.3890409999985422,
+            "p95": 2.7204579999997804,
+            "p99": 2.7724579999994603,
+            "max": 2.7724579999994603
+          },
+          "dropReasons": {},
+          "errors": {}
+        }
+      },
+      "memory": {
+        "source": "container-cgroup-v2",
+        "initialBytes": 98787328,
+        "finalBytes": 85811200,
+        "peakBytes": 98787328,
+        "growthBytes": -12976128
+      },
+      "idleMaintenance": {
+        "durationMs": 2074.6640419999967,
+        "maximumRunsPerSecond": 10,
+        "workers": {
+          "encrypted upload expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "invitation expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "legacy upload expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "multipart reconciliation": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "session expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "storage deletion": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "trash expiry": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "upload finalization": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          },
+          "user deletion": {
+            "iterations": 0,
+            "runsPerSecond": 0
+          }
+        },
+        "violations": []
+      },
+      "fixtureVerification": {
+        "expiredSessionsRemaining": 0,
+        "providerJobsRemaining": 0,
+        "providerJobsFailed": 0,
+        "oldestProviderJobMs": 0,
+        "expiredUploadsRemaining": 0,
+        "streamFrames": 184,
+        "streamErrors": 0,
+        "oldestSseFrameAgeMs": 4142.071124999995,
+        "published": 25,
+        "transferredBytes": 3277600,
+        "maintenanceStarted": 31,
+        "clientRssBytes": 136101888
+      },
+      "thresholds": {
+        "maximumP99Ms": 1000,
+        "maximumErrorRate": 0,
+        "maximumDroppedRate": 0,
+        "maximumMemoryGrowthBytes": 268435456,
+        "enforceTiming": true,
+        "maximumIdleMaintenanceRunsPerSecond": 10
+      }
+    }
+  ],
+  "interpretation": [
+    "These are one-run local comparisons of the same arrival workload and encrypted fixture, not repeated statistical estimates.",
+    "Native binaries use Rust 1.97.1 on unrestricted macOS arm64; the actual production image uses Rust 1.98 on Linux arm64 with a two-CPU quota and 2 GiB memory limit and the full Caddy routing path.",
+    "Native memory is API process RSS; image memory is the whole Caddy/Next/API cgroup, so their memory totals have different scopes.",
+    "Each artifact uses its own newly initialized database and S3 bucket on the same isolated PostgreSQL/MinIO services.",
+    "Record timestamps establish run order. Timing samples were collected sequentially without concurrent builds or other audit workloads.",
+    "Request p99 includes service completion and scheduling delay. The workload is primarily database/provider work, so differences do not establish universal CPU or production capacity gains.",
+    "HTTP 500 is not injected in these mixed runs. The separate database-stall reports deliberately fail the performance gate while their validating self-test succeeds."
+  ]
+}

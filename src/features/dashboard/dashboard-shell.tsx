@@ -1,13 +1,4 @@
-import {
-  ChevronRight,
-  FileText,
-  Folder,
-  HardDrive,
-  type LucideIcon,
-  Search,
-  Share2,
-  Star,
-} from "lucide-react";
+import { ChevronRight, Search } from "lucide-react";
 import Image from "next/image";
 import Link from "next/link";
 import type { CSSProperties, ReactNode } from "react";
@@ -27,7 +18,12 @@ import type { StorageOverviewState } from "@/features/dashboard/storage-overview
 import { UploadPanel } from "@/features/dashboard/upload-panel";
 import { UserPreferenceHydrator } from "@/features/dashboard/user-preference-hydrator";
 import { UsersContent as UsersDirectory } from "@/features/dashboard/users-content";
-import { RealtimeProvider } from "@/features/realtime/realtime-provider";
+import { FileSummaryMetrics } from "@/features/realtime/file-summary-metrics";
+import {
+  RealtimeFolderScope,
+  RealtimeProvider,
+  RealtimeSnapshotFence,
+} from "@/features/realtime/realtime-provider";
 import { RepositoryDetail } from "@/features/repositories/repository-detail";
 import { RepositoryOverview } from "@/features/repositories/repository-overview";
 import { VaultBreadcrumbs } from "@/features/vault/vault-breadcrumbs";
@@ -54,9 +50,11 @@ type DashboardFrameProps = {
   currentUser: CurrentUser;
   csrfToken: string;
   initialSidebarCollapsed: boolean;
+  realtimeCursor: string;
 };
 
 type DashboardPageProps = {
+  realtimeCursor: string;
   sectionKey: DashboardSectionKey;
   currentUser: CurrentUser;
   csrfToken: string;
@@ -79,6 +77,7 @@ export function DashboardFrame({
   currentUser,
   csrfToken,
   initialSidebarCollapsed,
+  realtimeCursor,
 }: DashboardFrameProps) {
   const accentColor =
     normalizeAccentColor(currentUser.accentColor) ?? DEFAULT_ACCENT_COLOR;
@@ -101,7 +100,7 @@ export function DashboardFrame({
         autoLockMinutes={currentUser.vaultAutoLockMinutes}
         onePasswordEnabled={currentUser.onePasswordEnabled}
       >
-        <RealtimeProvider key={currentUser.id}>
+        <RealtimeProvider key={currentUser.id} initialCursor={realtimeCursor}>
           <DashboardSidebar
             canViewSystemNavigation={currentUser.role === "admin"}
             csrfToken={csrfToken}
@@ -118,6 +117,7 @@ export function DashboardFrame({
 }
 
 export function DashboardPage({
+  realtimeCursor,
   sectionKey,
   currentUser,
   csrfToken,
@@ -139,8 +139,19 @@ export function DashboardPage({
     return null;
   }
 
+  const snapshotReady =
+    section.key === "settings"
+      ? true
+      : section.key === "users"
+        ? hasSettledSnapshot(adminUsersState)
+        : section.key === "storage"
+          ? hasSettledSnapshot(storageState)
+          : section.key === "repositories"
+            ? hasSettledSnapshot(repositoryDetailState ?? repositoriesState)
+            : hasSettledSnapshot(filesState);
+
   return (
-    <>
+    <RealtimeSnapshotFence cursor={realtimeCursor} ready={snapshotReady}>
       <TopBar section={section} currentUser={currentUser} />
       <DashboardContent
         section={section}
@@ -157,7 +168,16 @@ export function DashboardPage({
         repositoryFileId={repositoryFileId}
         storageState={storageState}
       />
-    </>
+    </RealtimeSnapshotFence>
+  );
+}
+
+function hasSettledSnapshot(state?: {
+  status: string;
+  retryable?: boolean;
+}): boolean {
+  return Boolean(
+    state && (state.status !== "unavailable" || state.retryable === false),
   );
 }
 
@@ -412,106 +432,87 @@ function FileContent({
     summary,
   } = filesState.data;
   return (
-    <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-4 py-5 sm:px-6">
-      <div className="grid shrink-0 gap-3 md:grid-cols-2 xl:grid-cols-5">
-        <FileMetric
-          icon={FileText}
-          label="Files"
-          value={String(summary.totalFiles)}
-        />
-        <FileMetric
-          icon={Folder}
-          label="Folders"
-          value={String(summary.totalFolders)}
-        />
-        <FileMetric
-          icon={Star}
-          label="Favorites"
-          value={String(summary.favoriteFiles)}
-        />
-        <FileMetric
-          icon={Share2}
-          label="Shared with me"
-          value={String(summary.sharedFiles)}
-        />
-        <FileMetric
-          icon={HardDrive}
-          label="Storage used"
-          value={formatBytes(summary.usedBytes)}
-        />
-      </div>
+    <RealtimeFolderScope
+      folderIds={[
+        ...breadcrumbs.map((breadcrumb) => breadcrumb.id),
+        currentFolderId ?? "",
+      ]}
+    >
+      <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-4 py-5 sm:px-6">
+        <FileSummaryMetrics initialSummary={summary} />
 
-      <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md border">
-        {section.key === "files" || section.key === "shared" ? (
-          <div className="flex min-h-16 shrink-0 flex-col justify-center gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
-            {e2eeMode === "off" ? (
-              <FolderBreadcrumbs
-                breadcrumbs={breadcrumbs}
-                sort={fileSort}
-                direction={fileSortDirection}
-                basePath={section.key === "shared" ? "/shared" : "/files"}
-              />
-            ) : (
-              <VaultBreadcrumbs
-                breadcrumbs={breadcrumbs}
-                sort={fileSort}
-                direction={fileSortDirection}
-                basePath={section.key === "shared" ? "/shared" : "/files"}
-              />
-            )}
-            {section.key === "files" ? (
-              <UploadPanel
+        <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md border">
+          {section.key === "files" || section.key === "shared" ? (
+            <div className="flex min-h-16 shrink-0 flex-col justify-center gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+              {e2eeMode === "off" ? (
+                <FolderBreadcrumbs
+                  breadcrumbs={breadcrumbs}
+                  sort={fileSort}
+                  direction={fileSortDirection}
+                  basePath={section.key === "shared" ? "/shared" : "/files"}
+                />
+              ) : (
+                <VaultBreadcrumbs
+                  breadcrumbs={breadcrumbs}
+                  sort={fileSort}
+                  direction={fileSortDirection}
+                  basePath={section.key === "shared" ? "/shared" : "/files"}
+                />
+              )}
+              {section.key === "files" ? (
+                <UploadPanel
+                  csrfToken={csrfToken}
+                  e2eeMode={e2eeMode}
+                  parentFolderId={currentFolderId}
+                  folderZipPromptEnabled={folderZipPromptEnabled}
+                  surface="files"
+                />
+              ) : null}
+            </div>
+          ) : null}
+
+          {entries.length ? (
+            <>
+              <VaultFileList
+                entries={entries}
+                sectionKey={section.key}
                 csrfToken={csrfToken}
-                e2eeMode={e2eeMode}
-                parentFolderId={currentFolderId}
-                folderZipPromptEnabled={folderZipPromptEnabled}
-                surface="files"
+                currentUserId={currentUserId}
+                currentFolderId={currentFolderId}
+                initialSort={fileSort}
+                initialDirection={fileSortDirection}
               />
-            ) : null}
-          </div>
-        ) : null}
-
-        {entries.length ? (
-          <>
-            <VaultFileList
-              entries={entries}
+              {hasMore && nextCursor ? (
+                <div className="flex shrink-0 justify-end border-t px-4 py-3">
+                  <Button asChild variant="outline">
+                    <Link
+                      href={{
+                        pathname: `/${section.key}`,
+                        query: {
+                          ...(section.key === "files" && currentFolderId
+                            ? { folder: currentFolderId }
+                            : {}),
+                          ...getSortQuery(fileSort, fileSortDirection),
+                          cursor: nextCursor,
+                        },
+                      }}
+                    >
+                      Next page
+                      <ChevronRight className="size-4" aria-hidden="true" />
+                    </Link>
+                  </Button>
+                </div>
+              ) : null}
+            </>
+          ) : (
+            <FilesEmptyState
               sectionKey={section.key}
-              csrfToken={csrfToken}
-              currentUserId={currentUserId}
-              currentFolderId={currentFolderId}
-              initialSort={fileSort}
-              initialDirection={fileSortDirection}
+              inFolder={Boolean(currentFolderId)}
             />
-            {hasMore && nextCursor ? (
-              <div className="flex shrink-0 justify-end border-t px-4 py-3">
-                <Button asChild variant="outline">
-                  <Link
-                    href={{
-                      pathname: `/${section.key}`,
-                      query: {
-                        ...(section.key === "files" && currentFolderId
-                          ? { folder: currentFolderId }
-                          : {}),
-                        ...getSortQuery(fileSort, fileSortDirection),
-                        cursor: nextCursor,
-                      },
-                    }}
-                  >
-                    Next page
-                    <ChevronRight className="size-4" aria-hidden="true" />
-                  </Link>
-                </Button>
-              </div>
-            ) : null}
-          </>
-        ) : (
-          <FilesEmptyState
-            sectionKey={section.key}
-            inFolder={Boolean(currentFolderId)}
-          />
-        )}
-      </section>
-    </div>
+          )}
+        </section>
+      </div>
+    </RealtimeFolderScope>
   );
 }
 
@@ -578,32 +579,6 @@ function FolderBreadcrumbs({
   );
 }
 
-function FileMetric({
-  icon: Icon,
-  label,
-  value,
-}: {
-  icon: LucideIcon;
-  label: string;
-  value: string;
-}) {
-  return (
-    <div className="grid h-24 grid-cols-[2.5rem_minmax(0,1fr)] items-center gap-3 rounded-md border px-4">
-      <span className="flex size-10 items-center justify-center text-primary">
-        <Icon className="size-5" aria-hidden="true" />
-      </span>
-      <div className="flex min-w-0 flex-col justify-center">
-        <p className="truncate text-sm leading-5 text-muted-foreground">
-          {label}
-        </p>
-        <p className="mt-0.5 truncate font-display text-2xl font-semibold leading-7 tabular-nums">
-          {value}
-        </p>
-      </div>
-    </div>
-  );
-}
-
 function FilesEmptyState({
   sectionKey,
   inFolder = false,
@@ -652,25 +627,6 @@ function getSortQuery(sort?: FileSort, direction?: FileSortDirection) {
     sort,
     direction: direction ?? (sort === "name" ? "asc" : "desc"),
   };
-}
-
-function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value <= 0) {
-    return "0 B";
-  }
-
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let unitIndex = 0;
-  let size = value;
-
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
-  }
-
-  return `${size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1)} ${
-    units[unitIndex]
-  }`;
 }
 
 function emptyFilesText(sectionKey: DashboardSectionKey) {

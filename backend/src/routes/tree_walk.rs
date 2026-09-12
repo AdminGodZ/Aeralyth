@@ -7,14 +7,13 @@ use crate::db::query_cached;
 
 const TREE_PARENT_BATCH_SIZE: usize = 256;
 const TREE_CHILD_PAGE_SIZE: i64 = 16_384;
-pub(crate) const MAX_TREE_MUTATION_NODES: usize = 1_000_000;
 pub(crate) const TREE_MUTATION_BATCH_SIZE: usize = 5_000;
 const _: () = assert!(TREE_PARENT_BATCH_SIZE <= 256);
 const _: () = assert!(TREE_CHILD_PAGE_SIZE <= 16_384);
 
 const ROOT_QUERY: &str = "
     SELECT id, entry_type
-    FROM files
+    FROM visible_files
     WHERE id = $1
       AND owner_id = $2
       AND ($3::text IS NULL OR state = $3)
@@ -24,7 +23,7 @@ const ROOT_QUERY: &str = "
 
 const CHILD_PAGE_QUERY: &str = "
     SELECT id, parent_id, entry_type
-    FROM files
+    FROM visible_files
     WHERE owner_id = $1
       AND parent_id = ANY($2::text[])
       AND ($3::text IS NULL OR state = $3)
@@ -117,6 +116,13 @@ where
         let mut cursor_parent: Option<String> = None;
         let mut cursor_id: Option<String> = None;
         loop {
+            let page_limit = TREE_CHILD_PAGE_SIZE.min(
+                scope
+                    .max_nodes
+                    .saturating_add(1)
+                    .saturating_sub(nodes.len())
+                    .max(1) as i64,
+            );
             let rows = query_cached(
                 client,
                 CHILD_PAGE_QUERY,
@@ -127,11 +133,11 @@ where
                     &scope.e2ee_state,
                     &cursor_parent,
                     &cursor_id,
-                    &TREE_CHILD_PAGE_SIZE,
+                    &page_limit,
                 ],
             )
             .await?;
-            let page_is_full = rows.len() == TREE_CHILD_PAGE_SIZE as usize;
+            let page_is_full = rows.len() == page_limit as usize;
             for row in rows {
                 let id: String = row.get("id");
                 let parent_id: String = row.get("parent_id");
@@ -150,7 +156,10 @@ where
                     parent_id: Some(parent_id),
                     depth,
                 });
-                if nodes.len() > scope.max_nodes {
+                // A depth boundary is an admission boundary, never a complete
+                // subtree. Existing descendants can exceed the insertion limit
+                // after a historical move; durable jobs must handle them all.
+                if nodes.len() > scope.max_nodes || (entry_type == "folder" && depth >= 100) {
                     return Ok(Some(TreeWalk {
                         nodes,
                         truncated: true,
@@ -229,7 +238,20 @@ mod tests {
             ("share_links", include_str!("share_links.rs")),
             ("vault", include_str!("vault.rs")),
         ] {
-            let normalized = source.to_ascii_lowercase();
+            let inspected = if name == "repositories" {
+                let (prefix, tail) = source
+                    .split_once("const PREPARE_REPOSITORY_ARCHIVE_QUERY")
+                    .expect("named one-time archive preparation");
+                let (preparation, suffix) = tail.split_once("\"#;").expect("archive SQL boundary");
+                assert!(preparation.contains("visited_ids"));
+                assert!(preparation.contains("t.depth < 100"));
+                assert!(preparation.contains("selected_tree AS MATERIALIZED"));
+                assert!(preparation.contains("SELECT * FROM tree LIMIT 50002"));
+                format!("{prefix}{suffix}")
+            } else {
+                source.to_owned()
+            };
+            let normalized = inspected.to_ascii_lowercase();
             assert!(
                 !normalized.contains("with recursive subtree")
                     && !normalized.contains("with recursive tree as"),
@@ -243,27 +265,16 @@ mod tests {
             .split("#[cfg(test)]")
             .next()
             .expect("files production source should remain inspectable");
-        assert_eq!(files.matches("walk_subtree(").count(), 4);
-        assert!(
-            files
-                .matches(".isolation_level(IsolationLevel::RepeatableRead)")
-                .count()
-                >= 3
-        );
+        assert_eq!(files.matches("tree_jobs::mutate(").count(), 3);
         let share_links = include_str!("share_links.rs")
             .split("#[cfg(test)]")
             .next()
-            .expect("share-link production source should remain inspectable");
-        assert_eq!(share_links.matches("walk_subtree(").count(), 1);
-        assert!(share_links.contains(".isolation_level(IsolationLevel::RepeatableRead)"));
-        let repositories = include_str!("repositories.rs")
-            .split("#[cfg(test)]")
-            .next()
-            .expect("repository production source should remain inspectable");
-        assert_eq!(repositories.matches("walk_subtree(").count(), 0);
-        assert!(repositories.contains("REPOSITORY_ARCHIVE_PAGE_QUERY"));
-        assert!(repositories.contains("LIMIT $9"));
-        assert!(repositories.contains(".isolation_level(IsolationLevel::RepeatableRead)"));
+            .unwrap();
+        assert!(share_links.contains("tree_jobs::mutate("));
+        let jobs = include_str!("tree_jobs.rs");
+        assert!(jobs.contains("FOR UPDATE SKIP LOCKED"));
+        assert!(jobs.contains("OPERATION_DEADLINE"));
+        assert!(jobs.contains("ORDER BY depth DESC,node_id LIMIT $2"));
         let vault = include_str!("vault.rs");
         assert_eq!(
             vault.matches("subtree_snapshot(&transaction").count(),
@@ -312,6 +323,22 @@ mod tests {
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
             .unwrap_or(100_001);
+        let existing_fixture = transaction
+            .query_opt(
+                "SELECT id FROM files WHERE id='fil_tree_scale_root' AND owner_id='usr_tree_scale'",
+                &[],
+            )
+            .await
+            .expect("fixture lookup")
+            .is_some();
+        if !existing_fixture {
+            transaction.execute("INSERT INTO users(id,username,password_hash,role) VALUES('usr_tree_scale','tree-scale-walker','unused','user') ON CONFLICT(id) DO NOTHING", &[]).await.expect("scale fixture owner");
+            transaction.execute("INSERT INTO files(id,owner_id,original_name,storage_name,size_bytes,entry_type) VALUES('fil_tree_scale_root','usr_tree_scale','root','tree-scale/root',0,'folder') ON CONFLICT(id) DO NOTHING", &[]).await.expect("scale fixture root");
+            for first in (1..expected_nodes as i64).step_by(1000) {
+                let last = (first + 999).min(expected_nodes as i64 - 1);
+                transaction.execute("INSERT INTO files(id,owner_id,original_name,storage_name,size_bytes,parent_id) SELECT 'fil_tree_scale_'||n,'usr_tree_scale','leaf','tree-scale/'||n,1,'fil_tree_scale_root' FROM generate_series($1::bigint,$2::bigint) AS n ON CONFLICT(id) DO NOTHING", &[&first,&last]).await.expect("bounded scale fixture page");
+            }
+        }
         transaction
             .batch_execute(
                 "INSERT INTO files (

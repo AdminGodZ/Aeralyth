@@ -165,11 +165,16 @@ function ReadyRepositoryDetail({
                 <GitBranch className="size-4" aria-hidden="true" />
                 {data.repository.defaultBranch}
               </span>
-              <span className="text-sm text-muted-foreground">
-                {formatTreeCount(
-                  data.summary.totalFiles,
-                  data.summary.totalFolders,
-                )}
+              <span
+                className="text-sm text-muted-foreground"
+                aria-busy={data.summary.stale || undefined}
+              >
+                {data.summary.stale
+                  ? "Updating totals…"
+                  : formatTreeCount(
+                      data.summary.totalFiles,
+                      data.summary.totalFolders,
+                    )}
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-3 sm:justify-end">
@@ -313,13 +318,13 @@ function ReadyRepositoryDetail({
               <div className="flex items-center justify-between gap-4">
                 <dt className="text-muted-foreground">Files</dt>
                 <dd className="font-medium tabular-nums">
-                  {data.summary.totalFiles}
+                  {data.summary.stale ? "Updating…" : data.summary.totalFiles}
                 </dd>
               </div>
               <div className="flex items-center justify-between gap-4">
                 <dt className="text-muted-foreground">Folders</dt>
                 <dd className="font-medium tabular-nums">
-                  {data.summary.totalFolders}
+                  {data.summary.stale ? "Updating…" : data.summary.totalFolders}
                 </dd>
               </div>
             </dl>

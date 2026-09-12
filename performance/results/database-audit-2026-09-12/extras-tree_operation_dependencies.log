@@ -1,0 +1,44 @@
+BEGIN
+INSERT 0 1
+INSERT 0 1
+INSERT 0 3
+INSERT 0 1000
+INSERT 0 1000
+INSERT 0 1000
+INSERT 0 1
+INSERT 0 2
+INSERT 0 1000
+INSERT 0 1
+INSERT 0 1000
+INSERT 0 1
+INSERT 0 1
+INSERT 0 1000
+INSERT 0 1000
+INSERT 0 1000
+INSERT 0 1000
+INSERT 0 1
+UPDATE 1
+INSERT 0 10
+UPDATE 1
+INSERT 0 1
+ set_config 
+------------
+ 2
+(1 row)
+
+CREATE FUNCTION
+DO
+NOTICE:  Drained node and share dependencies in 42 bounded pages; 3010 object jobs preserved write expiry and surviving files
+DELETE 1
+DELETE 1
+UPDATE 1
+INSERT 0 1
+ set_config 
+------------
+ 3
+(1 row)
+
+DO
+DELETE 1
+UPDATE 1
+ROLLBACK

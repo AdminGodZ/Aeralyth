@@ -76,7 +76,13 @@ export default async function SectionPage({
     requestedFileSort ? direction : undefined,
     fileSort,
   );
-  const dashboardSessionPromise = getDashboardSession();
+  // The bootstrap cursor must precede every data snapshot so changes during
+  // server rendering can be replayed when the browser connects.
+  const { csrfToken, currentUser, realtimeCursor } =
+    await getDashboardSession();
+  if (section.group === "system" && currentUser.role !== "admin") {
+    notFound();
+  }
   const adminUsersPromise =
     section.key === "users"
       ? getAdminUsersState({
@@ -104,23 +110,13 @@ export default async function SectionPage({
     section.key === "storage"
       ? getStorageOverviewState()
       : Promise.resolve(undefined);
-  const [
-    { csrfToken, currentUser },
-    adminUsersState,
-    filesState,
-    repositoriesState,
-    storageState,
-  ] = await Promise.all([
-    dashboardSessionPromise,
-    adminUsersPromise,
-    filesPromise,
-    repositoriesPromise,
-    storagePromise,
-  ]);
-
-  if (section.group === "system" && currentUser.role !== "admin") {
-    notFound();
-  }
+  const [adminUsersState, filesState, repositoriesState, storageState] =
+    await Promise.all([
+      adminUsersPromise,
+      filesPromise,
+      repositoriesPromise,
+      storagePromise,
+    ]);
 
   if (adminUsersState?.status === "unauthorized") {
     redirect("/login");
@@ -149,6 +145,7 @@ export default async function SectionPage({
       sectionKey={section.key}
       currentUser={currentUser}
       csrfToken={csrfToken}
+      realtimeCursor={realtimeCursor}
       invitationToken={section.key === "users" ? token?.trim() : undefined}
       adminQuery={section.key === "users" ? q?.trim() : undefined}
       adminUsersState={adminUsersState}

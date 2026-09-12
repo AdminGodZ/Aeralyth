@@ -88,7 +88,7 @@ describe("Railway production deployment", () => {
     const caddyfile = read("deployment/Caddyfile");
     const encode = caddyfile
       .split("encode zstd gzip {")[1]
-      ?.split("@workers path")[0];
+      ?.split("handle /workers/*")[0];
     expect(encode).toBeTruthy();
     expect(encode).toContain("minimum_length 1024");
     expect(encode).toContain("application/json*");
@@ -103,12 +103,19 @@ describe("Railway production deployment", () => {
 
   it("serves content-named browser workers with immutable caching", () => {
     const caddyfile = read("deployment/Caddyfile");
-    expect(caddyfile).toContain("@workers path /workers/*");
+    expect(caddyfile).toContain("handle /workers/*");
+    expect(caddyfile).toContain("@existingWorker file");
+    expect(caddyfile).toContain("root * /app/frontend/public");
+    expect(caddyfile).toContain("file_server");
     expect(caddyfile).toContain(
-      '>Cache-Control "public, max-age=31536000, immutable"',
+      'Cache-Control "public, max-age=31536000, immutable"',
     );
     expect(caddyfile).toContain(
-      '>CDN-Cache-Control "public, max-age=31536000, immutable"',
+      'CDN-Cache-Control "public, max-age=31536000, immutable"',
+    );
+    expect(caddyfile).toContain('header Cache-Control "no-store"');
+    expect(caddyfile).toContain(
+      'respond "Worker asset unavailable. Reload the application and retry." 404',
     );
   });
 

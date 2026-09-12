@@ -1,0 +1,7 @@
+{
+  "status": "superseded-before-build",
+  "reason": "Independently approved test-only backend/src/db.rs correction after complete-suite failure",
+  "snapshot": "/private/tmp/aeralyth-production-pre-test-correction-source-20260912",
+  "imageBuilt": false,
+  "timestamp": "2026-09-12T12:11:46.304605+00:00"
+}

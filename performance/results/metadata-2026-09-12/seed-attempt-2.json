@@ -1,0 +1,36 @@
+{
+  "recordedAt": "2026-09-12T12:24:04.370Z",
+  "artifact": "744a513655b7efd0a28d7cf406a077f59aa05e3939ec48ead58234b236b0e7e8",
+  "database": "aeralyth_audit_release_final",
+  "api": "http://127.0.0.1:58083",
+  "fixtureOwner": "md44ea8227b2e6b60eowner",
+  "fixtureSourceSha256": "bb445cc5a1c956b8e3fbb57fef14f31493174cc84d5a3ac6799b1701f8859b42",
+  "fixture": {
+    "maximumManifestCiphertextBytes": 1048576,
+    "maximumRecords": 9,
+    "disjointChains": 6,
+    "nodesPerChain": 100,
+    "totalRecords": 609,
+    "signedBootstrapVerified": true
+  },
+  "observations": [],
+  "limitations": [
+    "RSS is sampled every 10 ms using ps and can miss shorter peaks.",
+    "Synchronous ps sampling adds client-side observation overhead to reported request latency.",
+    "Process RSS includes any other work on the same API. Run during an exclusive metadata measurement window.",
+    "pg_stat_statements deltas include other matching requests on this database. Returned rows are not internal scanned-row counts; buffer counters are recorded separately.",
+    "responseBytes is the body delivered by fetch, excluding HTTP headers and transport/compression overhead. Decoded record bytes are not PostgreSQL protocol wire bytes.",
+    "Maximum ciphertext records use authenticated large CBOR names to exercise the server byte cap; this is a protocol storage boundary fixture, not a normal filename UI case.",
+    "HTTP latency includes authentication, SQL, decoding and encoding. Encode-only CPU and allocator volume are not measured.",
+    "The snapshot-conflict check changes the stored head hash directly; it verifies continuation fencing, not the publication endpoint."
+  ],
+  "passed": false,
+  "failure": "Error: ERROR:  duplicate key value violates unique constraint \"files_active_folder_sibling_name_unique_idx\"\nDETAIL:  Key (owner_id, COALESCE(parent_id, ''::text), lower(original_name))=(md44ea8227b2e6b60eowner, , metadata fixture) already exists.\n",
+  "cleanupRemainingRows": {
+    "users": 0,
+    "files": 0,
+    "sessions": 0,
+    "vaults": 0
+  },
+  "fixtureRemoved": true
+}

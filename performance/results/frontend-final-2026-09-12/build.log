@@ -1,0 +1,77 @@
+Command: npm run build
+Started: 2026-09-12T11:43:28.757Z
+
+
+> aeralyth@0.1.0 prebuild
+> npm run worker:build
+
+
+> aeralyth@0.1.0 worker:build
+> node scripts/write-zip-assets.mjs && npm run worker:zip && npm run worker:checksum && npm run worker:vault && node scripts/write-worker-assets.mjs
+
+
+> aeralyth@0.1.0 worker:zip
+> esbuild src/features/dashboard/folder-zip.worker.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=.worker-build/folder-zip.worker.js --minify --legal-comments=eof --sourcemap=external --sources-content=false --metafile=.worker-build/folder-zip.meta.json
+
+
+  .worker-build/folder-zip.worker.js      123.5kb
+  .worker-build/folder-zip.worker.js.map  195.1kb
+
+⚡ Done in 8ms
+
+> aeralyth@0.1.0 worker:checksum
+> esbuild src/features/dashboard/upload-checksum.worker.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=.worker-build/upload-checksum.worker.js --minify --legal-comments=eof --sourcemap=external --sources-content=false --metafile=.worker-build/upload-checksum.meta.json
+
+
+  .worker-build/upload-checksum.worker.js       6.3kb
+  .worker-build/upload-checksum.worker.js.map  10.7kb
+
+⚡ Done in 2ms
+
+> aeralyth@0.1.0 worker:vault
+> esbuild src/features/vault/vault.worker.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=.worker-build/vault.worker.js --minify --legal-comments=eof --sourcemap=external --sources-content=false --metafile=.worker-build/vault.meta.json
+
+
+  .worker-build/vault.worker.js      634.5kb
+  .worker-build/vault.worker.js.map  346.0kb
+
+⚡ Done in 33ms
+
+> aeralyth@0.1.0 build
+> next build
+
+▲ Next.js 16.3.4 (Turbopack)
+✓ Running next.config.ts took 44ms
+- Experiments (use with caution):
+  · turbopackPluginRuntimeStrategy: "workerThreads"
+
+  Creating an optimized production build ...
+✓ Compiled successfully in 1665ms
+  Running TypeScript ...
+  Finished TypeScript in 472ms ...
+  Collecting page data using 10 workers ...
+  Generating static pages using 10 workers (0/4) ...
+  Generating static pages using 10 workers (1/4) 
+  Generating static pages using 10 workers (2/4) 
+  Generating static pages using 10 workers (3/4) 
+✓ Generating static pages using 10 workers (4/4) in 183ms
+  Finalizing page optimization ...
+
+Route (app)
+┌ ƒ /
+├ ƒ /_not-found
+├ ƒ /[section]
+├ ƒ /invite/[token]
+├ ƒ /login
+├ ƒ /repositories/[repositoryId]
+└ ƒ /s/[token]
+
+
+ƒ Proxy (Middleware)
+
+ƒ  (Dynamic)  server-rendered on demand
+
+
+Finished: 2026-09-12T11:43:33.433Z
+Exit code: 0
+Signal: none

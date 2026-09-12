@@ -1,0 +1,333 @@
+{
+  "recordedAt": "2026-09-12T12:24:38.979Z",
+  "artifact": "744a513655b7efd0a28d7cf406a077f59aa05e3939ec48ead58234b236b0e7e8",
+  "database": "aeralyth_audit_release_final",
+  "api": "http://127.0.0.1:58083",
+  "fixtureOwner": "mdc0418d17803eca6downer",
+  "fixtureSourceSha256": "bb445cc5a1c956b8e3fbb57fef14f31493174cc84d5a3ac6799b1701f8859b42",
+  "fixture": {
+    "maximumManifestCiphertextBytes": 1048576,
+    "maximumRecords": 9,
+    "disjointChains": 6,
+    "nodesPerChain": 100,
+    "totalRecords": 609,
+    "signedBootstrapVerified": true
+  },
+  "observations": [
+    {
+      "name": "deep-disjoint-overflow",
+      "status": 413,
+      "latencyMs": 95.51824999999963,
+      "responseBytes": 54,
+      "beforeRss": 54427648,
+      "peakRss": 54722560,
+      "afterRss": 54722560,
+      "peakGrowthBytes": 294912,
+      "selectedPlans": 0,
+      "manifestPayloadBytes": 0,
+      "decodedRecordBytes": 0,
+      "payloadQueryCalls": 0,
+      "payloadRows": 0,
+      "payloadSqlMs": 0,
+      "sqlWork": {
+        "payload": {
+          "queryIds": ["5366550913846282173"],
+          "calls": 0,
+          "returnedRows": 0,
+          "executionMs": 0,
+          "sharedBlockHits": 0,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "identity": {
+          "queryIds": ["5000409866656610732"],
+          "calls": 86,
+          "returnedRows": 513,
+          "executionMs": 17.8492039999999,
+          "sharedBlockHits": 15547,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "sizes": {
+          "queryIds": ["4718889867618125004"],
+          "calls": 0,
+          "returnedRows": 0,
+          "executionMs": 0,
+          "sharedBlockHits": 0,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "wrappers": {
+          "queryIds": ["7245455763937611619"],
+          "calls": 0,
+          "returnedRows": 0,
+          "executionMs": 0,
+          "sharedBlockHits": 0,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        }
+      },
+      "continuation": null,
+      "error": "metadata plan ancestry exceeds the bounded batch limit"
+    },
+    {
+      "name": "maximum-record-page-1",
+      "status": 200,
+      "latencyMs": 25.944542000000183,
+      "responseBytes": 4197478,
+      "beforeRss": 54722560,
+      "peakRss": 73154560,
+      "afterRss": 73154560,
+      "peakGrowthBytes": 18432000,
+      "selectedPlans": 3,
+      "manifestPayloadBytes": 3145728,
+      "decodedRecordBytes": 3146874,
+      "payloadQueryCalls": 1,
+      "payloadRows": 3,
+      "payloadSqlMs": 3.8496660000000134,
+      "sqlWork": {
+        "payload": {
+          "queryIds": ["5366550913846282173"],
+          "calls": 1,
+          "returnedRows": 3,
+          "executionMs": 3.8496660000000134,
+          "sharedBlockHits": 461,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "identity": {
+          "queryIds": ["5000409866656610732"],
+          "calls": 1,
+          "returnedRows": 9,
+          "executionMs": 0.08208300000001145,
+          "sharedBlockHits": 63,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "sizes": {
+          "queryIds": ["4718889867618125004"],
+          "calls": 1,
+          "returnedRows": 9,
+          "executionMs": 0.12129099999999937,
+          "sharedBlockHits": 110,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "wrappers": {
+          "queryIds": ["7245455763937611619"],
+          "calls": 1,
+          "returnedRows": 3,
+          "executionMs": 0.0503750000000025,
+          "sharedBlockHits": 14,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        }
+      },
+      "continuation": 3
+    },
+    {
+      "name": "maximum-record-page-2",
+      "status": 200,
+      "latencyMs": 25.415875000000142,
+      "responseBytes": 4197478,
+      "beforeRss": 73154560,
+      "peakRss": 81313792,
+      "afterRss": 81313792,
+      "peakGrowthBytes": 8159232,
+      "selectedPlans": 3,
+      "manifestPayloadBytes": 3145728,
+      "decodedRecordBytes": 3146874,
+      "payloadQueryCalls": 1,
+      "payloadRows": 3,
+      "payloadSqlMs": 3.7327920000000177,
+      "sqlWork": {
+        "payload": {
+          "queryIds": ["5366550913846282173"],
+          "calls": 1,
+          "returnedRows": 3,
+          "executionMs": 3.7327920000000177,
+          "sharedBlockHits": 445,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "identity": {
+          "queryIds": ["5000409866656610732"],
+          "calls": 1,
+          "returnedRows": 9,
+          "executionMs": 0.06474900000000616,
+          "sharedBlockHits": 63,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "sizes": {
+          "queryIds": ["4718889867618125004"],
+          "calls": 1,
+          "returnedRows": 9,
+          "executionMs": 0.1052090000000021,
+          "sharedBlockHits": 110,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "wrappers": {
+          "queryIds": ["7245455763937611619"],
+          "calls": 1,
+          "returnedRows": 3,
+          "executionMs": 0.05700000000000216,
+          "sharedBlockHits": 14,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        }
+      },
+      "continuation": 6
+    },
+    {
+      "name": "maximum-record-page-3",
+      "status": 200,
+      "latencyMs": 24.656708999999864,
+      "responseBytes": 4197461,
+      "beforeRss": 81313792,
+      "peakRss": 86573056,
+      "afterRss": 86573056,
+      "peakGrowthBytes": 5259264,
+      "selectedPlans": 3,
+      "manifestPayloadBytes": 3145728,
+      "decodedRecordBytes": 3146874,
+      "payloadQueryCalls": 1,
+      "payloadRows": 3,
+      "payloadSqlMs": 5.579999999999984,
+      "sqlWork": {
+        "payload": {
+          "queryIds": ["5366550913846282173"],
+          "calls": 1,
+          "returnedRows": 3,
+          "executionMs": 5.579999999999984,
+          "sharedBlockHits": 450,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "identity": {
+          "queryIds": ["5000409866656610732"],
+          "calls": 1,
+          "returnedRows": 9,
+          "executionMs": 0.07400100000000975,
+          "sharedBlockHits": 63,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "sizes": {
+          "queryIds": ["4718889867618125004"],
+          "calls": 1,
+          "returnedRows": 9,
+          "executionMs": 0.11829099999999926,
+          "sharedBlockHits": 110,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "wrappers": {
+          "queryIds": ["7245455763937611619"],
+          "calls": 1,
+          "returnedRows": 3,
+          "executionMs": 0.06162599999999685,
+          "sharedBlockHits": 14,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        }
+      },
+      "continuation": null
+    },
+    {
+      "name": "changed-record-snapshot-conflict",
+      "status": 409,
+      "latencyMs": 5.0317079999999805,
+      "responseBytes": 54,
+      "beforeRss": 86573056,
+      "peakRss": 86573056,
+      "afterRss": 86573056,
+      "peakGrowthBytes": 0,
+      "selectedPlans": 0,
+      "manifestPayloadBytes": 0,
+      "decodedRecordBytes": 0,
+      "payloadQueryCalls": 0,
+      "payloadRows": 0,
+      "payloadSqlMs": 0,
+      "sqlWork": {
+        "payload": {
+          "queryIds": ["5366550913846282173"],
+          "calls": 0,
+          "returnedRows": 0,
+          "executionMs": 0,
+          "sharedBlockHits": 0,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "identity": {
+          "queryIds": ["5000409866656610732"],
+          "calls": 1,
+          "returnedRows": 9,
+          "executionMs": 0.07245800000001168,
+          "sharedBlockHits": 65,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "sizes": {
+          "queryIds": ["4718889867618125004"],
+          "calls": 1,
+          "returnedRows": 9,
+          "executionMs": 0.10604200000000219,
+          "sharedBlockHits": 110,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        },
+        "wrappers": {
+          "queryIds": ["7245455763937611619"],
+          "calls": 0,
+          "returnedRows": 0,
+          "executionMs": 0,
+          "sharedBlockHits": 0,
+          "sharedBlockReads": 0,
+          "temporaryBlockReads": 0,
+          "temporaryBlockWrites": 0
+        }
+      },
+      "continuation": null,
+      "error": "metadata snapshot changed; restart metadata resolution"
+    }
+  ],
+  "limitations": [
+    "RSS is sampled every 10 ms using ps and can miss shorter peaks.",
+    "Synchronous ps sampling adds client-side observation overhead to reported request latency.",
+    "Process RSS includes any other work on the same API. Run during an exclusive metadata measurement window.",
+    "pg_stat_statements deltas include other matching requests on this database. Returned rows are not internal scanned-row counts; buffer counters are recorded separately.",
+    "responseBytes is the body delivered by fetch, excluding HTTP headers and transport/compression overhead. Decoded record bytes are not PostgreSQL protocol wire bytes.",
+    "Maximum ciphertext records use authenticated large CBOR names to exercise the server byte cap; this is a protocol storage boundary fixture, not a normal filename UI case.",
+    "HTTP latency includes authentication, SQL, decoding and encoding. Encode-only CPU and allocator volume are not measured.",
+    "The snapshot-conflict check changes the stored head hash directly; it verifies continuation fencing, not the publication endpoint."
+  ],
+  "passed": true,
+  "cleanupRemainingRows": {
+    "users": 0,
+    "files": 0,
+    "sessions": 0,
+    "vaults": 0
+  },
+  "fixtureRemoved": true
+}

@@ -19,7 +19,8 @@ export type StorageOverview = {
 
 export type StorageOverviewState =
   | { status: "ready"; data: StorageOverview }
-  | { status: "unauthorized" | "forbidden" | "unavailable" };
+  | { status: "unauthorized" | "forbidden" }
+  | { status: "unavailable"; retryable?: boolean };
 
 function isNonnegativeNumber(value: unknown): value is number {
   return typeof value === "number" && Number.isFinite(value) && value >= 0;

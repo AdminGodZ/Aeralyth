@@ -37,7 +37,7 @@ import {
 import type { RepositoryFilePresentation } from "@/features/repositories/repository-file-types";
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
-import { useVault } from "@/features/vault/vault-provider";
+import { useVault, VAULT_LOCKING_EVENT } from "@/features/vault/vault-provider";
 import type { RepositoryEntry } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
@@ -153,10 +153,13 @@ function RepositoryFileViewerRequest({
       />
     );
   }
-  return <ReadyRepositoryFileViewer file={state.file} />;
+  return <ReadyRepositoryFileViewer file={state.file} entry={entry} />;
 }
 
-function ReadyRepositoryFileViewer({ file }: { file: ReadyRepositoryFile }) {
+function ReadyRepositoryFileViewer({
+  file,
+  entry,
+}: RepositoryFileViewerProps & { file: ReadyRepositoryFile }) {
   const [wrap, setWrap] = useState(false);
   const [markdownMode, setMarkdownMode] = useState<"preview" | "source">(
     "preview",
@@ -165,6 +168,7 @@ function ReadyRepositoryFileViewer({ file }: { file: ReadyRepositoryFile }) {
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const markdown = file.presentation.kind === "markdown";
   const sourceVisible = !markdown || markdownMode === "source";
+  const partial = file.blob.size < file.sizeBytes;
 
   useEffect(() => {
     return () => {
@@ -241,23 +245,32 @@ function ReadyRepositoryFileViewer({ file }: { file: ReadyRepositoryFile }) {
               rel="noopener noreferrer"
             >
               <ExternalLink className="size-4" aria-hidden="true" />
-              Raw
+              {partial ? "Raw preview" : "Raw"}
             </a>
           </Button>
-          <Button asChild size="sm">
-            <a href={file.objectUrl} download={file.name}>
-              <Download className="size-4" aria-hidden="true" />
-              Download
-            </a>
-          </Button>
+          {partial ? (
+            <RepositoryOriginalDownload entry={entry} />
+          ) : (
+            <Button asChild size="sm">
+              <a href={file.objectUrl} download={file.name}>
+                <Download className="size-4" aria-hidden="true" />
+                Download
+              </a>
+            </Button>
+          )}
         </div>
       </header>
 
-      {file.textTruncated ? (
+      {file.textTruncated || partial ? (
         <p className="border-b bg-amber-500/10 px-4 py-2 text-xs text-amber-700 dark:text-amber-300">
-          For smooth rendering, this view shows the first{" "}
-          {formatBytes(MAX_REPOSITORY_TEXT_BYTES)} of the file. Raw and Download
-          still use the complete file.
+          This preview shows up to {formatBytes(MAX_REPOSITORY_TEXT_BYTES)} and
+          500,000 text characters.
+          {partial
+            ? " Raw preview contains only the loaded prefix. Download original retrieves the complete file."
+            : " Raw and Download contain the complete file."}
+          {file.verification === "partial"
+            ? " Preview chunks are authenticated; the complete file has not been verified."
+            : null}
         </p>
       ) : null}
 
@@ -376,21 +389,6 @@ function RepositoryFileError({
   tooLarge: boolean;
   onRetry(): void;
 }) {
-  const vault = useVault();
-  const [downloadBusy, setDownloadBusy] = useState(false);
-
-  async function downloadOriginalEncryptedFile() {
-    if (entry.e2eeState !== "encrypted" || !vault.client) return;
-    setDownloadBusy(true);
-    try {
-      const manifest = await vault.openNode(entry.id);
-      const plan = await getVaultDownloadPlan(entry.id);
-      await downloadEncryptedFile({ plan, manifest, client: vault.client });
-    } finally {
-      setDownloadBusy(false);
-    }
-  }
-
   return (
     <ViewerMessage
       icon={tooLarge ? FileArchive : AlertTriangle}
@@ -405,28 +403,94 @@ function RepositoryFileError({
         <RefreshCw className="size-4" aria-hidden="true" />
         Try again
       </Button>
-      {entry.e2eeState === "encrypted" ? (
-        <Button
-          type="button"
-          onClick={() => void downloadOriginalEncryptedFile()}
-          disabled={downloadBusy}
-        >
-          {downloadBusy ? (
-            <LoaderCircle className="size-4 animate-spin" />
-          ) : (
-            <Download className="size-4" aria-hidden="true" />
-          )}
-          Download original
-        </Button>
-      ) : (
-        <Button asChild>
-          <a href={`/api/files/${encodeURIComponent(entry.id)}/download`}>
-            <Download className="size-4" aria-hidden="true" />
-            Download original
-          </a>
-        </Button>
-      )}
+      <RepositoryOriginalDownload entry={entry} />
     </ViewerMessage>
+  );
+}
+
+function RepositoryOriginalDownload({ entry }: RepositoryFileViewerProps) {
+  const vault = useVault();
+  const [downloadBusy, setDownloadBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const downloadRef = useRef<AbortController | null>(null);
+  const mountedRef = useRef(false);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    const abort = () => downloadRef.current?.abort();
+    window.addEventListener(VAULT_LOCKING_EVENT, abort);
+    return () => {
+      mountedRef.current = false;
+      window.removeEventListener(VAULT_LOCKING_EVENT, abort);
+      abort();
+    };
+  }, []);
+
+  async function downloadOriginalEncryptedFile() {
+    if (downloadRef.current) return;
+    const controller = new AbortController();
+    downloadRef.current = controller;
+    setDownloadBusy(true);
+    setError(null);
+    try {
+      if (!vault.client)
+        throw new Error("Unlock the vault to download this file.");
+      const manifest = await vault.openNode(entry.id);
+      controller.signal.throwIfAborted();
+      const plan = await getVaultDownloadPlan(entry.id, controller.signal);
+      await downloadEncryptedFile({
+        plan,
+        manifest,
+        client: vault.client,
+        signal: controller.signal,
+      });
+    } catch (failure) {
+      if (
+        mountedRef.current &&
+        !controller.signal.aborted &&
+        !isAbortError(failure)
+      ) {
+        setError(
+          failure instanceof Error ? failure.message : "Download failed.",
+        );
+      }
+    } finally {
+      downloadRef.current = null;
+      if (mountedRef.current) setDownloadBusy(false);
+    }
+  }
+
+  if (entry.e2eeState !== "encrypted") {
+    return (
+      <Button asChild size="sm">
+        <a href={`/api/files/${encodeURIComponent(entry.id)}/download`}>
+          <Download className="size-4" aria-hidden="true" />
+          Download original
+        </a>
+      </Button>
+    );
+  }
+  return (
+    <>
+      <Button
+        type="button"
+        size="sm"
+        onClick={() => void downloadOriginalEncryptedFile()}
+        disabled={downloadBusy}
+      >
+        {downloadBusy ? (
+          <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
+        ) : (
+          <Download className="size-4" aria-hidden="true" />
+        )}
+        Download original
+      </Button>
+      {error ? (
+        <p role="alert" className="text-xs text-destructive">
+          {error}
+        </p>
+      ) : null}
+    </>
   );
 }
 

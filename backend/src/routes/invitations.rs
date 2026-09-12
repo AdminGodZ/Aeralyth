@@ -58,7 +58,7 @@ pub async fn details(state: web::Data<AppState>, path: web::Path<String>) -> Res
             &[&token],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     let Some(invitation) = invitation else {
         return Ok(HttpResponse::Gone().finish());
@@ -108,7 +108,7 @@ pub async fn accept_one_password(
             &[&token],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if invitation_available.is_none() {
         return Ok(HttpResponse::Conflict().body("invitation is unavailable"));
     }
@@ -153,7 +153,7 @@ pub async fn accept_one_password(
             &[&token, &password_hash, &salt.as_slice()],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let Some(accepted_user) = accepted_user else {
         return Ok(HttpResponse::Conflict().body("invitation is unavailable"));
     };

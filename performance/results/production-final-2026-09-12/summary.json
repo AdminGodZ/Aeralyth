@@ -1,0 +1,331 @@
+{
+  "recordedAt": "2026-09-12T12:53:12.954895+00:00",
+  "passed": true,
+  "localEvidenceOnly": true,
+  "remoteCiOrDeploymentClaimed": false,
+  "imageId": "sha256:949ecffa36245a27e920ad364dc3575e9977dece5109318648ebffe97ddaf290",
+  "binarySha256": "1b19353b42adc457ee1ee1cf57f22c47ab2526e9688042e98692da74226f33a4",
+  "resources": {
+    "cpus": 2,
+    "memoryBytes": 2147483648,
+    "databasePoolMax": 8,
+    "maintenancePoolMax": 2,
+    "e2eeMode": "required",
+    "quotaBytes": 1073741824
+  },
+  "stepCount": 28,
+  "normal": {
+    "passed": true,
+    "phases": [
+      {
+        "name": "baseline",
+        "offered": 50,
+        "started": 50,
+        "completed": 50,
+        "failed": 0,
+        "dropped": 0,
+        "p99Ms": 35.20729200000005
+      },
+      {
+        "name": "mixed",
+        "offered": 300,
+        "started": 300,
+        "completed": 300,
+        "failed": 0,
+        "dropped": 0,
+        "p99Ms": 45.161583000000974
+      },
+      {
+        "name": "recovery",
+        "offered": 50,
+        "started": 50,
+        "completed": 50,
+        "failed": 0,
+        "dropped": 0,
+        "p99Ms": 31.652416999997513
+      }
+    ],
+    "memory": {
+      "source": "container-cgroup-v2",
+      "initialBytes": 98787328,
+      "finalBytes": 85811200,
+      "peakBytes": 98787328,
+      "growthBytes": -12976128
+    },
+    "idleMaintenance": {
+      "durationMs": 2074.6640419999967,
+      "maximumRunsPerSecond": 10,
+      "workers": {
+        "encrypted upload expiry": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "invitation expiry": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "legacy upload expiry": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "multipart reconciliation": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "session expiry": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "storage deletion": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "trash expiry": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "upload finalization": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "user deletion": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        }
+      },
+      "violations": []
+    },
+    "fixtureVerification": {
+      "expiredSessionsRemaining": 0,
+      "providerJobsRemaining": 0,
+      "providerJobsFailed": 0,
+      "oldestProviderJobMs": 0,
+      "expiredUploadsRemaining": 0,
+      "streamFrames": 184,
+      "streamErrors": 0,
+      "oldestSseFrameAgeMs": 4142.071124999995,
+      "published": 25,
+      "transferredBytes": 3277600,
+      "maintenanceStarted": 31,
+      "clientRssBytes": 136101888
+    },
+    "cleanup": "complete",
+    "violations": [],
+    "maintenancePoolCheckouts": 769
+  },
+  "fault": {
+    "expectedRejectionPassed": true,
+    "rawLoadGateExpectedToFail": true,
+    "passed": false,
+    "phases": [
+      {
+        "name": "baseline",
+        "offered": 40,
+        "started": 40,
+        "completed": 40,
+        "failed": 0,
+        "dropped": 0,
+        "p99Ms": 35.036958999999115
+      },
+      {
+        "name": "mixed",
+        "offered": 80,
+        "started": 45,
+        "completed": 45,
+        "failed": 0,
+        "dropped": 35,
+        "p99Ms": 1812.0281249999998
+      },
+      {
+        "name": "recovery",
+        "offered": 40,
+        "started": 40,
+        "completed": 40,
+        "failed": 0,
+        "dropped": 0,
+        "p99Ms": 32.01549999999952
+      }
+    ],
+    "memory": {
+      "source": "container-cgroup-v2",
+      "initialBytes": 85671936,
+      "finalBytes": 88272896,
+      "peakBytes": 88489984,
+      "growthBytes": 2600960
+    },
+    "idleMaintenance": {
+      "durationMs": 2069.1440000000002,
+      "maximumRunsPerSecond": 10,
+      "workers": {
+        "encrypted upload expiry": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "invitation expiry": {
+          "iterations": 1,
+          "runsPerSecond": 0.48329164137440406
+        },
+        "legacy upload expiry": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "multipart reconciliation": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "session expiry": {
+          "iterations": 1,
+          "runsPerSecond": 0.48329164137440406
+        },
+        "storage deletion": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "trash expiry": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "upload finalization": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "user deletion": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        }
+      },
+      "violations": []
+    },
+    "fixtureVerification": {
+      "expiredSessionsRemaining": 0,
+      "providerJobsRemaining": 0,
+      "providerJobsFailed": 0,
+      "oldestProviderJobMs": 0,
+      "expiredUploadsRemaining": 0,
+      "streamFrames": 36,
+      "streamErrors": 0,
+      "oldestSseFrameAgeMs": 2319.4331669999992,
+      "published": 3,
+      "transferredBytes": 393312,
+      "maintenanceStarted": 8,
+      "clientRssBytes": 132153344
+    },
+    "cleanup": "complete",
+    "violations": [
+      "mixed: dropped 35/80",
+      "mixed/browse: p99 1812.03ms exceeds 1000ms"
+    ],
+    "maintenancePoolCheckouts": 160
+  },
+  "sustained": {
+    "passed": true,
+    "phases": [
+      {
+        "name": "baseline",
+        "offered": 50,
+        "started": 50,
+        "completed": 50,
+        "failed": 0,
+        "dropped": 0,
+        "p99Ms": 30.7018750000002
+      },
+      {
+        "name": "mixed",
+        "offered": 3000,
+        "started": 3000,
+        "completed": 3000,
+        "failed": 0,
+        "dropped": 0,
+        "p99Ms": 50.4272079999937
+      },
+      {
+        "name": "recovery",
+        "offered": 50,
+        "started": 50,
+        "completed": 50,
+        "failed": 0,
+        "dropped": 0,
+        "p99Ms": 26.72758399997838
+      }
+    ],
+    "memory": {
+      "source": "container-cgroup-v2",
+      "initialBytes": 88678400,
+      "finalBytes": 89325568,
+      "peakBytes": 92065792,
+      "growthBytes": 647168
+    },
+    "idleMaintenance": {
+      "durationMs": 2059.3327500000014,
+      "maximumRunsPerSecond": 10,
+      "workers": {
+        "encrypted upload expiry": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "invitation expiry": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "legacy upload expiry": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "multipart reconciliation": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "session expiry": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "storage deletion": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "trash expiry": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "upload finalization": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        },
+        "user deletion": {
+          "iterations": 0,
+          "runsPerSecond": 0
+        }
+      },
+      "violations": []
+    },
+    "fixtureVerification": {
+      "expiredSessionsRemaining": 0,
+      "providerJobsRemaining": 0,
+      "providerJobsFailed": 0,
+      "oldestProviderJobMs": 0,
+      "expiredUploadsRemaining": 0,
+      "streamFrames": 1504,
+      "streamErrors": 0,
+      "oldestSseFrameAgeMs": 4191.712583999964,
+      "published": 250,
+      "transferredBytes": 32776000,
+      "maintenanceStarted": 256,
+      "clientRssBytes": 163921920
+    },
+    "cleanup": "complete",
+    "violations": [],
+    "maintenancePoolCheckouts": 6722
+  },
+  "sourceCurrencyPolicy": "sourceCurrent covers the application/runtime and exercised workload sources in the406-file dependency manifest. It does not assert byte equivalence of the entire copied frontend build context or a rebuild of the current tree. The broader407-file manifest explicitly records the external observability probe change. Documentation/results are excluded and may be visible to automatic Tailwind scanning.",
+  "runtimeInputSha256": "f8bf9eaaa156624f97d73f92343fa480d6d49127154a3ffb094f03290bbb6aa0",
+  "broadSnapshotCurrent": false,
+  "broadChangedPaths": [
+    {
+      "path": "performance/observability-probe.mjs",
+      "change": "modified"
+    }
+  ],
+  "independentWorkerProof": "independent-worker-proof-done.json",
+  "acceptance": "acceptance.json",
+  "hashSemantics": "Source/build manifest digests hash canonical JSON data; they do not hash the formatting bytes of report JSON. Individual source/binary/asset digests hash file bytes."
+}

@@ -1,0 +1,57 @@
+Command: npm run db:test:performance-ledger-concurrency
+
+> aeralyth@0.1.0 db:test:performance-ledger-concurrency
+> bash database/tests/concurrent_reservations.sh
+
+NOTICE:  trigger "perf_reservation_counter_write_audit" for relation "user_file_counters" does not exist, skipping
+NOTICE:  function capture_perf_reservation_counter_write() does not exist, skipping
+NOTICE:  table "perf_reservation_counter_writes" does not exist, skipping
+INSERT 0 1
+CREATE TABLE
+CREATE FUNCTION
+CREATE TRIGGER
+   pg_stat_statements_reset    
+-------------------------------
+ 2026-09-12 11:08:30.612338+00
+(1 row)
+
+pgbench (18.4 (Debian 18.4-1.pgdg13+1))
+transaction type: /docker-entrypoint-initdb.d/performance_reservation.pgbench
+scaling factor: 1
+query mode: simple
+number of clients: 40
+number of threads: 8
+maximum number of tries: 1
+number of transactions per client: 1
+number of transactions actually processed: 40/40
+number of failed transactions: 0 (0.000%)
+latency average = 39.161 ms
+initial connection time = 11.242 ms
+tps = 1021.424376 (without initial connection time)
+NOTICE:  40-client reservation burst latency: mean 22.604 ms, max 36.846 ms across 40 calls
+DO
+   pg_stat_statements_reset    
+-------------------------------
+ 2026-09-12 11:08:30.977084+00
+(1 row)
+
+pgbench (18.4 (Debian 18.4-1.pgdg13+1))
+transaction type: /docker-entrypoint-initdb.d/performance_reservation.pgbench
+scaling factor: 1
+query mode: simple
+number of clients: 8
+number of threads: 8
+maximum number of tries: 1
+number of transactions per client: 1
+number of transactions actually processed: 8/8
+number of failed transactions: 0 (0.000%)
+latency average = 13.026 ms
+initial connection time = 2.904 ms
+tps = 614.156303 (without initial connection time)
+NOTICE:  8-client reservation SQL latency: mean 6.332 ms, max 11.604 ms across 8 calls
+DO
+                     result                      
+-------------------------------------------------
+ concurrent reservation regression checks passed
+(1 row)
+

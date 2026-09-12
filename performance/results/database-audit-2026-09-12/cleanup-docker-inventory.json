@@ -1,0 +1,593 @@
+{
+  "captured_at_utc": "2026-09-12T12:17:07.874269+00:00",
+  "mode": "read-only inventory draft; no resources stopped or removed",
+  "active_task_note": "Final native, image and browser checks may still depend on these resources. Re-inspect exact IDs and attachments before any future cleanup.",
+  "audit_containers": [
+    {
+      "id": "153d72b51279ea65595076978a1e52b053773df5ad9abd3f5d0726ec457f17b0",
+      "name": "aeralyth-audit-db-suite-20260912",
+      "created_at": "2026-09-12T11:05:07.91865951Z",
+      "image_id": "sha256:3a82e1f56c8f0f5616a11103ac3d47e632c3938698946a7ad26da0df1334744a",
+      "image_reference": "postgres:latest",
+      "state": "running",
+      "running": true,
+      "started_at": "2026-09-12T11:05:08.052413843Z",
+      "labels": {
+        "com.docker.compose.config-hash": "053df2bd5c6b25060f968161b96db4ba1f338f6780517aecb4478cc77c3cc773",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:f1dd3522a7fde8bf8e505f42583ecdc00b4967a4b94d32ba1f890d118fe17335",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "aeralyth-audit-db-suite",
+        "com.docker.compose.project.config_files": "/tmp/aeralyth-audit-db-suite.compose.yml",
+        "com.docker.compose.project.working_dir": "/tmp",
+        "com.docker.compose.service": "postgres",
+        "com.docker.compose.version": "5.5.1"
+      },
+      "mounts": [
+        {
+          "Destination": "/aeralyth-migrations",
+          "Mode": "ro",
+          "Propagation": "rprivate",
+          "RW": false,
+          "Source": "/Users/timheld/Documents/Projects/Aeralyth/database/init",
+          "Type": "bind"
+        },
+        {
+          "Destination": "/var/lib/postgresql",
+          "Driver": "local",
+          "Mode": "",
+          "Name": "4463f12963892db7ee061df18d0f0273a475a8d9cd6cbf07b77a6f9a51ed0898",
+          "Propagation": "",
+          "RW": true,
+          "Source": "/var/lib/docker/volumes/4463f12963892db7ee061df18d0f0273a475a8d9cd6cbf07b77a6f9a51ed0898/_data",
+          "Type": "volume"
+        }
+      ],
+      "ports": {
+        "5432/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "55434"
+          }
+        ]
+      },
+      "networks": {
+        "aeralyth-audit-db-suite_default": {
+          "Aliases": ["aeralyth-audit-db-suite-20260912", "postgres"],
+          "DNSNames": [
+            "aeralyth-audit-db-suite-20260912",
+            "postgres",
+            "153d72b51279"
+          ],
+          "DriverOpts": null,
+          "EndpointID": "c5f025d431e0ced4734b7b7735c02fbe928eebf11d0d7fdd42c3d22fef4f532f",
+          "Gateway": "172.21.0.1",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "172.21.0.2",
+          "IPPrefixLen": 16,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "be:be:37:c5:22:b5",
+          "NetworkID": "af5edf12e3e7d86f82ca69b9921077ce0b2cc2c266c83725407fec30328b0eab"
+        }
+      },
+      "ownership_evidence": "Compose project aeralyth-audit-db-suite and task-specific /tmp/aeralyth-audit-db-suite.compose.yml"
+    },
+    {
+      "id": "62a74a0cbd912ad99e47336868556c866b59ed8aa6a53748d88cc996611370f8",
+      "name": "aeralyth-audit-s3-20260912",
+      "created_at": "2026-09-12T10:46:20.476748251Z",
+      "image_id": "sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
+      "image_reference": "minio/minio:latest",
+      "state": "running",
+      "running": true,
+      "started_at": "2026-09-12T10:46:20.514391418Z",
+      "labels": {
+        "aeralyth.task": "performance-audit-20260912",
+        "architecture": "aarch64",
+        "build-date": "2025-08-06T08:17:03",
+        "com.redhat.component": "ubi9-micro-container",
+        "com.redhat.license_terms": "https://www.redhat.com/en/about/red-hat-end-user-license-agreements#UBI",
+        "description": "MinIO object storage is fundamentally different. Designed for performance and the S3 API, it is 100% open-source. MinIO is ideal for large, private cloud environments with stringent security requirements and delivers mission-critical availability across a diverse range of workloads.",
+        "distribution-scope": "public",
+        "io.buildah.version": "1.40.1",
+        "io.k8s.description": "Very small image which doesn't install the package manager.",
+        "io.k8s.display-name": "Red Hat Universal Base Image 9 Micro",
+        "io.openshift.expose-services": "",
+        "maintainer": "MinIO Inc <dev@min.io>",
+        "name": "MinIO",
+        "release": "RELEASE.2025-09-07T16-13-09Z",
+        "summary": "MinIO is a High Performance Object Storage, API compatible with Amazon S3 cloud storage service.",
+        "url": "https://catalog.redhat.com/en/search?searchType=containers",
+        "vcs-ref": "32d8e5209f029a1fb7235308ab32253bface1001",
+        "vcs-type": "git",
+        "vendor": "MinIO Inc <dev@min.io>",
+        "version": "RELEASE.2025-09-07T16-13-09Z"
+      },
+      "mounts": [
+        {
+          "Destination": "/data",
+          "Driver": "local",
+          "Mode": "",
+          "Name": "b128e34ef8eb435f79db6ee917120f4e3b63349b7f36a017da243792bf9b705d",
+          "Propagation": "",
+          "RW": true,
+          "Source": "/var/lib/docker/volumes/b128e34ef8eb435f79db6ee917120f4e3b63349b7f36a017da243792bf9b705d/_data",
+          "Type": "volume"
+        }
+      ],
+      "ports": {
+        "9000/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "59000"
+          }
+        ]
+      },
+      "networks": {
+        "aeralyth-audit-integration-20260912": {
+          "Aliases": [],
+          "DNSNames": ["aeralyth-audit-s3-20260912", "62a74a0cbd91"],
+          "DriverOpts": {},
+          "EndpointID": "a2d7de303c90c7d9bc9c9eed1f1e367ce2631ce9f63d27df607eef4f78e2bd32",
+          "Gateway": "172.20.0.1",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": {},
+          "IPAddress": "172.20.0.3",
+          "IPPrefixLen": 16,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "26:6e:2c:f8:bf:77",
+          "NetworkID": "f4b8d55c99eb6c4e6ac30a4311f4c1e9466e840f7c94bbc89671947aa8e955a7"
+        },
+        "bridge": {
+          "Aliases": null,
+          "DNSNames": null,
+          "DriverOpts": null,
+          "EndpointID": "1721ee40e159af7585dddc50ee479a374a9f45fcb1719f6f1d360672d03c366c",
+          "Gateway": "172.17.0.1",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "172.17.0.3",
+          "IPPrefixLen": 16,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "ba:c0:f7:e8:bf:9f",
+          "NetworkID": "a2272e0985ea05b06aa38298e624f4dcd5b827bb73de2c427547cba8ed641418"
+        }
+      },
+      "ownership_evidence": "Container label aeralyth.task=performance-audit-20260912"
+    },
+    {
+      "id": "832beb83fb65bf8422d43ebe8681960419e7f9899b7d2da8b62cda7c8281c30b",
+      "name": "aeralyth-audit-20260912",
+      "created_at": "2026-09-12T10:43:16.535739208Z",
+      "image_id": "sha256:3a82e1f56c8f0f5616a11103ac3d47e632c3938698946a7ad26da0df1334744a",
+      "image_reference": "postgres:latest",
+      "state": "running",
+      "running": true,
+      "started_at": "2026-09-12T10:43:16.56715Z",
+      "labels": {
+        "aeralyth.task": "performance-audit-20260912"
+      },
+      "mounts": [
+        {
+          "Destination": "/var/lib/postgresql",
+          "Driver": "local",
+          "Mode": "",
+          "Name": "e6e80fad3f207d95821b161c774ec3fcb5bef1c0f3882d4c5fbdc22514f3eb7f",
+          "Propagation": "",
+          "RW": true,
+          "Source": "/var/lib/docker/volumes/e6e80fad3f207d95821b161c774ec3fcb5bef1c0f3882d4c5fbdc22514f3eb7f/_data",
+          "Type": "volume"
+        }
+      ],
+      "ports": {
+        "5432/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "55432"
+          }
+        ]
+      },
+      "networks": {
+        "aeralyth-audit-integration-20260912": {
+          "Aliases": [],
+          "DNSNames": ["aeralyth-audit-20260912", "832beb83fb65"],
+          "DriverOpts": {},
+          "EndpointID": "1fd3c823004a76a3e078d8056673dc43815326e80b108e923259d54d9611f421",
+          "Gateway": "172.20.0.1",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": {},
+          "IPAddress": "172.20.0.2",
+          "IPPrefixLen": 16,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "fa:3e:da:98:a8:fe",
+          "NetworkID": "f4b8d55c99eb6c4e6ac30a4311f4c1e9466e840f7c94bbc89671947aa8e955a7"
+        },
+        "bridge": {
+          "Aliases": null,
+          "DNSNames": null,
+          "DriverOpts": null,
+          "EndpointID": "c4e93c5e500673643c8502e9ad190019a139346370c2f744caf6fc3cd701b021",
+          "Gateway": "172.17.0.1",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "172.17.0.2",
+          "IPPrefixLen": 16,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "ea:68:d5:6c:8e:cb",
+          "NetworkID": "a2272e0985ea05b06aa38298e624f4dcd5b827bb73de2c427547cba8ed641418"
+        }
+      },
+      "ownership_evidence": "Container label aeralyth.task=performance-audit-20260912"
+    }
+  ],
+  "audit_networks": [
+    {
+      "id": "af5edf12e3e7d86f82ca69b9921077ce0b2cc2c266c83725407fec30328b0eab",
+      "name": "aeralyth-audit-db-suite_default",
+      "created_at": "2026-09-12T11:05:07.872394176Z",
+      "driver": "bridge",
+      "scope": "local",
+      "labels": {
+        "com.docker.compose.config-hash": "626212c151292dcc171650330981e1676dd2cd6837a4af27c02bd8d70747986f",
+        "com.docker.compose.network": "default",
+        "com.docker.compose.project": "aeralyth-audit-db-suite",
+        "com.docker.compose.version": "5.5.1"
+      },
+      "containers": {
+        "153d72b51279ea65595076978a1e52b053773df5ad9abd3f5d0726ec457f17b0": {
+          "EndpointID": "c5f025d431e0ced4734b7b7735c02fbe928eebf11d0d7fdd42c3d22fef4f532f",
+          "IPv4Address": "172.21.0.2/16",
+          "IPv6Address": "",
+          "MacAddress": "be:be:37:c5:22:b5",
+          "Name": "aeralyth-audit-db-suite-20260912"
+        }
+      },
+      "internal": false,
+      "non_audit_members": [],
+      "ownership_evidence": "Task-specific aeralyth-audit network name; attached container identities and Compose labels recorded"
+    },
+    {
+      "id": "f4b8d55c99eb6c4e6ac30a4311f4c1e9466e840f7c94bbc89671947aa8e955a7",
+      "name": "aeralyth-audit-integration-20260912",
+      "created_at": "2026-09-12T11:02:41.241345261Z",
+      "driver": "bridge",
+      "scope": "local",
+      "labels": {},
+      "containers": {
+        "62a74a0cbd912ad99e47336868556c866b59ed8aa6a53748d88cc996611370f8": {
+          "EndpointID": "a2d7de303c90c7d9bc9c9eed1f1e367ce2631ce9f63d27df607eef4f78e2bd32",
+          "IPv4Address": "172.20.0.3/16",
+          "IPv6Address": "",
+          "MacAddress": "26:6e:2c:f8:bf:77",
+          "Name": "aeralyth-audit-s3-20260912"
+        },
+        "832beb83fb65bf8422d43ebe8681960419e7f9899b7d2da8b62cda7c8281c30b": {
+          "EndpointID": "1fd3c823004a76a3e078d8056673dc43815326e80b108e923259d54d9611f421",
+          "IPv4Address": "172.20.0.2/16",
+          "IPv6Address": "",
+          "MacAddress": "fa:3e:da:98:a8:fe",
+          "Name": "aeralyth-audit-20260912"
+        }
+      },
+      "internal": false,
+      "non_audit_members": [],
+      "ownership_evidence": "Task-specific aeralyth-audit network name; attached container identities and Compose labels recorded"
+    }
+  ],
+  "audit_volumes": [
+    {
+      "name": "4463f12963892db7ee061df18d0f0273a475a8d9cd6cbf07b77a6f9a51ed0898",
+      "driver": "local",
+      "created_at": "2026-09-12T11:05:07Z",
+      "mountpoint": "/var/lib/docker/volumes/4463f12963892db7ee061df18d0f0273a475a8d9cd6cbf07b77a6f9a51ed0898/_data",
+      "labels": {
+        "com.docker.volume.anonymous": ""
+      },
+      "scope": "local",
+      "attached_containers": [
+        {
+          "id": "153d72b51279ea65595076978a1e52b053773df5ad9abd3f5d0726ec457f17b0",
+          "name": "aeralyth-audit-db-suite-20260912",
+          "target": "/var/lib/postgresql",
+          "audit_owned": true
+        }
+      ],
+      "ownership_evidence": "Volume is attached only to the task-owned audit containers identified above"
+    },
+    {
+      "name": "b128e34ef8eb435f79db6ee917120f4e3b63349b7f36a017da243792bf9b705d",
+      "driver": "local",
+      "created_at": "2026-09-12T10:46:20Z",
+      "mountpoint": "/var/lib/docker/volumes/b128e34ef8eb435f79db6ee917120f4e3b63349b7f36a017da243792bf9b705d/_data",
+      "labels": {
+        "com.docker.volume.anonymous": ""
+      },
+      "scope": "local",
+      "attached_containers": [
+        {
+          "id": "62a74a0cbd912ad99e47336868556c866b59ed8aa6a53748d88cc996611370f8",
+          "name": "aeralyth-audit-s3-20260912",
+          "target": "/data",
+          "audit_owned": true
+        }
+      ],
+      "ownership_evidence": "Volume is attached only to the task-owned audit containers identified above"
+    },
+    {
+      "name": "e6e80fad3f207d95821b161c774ec3fcb5bef1c0f3882d4c5fbdc22514f3eb7f",
+      "driver": "local",
+      "created_at": "2026-09-12T10:43:16Z",
+      "mountpoint": "/var/lib/docker/volumes/e6e80fad3f207d95821b161c774ec3fcb5bef1c0f3882d4c5fbdc22514f3eb7f/_data",
+      "labels": {
+        "com.docker.volume.anonymous": ""
+      },
+      "scope": "local",
+      "attached_containers": [
+        {
+          "id": "832beb83fb65bf8422d43ebe8681960419e7f9899b7d2da8b62cda7c8281c30b",
+          "name": "aeralyth-audit-20260912",
+          "target": "/var/lib/postgresql",
+          "audit_owned": true
+        }
+      ],
+      "ownership_evidence": "Volume is attached only to the task-owned audit containers identified above"
+    }
+  ],
+  "audit_built_images": [
+    {
+      "id": "sha256:0d1348f5ae29632604e17af13d7be8035727246ccdf4c3b4343d989b46f7ccc6",
+      "created_at": "2026-09-12T11:08:09.975586886Z",
+      "repository_tags": ["aeralyth-audit-20260912:current"],
+      "repository_digests": [
+        "aeralyth-audit-20260912@sha256:0d1348f5ae29632604e17af13d7be8035727246ccdf4c3b4343d989b46f7ccc6"
+      ],
+      "size_bytes": 146285700,
+      "attached_containers": [],
+      "ownership_evidence": "Image tagged aeralyth-audit-20260912 and created during current audit; tag may move during the active final image build",
+      "cleanup_scope": "Identity only; preserve image unless root separately authorizes image removal. Container/network/volume cleanup does not imply cache or image pruning."
+    }
+  ],
+  "unattributed_same_date_volumes_preserve": [],
+  "protected_development_container": [
+    {
+      "id": "9bf5ebb64fbc5c5ac706ee14850e30389ad55f7c75dfb4c82e34778c18e3dfaa",
+      "name": "aeralyth-postgres",
+      "created_at": "2026-08-29T19:57:18.230381343Z",
+      "image_id": "sha256:3a82e1f56c8f0f5616a11103ac3d47e632c3938698946a7ad26da0df1334744a",
+      "image_reference": "postgres:latest",
+      "state": "running",
+      "running": true,
+      "started_at": "2026-09-12T10:42:17.221895167Z",
+      "labels": {
+        "com.docker.compose.config-hash": "b260fce012b617deccdfca4e25a8e0b1e957f287f27295eecdafee04a05041a6",
+        "com.docker.compose.container-number": "1",
+        "com.docker.compose.depends_on": "",
+        "com.docker.compose.image": "sha256:f1dd3522a7fde8bf8e505f42583ecdc00b4967a4b94d32ba1f890d118fe17335",
+        "com.docker.compose.oneoff": "False",
+        "com.docker.compose.project": "aeralyth",
+        "com.docker.compose.project.config_files": "/Users/timheld/Documents/Projects/Aeralyth/docker-compose.yml",
+        "com.docker.compose.project.working_dir": "/Users/timheld/Documents/Projects/Aeralyth",
+        "com.docker.compose.replace": "aeralyth-postgres",
+        "com.docker.compose.service": "postgres",
+        "com.docker.compose.version": "5.4.0"
+      },
+      "mounts": [
+        {
+          "Destination": "/docker-entrypoint-initdb.d",
+          "Mode": "ro",
+          "Propagation": "rprivate",
+          "RW": false,
+          "Source": "/host_mnt/Users/timheld/Documents/Projects/Aeralyth/database/init",
+          "Type": "bind"
+        },
+        {
+          "Destination": "/var/lib/postgresql",
+          "Driver": "local",
+          "Mode": "rw",
+          "Name": "aeralyth_aeralyth-postgres-data",
+          "Propagation": "",
+          "RW": true,
+          "Source": "/var/lib/docker/volumes/aeralyth_aeralyth-postgres-data/_data",
+          "Type": "volume"
+        }
+      ],
+      "ports": {
+        "5432/tcp": [
+          {
+            "HostIp": "0.0.0.0",
+            "HostPort": "5432"
+          },
+          {
+            "HostIp": "::",
+            "HostPort": "5432"
+          }
+        ]
+      },
+      "networks": {
+        "aeralyth_default": {
+          "Aliases": ["aeralyth-postgres", "postgres"],
+          "DNSNames": ["aeralyth-postgres", "postgres", "9bf5ebb64fbc"],
+          "DriverOpts": null,
+          "EndpointID": "1f36e536caf113521791b4473e010702352b37d9132a583f3f36e6eef53c4d81",
+          "Gateway": "172.19.0.1",
+          "GlobalIPv6Address": "",
+          "GlobalIPv6PrefixLen": 0,
+          "GwPriority": 0,
+          "IPAMConfig": null,
+          "IPAddress": "172.19.0.2",
+          "IPPrefixLen": 16,
+          "IPv6Gateway": "",
+          "Links": null,
+          "MacAddress": "42:75:31:b6:ac:aa",
+          "NetworkID": "37165be6ac5f908486e122f23517a41911cb70df1d9aada33cab3ff570e8cb37"
+        }
+      }
+    }
+  ],
+  "all_container_identity_snapshot": [
+    {
+      "id": "153d72b51279ea65595076978a1e52b053773df5ad9abd3f5d0726ec457f17b0",
+      "name": "aeralyth-audit-db-suite-20260912",
+      "created_at": "2026-09-12T11:05:07.91865951Z",
+      "image_reference": "postgres:latest",
+      "state": "running",
+      "ports": {
+        "5432/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "55434"
+          }
+        ]
+      }
+    },
+    {
+      "id": "62a74a0cbd912ad99e47336868556c866b59ed8aa6a53748d88cc996611370f8",
+      "name": "aeralyth-audit-s3-20260912",
+      "created_at": "2026-09-12T10:46:20.476748251Z",
+      "image_reference": "minio/minio:latest",
+      "state": "running",
+      "ports": {
+        "9000/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "59000"
+          }
+        ]
+      }
+    },
+    {
+      "id": "832beb83fb65bf8422d43ebe8681960419e7f9899b7d2da8b62cda7c8281c30b",
+      "name": "aeralyth-audit-20260912",
+      "created_at": "2026-09-12T10:43:16.535739208Z",
+      "image_reference": "postgres:latest",
+      "state": "running",
+      "ports": {
+        "5432/tcp": [
+          {
+            "HostIp": "127.0.0.1",
+            "HostPort": "55432"
+          }
+        ]
+      }
+    },
+    {
+      "id": "28fb4f26c05fe66fd75909aa626ae74368c01c2bee547976a7d1a410203b002b",
+      "name": "m324-gitlab-runner",
+      "created_at": "2026-09-10T18:02:30.801078717Z",
+      "image_reference": "gitlab/gitlab-runner@sha256:af0325804248aee217e055e753add77ccaaba6c8f5e2143b01108fd401165ef3",
+      "state": "exited",
+      "ports": {}
+    },
+    {
+      "id": "9bf5ebb64fbc5c5ac706ee14850e30389ad55f7c75dfb4c82e34778c18e3dfaa",
+      "name": "aeralyth-postgres",
+      "created_at": "2026-08-29T19:57:18.230381343Z",
+      "image_reference": "postgres:latest",
+      "state": "running",
+      "ports": {
+        "5432/tcp": [
+          {
+            "HostIp": "0.0.0.0",
+            "HostPort": "5432"
+          },
+          {
+            "HostIp": "::",
+            "HostPort": "5432"
+          }
+        ]
+      }
+    },
+    {
+      "id": "d2b35a15cc9dd1b451ff7c80f3e48f887ab833b221f1878eb1ed776b16ffe2ac",
+      "name": "adminsearch-nextjs-1",
+      "created_at": "2026-07-31T22:18:32.472257554Z",
+      "image_reference": "adminsearch-nextjs",
+      "state": "exited",
+      "ports": {}
+    },
+    {
+      "id": "10baec00da7f0e87f2f33c19c2b8c63c12cf72db4d2ea3f2b5397da3e030dfed",
+      "name": "adminsearch-valkey-1",
+      "created_at": "2026-07-31T20:14:37.991902793Z",
+      "image_reference": "docker.io/valkey/valkey:latest",
+      "state": "exited",
+      "ports": {}
+    },
+    {
+      "id": "98ae03f0e5b52c2674dda7fa65473a88d98077c901837864d9bdb687e22430aa",
+      "name": "adminsearch-caddy-1",
+      "created_at": "2026-07-31T20:10:08.847863918Z",
+      "image_reference": "docker.io/caddy:2.10.2-alpine",
+      "state": "exited",
+      "ports": {}
+    },
+    {
+      "id": "f696bb05c53cb7cd1668f04955b566e6e0db17ac0c481113ac1a47f5fa5d1967",
+      "name": "adminsearch-searxng-core-1",
+      "created_at": "2026-07-31T20:10:08.74411946Z",
+      "image_reference": "docker.io/searxng/searxng:latest",
+      "state": "exited",
+      "ports": {}
+    }
+  ],
+  "protected_shared_images": [
+    {
+      "reference": "node:24",
+      "id": "sha256:6dac556d980b7f0e5498d08f08cee0ca67798b4ad6c23964a9214920e67758d0",
+      "reason": "Shared or vendor image; creation/pull ownership is not established by this inventory"
+    },
+    {
+      "reference": "rust:1.98-bookworm",
+      "id": "sha256:9a73a5088750b4c95158ab26629c854c3d6fc4b173cb7bc8079ad252d8ed7bfa",
+      "reason": "Shared or vendor image; creation/pull ownership is not established by this inventory"
+    },
+    {
+      "reference": "node:22-bookworm-slim",
+      "id": "sha256:83f487e0a63425e5b4d146fb5e5be574bcbe1b7b843d3ebafdd95eaf7767a7e5",
+      "reason": "Shared or vendor image; creation/pull ownership is not established by this inventory"
+    },
+    {
+      "reference": "postgres:latest",
+      "id": "sha256:3a82e1f56c8f0f5616a11103ac3d47e632c3938698946a7ad26da0df1334744a",
+      "reason": "Shared or vendor image; creation/pull ownership is not established by this inventory"
+    },
+    {
+      "reference": "minio/minio:latest",
+      "id": "sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e",
+      "reason": "Shared or vendor image; creation/pull ownership is not established by this inventory"
+    },
+    {
+      "reference": "minio/mc:latest",
+      "id": "sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727",
+      "reason": "Shared or vendor image; creation/pull ownership is not established by this inventory"
+    }
+  ],
+  "protected_paths": [
+    "/Users/timheld/Documents/Projects/Aeralyth/database/init",
+    "/Users/timheld/Documents/Projects/Aeralyth/backend/target",
+    "/Users/timheld/Documents/Projects/Aeralyth/node_modules",
+    "/Users/timheld/Documents/Projects/Aeralyth/performance/results/database-audit-2026-09-12"
+  ],
+  "observed_actions": [
+    "docker ps/list",
+    "docker container/network/volume/image inspect with explicit metadata fields",
+    "write inventory JSON and Markdown only"
+  ]
+}

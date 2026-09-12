@@ -1,0 +1,21 @@
+    Blocking waiting for file lock on build directory
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.56s
+     Running unittests src/main.rs (backend/target/debug/deps/aeralyth_api-66575a101fb2eba5)
+
+running 1 test
+
+thread 'upload_completion::tests::unavailable_parent_aborts_completion_atomically_without_losing_write_lease' (279195) panicked at src/upload_completion.rs:690:9:
+assertion `left == right` failed
+  left: 0
+ right: 4
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test upload_completion::tests::unavailable_parent_aborts_completion_atomically_without_losing_write_lease ... FAILED
+
+failures:
+
+failures:
+    upload_completion::tests::unavailable_parent_aborts_completion_atomically_without_losing_write_lease
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 262 filtered out; finished in 0.07s
+
+error: test failed, to rerun pass `--bin aeralyth-api`

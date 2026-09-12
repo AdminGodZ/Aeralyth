@@ -1,0 +1,14 @@
+{
+  "preparedAt": "2026-09-12T11:21:51.354Z",
+  "fixtureSourceSha256": "bb445cc5a1c956b8e3fbb57fef14f31493174cc84d5a3ac6799b1701f8859b42",
+  "maximumManifestLengths": [
+    1048576, 1048576, 1048576, 1048576, 1048576, 1048576, 1048576, 1048576,
+    1048576
+  ],
+  "signedMaximumRecordsVerified": true,
+  "requestedDeepLeaves": 6,
+  "expandedDeepNodes": 600,
+  "totalNodes": 609,
+  "databaseTouched": false,
+  "apiMeasured": false
+}

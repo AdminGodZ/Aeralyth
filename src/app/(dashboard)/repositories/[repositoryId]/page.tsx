@@ -25,15 +25,12 @@ export default async function RepositoryPage({
     params,
     searchParams,
   ]);
-  const [{ csrfToken, currentUser }, repositoryDetailState] = await Promise.all(
-    [
-      getDashboardSession(),
-      getRepositoryDetailState(
-        repositoryId,
-        folder?.trim() || undefined,
-        cursor?.trim() || undefined,
-      ),
-    ],
+  const { csrfToken, currentUser, realtimeCursor } =
+    await getDashboardSession();
+  const repositoryDetailState = await getRepositoryDetailState(
+    repositoryId,
+    folder?.trim() || undefined,
+    cursor?.trim() || undefined,
   );
 
   if (repositoryDetailState.status === "unauthorized") {
@@ -49,6 +46,7 @@ export default async function RepositoryPage({
       sectionKey="repositories"
       currentUser={currentUser}
       csrfToken={csrfToken}
+      realtimeCursor={realtimeCursor}
       filesState={{ status: "unavailable" }}
       repositoryDetailState={repositoryDetailState}
       repositoryFileId={file?.trim() || undefined}

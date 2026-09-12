@@ -289,7 +289,7 @@ pub async fn update(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if updated.is_none() {
         return Err(error::ErrorUnauthorized("authentication required"));
     }
@@ -314,7 +314,7 @@ pub async fn avatar(state: web::Data<AppState>, request: HttpRequest) -> Result<
             &[&user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?
+        .map_err(crate::db::http_error)?
     else {
         return Ok(HttpResponse::NotFound().finish());
     };
@@ -353,7 +353,7 @@ pub async fn change_password(
             &[&user.id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?
+        .map_err(crate::db::http_error)?
         .map(|row| row.get::<_, String>("password_hash"));
     state.db.release_request_connection().await;
 
@@ -378,7 +378,7 @@ pub async fn change_password(
         .db
         .query_opt(PASSWORD_CHANGE_QUERY, &[&new_hash, &user.id, &current_hash])
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if changed.is_none() {
         return Ok(HttpResponse::Conflict().body("password changed concurrently; try again"));
     }

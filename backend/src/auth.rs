@@ -2,6 +2,10 @@ use actix_web::{HttpMessage, HttpRequest, Result, dev, error, web};
 use serde::{Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use std::future::Future;
+use std::time::Duration;
+
+use bytes::{Bytes, BytesMut};
+use futures_util::StreamExt;
 
 use crate::state::{AppState, LoadShedError};
 use crate::timestamps;
@@ -24,18 +28,102 @@ pub async fn parse_json_body<T: DeserializeOwned>(
     payload: web::Payload,
     limit: usize,
 ) -> Result<T> {
-    decode_json_body(request, payload.into_inner(), limit).await
+    let decoded = decode_json_body(request, payload.into_inner(), limit).await?;
+    if let Some(state) = request.app_data::<web::Data<AppState>>()
+        && request.extensions().get::<SessionPrincipal>().is_some()
+    {
+        revalidate_principal(state, request).await?;
+    }
+    Ok(decoded)
 }
 
 async fn decode_json_body<T: DeserializeOwned>(
     request: &HttpRequest,
-    mut payload: dev::Payload,
+    payload: dev::Payload,
     limit: usize,
 ) -> Result<T> {
+    let bytes = read_control_body(request, payload, limit).await?;
+    let mut payload = dev::Payload::from(bytes);
     web::JsonBody::<T>::new(request, &mut payload, None, true)
         .limit(limit)
         .await
         .map_err(Into::into)
+}
+
+// Control metadata is bounded separately from multi-gigabyte file streams. An idle
+// sender gets five seconds; even a continuously trickling publication gets 60 seconds.
+const CONTROL_BODY_IDLE_TIMEOUT: Duration = Duration::from_secs(5);
+const CONTROL_BODY_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
+
+pub async fn read_control_body(
+    request: &HttpRequest,
+    payload: dev::Payload,
+    limit: usize,
+) -> Result<Bytes> {
+    crate::db::release_request_connection().await;
+    let declared = request
+        .headers()
+        .get(actix_web::http::header::CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    if declared.is_some_and(|length| length > limit) {
+        return Err(error::ErrorPayloadTooLarge("control body is too large"));
+    }
+    read_control_chunks(
+        payload,
+        limit,
+        CONTROL_BODY_IDLE_TIMEOUT,
+        CONTROL_BODY_TOTAL_TIMEOUT,
+    )
+    .await
+}
+
+async fn read_control_chunks(
+    mut payload: dev::Payload,
+    limit: usize,
+    idle: Duration,
+    total: Duration,
+) -> Result<Bytes> {
+    let deadline = tokio::time::Instant::now() + total;
+    let mut bytes = BytesMut::new();
+    loop {
+        if tokio::time::Instant::now() >= deadline {
+            return Err(error::ErrorRequestTimeout("control body deadline exceeded"));
+        }
+        let next_deadline = deadline.min(tokio::time::Instant::now() + idle);
+        let next = tokio::time::timeout_at(next_deadline, payload.next())
+            .await
+            .map_err(|_| error::ErrorRequestTimeout("control body deadline exceeded"))?;
+        let Some(chunk) = next else {
+            return Ok(bytes.freeze());
+        };
+        let chunk = chunk.map_err(error::ErrorBadRequest)?;
+        if bytes.len().saturating_add(chunk.len()) > limit {
+            return Err(error::ErrorPayloadTooLarge("control body is too large"));
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+}
+
+/// Revalidate after body/CPU/provider waits; the request extension is only a phase-local cache.
+/// A role or session change invalidates already-derived authorization decisions.
+pub async fn revalidate_principal(
+    state: &AppState,
+    request: &HttpRequest,
+) -> Result<SessionPrincipal> {
+    let previous = request.extensions_mut().remove::<SessionPrincipal>();
+    request.extensions_mut().remove::<AuthUser>();
+    let current = require_principal(state, request).await?;
+    if previous.is_some_and(|previous| {
+        previous.id != current.id
+            || previous.session_id != current.session_id
+            || previous.role != current.role
+    }) {
+        return Err(error::ErrorUnauthorized(
+            "authentication changed; retry request",
+        ));
+    }
+    Ok(current)
 }
 
 #[derive(Clone, Debug)]
@@ -130,7 +218,7 @@ pub async fn authenticate_password(
             &[&username],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let candidate = user.map(|row| {
         let password_hash: String = row.get("password_hash");
         let auth_version: i16 = row.get("auth_version");
@@ -212,7 +300,7 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
                 &[&principal.id],
             )
             .await
-            .map_err(error::ErrorInternalServerError)?
+            .map_err(crate::db::http_error)?
     } else {
         let token_hash = hash_session_token(cookie.value());
         state
@@ -248,7 +336,7 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
                 &[&token_hash.as_slice()],
             )
             .await
-            .map_err(error::ErrorInternalServerError)?
+            .map_err(crate::db::http_error)?
     };
 
     let Some(row) = user else {
@@ -278,7 +366,7 @@ pub async fn session_principal(
             .db
             .query_opt(SESSION_PRINCIPAL_QUERY, &[&token_hash.as_slice()])
             .await
-            .map_err(error::ErrorInternalServerError)?;
+            .map_err(crate::db::http_error)?;
         Ok(row.as_ref().map(session_principal_from_row))
     })
     .await
@@ -378,7 +466,7 @@ fn constant_time_equal(left: &[u8], right: &[u8]) -> bool {
         == 0
 }
 
-fn auth_user_from_row(row: tokio_postgres::Row, e2ee_mode: &str) -> AuthUser {
+pub(crate) fn auth_user_from_row(row: tokio_postgres::Row, e2ee_mode: &str) -> AuthUser {
     let has_profile_image: bool = row.get("has_profile_image");
     let profile_image_version = timestamps::version_millis(row.get("profile_image_version_at"));
     let profile_image_url =
@@ -406,12 +494,15 @@ fn auth_user_from_row(row: tokio_postgres::Row, e2ee_mode: &str) -> AuthUser {
 #[cfg(test)]
 mod tests {
     use super::{
-        SESSION_PRINCIPAL_QUERY, SessionPrincipal, cached_or_load_principal, constant_time_equal,
-        decode_json_body, hash_session_token,
+        SESSION_COOKIE, SESSION_PRINCIPAL_QUERY, SessionPrincipal, cached_or_load_principal,
+        constant_time_equal, decode_json_body, hash_session_token, read_control_chunks,
+        require_principal,
     };
-    use actix_web::{http::StatusCode, test as actix_test};
+    use actix_web::{dev, http::StatusCode, test as actix_test};
+    use bytes::Bytes;
     use serde::Deserialize;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     #[test]
     fn csrf_comparison_rejects_wrong_values_and_lengths() {
@@ -581,25 +672,47 @@ mod tests {
             ("files", include_str!("routes/files.rs"), 6),
             ("repositories", include_str!("routes/repositories.rs"), 3),
             ("share links", include_str!("routes/share_links.rs"), 1),
-            ("profile", include_str!("routes/profile.rs"), 2),
+            ("profile", include_str!("routes/profile.rs"), 1),
             ("admin", include_str!("routes/admin.rs"), 1),
             ("vault", include_str!("routes/vault.rs"), 11),
         ] {
+            let source = source.split("#[cfg(test)]").next().unwrap();
             assert!(
                 !source.contains("web::Json<"),
                 "{name} reintroduced eager JSON extraction"
             );
             assert_eq!(
-                source.matches("parse_json_body::<").count(),
+                source.matches("parse_json_body::<").count()
+                    + if name == "vault" {
+                        source.matches("parse_account_material(").count()
+                    } else {
+                        0
+                    },
                 expected_payloads,
                 "{name} JSON route coverage changed; authenticate before parsing any new body"
             );
         }
         let vault = include_str!("routes/vault.rs");
+        let production = vault.split("#[cfg(test)]").next().unwrap();
         assert_eq!(
-            vault.matches("serde_json::from_slice::<").count(),
-            5,
-            "large compatibility publications must deserialize only inside bounded CPU work"
+            production.matches("parse_account_material(").count(),
+            4,
+            "all four account mutations must use bounded CPU decoding"
+        );
+        let account_decoder = production
+            .split_once("async fn offload_account_material<")
+            .unwrap()
+            .1
+            .split_once("fn decode_account_content(")
+            .unwrap()
+            .0;
+        assert!(account_decoder.contains(".run(user_id, move ||"));
+        assert!(production.contains("offload_account_material(&state.vault_validation"));
+        assert!(account_decoder.contains("serde_json::from_slice::<Body>"));
+        assert_eq!(
+            production.matches("serde_json::from_slice::<").count(),
+            6,
+            "large compatibility publications and account bodies must deserialize inside bounded CPU work"
         );
     }
 
@@ -655,5 +768,116 @@ mod tests {
         assert_eq!(loads.load(Ordering::Relaxed), 1);
         assert_eq!(first.expect("principal should exist").id, "user-1");
         assert_eq!(second.expect("principal should be cached").id, "user-1");
+    }
+    #[actix_web::test]
+    async fn control_body_enforces_idle_and_total_deadlines() {
+        use futures_util::Stream;
+        use std::pin::Pin;
+        let idle_stream = futures_util::stream::pending::<
+            std::result::Result<Bytes, actix_web::error::PayloadError>,
+        >();
+        let payload = dev::Payload::from(Box::pin(idle_stream) as Pin<Box<dyn Stream<Item = _>>>);
+        let failure = read_control_chunks(
+            payload,
+            100,
+            Duration::from_millis(10),
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            failure.as_response_error().status_code(),
+            StatusCode::REQUEST_TIMEOUT
+        );
+        let trickle = futures_util::stream::unfold((), |()| async {
+            tokio::time::sleep(Duration::from_millis(3)).await;
+            Some((
+                Ok::<_, actix_web::error::PayloadError>(Bytes::from_static(b"x")),
+                (),
+            ))
+        });
+        let payload = dev::Payload::from(Box::pin(trickle) as Pin<Box<dyn Stream<Item = _>>>);
+        let failure = read_control_chunks(
+            payload,
+            100,
+            Duration::from_millis(20),
+            Duration::from_millis(15),
+        )
+        .await
+        .unwrap_err();
+        assert_eq!(
+            failure.as_response_error().status_code(),
+            StatusCode::REQUEST_TIMEOUT
+        );
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn slow_control_body_releases_pool_and_honors_session_revocation() {
+        use actix_web::{FromRequest, cookie::Cookie, test::TestRequest, web};
+        use futures_util::Stream;
+        use std::pin::Pin;
+        let state = crate::state::database_test_state(1).await;
+        let suffix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let user = format!("usr_body_{suffix}");
+        let session = format!("ses_body_{suffix}");
+        let token = format!("body-token-{suffix}");
+        let hash = hash_session_token(&token);
+        state.db.execute("INSERT INTO users(id,username,password_hash,role,status) VALUES($1,$1,'test','user','active')", &[&user]).await.unwrap();
+        state.db.execute("INSERT INTO sessions(id,user_id,token_hash,csrf_token,expires_at) VALUES($1,$2,$3,'csrf',now()+interval '1 hour')", &[&session,&user,&hash.as_slice()]).await.unwrap();
+        let request = TestRequest::post()
+            .app_data(state.clone())
+            .insert_header(("content-type", "application/json"))
+            .cookie(Cookie::new(SESSION_COOKIE, token))
+            .to_http_request();
+        let (send, receive) = tokio::sync::oneshot::channel::<()>();
+        let stream = futures_util::stream::once(async move {
+            receive.await.unwrap();
+            Ok::<_, actix_web::error::PayloadError>(Bytes::from_static(br#"{"value":"ok"}"#))
+        });
+        let payload = dev::Payload::from(Box::pin(stream) as Pin<Box<dyn Stream<Item = _>>>);
+        let (authenticated_send, authenticated_receive) = tokio::sync::oneshot::channel();
+        let slow = crate::db::scope_request(async {
+            require_principal(&state, &request).await.unwrap();
+            authenticated_send.send(()).unwrap();
+            let mut payload = payload;
+            let payload = web::Payload::from_request(&request, &mut payload)
+                .await
+                .unwrap();
+            let failure = super::parse_json_body::<JsonProbe>(&request, payload, 1024)
+                .await
+                .unwrap_err();
+            assert_eq!(
+                failure.as_response_error().status_code(),
+                StatusCode::UNAUTHORIZED
+            );
+        });
+        let concurrent = async {
+            authenticated_receive.await.unwrap();
+            tokio::task::yield_now().await;
+            tokio::time::timeout(
+                Duration::from_millis(150),
+                state.db.query_one("SELECT 1", &[]),
+            )
+            .await
+            .expect("slow body must release the only connection")
+            .unwrap();
+            state
+                .db
+                .execute("DELETE FROM sessions WHERE id=$1", &[&session])
+                .await
+                .unwrap();
+            send.send(()).unwrap();
+        };
+        tokio::join!(slow, concurrent);
+        assert_eq!(state.db.status().available, state.db.status().size);
+        state
+            .db
+            .execute("DELETE FROM users WHERE id=$1", &[&user])
+            .await
+            .unwrap();
     }
 }

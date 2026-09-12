@@ -3,32 +3,22 @@ import "server-only";
 import { redirect } from "next/navigation";
 import { cache } from "react";
 
-import { getAuthState, getCsrfState } from "@/lib/api";
+import { getSessionBootstrapState } from "@/lib/api";
 
 export const getDashboardSession = cache(async () => {
-  const [authState, csrfState] = await Promise.all([
-    getAuthState(),
-    getCsrfState(),
-  ]);
+  const session = await getSessionBootstrapState();
 
-  if (authState.status === "unavailable") {
+  if (session.status === "unavailable") {
     redirect("/login?error=backend");
   }
 
-  if (authState.status === "anonymous") {
+  if (session.status === "unauthorized") {
     redirect("/login");
-  }
-
-  if (csrfState.status === "unauthorized") {
-    redirect("/login");
-  }
-
-  if (csrfState.status === "unavailable") {
-    redirect("/login?error=backend");
   }
 
   return {
-    csrfToken: csrfState.token,
-    currentUser: authState.user,
+    csrfToken: session.csrfToken,
+    currentUser: session.user,
+    realtimeCursor: session.realtimeCursor,
   };
 });

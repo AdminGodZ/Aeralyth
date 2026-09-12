@@ -1,0 +1,34 @@
+{
+  "purpose": "Final source and migration identity for the100k acceptance rerun; earlier scale runs are distinguished in README.md",
+  "database": "aeralyth_audit_tree_final",
+  "sources": {
+    "backend/src/routes/tree_jobs.rs": "f2dcd451a1519503cb8c4b9bc89e50a97a378694fe7cda06ea424c19e5466058",
+    "backend/src/routes/tree_walk.rs": "4f36bc5c830fda36689f471c4eff34462d9a6ff6923e786adfcfee273d41474c",
+    "database/init/029_durable_tree_operations.sql": "775e7a6a5c451c434077ed82fc733a2fe4be1e5ea6c2a0c3abdd3ecd1b3c90db",
+    "src/features/vault/vault-api.ts": "f070de4dddb8a79af81f99ae9fa3b41255f76dc556521d84fe3a221b35ee5e3f",
+    "src/features/vault/vault-api.tree-jobs.test.ts": "a3050fcca256d916c814a93ce2a883051f5cfe39b3c3dec554094c1eac55f192",
+    "database/init/028_migration_progress.sql": "d4dff9325e52ff506e46f925feb8e02a1c806f34f569864637c37e2175c70f55",
+    "database/init/030_repository_change_tracking.sql": "d12ae90554242db71a50a05375fe66cdcd9eed8d5e35a1b75bc92f054d433dca",
+    "database/init/031_realtime_background_audiences.sql": "09824dbfadfdeeb273f85f8a30776b5920af2c61e4435dea79de084972fbff46",
+    "database/init/032_bucket_usage_snapshots.sql": "2902b8eb43addd38840d18308993ddd02d7c65538e577cd29a81fd3bc3820f97",
+    "database/init/034_indexed_trash_expiry.sql": "c5945b11ae078303aed24fa0f80e5e10fe9f1cb75c563315b5528cefa4c3e3ff",
+    "database/init/035_multipart_reconciliation.sql": "a8d5b65a959eb5c0ce95a3b1ccadfbef26e3c1da3c823fe24ea228e506b08ec1"
+  },
+  "completed_checks": [
+    "100k-final.log",
+    "balanced-final.log",
+    "million-resumed.log",
+    "folders.log",
+    "deep.log",
+    "fairness.log",
+    "fences-final.log",
+    "dependencies-final.log",
+    "depth-final.log",
+    "parent-concurrency.log",
+    "parent-publication.log",
+    "upload-bookkeeping.log",
+    "frontend-polling.log",
+    "frontend-biome.log",
+    "route-source-contract.log"
+  ]
+}

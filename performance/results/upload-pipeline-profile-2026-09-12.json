@@ -1,0 +1,3861 @@
+{
+  "measuredAt": "2026-09-12T11:26:49.446Z",
+  "nodeVersion": "v26.8.2",
+  "execArgv": ["--max-old-space-size=128", "--expose-gc"],
+  "baselineRef": "fe9556cf9f011297e16500f18cdf04b991b35635",
+  "sourceHashes": {
+    "baseline": "95f7944ea91d6c174497f9e80ae0e025417251f62322796b377cfcdcde79e9fd",
+    "current": "cf2b368b32e4692cedf099f4b56d4d59ec4113462d2348b8543cd33774843994",
+    "sharedHelpers": {
+      "src/features/vault/bounded-async.ts": "b5bbf3f0ed661a52d58e8b68626236421bd0cc0006185ec32bfb91dad789bf91",
+      "src/features/vault/buffered-bytes.ts": "b20b269a039d2853dd79ef1aaf1630076552fd1ab6fccdae7f25de3c342473ff",
+      "src/features/vault/protocol.ts": "9b5dc9588046d9a21495b7673b4b5ccd842c9e7c6b93f3fd94a1dcd08f9cf9af",
+      "src/features/uploads/upload-retry.ts": "b7ed6b4a34ea672e94dacd5f6811e118cc84cd7b88d7f61c4b9314c1205293ff"
+    }
+  },
+  "methodology": {
+    "real": [
+      "current and historical production upload scheduling",
+      "32 MiB part assembly and 4 MiB generated chunks",
+      "SHA-256 part checksums",
+      "retry wrapper",
+      "actual wall-clock phase timings",
+      "native process RSS and ArrayBuffer sampling",
+      "allocated live assembler/part buffer accounting"
+    ],
+    "controlled": [
+      "crypto adapter produces generated ciphertext with 1 ms delay per chunk",
+      "init 5 ms, presign 2 ms, finalize 3 ms",
+      "first part 300 ms, other PUTs 35 ms",
+      "first file publication 200 ms, others 5 ms",
+      "navigator hardwareConcurrency and deviceMemory hints"
+    ],
+    "limitations": [
+      "No real encryption, network, disk, account, or browser",
+      "deviceMemory is a hint, not a physical 1 GiB memory constraint",
+      "process memory includes allocator/GC and instrumentation",
+      "single sample per scenario, baseline then current; no statistical speed claims",
+      "owned assembler/part metric excludes transient plaintext/ciphertext and native digest copies, captured separately in RSS/ArrayBuffers",
+      "historical uploader entrypoint uses the same current semaphore, assembler, protocol, and retry helpers; their hashes are recorded",
+      "all profiles run in one process; allocator-retained RSS carries between scenarios despite requested GC"
+    ]
+  },
+  "results": [
+    {
+      "variant": "baseline",
+      "scenario": "multipart-threshold-plus-one",
+      "hardwareConcurrency": 8,
+      "simulatedDeviceMemoryGiB": 1,
+      "totalCiphertextBytes": 33554433,
+      "totalPlaintextBytes": 33554305,
+      "chunkCount": 8,
+      "partCount": 2,
+      "firstPutMs": 58.26412500000001,
+      "lastPutMs": 358.518375,
+      "elapsedMs": 566.7585409999999,
+      "transferPhaseMiBPerSecond": 106.57634639201385,
+      "completePhaseMiBPerSecond": 56.46143575924394,
+      "presignRequests": 1,
+      "unusedPutSlotMs": 864.6629999999999,
+      "peakActivePuts": 2,
+      "peakOwnedAssemblerAndPartBytes": 67108864,
+      "peakOwnedBufferCount": 2,
+      "ownedAssemblerAndPartCeilingBytes": 201326592,
+      "firstSlowPartEndMs": 358.518375,
+      "fifthPartStartMs": null,
+      "fifthPartStartedBeforeFirstPartEnded": null,
+      "peakRssBytes": 171720704,
+      "initialRssBytes": 52641792,
+      "peakArrayBufferBytes": 113471711,
+      "initialArrayBufferBytes": 225706,
+      "peakExternalBytes": 115923714,
+      "files": [
+        {
+          "id": "file-0",
+          "ciphertextBytes": 33554433,
+          "chunkCount": 8,
+          "size": 33554305,
+          "firstPutMs": 58.26412500000001,
+          "publishStartMs": 364.397958,
+          "completeMs": 566.6508329999999
+        }
+      ],
+      "events": [
+        {
+          "event": "file-start",
+          "file": "file-0",
+          "ms": 0.6886659999999978
+        },
+        {
+          "event": "init-start",
+          "file": "file-0",
+          "ms": 0.8239999999999981
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-0",
+          "ms": 9.057916000000006
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-0",
+          "ms": 31.881124999999997
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 1,
+          "ms": 58.26412500000001,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 2,
+          "ms": 58.319458,
+          "bytes": 1,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 2,
+          "ms": 94.419208,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 1,
+          "ms": 358.518375,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-0",
+          "ms": 364.397958
+        },
+        {
+          "event": "file-end",
+          "file": "file-0",
+          "ms": 566.6508329999999
+        }
+      ]
+    },
+    {
+      "variant": "current",
+      "scenario": "multipart-threshold-plus-one",
+      "hardwareConcurrency": 8,
+      "simulatedDeviceMemoryGiB": 1,
+      "totalCiphertextBytes": 33554433,
+      "totalPlaintextBytes": 33554305,
+      "chunkCount": 8,
+      "partCount": 2,
+      "firstPutMs": 35.35987499999999,
+      "lastPutMs": 349.73754099999996,
+      "elapsedMs": 554.380958,
+      "transferPhaseMiBPerSecond": 101.78840424902931,
+      "completePhaseMiBPerSecond": 57.7220420216423,
+      "presignRequests": 2,
+      "unusedPutSlotMs": 920.8047059999999,
+      "peakActivePuts": 2,
+      "peakOwnedAssemblerAndPartBytes": 67108864,
+      "peakOwnedBufferCount": 2,
+      "ownedAssemblerAndPartCeilingBytes": 201326592,
+      "firstSlowPartEndMs": 349.73754099999996,
+      "fifthPartStartMs": null,
+      "fifthPartStartedBeforeFirstPartEnded": null,
+      "peakRssBytes": 217890816,
+      "initialRssBytes": 171982848,
+      "peakArrayBufferBytes": 92503151,
+      "initialArrayBufferBytes": 228605,
+      "peakExternalBytes": 96713208,
+      "files": [
+        {
+          "id": "file-0",
+          "ciphertextBytes": 33554433,
+          "chunkCount": 8,
+          "size": 33554305,
+          "firstPutMs": 35.35987499999999,
+          "publishStartMs": 353.849833,
+          "completeMs": 554.2827909999999
+        }
+      ],
+      "events": [
+        {
+          "event": "file-start",
+          "file": "file-0",
+          "ms": 0.48579099999994924
+        },
+        {
+          "event": "init-start",
+          "file": "file-0",
+          "ms": 0.849790999999982
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-0",
+          "ms": 9.056499999999915
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-0",
+          "ms": 20.529915999999957
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 2,
+          "ms": 35.35987499999999,
+          "bytes": 1,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 1,
+          "ms": 48.24529099999995,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 2,
+          "ms": 70.57358299999999,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 1,
+          "ms": 349.73754099999996,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-0",
+          "ms": 353.849833
+        },
+        {
+          "event": "file-end",
+          "file": "file-0",
+          "ms": 554.2827909999999
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "scenario": "64-mib",
+      "hardwareConcurrency": 8,
+      "simulatedDeviceMemoryGiB": 1,
+      "totalCiphertextBytes": 67108864,
+      "totalPlaintextBytes": 67108608,
+      "chunkCount": 16,
+      "partCount": 2,
+      "firstPutMs": 63.73325,
+      "lastPutMs": 364.5780420000001,
+      "elapsedMs": 569.763334,
+      "transferPhaseMiBPerSecond": 212.73427927580673,
+      "completePhaseMiBPerSecond": 112.32734046027609,
+      "presignRequests": 1,
+      "unusedPutSlotMs": 866.8067510000003,
+      "peakActivePuts": 2,
+      "peakOwnedAssemblerAndPartBytes": 67108864,
+      "peakOwnedBufferCount": 2,
+      "ownedAssemblerAndPartCeilingBytes": 201326592,
+      "firstSlowPartEndMs": 364.5780420000001,
+      "fifthPartStartMs": null,
+      "fifthPartStartedBeforeFirstPartEnded": null,
+      "peakRssBytes": 266797056,
+      "initialRssBytes": 217890816,
+      "peakArrayBufferBytes": 142834573,
+      "initialArrayBufferBytes": 228605,
+      "peakExternalBytes": 147040936,
+      "files": [
+        {
+          "id": "file-0",
+          "ciphertextBytes": 67108864,
+          "chunkCount": 16,
+          "size": 67108608,
+          "firstPutMs": 63.73325,
+          "publishStartMs": 369.045834,
+          "completeMs": 569.7030420000001
+        }
+      ],
+      "events": [
+        {
+          "event": "file-start",
+          "file": "file-0",
+          "ms": 0.3364590000001044
+        },
+        {
+          "event": "init-start",
+          "file": "file-0",
+          "ms": 0.42487500000015643
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-0",
+          "ms": 7.962334000000055
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-0",
+          "ms": 40.618375000000015
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 1,
+          "ms": 63.73325,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 2,
+          "ms": 63.7677920000001,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 2,
+          "ms": 99.49541700000009,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 1,
+          "ms": 364.5780420000001,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-0",
+          "ms": 369.045834
+        },
+        {
+          "event": "file-end",
+          "file": "file-0",
+          "ms": 569.7030420000001
+        }
+      ]
+    },
+    {
+      "variant": "current",
+      "scenario": "64-mib",
+      "hardwareConcurrency": 8,
+      "simulatedDeviceMemoryGiB": 1,
+      "totalCiphertextBytes": 67108864,
+      "totalPlaintextBytes": 67108608,
+      "chunkCount": 16,
+      "partCount": 2,
+      "firstPutMs": 45.52879199999984,
+      "lastPutMs": 346.4943330000001,
+      "elapsedMs": 550.222542,
+      "transferPhaseMiBPerSecond": 212.648929134382,
+      "completePhaseMiBPerSecond": 116.3165721407321,
+      "presignRequests": 2,
+      "unusedPutSlotMs": 866.8034140000007,
+      "peakActivePuts": 2,
+      "peakOwnedAssemblerAndPartBytes": 67108864,
+      "peakOwnedBufferCount": 2,
+      "ownedAssemblerAndPartCeilingBytes": 201326592,
+      "firstSlowPartEndMs": 346.4943330000001,
+      "fifthPartStartMs": null,
+      "fifthPartStartedBeforeFirstPartEnded": null,
+      "peakRssBytes": 266829824,
+      "initialRssBytes": 266813440,
+      "peakArrayBufferBytes": 142834573,
+      "initialArrayBufferBytes": 228605,
+      "peakExternalBytes": 147040936,
+      "files": [
+        {
+          "id": "file-0",
+          "ciphertextBytes": 67108864,
+          "chunkCount": 16,
+          "size": 67108608,
+          "firstPutMs": 45.52879199999984,
+          "publishStartMs": 349.41087500000003,
+          "completeMs": 550.138125
+        }
+      ],
+      "events": [
+        {
+          "event": "file-start",
+          "file": "file-0",
+          "ms": 0.158916999999974
+        },
+        {
+          "event": "init-start",
+          "file": "file-0",
+          "ms": 0.2130419999998594
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-0",
+          "ms": 7.15729199999987
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-0",
+          "ms": 40.20866699999988
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 1,
+          "ms": 45.52879199999984,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 2,
+          "ms": 60.00133299999993,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 2,
+          "ms": 96.09454200000005,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 1,
+          "ms": 346.4943330000001,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-0",
+          "ms": 349.41087500000003
+        },
+        {
+          "event": "file-end",
+          "file": "file-0",
+          "ms": 550.138125
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "scenario": "128-mib",
+      "hardwareConcurrency": 8,
+      "simulatedDeviceMemoryGiB": 1,
+      "totalCiphertextBytes": 134217728,
+      "totalPlaintextBytes": 134217216,
+      "chunkCount": 32,
+      "partCount": 4,
+      "firstPutMs": 95.72108400000025,
+      "lastPutMs": 395.3504170000001,
+      "elapsedMs": 601.1300839999999,
+      "transferPhaseMiBPerSecond": 427.19448966633735,
+      "completePhaseMiBPerSecond": 212.93228106015073,
+      "presignRequests": 1,
+      "unusedPutSlotMs": 792.8802489999994,
+      "peakActivePuts": 4,
+      "peakOwnedAssemblerAndPartBytes": 134217728,
+      "peakOwnedBufferCount": 4,
+      "ownedAssemblerAndPartCeilingBytes": 201326592,
+      "firstSlowPartEndMs": 395.3504170000001,
+      "fifthPartStartMs": null,
+      "fifthPartStartedBeforeFirstPartEnded": null,
+      "peakRssBytes": 400293888,
+      "initialRssBytes": 262209536,
+      "peakArrayBufferBytes": 209942925,
+      "initialArrayBufferBytes": 228605,
+      "peakExternalBytes": 214143647,
+      "files": [
+        {
+          "id": "file-0",
+          "ciphertextBytes": 134217728,
+          "chunkCount": 32,
+          "size": 134217216,
+          "firstPutMs": 95.72108400000025,
+          "publishStartMs": 399.9459999999999,
+          "completeMs": 600.9858749999999
+        }
+      ],
+      "events": [
+        {
+          "event": "file-start",
+          "file": "file-0",
+          "ms": 0.3694590000000062
+        },
+        {
+          "event": "init-start",
+          "file": "file-0",
+          "ms": 0.42212500000005093
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-0",
+          "ms": 7.572916999999961
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-0",
+          "ms": 62.18633399999999
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 1,
+          "ms": 95.72108400000025,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 2,
+          "ms": 95.753917,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 3,
+          "ms": 95.7696249999999,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 4,
+          "ms": 95.78279199999997,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 2,
+          "ms": 130.9625420000002,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 3,
+          "ms": 131.1369169999998,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 4,
+          "ms": 131.21462500000007,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 1,
+          "ms": 395.3504170000001,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-0",
+          "ms": 399.9459999999999
+        },
+        {
+          "event": "file-end",
+          "file": "file-0",
+          "ms": 600.9858749999999
+        }
+      ]
+    },
+    {
+      "variant": "current",
+      "scenario": "128-mib",
+      "hardwareConcurrency": 8,
+      "simulatedDeviceMemoryGiB": 1,
+      "totalCiphertextBytes": 134217728,
+      "totalPlaintextBytes": 134217216,
+      "chunkCount": 32,
+      "partCount": 4,
+      "firstPutMs": 41.532250000000204,
+      "lastPutMs": 341.07945800000016,
+      "elapsedMs": 544.4810830000001,
+      "transferPhaseMiBPerSecond": 427.31161092978715,
+      "completePhaseMiBPerSecond": 235.0862206171449,
+      "presignRequests": 4,
+      "unusedPutSlotMs": 790.717165,
+      "peakActivePuts": 4,
+      "peakOwnedAssemblerAndPartBytes": 134217728,
+      "peakOwnedBufferCount": 4,
+      "ownedAssemblerAndPartCeilingBytes": 201326592,
+      "firstSlowPartEndMs": 341.07945800000016,
+      "fifthPartStartMs": null,
+      "fifthPartStartedBeforeFirstPartEnded": null,
+      "peakRssBytes": 400424960,
+      "initialRssBytes": 400359424,
+      "peakArrayBufferBytes": 209942925,
+      "initialArrayBufferBytes": 228605,
+      "peakExternalBytes": 214143647,
+      "files": [
+        {
+          "id": "file-0",
+          "ciphertextBytes": 134217728,
+          "chunkCount": 32,
+          "size": 134217216,
+          "firstPutMs": 41.532250000000204,
+          "publishStartMs": 344.384583,
+          "completeMs": 544.3950420000001
+        }
+      ],
+      "events": [
+        {
+          "event": "file-start",
+          "file": "file-0",
+          "ms": 0.3266670000002705
+        },
+        {
+          "event": "init-start",
+          "file": "file-0",
+          "ms": 0.40837499999997817
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-0",
+          "ms": 6.945208000000093
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 1,
+          "ms": 41.532250000000204,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 2,
+          "ms": 59.13050000000021,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-0",
+          "ms": 68.71500000000015
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 3,
+          "ms": 73.3363330000002,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 4,
+          "ms": 88.42533300000014,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 2,
+          "ms": 95.54608300000018,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 3,
+          "ms": 108.9223750000001,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 4,
+          "ms": 124.3481670000001,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 1,
+          "ms": 341.07945800000016,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-0",
+          "ms": 344.384583
+        },
+        {
+          "event": "file-end",
+          "file": "file-0",
+          "ms": 544.3950420000001
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "scenario": "maximum-supported",
+      "hardwareConcurrency": 8,
+      "simulatedDeviceMemoryGiB": 1,
+      "totalCiphertextBytes": 2415919104,
+      "totalPlaintextBytes": 2415909888,
+      "chunkCount": 576,
+      "partCount": 72,
+      "firstPutMs": 89.67937500000016,
+      "lastPutMs": 2099.1840420000003,
+      "elapsedMs": 2305.762459,
+      "transferPhaseMiBPerSecond": 1146.5512062928688,
+      "completePhaseMiBPerSecond": 999.2356285474592,
+      "presignRequests": 18,
+      "unusedPutSlotMs": 5209.490710000004,
+      "peakActivePuts": 4,
+      "peakOwnedAssemblerAndPartBytes": 201326592,
+      "peakOwnedBufferCount": 6,
+      "ownedAssemblerAndPartCeilingBytes": 201326592,
+      "firstSlowPartEndMs": 389.57450000000017,
+      "fifthPartStartMs": 452.78033400000004,
+      "fifthPartStartedBeforeFirstPartEnded": false,
+      "peakRssBytes": 434208768,
+      "initialRssBytes": 400490496,
+      "peakArrayBufferBytes": 272859561,
+      "initialArrayBufferBytes": 228605,
+      "peakExternalBytes": 277060155,
+      "files": [
+        {
+          "id": "file-0",
+          "ciphertextBytes": 2415919104,
+          "chunkCount": 576,
+          "size": 2415909888,
+          "firstPutMs": 89.67937500000016,
+          "publishStartMs": 2103.5240420000005,
+          "completeMs": 2305.597459
+        }
+      ],
+      "events": [
+        {
+          "event": "file-start",
+          "file": "file-0",
+          "ms": 0.5617090000000644
+        },
+        {
+          "event": "init-start",
+          "file": "file-0",
+          "ms": 0.6165000000000873
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-0",
+          "ms": 8.485584000000017
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 1,
+          "ms": 89.67937500000016,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 2,
+          "ms": 89.71387500000037,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 3,
+          "ms": 89.74683400000004,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 4,
+          "ms": 89.75995900000044,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 2,
+          "ms": 124.55562500000042,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 3,
+          "ms": 124.72020900000007,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 4,
+          "ms": 124.74529200000006,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 1,
+          "ms": 389.57450000000017,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 5,
+          "ms": 452.78033400000004,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 6,
+          "ms": 452.8079170000001,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 7,
+          "ms": 452.8267920000003,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 8,
+          "ms": 452.8334170000003,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 5,
+          "ms": 487.92429200000015,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 6,
+          "ms": 488.1415840000004,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 7,
+          "ms": 488.162417,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 8,
+          "ms": 488.1771670000003,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 9,
+          "ms": 551.5161670000002,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 10,
+          "ms": 551.5381670000002,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 11,
+          "ms": 551.5488340000002,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 12,
+          "ms": 551.5542090000004,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 9,
+          "ms": 586.6908750000002,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 10,
+          "ms": 586.8934590000003,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 11,
+          "ms": 586.9805000000001,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 12,
+          "ms": 587.0041250000004,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 13,
+          "ms": 647.2811670000006,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 14,
+          "ms": 647.304834,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 15,
+          "ms": 647.3201250000006,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 16,
+          "ms": 647.3267090000004,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 13,
+          "ms": 682.5459590000005,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 14,
+          "ms": 682.7125840000003,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 15,
+          "ms": 682.7250840000002,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 16,
+          "ms": 682.7351670000003,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 17,
+          "ms": 747.475167,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 18,
+          "ms": 747.4927920000005,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 19,
+          "ms": 747.4991670000004,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 20,
+          "ms": 747.5036249999998,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 17,
+          "ms": 782.8025000000002,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 18,
+          "ms": 782.9515000000006,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 19,
+          "ms": 782.9665,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 20,
+          "ms": 782.9787090000004,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 21,
+          "ms": 845.8590840000002,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 22,
+          "ms": 845.8728340000002,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 23,
+          "ms": 845.9210420000004,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 24,
+          "ms": 845.9618750000004,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 21,
+          "ms": 881.4837090000005,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 22,
+          "ms": 881.6370419999998,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 23,
+          "ms": 881.6481669999998,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 24,
+          "ms": 881.6603749999999,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 25,
+          "ms": 947.5518750000006,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 26,
+          "ms": 947.5717500000005,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 27,
+          "ms": 947.5784170000002,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 28,
+          "ms": 947.5831250000006,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 25,
+          "ms": 984.5062499999999,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 26,
+          "ms": 984.665375,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 27,
+          "ms": 984.6908340000005,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 28,
+          "ms": 984.7076250000005,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 29,
+          "ms": 1045.8172090000003,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 30,
+          "ms": 1045.8282920000006,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 31,
+          "ms": 1045.836084,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 32,
+          "ms": 1045.840917,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 29,
+          "ms": 1082.5222090000002,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 30,
+          "ms": 1082.7196250000002,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 31,
+          "ms": 1082.7320000000004,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 32,
+          "ms": 1082.7449170000004,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 33,
+          "ms": 1147.8120840000006,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 34,
+          "ms": 1147.8362499999998,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 35,
+          "ms": 1147.8441670000007,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 36,
+          "ms": 1147.85,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 33,
+          "ms": 1183.9832090000004,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 34,
+          "ms": 1184.1409170000002,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 35,
+          "ms": 1184.1533750000003,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 36,
+          "ms": 1184.177959,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 37,
+          "ms": 1252.225167,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 38,
+          "ms": 1252.246584,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 39,
+          "ms": 1252.2590420000001,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 40,
+          "ms": 1252.2642500000006,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 37,
+          "ms": 1287.5787500000001,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 38,
+          "ms": 1287.736292,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 39,
+          "ms": 1287.747084,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 40,
+          "ms": 1287.7590000000005,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 41,
+          "ms": 1353.2969170000001,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 42,
+          "ms": 1353.3150840000003,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 43,
+          "ms": 1353.3267500000006,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 44,
+          "ms": 1353.3324590000007,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 41,
+          "ms": 1388.452334,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 42,
+          "ms": 1388.6223340000001,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 43,
+          "ms": 1388.6340839999998,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 44,
+          "ms": 1388.646709,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 45,
+          "ms": 1451.9648339999999,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 46,
+          "ms": 1451.9867090000002,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 47,
+          "ms": 1451.9932920000006,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 48,
+          "ms": 1451.9982089999999,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 45,
+          "ms": 1487.561792,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 46,
+          "ms": 1487.735459,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 47,
+          "ms": 1487.7465000000007,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 48,
+          "ms": 1487.7682920000002,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 49,
+          "ms": 1552.294292,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 50,
+          "ms": 1552.3222500000006,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 51,
+          "ms": 1552.3295000000003,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 52,
+          "ms": 1552.338292,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 49,
+          "ms": 1587.577084,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 50,
+          "ms": 1587.7655,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 51,
+          "ms": 1587.7779590000005,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 52,
+          "ms": 1587.7933340000004,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 53,
+          "ms": 1653.4543749999998,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 54,
+          "ms": 1653.470084,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 55,
+          "ms": 1653.4761250000006,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 56,
+          "ms": 1653.4804170000002,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 53,
+          "ms": 1688.474084,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 54,
+          "ms": 1688.662667,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 55,
+          "ms": 1688.728917,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 56,
+          "ms": 1688.7803749999998,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 57,
+          "ms": 1753.512875,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 58,
+          "ms": 1753.56975,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 59,
+          "ms": 1753.580125,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 60,
+          "ms": 1753.5892500000004,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 57,
+          "ms": 1788.8693749999998,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 58,
+          "ms": 1789.027917,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 59,
+          "ms": 1789.0383750000005,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 60,
+          "ms": 1789.0513750000005,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 61,
+          "ms": 1862.1489590000006,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 62,
+          "ms": 1862.168709,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 63,
+          "ms": 1862.1742920000002,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 64,
+          "ms": 1862.1809589999998,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 61,
+          "ms": 1897.4122499999999,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 62,
+          "ms": 1897.5708340000006,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 63,
+          "ms": 1897.5810000000006,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 64,
+          "ms": 1897.5903750000002,
+          "activePuts": 0
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 65,
+          "ms": 1962.46175,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 66,
+          "ms": 1962.5174170000005,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 67,
+          "ms": 1962.5322920000003,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 68,
+          "ms": 1962.56,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 65,
+          "ms": 1998.1379590000001,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 66,
+          "ms": 1998.305167,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 67,
+          "ms": 1998.315459,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 68,
+          "ms": 1998.3359169999999,
+          "activePuts": 0
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-0",
+          "ms": 2045.358584
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 69,
+          "ms": 2064.067917,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 70,
+          "ms": 2064.125625,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 71,
+          "ms": 2064.133542,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 72,
+          "ms": 2064.138542,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 69,
+          "ms": 2098.990709,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 70,
+          "ms": 2099.1477500000005,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 71,
+          "ms": 2099.170375,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 72,
+          "ms": 2099.1840420000003,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-0",
+          "ms": 2103.5240420000005
+        },
+        {
+          "event": "file-end",
+          "file": "file-0",
+          "ms": 2305.597459
+        }
+      ]
+    },
+    {
+      "variant": "current",
+      "scenario": "maximum-supported",
+      "hardwareConcurrency": 8,
+      "simulatedDeviceMemoryGiB": 1,
+      "totalCiphertextBytes": 2415919104,
+      "totalPlaintextBytes": 2415909888,
+      "chunkCount": 576,
+      "partCount": 72,
+      "firstPutMs": 46.93812499999967,
+      "lastPutMs": 1313.5097079999996,
+      "elapsedMs": 1518.0413749999998,
+      "transferPhaseMiBPerSecond": 1819.083919870323,
+      "completePhaseMiBPerSecond": 1517.745193209902,
+      "presignRequests": 72,
+      "unusedPutSlotMs": 2257.406166000005,
+      "peakActivePuts": 4,
+      "peakOwnedAssemblerAndPartBytes": 201326592,
+      "peakOwnedBufferCount": 6,
+      "ownedAssemblerAndPartCeilingBytes": 201326592,
+      "firstSlowPartEndMs": 347.2390829999995,
+      "fifthPartStartMs": 116.73133299999972,
+      "fifthPartStartedBeforeFirstPartEnded": true,
+      "peakRssBytes": 434274304,
+      "initialRssBytes": 434257920,
+      "peakArrayBufferBytes": 272858493,
+      "initialArrayBufferBytes": 228605,
+      "peakExternalBytes": 277059087,
+      "files": [
+        {
+          "id": "file-0",
+          "ciphertextBytes": 2415919104,
+          "chunkCount": 576,
+          "size": 2415909888,
+          "firstPutMs": 46.93812499999967,
+          "publishStartMs": 1316.7142079999994,
+          "completeMs": 1517.927667
+        }
+      ],
+      "events": [
+        {
+          "event": "file-start",
+          "file": "file-0",
+          "ms": 0.5137919999997393
+        },
+        {
+          "event": "init-start",
+          "file": "file-0",
+          "ms": 0.6754579999997077
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-0",
+          "ms": 8.843582999999853
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 1,
+          "ms": 46.93812499999967,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 2,
+          "ms": 59.90941699999985,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 3,
+          "ms": 83.51458299999922,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 4,
+          "ms": 93.24462499999936,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 2,
+          "ms": 95.6436249999997,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 5,
+          "ms": 116.73133299999972,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 3,
+          "ms": 118.09512499999983,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 4,
+          "ms": 128.66054199999962,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 6,
+          "ms": 138.83591699999943,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 5,
+          "ms": 153.12112499999967,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 7,
+          "ms": 158.8819999999996,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 8,
+          "ms": 172.66849999999977,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 6,
+          "ms": 174.10958299999947,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 7,
+          "ms": 193.75024999999914,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 9,
+          "ms": 196.34295799999927,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 8,
+          "ms": 208.06887499999993,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 10,
+          "ms": 215.66891699999996,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 9,
+          "ms": 230.9127499999995,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 11,
+          "ms": 232.18387499999972,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 10,
+          "ms": 250.8430419999995,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 12,
+          "ms": 252.1884169999994,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 11,
+          "ms": 266.64879199999996,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 13,
+          "ms": 270.9101249999994,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 14,
+          "ms": 286.6571669999994,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 12,
+          "ms": 286.7132499999998,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 13,
+          "ms": 306.5967499999997,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 15,
+          "ms": 310.65591699999914,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 14,
+          "ms": 321.82266699999946,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 16,
+          "ms": 326.89275,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 17,
+          "ms": 343.3901249999999,
+          "bytes": 33554432,
+          "activePuts": 4
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 15,
+          "ms": 345.95566699999927,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 1,
+          "ms": 347.2390829999995,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 16,
+          "ms": 362.5992919999999,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 18,
+          "ms": 365.9865829999999,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 17,
+          "ms": 379.20458299999973,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 19,
+          "ms": 385.42241699999977,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 18,
+          "ms": 401.3361249999998,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 20,
+          "ms": 401.9977079999999,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 21,
+          "ms": 418.6149579999992,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 19,
+          "ms": 420.13087499999983,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 22,
+          "ms": 436.20329199999924,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 20,
+          "ms": 437.63066699999945,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 23,
+          "ms": 452.7979999999998,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 21,
+          "ms": 454.42108299999927,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 24,
+          "ms": 469.43454199999996,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 22,
+          "ms": 471.14016699999956,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 25,
+          "ms": 486.13745799999924,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 23,
+          "ms": 487.7449579999993,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 26,
+          "ms": 502.8068749999993,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 24,
+          "ms": 504.1130829999993,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 27,
+          "ms": 519.0034169999999,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 25,
+          "ms": 520.7889999999998,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 26,
+          "ms": 538.510542,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 28,
+          "ms": 538.8187079999998,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 27,
+          "ms": 553.9064169999992,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 29,
+          "ms": 557.7530419999994,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 30,
+          "ms": 568.9041249999991,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 28,
+          "ms": 573.6078329999991,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 31,
+          "ms": 589.3985419999999,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 29,
+          "ms": 592.7239169999993,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 32,
+          "ms": 601.7189169999992,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 30,
+          "ms": 604.6233749999992,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 33,
+          "ms": 617.9109999999991,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 31,
+          "ms": 624.3377079999991,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 34,
+          "ms": 634.9140829999997,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 32,
+          "ms": 636.6327919999994,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 33,
+          "ms": 653.6064999999999,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 35,
+          "ms": 656.3242499999997,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 36,
+          "ms": 667.644292,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 34,
+          "ms": 670.8233749999999,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 37,
+          "ms": 687.3808329999993,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 35,
+          "ms": 690.6937919999991,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 38,
+          "ms": 698.9426669999993,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 36,
+          "ms": 702.9116249999997,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 39,
+          "ms": 720.5980419999996,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 37,
+          "ms": 721.9420419999997,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 40,
+          "ms": 732.317583,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 38,
+          "ms": 734.0265829999998,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 41,
+          "ms": 751.8758749999997,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 39,
+          "ms": 756.5591249999998,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 42,
+          "ms": 763.0763749999996,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 40,
+          "ms": 767.6566669999993,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 43,
+          "ms": 784.8592079999999,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 41,
+          "ms": 787.6291249999995,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 42,
+          "ms": 798.8195829999995,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 44,
+          "ms": 799.5091249999996,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 45,
+          "ms": 810.8410829999993,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 43,
+          "ms": 819.8293329999997,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 46,
+          "ms": 827.9008749999994,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 44,
+          "ms": 834.0642919999991,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 45,
+          "ms": 845.83925,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 47,
+          "ms": 848.6965829999999,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 48,
+          "ms": 859.9989999999998,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 46,
+          "ms": 863.2639999999992,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 49,
+          "ms": 881.0890829999998,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 47,
+          "ms": 884.0252499999997,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 50,
+          "ms": 892.6461669999999,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 48,
+          "ms": 895.6948749999992,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 51,
+          "ms": 911.6105419999994,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 49,
+          "ms": 916.6877079999995,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 52,
+          "ms": 925.8871669999999,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 50,
+          "ms": 928.7702919999992,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 53,
+          "ms": 942.9351669999996,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 51,
+          "ms": 947.0167919999994,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 54,
+          "ms": 960.6905829999996,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 52,
+          "ms": 961.0250419999993,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 55,
+          "ms": 977.6329579999992,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 53,
+          "ms": 979.2902919999997,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 56,
+          "ms": 994.757208,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 54,
+          "ms": 996.3435419999996,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 57,
+          "ms": 1011.8862499999996,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 55,
+          "ms": 1013.4414579999993,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 58,
+          "ms": 1028.0055419999999,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 56,
+          "ms": 1029.7599579999996,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 57,
+          "ms": 1047.74075,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 59,
+          "ms": 1052.3882919999996,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 58,
+          "ms": 1063.6888749999998,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 60,
+          "ms": 1064.7432079999999,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 61,
+          "ms": 1083.9277499999998,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 59,
+          "ms": 1087.1991249999992,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 60,
+          "ms": 1100.0409169999994,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 62,
+          "ms": 1101.967917,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 61,
+          "ms": 1119.6453749999991,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 63,
+          "ms": 1121.9542919999994,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 62,
+          "ms": 1137.5272919999998,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 64,
+          "ms": 1139.7039169999998,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 63,
+          "ms": 1157.042375,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 65,
+          "ms": 1161.4507079999994,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 66,
+          "ms": 1173.0782499999996,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 64,
+          "ms": 1174.87,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 67,
+          "ms": 1195.675792,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 65,
+          "ms": 1198.5057499999994,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 66,
+          "ms": 1207.7802079999992,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 68,
+          "ms": 1209.8316669999995,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 67,
+          "ms": 1231.5724579999996,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 69,
+          "ms": 1231.9919169999994,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 70,
+          "ms": 1246.1445829999993,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 68,
+          "ms": 1246.1981669999996,
+          "activePuts": 2
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-0",
+          "ms": 1257.7959579999997
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 71,
+          "ms": 1265.6321669999998,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 69,
+          "ms": 1266.9138749999993,
+          "activePuts": 2
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 72,
+          "ms": 1277.8087919999998,
+          "bytes": 33554432,
+          "activePuts": 3
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 70,
+          "ms": 1280.9668329999995,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 71,
+          "ms": 1301.1685419999994,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 72,
+          "ms": 1313.5097079999996,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-0",
+          "ms": 1316.7142079999994
+        },
+        {
+          "event": "file-end",
+          "file": "file-0",
+          "ms": 1517.927667
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "scenario": "mixed-two-core",
+      "hardwareConcurrency": 2,
+      "simulatedDeviceMemoryGiB": 1,
+      "totalCiphertextBytes": 67305472,
+      "totalPlaintextBytes": 67305184,
+      "chunkCount": 18,
+      "partCount": 4,
+      "firstPutMs": 53.14087500000005,
+      "lastPutMs": 604.0679580000005,
+      "elapsedMs": 612.7870410000005,
+      "transferPhaseMiBPerSecond": 116.50815866679756,
+      "completePhaseMiBPerSecond": 104.7468299839584,
+      "presignRequests": 1,
+      "unusedPutSlotMs": 1796.1475400000008,
+      "peakActivePuts": 2,
+      "peakOwnedAssemblerAndPartBytes": 67108864,
+      "peakOwnedBufferCount": 2,
+      "ownedAssemblerAndPartCeilingBytes": 201326592,
+      "firstSlowPartEndMs": 354.07587500000045,
+      "fifthPartStartMs": null,
+      "fifthPartStartedBeforeFirstPartEnded": null,
+      "peakRssBytes": 434929664,
+      "initialRssBytes": 434192384,
+      "peakArrayBufferBytes": 142834573,
+      "initialArrayBufferBytes": 228605,
+      "peakExternalBytes": 247681675,
+      "files": [
+        {
+          "id": "file-0",
+          "ciphertextBytes": 67108864,
+          "chunkCount": 16,
+          "size": 67108608,
+          "firstPutMs": 53.14087500000005,
+          "publishStartMs": 358.597041,
+          "completeMs": 560.491916
+        },
+        {
+          "id": "file-1",
+          "ciphertextBytes": 65536,
+          "chunkCount": 1,
+          "size": 65520,
+          "firstPutMs": 568.1131660000001,
+          "publishStartMs": 606.6981249999999,
+          "completeMs": 611.4084160000002
+        },
+        {
+          "id": "file-2",
+          "ciphertextBytes": 131072,
+          "chunkCount": 1,
+          "size": 131056,
+          "firstPutMs": 568.140958,
+          "publishStartMs": 608.0449580000004,
+          "completeMs": 612.7345409999998
+        }
+      ],
+      "events": [
+        {
+          "event": "file-start",
+          "file": "file-0",
+          "ms": 0.706000000000131
+        },
+        {
+          "event": "init-start",
+          "file": "file-0",
+          "ms": 0.7712499999997817
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-0",
+          "ms": 7.868916000000354
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-0",
+          "ms": 34.82733300000018
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 1,
+          "ms": 53.14087500000005,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 2,
+          "ms": 53.228665999999976,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 2,
+          "ms": 88.32758300000023,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 1,
+          "ms": 354.07587500000045,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-0",
+          "ms": 358.597041
+        },
+        {
+          "event": "file-end",
+          "file": "file-0",
+          "ms": 560.491916
+        },
+        {
+          "event": "file-start",
+          "file": "file-1",
+          "ms": 560.5666659999997
+        },
+        {
+          "event": "init-start",
+          "file": "file-1",
+          "ms": 560.6320830000004
+        },
+        {
+          "event": "file-start",
+          "file": "file-2",
+          "ms": 560.6463750000003
+        },
+        {
+          "event": "init-start",
+          "file": "file-2",
+          "ms": 560.6654580000004
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-1",
+          "ms": 567.7004159999997
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-1",
+          "ms": 567.7021249999998
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-2",
+          "ms": 567.9565830000001
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-2",
+          "ms": 567.9571660000001
+        },
+        {
+          "event": "put-start",
+          "file": "file-1",
+          "part": 1,
+          "ms": 568.1131660000001,
+          "bytes": 65536,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-2",
+          "part": 1,
+          "ms": 568.140958,
+          "bytes": 131072,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-1",
+          "part": 1,
+          "ms": 603.713041,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-2",
+          "part": 1,
+          "ms": 604.0679580000005,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-1",
+          "ms": 606.6981249999999
+        },
+        {
+          "event": "publish-start",
+          "file": "file-2",
+          "ms": 608.0449580000004
+        },
+        {
+          "event": "file-end",
+          "file": "file-1",
+          "ms": 611.4084160000002
+        },
+        {
+          "event": "file-end",
+          "file": "file-2",
+          "ms": 612.7345409999998
+        }
+      ]
+    },
+    {
+      "variant": "current",
+      "scenario": "mixed-two-core",
+      "hardwareConcurrency": 2,
+      "simulatedDeviceMemoryGiB": 1,
+      "totalCiphertextBytes": 67305472,
+      "totalPlaintextBytes": 67305184,
+      "chunkCount": 18,
+      "partCount": 4,
+      "firstPutMs": 42.71937499999967,
+      "lastPutMs": 432.1447079999998,
+      "elapsedMs": 546.6299159999999,
+      "transferPhaseMiBPerSecond": 164.82620559253647,
+      "completePhaseMiBPerSecond": 117.4240525833204,
+      "presignRequests": 2,
+      "unusedPutSlotMs": 1151.9290410000012,
+      "peakActivePuts": 2,
+      "peakOwnedAssemblerAndPartBytes": 67108864,
+      "peakOwnedBufferCount": 2,
+      "ownedAssemblerAndPartCeilingBytes": 201326592,
+      "firstSlowPartEndMs": 342.95966599999883,
+      "fifthPartStartMs": null,
+      "fifthPartStartedBeforeFirstPartEnded": null,
+      "peakRssBytes": 435421184,
+      "initialRssBytes": 434929664,
+      "peakArrayBufferBytes": 142834573,
+      "initialArrayBufferBytes": 228605,
+      "peakExternalBytes": 147035231,
+      "files": [
+        {
+          "id": "file-0",
+          "ciphertextBytes": 67108864,
+          "chunkCount": 16,
+          "size": 67108608,
+          "firstPutMs": 42.71937499999967,
+          "publishStartMs": 346.41100000000006,
+          "completeMs": 546.5872500000005
+        },
+        {
+          "id": "file-1",
+          "ciphertextBytes": 65536,
+          "chunkCount": 1,
+          "size": 65520,
+          "firstPutMs": 345.0233329999992,
+          "publishStartMs": 383.9215409999997,
+          "completeMs": 390.201583
+        },
+        {
+          "id": "file-2",
+          "ciphertextBytes": 131072,
+          "chunkCount": 1,
+          "size": 131056,
+          "firstPutMs": 397.37091599999985,
+          "publishStartMs": 435.82354099999975,
+          "completeMs": 440.6039579999997
+        }
+      ],
+      "events": [
+        {
+          "event": "file-start",
+          "file": "file-0",
+          "ms": 0.4428749999997308
+        },
+        {
+          "event": "file-start",
+          "file": "file-1",
+          "ms": 0.49779099999977916
+        },
+        {
+          "event": "init-start",
+          "file": "file-0",
+          "ms": 0.564499999999498
+        },
+        {
+          "event": "init-start",
+          "file": "file-1",
+          "ms": 0.5765830000000278
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-0",
+          "ms": 7.552165999999488
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-0",
+          "ms": 34.63262500000019
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 1,
+          "ms": 42.71937499999967,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 2,
+          "ms": 54.94720799999959,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 2,
+          "ms": 90.1563329999999,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 1,
+          "ms": 342.95966599999883,
+          "activePuts": 0
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-1",
+          "ms": 344.7203329999993
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-1",
+          "ms": 344.721458
+        },
+        {
+          "event": "put-start",
+          "file": "file-1",
+          "part": 1,
+          "ms": 345.0233329999992,
+          "bytes": 65536,
+          "activePuts": 1
+        },
+        {
+          "event": "publish-start",
+          "file": "file-0",
+          "ms": 346.41100000000006
+        },
+        {
+          "event": "put-end",
+          "file": "file-1",
+          "part": 1,
+          "ms": 380.57241599999907,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-1",
+          "ms": 383.9215409999997
+        },
+        {
+          "event": "file-end",
+          "file": "file-1",
+          "ms": 390.201583
+        },
+        {
+          "event": "file-start",
+          "file": "file-2",
+          "ms": 390.2529579999991
+        },
+        {
+          "event": "init-start",
+          "file": "file-2",
+          "ms": 390.29129099999955
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-2",
+          "ms": 397.0743330000005
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-2",
+          "ms": 397.0752080000002
+        },
+        {
+          "event": "put-start",
+          "file": "file-2",
+          "part": 1,
+          "ms": 397.37091599999985,
+          "bytes": 131072,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-2",
+          "part": 1,
+          "ms": 432.1447079999998,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-2",
+          "ms": 435.82354099999975
+        },
+        {
+          "event": "file-end",
+          "file": "file-2",
+          "ms": 440.6039579999997
+        },
+        {
+          "event": "file-end",
+          "file": "file-0",
+          "ms": 546.5872500000005
+        }
+      ]
+    },
+    {
+      "variant": "baseline",
+      "scenario": "mixed-single-core",
+      "hardwareConcurrency": 1,
+      "simulatedDeviceMemoryGiB": 1,
+      "totalCiphertextBytes": 67305472,
+      "totalPlaintextBytes": 67305184,
+      "chunkCount": 18,
+      "partCount": 4,
+      "firstPutMs": 51.256084000000556,
+      "lastPutMs": 650.0766249999997,
+      "elapsedMs": 658.4499589999996,
+      "transferPhaseMiBPerSecond": 107.189876774785,
+      "completePhaseMiBPerSecond": 97.48273065045485,
+      "presignRequests": 1,
+      "unusedPutSlotMs": 1990.6166229999963,
+      "peakActivePuts": 2,
+      "peakOwnedAssemblerAndPartBytes": 67108864,
+      "peakOwnedBufferCount": 2,
+      "ownedAssemblerAndPartCeilingBytes": 201326592,
+      "firstSlowPartEndMs": 350.66450000000077,
+      "fifthPartStartMs": null,
+      "fifthPartStartedBeforeFirstPartEnded": null,
+      "peakRssBytes": 435453952,
+      "initialRssBytes": 435437568,
+      "peakArrayBufferBytes": 142834573,
+      "initialArrayBufferBytes": 228605,
+      "peakExternalBytes": 147035231,
+      "files": [
+        {
+          "id": "file-0",
+          "ciphertextBytes": 67108864,
+          "chunkCount": 16,
+          "size": 67108608,
+          "firstPutMs": 51.256084000000556,
+          "publishStartMs": 353.4762499999997,
+          "completeMs": 554.4443339999998
+        },
+        {
+          "id": "file-1",
+          "ciphertextBytes": 65536,
+          "chunkCount": 1,
+          "size": 65520,
+          "firstPutMs": 562.6122500000001,
+          "publishStartMs": 602.3468749999993,
+          "completeMs": 607.5633749999997
+        },
+        {
+          "id": "file-2",
+          "ciphertextBytes": 131072,
+          "chunkCount": 1,
+          "size": 131056,
+          "firstPutMs": 615.1135840000006,
+          "publishStartMs": 652.5831249999992,
+          "completeMs": 658.4050420000003
+        }
+      ],
+      "events": [
+        {
+          "event": "file-start",
+          "file": "file-0",
+          "ms": 0.345459000000119
+        },
+        {
+          "event": "init-start",
+          "file": "file-0",
+          "ms": 0.38116699999955017
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-0",
+          "ms": 7.199791999999434
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-0",
+          "ms": 34.81158399999913
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 1,
+          "ms": 51.256084000000556,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 2,
+          "ms": 51.27937500000007,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 2,
+          "ms": 85.74470900000051,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 1,
+          "ms": 350.66450000000077,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-0",
+          "ms": 353.4762499999997
+        },
+        {
+          "event": "file-end",
+          "file": "file-0",
+          "ms": 554.4443339999998
+        },
+        {
+          "event": "file-start",
+          "file": "file-1",
+          "ms": 554.492542
+        },
+        {
+          "event": "init-start",
+          "file": "file-1",
+          "ms": 554.5399589999997
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-1",
+          "ms": 562.3890840000004
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-1",
+          "ms": 562.3904999999995
+        },
+        {
+          "event": "put-start",
+          "file": "file-1",
+          "part": 1,
+          "ms": 562.6122500000001,
+          "bytes": 65536,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-1",
+          "part": 1,
+          "ms": 598.4410000000007,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-1",
+          "ms": 602.3468749999993
+        },
+        {
+          "event": "file-end",
+          "file": "file-1",
+          "ms": 607.5633749999997
+        },
+        {
+          "event": "file-start",
+          "file": "file-2",
+          "ms": 607.618375
+        },
+        {
+          "event": "init-start",
+          "file": "file-2",
+          "ms": 607.6530000000002
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-2",
+          "ms": 614.8373749999992
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-2",
+          "ms": 614.8385419999995
+        },
+        {
+          "event": "put-start",
+          "file": "file-2",
+          "part": 1,
+          "ms": 615.1135840000006,
+          "bytes": 131072,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-2",
+          "part": 1,
+          "ms": 650.0766249999997,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-2",
+          "ms": 652.5831249999992
+        },
+        {
+          "event": "file-end",
+          "file": "file-2",
+          "ms": 658.4050420000003
+        }
+      ]
+    },
+    {
+      "variant": "current",
+      "scenario": "mixed-single-core",
+      "hardwareConcurrency": 1,
+      "simulatedDeviceMemoryGiB": 1,
+      "totalCiphertextBytes": 67305472,
+      "totalPlaintextBytes": 67305184,
+      "chunkCount": 18,
+      "partCount": 4,
+      "firstPutMs": 42.41533299999901,
+      "lastPutMs": 645.2473329999993,
+      "elapsedMs": 654.546542,
+      "transferPhaseMiBPerSecond": 106.4765971282214,
+      "completePhaseMiBPerSecond": 98.0640731885495,
+      "presignRequests": 2,
+      "unusedPutSlotMs": 2002.1214180000024,
+      "peakActivePuts": 2,
+      "peakOwnedAssemblerAndPartBytes": 67108864,
+      "peakOwnedBufferCount": 2,
+      "ownedAssemblerAndPartCeilingBytes": 201326592,
+      "firstSlowPartEndMs": 344.38245800000004,
+      "fifthPartStartMs": null,
+      "fifthPartStartedBeforeFirstPartEnded": null,
+      "peakRssBytes": 435552256,
+      "initialRssBytes": 435404800,
+      "peakArrayBufferBytes": 142834573,
+      "initialArrayBufferBytes": 228605,
+      "peakExternalBytes": 147035231,
+      "files": [
+        {
+          "id": "file-0",
+          "ciphertextBytes": 67108864,
+          "chunkCount": 16,
+          "size": 67108608,
+          "firstPutMs": 42.41533299999901,
+          "publishStartMs": 348.4999169999992,
+          "completeMs": 549.2880000000005
+        },
+        {
+          "id": "file-1",
+          "ciphertextBytes": 65536,
+          "chunkCount": 1,
+          "size": 65520,
+          "firstPutMs": 558.0126249999994,
+          "publishStartMs": 596.2563329999994,
+          "completeMs": 601.6229579999999
+        },
+        {
+          "id": "file-2",
+          "ciphertextBytes": 131072,
+          "chunkCount": 1,
+          "size": 131056,
+          "firstPutMs": 609.6927919999998,
+          "publishStartMs": 649.2435420000002,
+          "completeMs": 654.5124579999992
+        }
+      ],
+      "events": [
+        {
+          "event": "file-start",
+          "file": "file-0",
+          "ms": 0.30570799999986775
+        },
+        {
+          "event": "init-start",
+          "file": "file-0",
+          "ms": 0.36537499999940337
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-0",
+          "ms": 7.895457999999053
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-0",
+          "ms": 34.520667000000685
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 1,
+          "ms": 42.41533299999901,
+          "bytes": 33554432,
+          "activePuts": 1
+        },
+        {
+          "event": "put-start",
+          "file": "file-0",
+          "part": 2,
+          "ms": 53.28816700000061,
+          "bytes": 33554432,
+          "activePuts": 2
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 2,
+          "ms": 90.26924999999937,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-0",
+          "part": 1,
+          "ms": 344.38245800000004,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-0",
+          "ms": 348.4999169999992
+        },
+        {
+          "event": "file-end",
+          "file": "file-0",
+          "ms": 549.2880000000005
+        },
+        {
+          "event": "file-start",
+          "file": "file-1",
+          "ms": 549.304333
+        },
+        {
+          "event": "init-start",
+          "file": "file-1",
+          "ms": 549.3392920000006
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-1",
+          "ms": 557.7412499999991
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-1",
+          "ms": 557.7454170000001
+        },
+        {
+          "event": "put-start",
+          "file": "file-1",
+          "part": 1,
+          "ms": 558.0126249999994,
+          "bytes": 65536,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-1",
+          "part": 1,
+          "ms": 592.716457999999,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-1",
+          "ms": 596.2563329999994
+        },
+        {
+          "event": "file-end",
+          "file": "file-1",
+          "ms": 601.6229579999999
+        },
+        {
+          "event": "file-start",
+          "file": "file-2",
+          "ms": 601.6376249999994
+        },
+        {
+          "event": "init-start",
+          "file": "file-2",
+          "ms": 601.677416999999
+        },
+        {
+          "event": "crypto-start",
+          "file": "file-2",
+          "ms": 609.4359170000007
+        },
+        {
+          "event": "crypto-end",
+          "file": "file-2",
+          "ms": 609.4368749999994
+        },
+        {
+          "event": "put-start",
+          "file": "file-2",
+          "part": 1,
+          "ms": 609.6927919999998,
+          "bytes": 131072,
+          "activePuts": 1
+        },
+        {
+          "event": "put-end",
+          "file": "file-2",
+          "part": 1,
+          "ms": 645.2473329999993,
+          "activePuts": 0
+        },
+        {
+          "event": "publish-start",
+          "file": "file-2",
+          "ms": 649.2435420000002
+        },
+        {
+          "event": "file-end",
+          "file": "file-2",
+          "ms": 654.5124579999992
+        }
+      ]
+    }
+  ]
+}

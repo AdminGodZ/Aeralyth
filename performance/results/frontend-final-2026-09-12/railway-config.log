@@ -1,0 +1,12 @@
+Command: npm run validate:railway
+Started: 2026-09-12T11:42:38.157Z
+
+
+> aeralyth@0.1.0 validate:railway
+> node scripts/validate-railway-config.mjs
+
+Railway deployment config contract is valid.
+
+Finished: 2026-09-12T11:42:38.255Z
+Exit code: 0
+Signal: none

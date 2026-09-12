@@ -1,0 +1,19 @@
+{
+  "reviewer": "/root/frontend_transfers/downloads",
+  "approved": true,
+  "actionableFindings": 0,
+  "summarySha256": "d32259bf60aca1bb03a755bc9cc6ca5d4653ce53affee9fb77c25c7a81b1d129",
+  "scope": "Independent file-only review of final browser acceptance evidence; no API or browser requests and no performance reruns.",
+  "verified": [
+    "Eight frontend source hashes and 40 backend source hashes",
+    "Next build and native binary identities",
+    "Original fixture and both complete 40 MiB output hashes and lengths",
+    "Raw versus sanitized preview/download HTTP headers, statuses and timings",
+    "Normalized probe source and raw versus summarized metrics",
+    "One authenticated crypto chunk, partial-session abort and probe cleanup",
+    "Preview screenshot limits and partial-verification wording",
+    "Locked-state screenshot/text, repeat-unlock state and recovered download",
+    "Empty post-recovery console and browser-error logs",
+    "No signed URL or credential markers in the summary"
+  ]
+}

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   BoundedBatchPipeline,
+  BoundedRollingPipeline,
   concurrencyForHardware,
   mapWithConcurrency,
   WeightedSemaphore,
@@ -49,6 +50,62 @@ describe("bounded async work", () => {
     expect(concurrencyForHardware(64, 16)).toBe(16);
     expect(concurrencyForHardware(12, 8, 2)).toBe(6);
     expect(concurrencyForHardware(64, 8, 2)).toBe(8);
+  });
+});
+
+describe("bounded rolling pipeline", () => {
+  it("starts its first input and refills a free slot while the first input is slow", async () => {
+    const operation = new AbortController();
+    const releases = new Map<number, () => void>();
+    const started: number[] = [];
+    const pipeline = new BoundedRollingPipeline<number, number>(
+      4,
+      128,
+      () => 32,
+      async (value) => {
+        started.push(value);
+        await new Promise<void>((resolve) => releases.set(value, resolve));
+        return value;
+      },
+      operation.signal,
+      (error) => operation.abort(error),
+    );
+    await pipeline.push(1);
+    expect(started).toEqual([1]);
+    for (const value of [2, 3, 4]) await pipeline.push(value);
+    const fifth = pipeline.push(5);
+    expect(pipeline.processingBytes).toBe(128);
+    releases.get(2)?.();
+    await fifth;
+    expect(started).toEqual([1, 2, 3, 4, 5]);
+    expect(pipeline.processingBytes).toBe(128);
+    for (const value of [5, 4, 3, 1]) releases.get(value)?.();
+    expect(await pipeline.finish()).toEqual([1, 2, 3, 4, 5]);
+    expect(pipeline.processingBytes).toBe(0);
+  });
+
+  it("uses byte weights as well as slots and aborts blocked producers on failure", async () => {
+    const operation = new AbortController();
+    let fail: ((error: Error) => void) | undefined;
+    const pipeline = new BoundedRollingPipeline<number, number>(
+      4,
+      100,
+      (value) => value,
+      async () =>
+        new Promise((_resolve, reject) => {
+          fail = reject;
+        }),
+      operation.signal,
+      (error) => operation.abort(error),
+    );
+    await pipeline.push(60);
+    const pending = pipeline.push(50);
+    const rejected = expect(pending).rejects.toThrow("failed part");
+    fail?.(new Error("failed part"));
+    await rejected;
+    await expect(pipeline.finish()).rejects.toThrow("failed part");
+    await pipeline.stop();
+    expect(pipeline.processingBytes).toBe(0);
   });
 });
 

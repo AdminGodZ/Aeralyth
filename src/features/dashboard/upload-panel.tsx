@@ -1240,21 +1240,32 @@ function useUploadPanelController({
         );
       },
     );
-    worker.addEventListener("error", (event) => {
-      event.preventDefault();
+    const failZipWorker = () => {
+      if (zipWorkerRef.current !== worker) return;
       worker.terminate();
       zipWorkerRef.current = null;
       setIsCompressing(false);
-      setCompressionError("The ZIP archive could not be created.");
+      setCompressionError(
+        "The ZIP worker could not run. Upload the folder without compression, or reload the application and select the folder again.",
+      );
+    };
+    worker.addEventListener("error", (event) => {
+      event.preventDefault();
+      failZipWorker();
     });
-    worker.postMessage({
-      type: "compress",
-      compressionMode: "speed",
-      sources: pendingFolderUpload.files.map(({ file, relativePath }) => ({
-        file,
-        path: relativePath,
-      })),
-    });
+    worker.addEventListener("messageerror", failZipWorker);
+    try {
+      worker.postMessage({
+        type: "compress",
+        compressionMode: "speed",
+        sources: pendingFolderUpload.files.map(({ file, relativePath }) => ({
+          file,
+          path: relativePath,
+        })),
+      });
+    } catch {
+      failZipWorker();
+    }
   }
 
   function uploadPendingFolder() {

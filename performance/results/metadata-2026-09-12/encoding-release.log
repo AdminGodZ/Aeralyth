@@ -1,0 +1,13 @@
+   Compiling aeralyth-api v0.1.0 (/Users/timheld/Documents/Projects/Aeralyth/backend)
+    Finished `release` profile [optimized] target(s) in 1m 45s
+     Running unittests src/main.rs (backend/target/release/deps/aeralyth_api-99b7734f6a76ab54)
+
+running 1 test
+test routes::vault::metadata_paging::tests::metadata_encoding_allocation_benchmark ... metadata_encode_benchmark={"fixture_crypto_validated":false,"implementation":"historical_two_pass","iterations":100,"mean_allocation_calls":42,"mean_encode_nanoseconds":8964,"mean_requested_allocation_bytes":48033,"plans":8,"profile":"small","raw_manifest_bytes_per_plan":64,"release":true,"response_bytes":8195,"timing_allocation_counter_enabled":false}
+metadata_encode_benchmark={"fixture_crypto_validated":false,"implementation":"one_pass","iterations":100,"mean_allocation_calls":17,"mean_encode_nanoseconds":8163,"mean_requested_allocation_bytes":29109,"plans":8,"profile":"small","raw_manifest_bytes_per_plan":64,"release":true,"response_bytes":8195,"timing_allocation_counter_enabled":false}
+metadata_encode_benchmark={"fixture_crypto_validated":false,"implementation":"historical_two_pass","iterations":8,"mean_allocation_calls":34,"mean_encode_nanoseconds":3357046,"mean_requested_allocation_bytes":37462617,"plans":4,"profile":"maximum_schema_sized_page","raw_manifest_bytes_per_plan":1039936,"release":true,"response_bytes":5550107,"timing_allocation_counter_enabled":false}
+metadata_encode_benchmark={"fixture_crypto_validated":false,"implementation":"one_pass","iterations":8,"mean_allocation_calls":17,"mean_encode_nanoseconds":1778869,"mean_requested_allocation_bytes":18100701,"plans":4,"profile":"maximum_schema_sized_page","raw_manifest_bytes_per_plan":1039936,"release":true,"response_bytes":5550107,"timing_allocation_counter_enabled":false}
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 258 filtered out; finished in 0.14s
+

@@ -1,0 +1,6 @@
+Command: npm run db:test:flexible-settings
+
+> aeralyth@0.1.0 db:test:flexible-settings
+> bash database/tests/flexible_settings.sh
+
+Flexible settings checks passed: migration preservation/replay, minute/year bounds, Never, and legacy writers.

@@ -1,5 +1,6 @@
 export const changeScopes = [
   "files",
+  "paths",
   "shared",
   "repositories",
   "profile",
@@ -57,25 +58,87 @@ export function mergeChanges(
   return [...merged].map(([scope, folderIds]) => ({ scope, folderIds }));
 }
 
-export function affectsRoute(changes: RealtimeChange[], url: URL): boolean {
+export function affectsRoute(
+  changes: RealtimeChange[],
+  url: URL,
+  ancestorFolderIds: readonly string[] = [],
+): boolean {
   const section = url.pathname.split("/")[1] || "files";
-  return changes.some(({ scope }) => {
+  const currentFolderId = url.searchParams.get("folder") ?? "";
+  return changes.some(({ scope, folderIds }) => {
     if (scope === "profile" || scope === "vault" || scope === "security")
       return true;
     if (scope === "users") return section === "users";
     if (scope === "repositories") return section === "repositories";
-    // File pages include account-wide counters, even inside an unrelated
-    // folder. Folder IDs still limit decrypted metadata cache invalidation.
-    return [
-      "files",
-      "shared",
-      "recent",
-      "favorites",
-      "trash",
-      "storage",
-      "repositories",
-    ].includes(section);
+    if (scope === "shared") return section === "shared";
+    if (scope === "paths") {
+      return (
+        ["files", "shared"].includes(section) &&
+        (folderIds.length === 0 ||
+          folderIds.some(
+            (id) => id === currentFolderId || ancestorFolderIds.includes(id),
+          ))
+      );
+    }
+    if (section === "files") {
+      return folderIds.length === 0 || folderIds.includes(currentFolderId);
+    }
+    // These are account-wide collections, or repository aggregates whose
+    // membership can change when a file elsewhere in their tree changes.
+    return ["recent", "favorites", "trash", "storage", "repositories"].includes(
+      section,
+    );
   });
+}
+
+/** Reconcile route snapshots that commit after their events were consumed. */
+export class SnapshotHistory {
+  private changes: {
+    cursor: bigint;
+    changes: RealtimeChange[];
+    reset: boolean;
+  }[] = [];
+  private floor: bigint;
+  private head: bigint;
+
+  constructor(
+    initialCursor: string,
+    private readonly limit = 512,
+  ) {
+    this.floor = BigInt(initialCursor);
+    this.head = this.floor;
+  }
+
+  checkpoint(cursor: string): void {
+    const next = BigInt(cursor);
+    if (next > this.head) this.head = next;
+  }
+
+  record(changes: RealtimeChange[], reset: boolean, cursor: string): void {
+    const next = BigInt(cursor);
+    if (next < this.head && reset) {
+      this.changes = [];
+      this.floor = next;
+    }
+    this.head = next;
+    this.changes.push({ cursor: next, changes, reset });
+    while (this.changes.length > this.limit) {
+      const oldest = this.changes.shift();
+      if (oldest) this.floor = oldest.cursor;
+    }
+  }
+
+  since(cursor: string): { changes: RealtimeChange[]; reset: boolean } {
+    const fence = BigInt(cursor);
+    if (fence < this.floor) return { changes: [], reset: true };
+    const result = { changes: [] as RealtimeChange[], reset: false };
+    for (const update of this.changes) {
+      if (update.cursor <= fence) continue;
+      result.changes = mergeChanges(result.changes, update.changes);
+      result.reset ||= update.reset;
+    }
+    return result;
+  }
 }
 
 /** One trailing refresh, bounded memory, and no starvation during bulk uploads. */
@@ -111,8 +174,9 @@ export class RefreshCoordinator {
       if (ended) return;
       ended = true;
       this.mutations -= 1;
-      // A response already in flight when the mutation began may be stale.
-      this.request([], true);
+      // Drain scoped durable events. Page snapshot fences reconcile any
+      // response that read data before the mutation committed.
+      this.schedule();
     };
   }
 

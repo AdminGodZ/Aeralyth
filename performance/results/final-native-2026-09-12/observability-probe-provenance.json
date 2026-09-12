@@ -1,0 +1,41 @@
+{
+  "recordedAt": "2026-09-12T12:55:17.339368+00:00",
+  "passed": true,
+  "applicationSourceCurrent": true,
+  "migrationsCurrent": true,
+  "binarySha256": "744a513655b7efd0a28d7cf406a077f59aa05e3939ec48ead58234b236b0e7e8",
+  "backendSourceSha256": "6a9494aa3f7e781e81289f0a3f10b1f1590f5988e563753c30489897c8beefab",
+  "validationFiles": {
+    "performance/observability-probe.mjs": "9f917fd95819e262890497158530d7d7b73c9b7dfd0011fa59d71585fc9b529c",
+    "performance/arrival-load.mjs": "4516bc18c72c96caae3bc97dc17289316126d9a03a9084823ba01781eac92391"
+  },
+  "validationRunnerSha256": "6b7e51440d66891043fcd7301cd56bb6c73c6d35740648b34e0c28f87a57c9d6",
+  "reportHashes": {
+    "observability-probe.json": "9e21850deb74efc9ef4eccff549136cd5ed60202c0af7f0ca5bed241bedb8de6",
+    "observability-probe.raw.log": "1f528369cbb62dcd2e54f7689380e7a5d388beb540dfec4e98fd3098508e84ee",
+    "observability-probe.stdout.log": "1f2b57220b1471b7597479e4f04fe4c5d702d508e686e466ee465f400c9a0356",
+    "observability-probe-failed-unauthenticated-expectation.json": "38c45f5bcfbc2eb832e5204fdc762b74898ba9238be386753978d9bd14899221",
+    "observability-probe-failed-unauthenticated-expectation.raw.log": "6355b3ab64c831d99b0a03381d5661a55ea7ed009814117ba80558fffcff53e6",
+    "observability-probe-failed-unauthenticated-expectation.stdout.log": "05b71e404b5a0212d52c360cf504baebff14919609dac123cdf90f385ba93935",
+    "artifact-comparison.json": "5197d01a3dbe468e1a82d59a4cb8c5a9db637bcd99c658062076eddb969fbf0b",
+    "artifact-comparison.md": "bc407d01e6cdc4cd0e43f099b95d8f7c80b0a823746cf9598783a00f10d58f00"
+  },
+  "reportHashPolicy": "JSON reports were formatted before these hashes. Original process output and raw capture bytes are preserved unchanged in .log files.",
+  "independentReview": {
+    "reviewer": "/root/worker_deployment",
+    "harnessApproved": true,
+    "resultApproved": true,
+    "verified": [
+      "Exact current harness/arrival and prebuilt binary hashes",
+      "7000 measured expected outcomes, no dropped arrivals or unexpected status",
+      "Intentional400/500 responses remain distinct from measured200 and readiness probes",
+      "HTTP counters and scrape rate",
+      "Bounded queue saturation, overflow, suppression, drain and memory",
+      "Database restoration and clean shutdown",
+      "External probe Tailwind scanner proof and explicit broad snapshot drift"
+    ]
+  },
+  "previousAttempt": "The first capture failed because it expected unauthenticated auth/me to return200; the application correctly returned401. Only the external success scenario was corrected to a public200 route with the same Standard logging class. No application binary was rebuilt or changed.",
+  "timingScope": "Sequential5s normal,5s frequent,5s normal repeat,20s paused stdout at200 arrivals/s on one local release process. No sustained image mixed load, other native workload, or build overlapped the measured phases. Lightweight independent image asset checks could run during this probe; this is not a statistical capacity estimate.",
+  "processState": "The probe child exited successfully after restoring the dedicated debug-final database. Native release/debug API processes are also stopped; data is retained."
+}

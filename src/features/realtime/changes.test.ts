@@ -4,6 +4,7 @@ import {
   mergeChanges,
   parseChanges,
   RefreshCoordinator,
+  SnapshotHistory,
 } from "./changes";
 import { applyFileListOverlay } from "./file-list-overlay";
 
@@ -43,7 +44,7 @@ describe("realtime refresh coordination", () => {
     vi.advanceTimersByTime(200);
     expect(refresh).toHaveBeenCalledExactlyOnceWith(
       [{ scope: "files", folderIds: [""] }],
-      true,
+      false,
     );
   });
 
@@ -71,7 +72,42 @@ describe("realtime refresh coordination", () => {
     endUpload();
     endEdit();
     vi.advanceTimersByTime(200);
-    expect(refresh).toHaveBeenLastCalledWith([], true);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    coordinator.dispose();
+  });
+
+  it("does not turn a completed mutation in A into a reset after navigating to B", () => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    const coordinator = new RefreshCoordinator(refresh);
+    const end = coordinator.beginMutation();
+    const currentRoute = new URL("https://example.test/files?folder=B");
+    const changes = [{ scope: "files" as const, folderIds: ["A"] }];
+    coordinator.request(changes);
+    end();
+    vi.advanceTimersByTime(200);
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(changes, false);
+    expect(affectsRoute(refresh.mock.calls[0][0], currentRoute)).toBe(false);
+    coordinator.beginMutation()();
+    vi.advanceTimersByTime(2_000);
+    expect(refresh).toHaveBeenCalledOnce();
+    coordinator.dispose();
+  });
+
+  it("waits for the durable scoped event when a mutation completes before publication", () => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    const coordinator = new RefreshCoordinator(refresh);
+    coordinator.beginMutation()();
+    vi.advanceTimersByTime(2_000);
+    expect(refresh).not.toHaveBeenCalled();
+    const changes = [{ scope: "files" as const, folderIds: ["B"] }];
+    coordinator.request(changes);
+    vi.advanceTimersByTime(200);
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(changes, false);
+    expect(
+      affectsRoute(changes, new URL("https://example.test/files?folder=B")),
+    ).toBe(true);
     coordinator.dispose();
   });
 
@@ -104,9 +140,9 @@ describe("realtime refresh coordination", () => {
     }
     expect(refresh.mock.calls[0]).toEqual([
       [{ scope: "files", folderIds: ["remote"] }],
-      true,
+      false,
     ]);
-    expect(refresh).toHaveBeenCalledTimes(3);
+    expect(refresh).toHaveBeenCalledTimes(1);
     endUpload();
     coordinator.dispose();
   });
@@ -127,11 +163,11 @@ it("limits and validates event payloads", () => {
   ).toEqual([{ scope: "files", folderIds: [] }]);
 });
 
-it("refreshes file pages with account-wide counters but skips unrelated settings", () => {
+it("refreshes only relevant folders and account-wide collections", () => {
   const changes = [{ scope: "files" as const, folderIds: ["one"] }];
   expect(
     affectsRoute(changes, new URL("https://example.test/files?folder=two")),
-  ).toBe(true);
+  ).toBe(false);
   expect(
     affectsRoute(changes, new URL("https://example.test/files?folder=one")),
   ).toBe(true);
@@ -140,7 +176,7 @@ it("refreshes file pages with account-wide counters but skips unrelated settings
       [{ scope: "shared", folderIds: [] }],
       new URL("https://example.test/files?folder=two"),
     ),
-  ).toBe(true);
+  ).toBe(false);
   expect(affectsRoute(changes, new URL("https://example.test/trash"))).toBe(
     true,
   );
@@ -177,4 +213,82 @@ it("does not resurrect an optimistic deletion or revert a favorite from an older
   );
   expect(removed.size).toBe(0);
   expect(favorites.size).toBe(0);
+});
+
+it("refreshes parent moves/renames, root membership, broad resets, and security changes", () => {
+  const current = new URL("https://example.test/files?folder=child");
+  expect(
+    affectsRoute([{ scope: "paths", folderIds: ["ancestor"] }], current, [
+      "ancestor",
+      "child",
+    ]),
+  ).toBe(true);
+  expect(
+    affectsRoute(
+      [{ scope: "files", folderIds: [""] }],
+      new URL("https://example.test/files"),
+    ),
+  ).toBe(true);
+  expect(affectsRoute([{ scope: "files", folderIds: [] }], current)).toBe(true);
+  for (const scope of ["security", "vault", "profile"] as const)
+    expect(affectsRoute([{ scope, folderIds: [] }], current)).toBe(true);
+});
+
+describe("server snapshot reconciliation", () => {
+  it("replays an event skipped in A after B's older navigation snapshot commits", () => {
+    const history = new SnapshotHistory("10");
+    const changes = [{ scope: "files" as const, folderIds: ["B"] }];
+    history.record(changes, false, "11");
+    expect(
+      affectsRoute(changes, new URL("https://example.test/files?folder=A")),
+    ).toBe(false);
+    const replay = history.since("10");
+    expect(replay.reset).toBe(false);
+    expect(
+      affectsRoute(
+        replay.changes,
+        new URL("https://example.test/files?folder=B"),
+      ),
+    ).toBe(true);
+    expect(history.since("11")).toEqual({ changes: [], reset: false });
+  });
+
+  it("keeps unchanged checkpoint coverage without growing event history", () => {
+    const history = new SnapshotHistory("10", 2);
+    for (let cursor = 11; cursor < 1000; cursor++)
+      history.checkpoint(String(cursor));
+    expect(history.since("10")).toEqual({ changes: [], reset: false });
+    history.record([{ scope: "files", folderIds: ["B"] }], false, "1000");
+    expect(history.since("999").changes).toEqual([
+      { scope: "files", folderIds: ["B"] },
+    ]);
+  });
+
+  it("resets when a page predates retained changes or a server replay gap", () => {
+    const history = new SnapshotHistory("10", 2);
+    history.record([{ scope: "files", folderIds: ["A"] }], false, "11");
+    history.record([{ scope: "files", folderIds: ["B"] }], false, "12");
+    history.record([], true, "13");
+    expect(history.since("10").reset).toBe(true);
+    expect(history.since("12")).toEqual({ changes: [], reset: true });
+    expect(history.since("13")).toEqual({ changes: [], reset: false });
+  });
+});
+
+it("does not mistake changes to a parent listing for renamed ancestor metadata", () => {
+  const current = new URL("https://example.test/files?folder=B");
+  const ancestors = ["A", "B"];
+  expect(
+    affectsRoute(
+      [{ scope: "files", folderIds: ["A", "C"] }],
+      current,
+      ancestors,
+    ),
+  ).toBe(false);
+  expect(
+    affectsRoute([{ scope: "paths", folderIds: ["A"] }], current, ancestors),
+  ).toBe(true);
+  expect(
+    affectsRoute([{ scope: "paths", folderIds: ["C"] }], current, ancestors),
+  ).toBe(false);
 });

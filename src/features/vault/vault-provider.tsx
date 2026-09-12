@@ -140,6 +140,7 @@ function useVaultProviderController({
   const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lockDeadlineRef = useRef(0);
   const resumeSessionIdRef = useRef<string | null>(null);
+  const submitVersionRef = useRef(0);
   const persistedResumeExpirationRef = useRef(0);
   const serverAutoLockMinutesRef = useRef(autoLockMinutes);
   serverAutoLockMinutesRef.current = autoLockMinutes;
@@ -149,6 +150,8 @@ function useVaultProviderController({
   // Setup can transition this value locally before server props refresh.
   // react-doctor-disable-next-line react-doctor/no-derived-useState
   const [configured, setConfigured] = useState(vaultConfigured);
+  const configuredRef = useRef(configured);
+  configuredRef.current = configured;
   const [activeAutoLockMinutes, setActiveAutoLockMinutes] = useState(() =>
     normalizeVaultAutoLockMinutes(autoLockMinutes),
   );
@@ -164,10 +167,41 @@ function useVaultProviderController({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const getClient = useCallback(() => {
-    if (!clientRef.current) clientRef.current = new VaultCryptoClient();
-    return clientRef.current;
-  }, []);
+  const getClient = useCallback(
+    (allowCreate = false) => {
+      // Old render callbacks can run before React commits the locked state. They
+      // must never replace a failed worker while a background operation retries.
+      if (!clientRef.current && !allowCreate)
+        throw new VaultWorkerError("Unlock the vault first.", "VAULT_LOCKED");
+      if (!clientRef.current) {
+        const client = new VaultCryptoClient((failure) => {
+          if (clientRef.current !== client) return;
+          clientRef.current = null;
+          if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
+          lockTimerRef.current = null;
+          lockDeadlineRef.current = 0;
+          resumeSessionIdRef.current = null;
+          persistedResumeExpirationRef.current = 0;
+          clearVaultResumeMarkers();
+          cancelShareDirectorySyncForLock();
+          metadataResolver.clear();
+          nodeOpenFlightsRef.current.clear();
+          window.dispatchEvent(new Event(VAULT_LOCKING_EVENT));
+          setState(configuredRef.current ? "locked" : "setup");
+          setMode(configuredRef.current ? "unlock" : "setup");
+          setError(failure.message);
+          setBusy(false);
+          setPassword("");
+          setPasswordConfirmation("");
+          setRecoveryCodeInput("");
+          setDialogOpen(true);
+        });
+        clientRef.current = client;
+      }
+      return clientRef.current;
+    },
+    [metadataResolver],
+  );
 
   const beginVaultResumeSession = useCallback(
     async (client: VaultCryptoClient, vaultVersion: number): Promise<void> => {
@@ -181,11 +215,19 @@ function useVaultProviderController({
           vaultVersion,
           storage,
         );
+        if (clientRef.current !== client) {
+          if (readVaultResumeMarker(storage)?.sessionId === marker.sessionId)
+            clearVaultResumeMarker(storage);
+          throw new VaultWorkerError(
+            "Unlock the vault again to recover.",
+            "WORKER_UNAVAILABLE",
+          );
+        }
         resumeSessionIdRef.current = marker.sessionId;
         persistedResumeExpirationRef.current = marker.expiresAt;
         lockDeadlineRef.current = marker.expiresAt;
       } catch {
-        clearVaultResumeMarker(storage);
+        if (clientRef.current === client) clearVaultResumeMarker(storage);
       }
     },
     [activeAutoLockMinutes, csrfToken],
@@ -237,15 +279,16 @@ function useVaultProviderController({
 
     let cancelled = false;
     const restore = async () => {
+      let client: VaultCryptoClient | null = null;
       try {
-        const client = getClient();
+        client = getClient(true);
         const material = await getUnlockMaterial();
         const resumed = await client.resume(
           marker.sessionId,
           csrfToken,
           material,
         );
-        if (cancelled) return;
+        if (cancelled || clientRef.current !== client) return;
         if (!resumed.resumed) {
           if (storage) clearVaultResumeMarker(storage);
           setState("locked");
@@ -265,7 +308,7 @@ function useVaultProviderController({
         setDialogOpen(false);
         enqueueShareDirectorySync({ csrfToken, client });
       } catch {
-        if (cancelled) return;
+        if (cancelled || (client && clientRef.current !== client)) return;
         if (storage) clearVaultResumeMarker(storage);
         setState("locked");
         setDialogOpen(true);
@@ -443,7 +486,11 @@ function useVaultProviderController({
 
   const prefetchFolderMetadata = useCallback(
     (folderId: string, view: "files" | "shared"): Promise<void> => {
-      if (state !== "unlocked" || !isVaultNodeId(folderId)) {
+      if (
+        !clientRef.current ||
+        state !== "unlocked" ||
+        !isVaultNodeId(folderId)
+      ) {
         return Promise.resolve();
       }
       return metadataResolver.prefetchFolder(folderId, view, {
@@ -486,11 +533,13 @@ function useVaultProviderController({
   );
 
   async function submit(): Promise<void> {
+    const version = ++submitVersionRef.current;
+    let client: VaultCryptoClient | null = null;
     setError(null);
     setBusy(true);
     setState("unlocking");
     try {
-      const client = getClient();
+      client = getClient(true);
       if (mode === "setup") {
         if (password !== passwordConfirmation) {
           throw new Error(
@@ -501,8 +550,14 @@ function useVaultProviderController({
         }
         const setup = await client.setup(password);
         const created = await setupVault(csrfToken, setup.payload);
-        await beginVaultResumeSession(client, created.vaultVersion);
+        configuredRef.current = true;
         setConfigured(true);
+        await beginVaultResumeSession(client, created.vaultVersion);
+        if (clientRef.current !== client)
+          throw new VaultWorkerError(
+            "Unlock the vault again to recover.",
+            "WORKER_UNAVAILABLE",
+          );
         setNewRecoveryCode(setup.recoveryCode);
         setRecoveryConfirmed(false);
         setState("unlocked");
@@ -510,6 +565,11 @@ function useVaultProviderController({
         const material = await getUnlockMaterial();
         const unlocked = await client.unlock(password, material);
         await beginVaultResumeSession(client, unlocked.vaultVersion);
+        if (clientRef.current !== client)
+          throw new VaultWorkerError(
+            "Unlock the vault again to recover.",
+            "WORKER_UNAVAILABLE",
+          );
         setState("unlocked");
         setDialogOpen(false);
       } else {
@@ -524,6 +584,11 @@ function useVaultProviderController({
         );
         const rewrapped = await rewrapVault(csrfToken, recovered.payload);
         await beginVaultResumeSession(client, rewrapped.vaultVersion);
+        if (clientRef.current !== client)
+          throw new VaultWorkerError(
+            "Unlock the vault again to recover.",
+            "WORKER_UNAVAILABLE",
+          );
         setNewRecoveryCode(recovered.recoveryCode);
         setRecoveryConfirmed(false);
         setState("unlocked");
@@ -533,6 +598,7 @@ function useVaultProviderController({
       setPasswordConfirmation("");
       setRecoveryCodeInput("");
     } catch (failure) {
+      if (submitVersionRef.current !== version) return;
       const message =
         onePasswordEnabled &&
         failure instanceof VaultWorkerError &&
@@ -542,7 +608,8 @@ function useVaultProviderController({
             ? failure.message
             : "The vault operation failed.";
       cancelShareDirectorySyncForLock();
-      await clientRef.current?.lock().catch(() => undefined);
+      if (clientRef.current === client)
+        await client?.lock().catch(() => undefined);
       setError(message);
       if (
         failure instanceof VaultWorkerError &&
@@ -550,10 +617,12 @@ function useVaultProviderController({
       ) {
         setState("unsupported");
       } else {
-        setState(configured || mode !== "setup" ? "locked" : "setup");
+        setState(
+          configuredRef.current || mode !== "setup" ? "locked" : "setup",
+        );
       }
     } finally {
-      setBusy(false);
+      if (submitVersionRef.current === version) setBusy(false);
     }
   }
 

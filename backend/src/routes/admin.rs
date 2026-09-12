@@ -490,7 +490,7 @@ pub async fn create_invitation(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if outcome.get("user_exists") {
         return Ok(redirect("/users?invite=user-exists"));
     }
@@ -537,7 +537,7 @@ pub async fn create_one_password_user(
             &[&username, &password_hash, &role, &salt.as_slice()],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if !outcome.get::<_, bool>("inserted") {
         return Ok(HttpResponse::Conflict().body("username already exists"));
     }
@@ -576,7 +576,7 @@ pub async fn update_user_role(
         )
         .await
         .map(admin_mutation_outcome)
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if let Some(response) = admin_mutation_failure(&outcome)? {
         return Ok(response);
     }
@@ -620,7 +620,7 @@ pub async fn update_user_status(
         )
         .await
         .map(admin_mutation_outcome)
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if let Some(response) = admin_mutation_failure(&outcome)? {
         return Ok(response);
     }
@@ -676,7 +676,7 @@ pub async fn update_user(
         )
         .await
         .map(admin_mutation_outcome)
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     if let Some(response) = admin_mutation_failure(&outcome)? {
         return Ok(response);
     }
@@ -718,7 +718,7 @@ pub async fn delete_user(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let outcome = admin_mutation_outcome(row);
     if let Some(response) = admin_mutation_failure(&outcome)? {
         return Ok(response);
@@ -754,7 +754,7 @@ pub async fn user_avatar(
             &[&user_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?
+        .map_err(crate::db::http_error)?
     else {
         return Ok(HttpResponse::NotFound().finish());
     };
@@ -809,7 +809,7 @@ pub async fn rotate_invitation(
             &[&token, &expires_after_days, &invitation_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     if updated == 0 {
         return Ok(redirect("/users?invite=missing"));
@@ -840,7 +840,7 @@ pub async fn revoke_invitation(
             &[&invitation_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     Ok(redirect("/users?invite=revoked"))
 }
@@ -907,7 +907,7 @@ async fn list_users(
             ],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
     let has_more = rows.len() > page_size;
     rows.truncate(page_size);
     let next_cursor = if has_more {
@@ -1087,7 +1087,7 @@ async fn list_invitations(
             )
             .await
     }
-    .map_err(error::ErrorInternalServerError)?;
+    .map_err(crate::db::http_error)?;
     let has_more = rows.len() > page_size;
     rows.truncate(page_size);
     let next_cursor = if has_more {
@@ -1137,7 +1137,7 @@ async fn load_admin_summary(state: &AppState) -> Result<AdminUsersSummary> {
             &[],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     Ok(AdminUsersSummary {
         total_users: row.get("total_users"),
@@ -1236,7 +1236,7 @@ async fn expire_invitations_for_id(state: &AppState, invitation_id: &str) -> Res
             &[&invitation_id],
         )
         .await
-        .map_err(error::ErrorInternalServerError)?;
+        .map_err(crate::db::http_error)?;
 
     Ok(())
 }

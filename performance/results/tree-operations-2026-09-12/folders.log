@@ -1,0 +1,19 @@
+   Compiling aeralyth-api v0.1.0 (/Users/timheld/Documents/Projects/Aeralyth/backend)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.37s
+     Running unittests src/main.rs (backend/target/debug/deps/aeralyth_api-66575a101fb2eba5)
+
+running 1 test
+tree trash progress: processed=5120/10001, batches=100
+durable tree trash: nodes=10001, batches=121, max_batch=75.375042ms, wal_bytes=23887768, files_dead_tuples=7696
+tree restore progress: processed=5120/10001, batches=100
+durable tree restore: nodes=10001, batches=121, max_batch=100.387459ms, wal_bytes=38464160, files_dead_tuples=16431
+tree trash progress: processed=5120/10001, batches=100
+durable tree trash: nodes=10001, batches=121, max_batch=82.054916ms, wal_bytes=23288576, files_dead_tuples=30033
+tree delete progress: processed=5120/10001, batches=100
+durable tree delete: nodes=10001, batches=121, max_batch=64.459ms, wal_bytes=14102136, files_dead_tuples=36205
+tree navigation same+other owner: reads=1078, p95=3.163417ms, max=43.319417ms, rss_before_kib=16304, peak_rss_kib=19088
+durable tree full lifecycle: 16.116867958s
+test routes::tree_jobs::tests::durable_tree_jobs_preserve_visibility_and_resume_between_batches ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 253 filtered out; finished in 17.06s
+

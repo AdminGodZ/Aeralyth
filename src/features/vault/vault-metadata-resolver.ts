@@ -503,12 +503,15 @@ export class VaultMetadataResolver {
           .slice(offset, offset + METADATA_PLAN_BATCH_SIZE)
           .map((reference) => reference.nodeId);
         let continuation: number | undefined;
+        let snapshot: string | undefined;
         do {
           const response = await getVaultMetadataPlans(
             csrfToken,
             nodeIds,
             continuation,
             controller.signal,
+            undefined,
+            snapshot,
           );
           requestCount += 1;
           plans.push(...response.plans);
@@ -519,6 +522,12 @@ export class VaultMetadataResolver {
           ) {
             throw new Error("The metadata plan continuation is invalid.");
           }
+          if (snapshot && response.snapshot !== snapshot) {
+            throw new Error(
+              "The metadata snapshot changed. Refresh and retry.",
+            );
+          }
+          snapshot = response.snapshot;
           continuation = response.continuation;
         } while (continuation !== undefined);
       }

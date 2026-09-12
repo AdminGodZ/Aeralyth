@@ -1,0 +1,56 @@
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ reconcile_vault_migration_progress 
+------------------------------------
+ 
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+ refresh_trash_expiry_owners 
+-----------------------------
+ 
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+
+NOTICE:  relation "schema_migrations" already exists, skipping
+ pg_advisory_xact_lock 
+-----------------------
+ 
+(1 row)
+

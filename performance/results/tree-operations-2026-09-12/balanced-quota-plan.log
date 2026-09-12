@@ -1,0 +1,22 @@
+                                                                          QUERY PLAN                                                                           
+---------------------------------------------------------------------------------------------------------------------------------------------------------------
+ Incremental Sort  (cost=88.52..17702.61 rows=6400 width=54) (actual time=4.730..26.024 rows=256.00 loops=1)
+   Sort Key: parent.ordinality, files.id
+   Presorted Key: parent.ordinality
+   Full-sort Groups: 8  Sort Method: quicksort  Average Memory: 27kB  Peak Memory: 27kB
+   Buffers: shared hit=135495 read=58 dirtied=375 written=1
+   ->  Nested Loop Left Join  (cost=0.43..17458.61 rows=6400 width=54) (actual time=0.702..25.966 rows=256.00 loops=1)
+         Buffers: shared hit=135489 read=58 dirtied=375 written=1
+         ->  Function Scan on parent  (cost=0.01..2.57 rows=256 width=80) (actual time=0.054..0.091 rows=256.00 loops=1)
+         ->  Limit  (cost=0.42..67.81 rows=25 width=38) (actual time=0.101..0.101 rows=1.00 loops=256)
+               Buffers: shared hit=135489 read=58 dirtied=375 written=1
+               ->  Index Scan using files_owner_parent_walk_idx on files  (cost=0.42..677.07 rows=251 width=38) (actual time=0.094..0.094 rows=1.00 loops=256)
+                     Index Cond: ((owner_id = 'usr_tree_job_test'::text) AND (parent_id = parent.node_id) AND (id > COALESCE(parent.last_child_id, ''::text)))
+                     Index Searches: 256
+                     Buffers: shared hit=135234 read=58 dirtied=169 written=1
+ Planning:
+   Buffers: shared hit=645 read=33
+ Planning Time: 0.784 ms
+ Execution Time: 26.057 ms
+(18 rows)
+

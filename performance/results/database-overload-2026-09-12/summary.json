@@ -1,0 +1,39 @@
+{
+  "date": "2026-09-12",
+  "before": {
+    "actual_database_queue_full": true,
+    "authentication_http_status": 500,
+    "retry_after": null,
+    "log": "before.log"
+  },
+  "after": {
+    "actual_database_queue_full": true,
+    "authentication_http_status": 503,
+    "retry_after": "1",
+    "author_tests_passed": 3,
+    "author_duration_seconds": 0.21,
+    "independent_tests_passed": 3,
+    "independent_duration_seconds": 0.16,
+    "reviewer": "/root/db_lifetimes/db_overload_review",
+    "log": "final.log"
+  },
+  "coverage": [
+    "actual authentication/read/boxed upload helper overload",
+    "authenticated request phase release then live revalidation overload and recovery",
+    "normal PostgreSQL error stays 500",
+    "closed and wait-timeout pool errors stay 500",
+    "unrelated boxed IO errors stay 500",
+    "ambiguous COMMIT errors preserve original PostgreSQL classification"
+  ],
+  "source_sha256": {
+    "backend/src/db.rs": "bbe28c8fad5ad8a7bf9a12cd82193ecff50ee0cbf8464e745a81a20dd55ccd33",
+    "backend/src/auth.rs": "3b793f3ed8d85b251fd6a7a565e2d767c30ceb94097f911a4ea8dc9c05ddbb7c",
+    "backend/src/routes/files.rs": "0b9d1c9ed1a183779ff1c2c25cf9472ce6f65159b5e0e36444be17406bfedaa8",
+    "backend/src/routes/vault.rs": "2ce3b8f227196338494086cfcaf78dc4e8b96f51a17155fff6f6034986aa7b55",
+    "backend/src/routes/vault_metadata_paging.rs": "d74b227dd243fa9402cfc4db60d8608e10c798b07eb809c8e7d969fe891253fc"
+  },
+  "limitations": [
+    "This verifies a confirmed overload classification defect. It does not attribute the eight HTTP 500 responses from the earlier admission matrix, which lacked diagnostics.",
+    "Local focused tests are not HTTP throughput or production capacity measurements."
+  ]
+}

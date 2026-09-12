@@ -18,6 +18,7 @@
 /.next/
 /out/
 /.worker-build/
+/.worker-reports/
 /public/workers/*.worker.js
 /public/workers/zip-module.*.wasm
 
