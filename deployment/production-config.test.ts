@@ -155,7 +155,10 @@ describe("Railway production deployment", () => {
     expect(workflow).toContain(
       "git diff --exit-code -- src/generated/worker-assets.ts",
     );
-    expect(workflow).toContain("npm run db:test:production-preflight-fresh");
+    expect(workflow).toContain("python3 database/tests/run_audit_suite.py");
+    expect(read("database/tests/run_audit_suite.py")).toContain(
+      '"production-preflight-fresh"',
+    );
     expect(workflow).toContain("-e AERALYTH_ENV=production");
     expect(workflow).toContain("-e AERALYTH_ENV=Production");
     expect(workflow).toContain("quay.io/minio/minio@sha256:");
@@ -194,20 +197,14 @@ describe("Railway production deployment", () => {
   });
 
   it("allows direct S3 requests only from the production frontend", () => {
-    const cors = JSON.parse(read("docs/railway-s3-cors.production.json")) as {
+    const cors = JSON.parse(
+      read("deployment/railway-s3-cors.production.json"),
+    ) as {
       CORSRules: Array<{ AllowedOrigins: string[] }>;
     };
     expect(cors.CORSRules).toHaveLength(1);
     expect(cors.CORSRules[0]?.AllowedOrigins).toEqual([
       "https://cloud.admingod.ch",
     ]);
-
-    const runbook = read("docs/production-railway.md");
-    const domainStep = runbook.indexOf("7. Attach `cloud.admingod.ch`");
-    const corsStep = runbook.indexOf(
-      "8. Apply the production bucket CORS policy",
-    );
-    expect(domainStep).toBeGreaterThan(-1);
-    expect(corsStep).toBeGreaterThan(domainStep);
   });
 });

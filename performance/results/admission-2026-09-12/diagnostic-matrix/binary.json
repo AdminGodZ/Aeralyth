@@ -1,8 +1,0 @@
-{
-  "binary_path": "/tmp/aeralyth-admission-matrix-x8dzlphn/aeralyth-api-tests",
-  "binary_sha256": "b848a9324148d8dec073ec6f49a22d04c0d87d648f0eb6f3196f105fc36b80a9",
-  "copied_at_utc": "2026-09-12T11:49:31.094260+00:00",
-  "database": "aeralyth_audit_migration",
-  "request_pool_max": 4,
-  "command": "measure_provider_bulk_and_browse_admission_contention --ignored --nocapture --test-threads=1"
-}

@@ -2,6 +2,8 @@
 .github
 .next
 .worker-reports
+performance/results
+performance-results
 .vercel
 backend/target
 coverage

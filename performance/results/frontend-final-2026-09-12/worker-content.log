@@ -1,8 +1,0 @@
-Command: node scripts/verify-worker-release.mjs --content-only
-Started: 2026-09-12T11:43:54.255Z
-
-Worker archive hashes and current release coverage verified.
-
-Finished: 2026-09-12T11:43:54.298Z
-Exit code: 0
-Signal: none

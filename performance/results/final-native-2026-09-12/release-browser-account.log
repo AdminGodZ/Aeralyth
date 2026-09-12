@@ -1,5 +1,0 @@
-                                                          json_build_object                                                           
---------------------------------------------------------------------------------------------------------------------------------------
- {"id" : "usr_audit_browser", "username" : "audit_browser", "role" : "admin", "status" : "active", "vaultCount" : 0, "fileCount" : 0}
-(1 row)
-

@@ -1,9 +1,0 @@
-{
-  "status": "passed",
-  "finishedAt": "2026-09-12T12:51:28.858Z",
-  "origin": "http://127.0.0.1:58082",
-  "proofPath": "performance/results/worker-release-2026-09-12.json",
-  "logPath": "performance/results/production-final-2026-09-12/independent-worker-http.log",
-  "logSha256": "ef2e64efcbf70843dac4f87488e587d812c830fb8d9a3a6f520d017f6e8b9379",
-  "handoffSha256": "ab58137b9cff35e455a26b19329b8c3e05165b3a10ecedad05c99ed3b5d6dc28"
-}

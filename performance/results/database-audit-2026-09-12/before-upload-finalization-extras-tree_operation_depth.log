@@ -1,9 +1,0 @@
-BEGIN
-INSERT 0 1
-ALTER TABLE
-INSERT 0 121
-ALTER TABLE
-INSERT 0 1
-DO
-ROLLBACK
-Depth120 tree remains hidden and mutations are rejected with bounded traversal

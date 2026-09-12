@@ -1,8 +1,0 @@
-Command: node /private/tmp/aeralyth-worker-release-snapshot-8GOuE9/scripts/verify-worker-release.mjs
-Started: 2026-09-12T11:44:31.846Z
-
-Committed worker assets cover the current release and retained versions.
-
-Finished: 2026-09-12T11:44:31.954Z
-Exit code: 0
-Signal: none

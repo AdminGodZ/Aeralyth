@@ -13,6 +13,8 @@
 # testing
 /coverage
 /.playwright-mcp/
+/performance/results/
+/performance-results/
 
 # next.js
 /.next/

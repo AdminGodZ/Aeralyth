@@ -1,6 +1,0 @@
-\set ON_ERROR_STOP on
-SET plan_cache_mode=force_generic_plan;
-PREPARE scalar_seek(text,text[],integer[],text[],text,bigint) AS SELECT child.id,child.parent_id,child.entry_type,parent.depth FROM unnest($2::text[],$3::integer[],$4::text[]) AS parent(node_id,depth,last_child_id) CROSS JOIN LATERAL (SELECT id,parent_id,entry_type FROM files WHERE owner_id=$1 AND parent_id=parent.node_id AND id > COALESCE(parent.last_child_id,'') AND ($5::text IS NULL OR state=$5) ORDER BY id LIMIT $6) AS child ORDER BY parent.depth,parent.node_id,child.id LIMIT $6;
-EXPLAIN (ANALYZE,BUFFERS) EXECUTE scalar_seek('usr_tree_job_test',ARRAY['no-such-empty-folder'],ARRAY[1],ARRAY[NULL]::text[],NULL,256);
-PREPARE composite_seek(text,text[],integer[],text[],text,bigint) AS SELECT child.id,child.parent_id,child.entry_type,parent.depth FROM unnest($2::text[],$3::integer[],$4::text[]) AS parent(node_id,depth,last_child_id) CROSS JOIN LATERAL (SELECT id,parent_id,entry_type FROM files WHERE owner_id=$1 AND parent_id=parent.node_id AND (owner_id,parent_id,id) > ($1,parent.node_id,COALESCE(parent.last_child_id,'')) AND ($5::text IS NULL OR state=$5) ORDER BY id LIMIT $6) AS child ORDER BY parent.depth,parent.node_id,child.id LIMIT $6;
-EXPLAIN (ANALYZE,BUFFERS) EXECUTE composite_seek('usr_tree_job_test',ARRAY['no-such-empty-folder'],ARRAY[1],ARRAY[NULL]::text[],NULL,256);

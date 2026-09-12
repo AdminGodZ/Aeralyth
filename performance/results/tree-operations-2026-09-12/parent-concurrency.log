@@ -1,4 +1,0 @@
-Raw parent lifecycle update with concurrent child holders rejected immediately with 40001
-Two concurrent sibling insertions, both holding compatible parent locks, committed with migration 034 child_count=2
-REPEATABLE READ: pre-trash parent snapshot publication rejected with 40001
-READ COMMITTED: pre-trash parent snapshot publication rejected with 23514

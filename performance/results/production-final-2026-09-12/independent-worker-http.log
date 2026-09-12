@@ -1,6 +1,0 @@
-Command: node scripts/test-worker-http.mjs http://127.0.0.1:58082
-Started: 2026-09-12T12:51:28.774Z
-Verified 8 current/retained assets over HTTP with exact hashes, gzip, immutable success caching, and uncached missing-asset recovery.
-
-Finished: 2026-09-12T12:51:28.858Z
-Exit code: 0

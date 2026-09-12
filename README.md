@@ -47,14 +47,6 @@ npm run build
 cargo build --manifest-path backend/Cargo.toml
 ```
 
-The encrypted vault design and rollout procedure are documented in
-[docs/e2ee.md](docs/e2ee.md). Object-storage configuration is documented in
-[docs/storage.md](docs/storage.md).
-Cross-device updates, replay, and rollout requirements are documented in
-[docs/realtime.md](docs/realtime.md).
-Trash retention and the Never lock option are documented in
-[docs/settings-retention-and-lock.md](docs/settings-retention-and-lock.md).
-
 ## Local Database
 
 ```bash
@@ -202,6 +194,13 @@ Next.js server, and the Actix API. Railway runs migrations as a pre-deploy
 command and activates a deployment only after `/health/ready` succeeds. PostgreSQL
 and the private S3 bucket remain separate Railway resources.
 
-Follow [docs/production-railway.md](docs/production-railway.md) for the ordered
-database cutover, variables, GitHub CI gate, bucket CORS, and
-`cloud.admingod.ch` domain setup.
+Deployment settings are in [railway.json](railway.json), environment variables
+in [.env.example](.env.example), and the production bucket CORS policy in
+[deployment/railway-s3-cors.production.json](deployment/railway-s3-cors.production.json).
+Attach `cloud.admingod.ch` before applying that origin-restricted bucket policy.
+
+For the durable-tree migration, apply the full migration chain, then drain and
+stop older API instances and maintenance workers before starting the updated
+API. Workers can resume persisted jobs before public traffic switches. Every
+replica and rollback version must honor tree visibility fences while jobs are
+pending or running, including when workers are paused.

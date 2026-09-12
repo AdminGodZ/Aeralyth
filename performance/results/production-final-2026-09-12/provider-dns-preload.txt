@@ -1,6 +1,0 @@
-// Local acceptance runner only. Keep the signed provider URL and Host unchanged.
-const dns = require('node:dns');
-const originalLookup = dns.lookup;
-dns.lookup = function auditProviderLookup(hostname, ...args) {
-  return originalLookup.call(this, hostname === 'host.docker.internal' ? '127.0.0.1' : hostname, ...args);
-};

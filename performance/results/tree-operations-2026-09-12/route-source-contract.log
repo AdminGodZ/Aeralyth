@@ -1,8 +1,0 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.17s
-     Running unittests src/main.rs (backend/target/debug/deps/aeralyth_api-66575a101fb2eba5)
-
-running 1 test
-test routes::tree_walk::tests::large_route_operations_do_not_reintroduce_recursive_subtree_statements ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 267 filtered out; finished in 0.01s
-
