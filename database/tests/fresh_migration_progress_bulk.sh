@@ -31,5 +31,6 @@ for migration in database/init/[0-9][0-9][0-9]_*.sql; do
   echo "Applying ${migration##*/}"
   psql_test < "${migration}" >/dev/null
 done
+psql_test < database/tests/hierarchy_updates.sql
 psql_test < database/tests/migration_progress_bulk.sql
 echo 'fresh full-chain migration progress bulk regression passed'

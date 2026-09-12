@@ -114,26 +114,33 @@ describe("the exact production worker bundles", () => {
       if (value.hostAssetRequest) requestedAssets.push(value.hostAssetRequest);
     });
     const text = "Production worker ZIP and WASM round trip.\n".repeat(8_192);
+    const lastModified = Date.UTC(2024, 0, 2, 12, 0, 0);
+    const file = new File([text], "content.txt", {
+      type: "text/plain",
+      lastModified,
+    });
     try {
       const result = nextMessage<FolderZipWorkerResponse>(
         worker,
         (value) => Boolean(value.type) && value.type !== "progress",
       );
       worker.postMessage({
-        type: "compress",
-        sources: [
-          { directory: true, path: "fixture", lastModified: 0 },
-          {
-            path: "fixture/content.txt",
-            file: new File([text], "content.txt", {
-              type: "text/plain",
-              lastModified: 0,
-            }),
-          },
+        hostFileMetadata: [
+          { index: 1, name: file.name, lastModified: file.lastModified },
         ],
+        hostRequest: {
+          type: "compress",
+          sources: [
+            { directory: true, path: "fixture", lastModified },
+            { path: "fixture/content.txt", file },
+          ],
+        },
       });
       const response = await result;
-      expect(response.type).toBe("complete");
+      expect(
+        response.type,
+        response.type === "error" ? response.message : undefined,
+      ).toBe("complete");
       if (response.type !== "complete")
         throw new Error(JSON.stringify(response));
       expect(requestedAssets).toContain(ZIP_WASM_URL);
@@ -152,6 +159,7 @@ describe("the exact production worker bundles", () => {
         );
         if (!entry || entry.directory)
           throw new Error("ZIP file entry missing.");
+        expect(entry.lastModDate.getTime()).toBe(lastModified);
         expect(await entry.getData(new TextWriter())).toBe(text);
       } finally {
         await reader.close();

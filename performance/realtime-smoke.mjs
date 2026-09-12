@@ -74,8 +74,10 @@ async function openStream(value, cursor, base = origin, extraHeaders = {}) {
   let buffer = "";
   const stream = {
     close: () => controller.abort(),
-    async next() {
-      const timeout = setTimeout(() => controller.abort(), 5000);
+    async next(deadline = performance.now() + 5000) {
+      const remainingMs = deadline - performance.now();
+      assert.ok(remainingMs > 0, "event deadline exceeded");
+      const timeout = setTimeout(() => controller.abort(), remainingMs);
       try {
         while (!buffer.includes("\n\n")) {
           const chunk = await reader.read();
@@ -97,6 +99,21 @@ async function openStream(value, cursor, base = origin, extraHeaders = {}) {
               const separator = line.indexOf(": ");
               return [line.slice(0, separator), line.slice(separator + 2)];
             }),
+        );
+      } finally {
+        clearTimeout(timeout);
+      }
+    },
+    async expectClosed(deadline) {
+      assert.equal(buffer, "", "revoked stream must not queue more events");
+      const remainingMs = deadline - performance.now();
+      assert.ok(remainingMs > 0, "stream closure deadline exceeded");
+      const timeout = setTimeout(() => controller.abort(), remainingMs);
+      try {
+        assert.equal(
+          (await reader.read()).done,
+          true,
+          "revoked stream must end after session-expired",
         );
       } finally {
         clearTimeout(timeout);
@@ -230,19 +247,43 @@ try {
 
   const revoked = await openStream(otherToken);
   await revoked.next();
+  const revocationStart = performance.now();
+  const revocationDeadline = revocationStart + 5000;
   sql(`DELETE FROM sessions WHERE id = '${other}';`);
-  assert.equal((await revoked.next()).event, "session-expired");
-  revoked.close();
   assert.equal(
-    (await fetch(`${origin}/api/events`, { headers: headers(otherToken) }))
-      .status,
+    (
+      await fetch(`${origin}/api/events`, {
+        headers: headers(otherToken),
+        signal: AbortSignal.timeout(5000),
+      })
+    ).status,
     401,
   );
   assert.equal((await sync(otherToken)).status, 401);
+  // Deleting the session also emits a security invalidation. It can arrive
+  // before the shared authorization batch, whose existing lease is five seconds.
+  // Keep one absolute deadline across frames, then verify actual server closure.
+  const revocationEvents = [];
+  for (;;) {
+    const frame = await revoked.next(revocationDeadline);
+    revocationEvents.push(frame.event);
+    if (frame.event === "session-expired") break;
+    if (frame.event === "changes") {
+      assert.deepEqual(JSON.parse(frame.data), [
+        { scope: "security", folderIds: [] },
+      ]);
+    } else {
+      assert.equal(frame.event, "checkpoint");
+    }
+  }
+  await revoked.expectClosed(revocationDeadline);
+  const revocationMs = Math.round(performance.now() - revocationStart);
   console.log(
     JSON.stringify({
       passed: true,
       deliveryMs,
+      revocationMs,
+      revocationEvents,
       replicas: origin !== secondOrigin,
       checks: [
         "authenticated SSE",

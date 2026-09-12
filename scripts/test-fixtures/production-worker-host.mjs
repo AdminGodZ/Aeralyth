@@ -33,5 +33,18 @@ const source = await readFile(workerData.modulePath);
 // A data URL selects ESM on every supported Node version without reparsing .js
 // as CommonJS first. Its decoded content is still the exact published file.
 await import(`data:text/javascript;base64,${source.toString("base64")}`);
-parentPort.on("message", (data) => globalThis.onmessage({ data }));
+parentPort.on("message", (message) => {
+  const data = message.hostRequest ?? message;
+  // Node 22 clones File as Blob and drops its name and lastModified. Browsers
+  // preserve both. Reconstruct that browser boundary before calling the exact
+  // emitted worker, using metadata sent separately from the parent fixture.
+  for (const metadata of message.hostFileMetadata ?? []) {
+    const source = data.sources[metadata.index];
+    source.file = new File([source.file], metadata.name, {
+      type: source.file.type,
+      lastModified: metadata.lastModified,
+    });
+  }
+  globalThis.onmessage({ data });
+});
 parentPort.postMessage({ hostReady: true });
