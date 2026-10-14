@@ -161,7 +161,10 @@ describe("Railway production deployment", () => {
     );
     expect(workflow).toContain("-e AERALYTH_ENV=production");
     expect(workflow).toContain("-e AERALYTH_ENV=Production");
-    expect(workflow).toContain("quay.io/minio/minio@sha256:");
+    expect(workflow).toContain(
+      "docker build --tag aeralyth-ci-minio --file .github/fixtures/minio.Dockerfile .github/fixtures",
+    );
+    expect(workflow).toContain("            aeralyth-ci-minio \\");
     expect(workflow).toContain("-e AERALYTH_STORAGE_BACKEND=s3");
     expect(workflow).toContain("-e AERALYTH_E2EE_MODE=migrate");
     expect(workflow).toContain("-e AERALYTH_COOKIE_SECURE=true");

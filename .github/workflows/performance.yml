@@ -177,6 +177,8 @@ jobs:
       - run: npm run db:migrate
       - name: Verify every migration replays safely
         run: npm run db:migrate
+      - name: Build pinned MinIO test fixture
+        run: docker build --tag aeralyth-ci-minio --file .github/fixtures/minio.Dockerfile .github/fixtures
       - name: Start isolated S3-compatible storage
         run: |
           echo '127.0.0.1 aeralyth-s3-smoke' | sudo tee --append /etc/hosts
@@ -185,7 +187,7 @@ jobs:
             --publish 127.0.0.1:9000:9000 \
             -e MINIO_ROOT_USER=aeralyth-ci-access \
             -e MINIO_ROOT_PASSWORD=aeralyth-ci-secret-key-000000000 \
-            quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e \
+            aeralyth-ci-minio \
             server /data --address :9000 --console-address :9001
           for attempt in $(seq 1 60); do
             if docker exec aeralyth-s3-smoke mc alias set \
@@ -358,6 +360,8 @@ jobs:
           cache-to: type=gha,mode=max
       - name: Start isolated PostgreSQL
         run: docker compose up -d --wait postgres
+      - name: Build pinned MinIO test fixture
+        run: docker build --tag aeralyth-ci-minio --file .github/fixtures/minio.Dockerfile .github/fixtures
       - name: Start isolated S3-compatible storage
         run: |
           echo '127.0.0.1 aeralyth-s3-smoke' | sudo tee --append /etc/hosts
@@ -366,7 +370,7 @@ jobs:
             --publish 127.0.0.1:9000:9000 \
             -e MINIO_ROOT_USER=aeralyth-ci-access \
             -e MINIO_ROOT_PASSWORD=aeralyth-ci-secret-key-000000000 \
-            quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e \
+            aeralyth-ci-minio \
             server /data --address :9000 --console-address :9001
           for attempt in $(seq 1 60); do
             if docker exec aeralyth-s3-smoke mc alias set \
