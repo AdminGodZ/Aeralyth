@@ -10,7 +10,62 @@ import {
   phaseViolations,
   runArrivalPhase,
 } from "./arrival-load.mjs";
-import { createFixtureStream } from "./fixture-stream.mjs";
+import { createFixtureStream, nextFixtureChanges } from "./fixture-stream.mjs";
+
+test("realtime smoke waits through empty checkpoints with one deadline", async () => {
+  const change = {
+    event: "changes",
+    data: JSON.stringify([{ scope: "profile", folderIds: [] }]),
+  };
+  const frames = [
+    { event: "checkpoint", data: "{}" },
+    { event: "checkpoint", data: "{}" },
+    change,
+  ];
+  const deadlines = [];
+  const deadline = performance.now() + 5_000;
+  assert.equal(
+    await nextFixtureChanges(
+      {
+        async next(value) {
+          deadlines.push(value);
+          return frames.shift();
+        },
+      },
+      deadline,
+    ),
+    change,
+  );
+  assert.deepEqual(deadlines, [deadline, deadline, deadline]);
+});
+
+test("realtime smoke still rejects unexpected frames and expired deadlines", async () => {
+  for (const frame of [
+    { event: "reset", data: "{}" },
+    { event: "session-expired" },
+    { event: "checkpoint", data: '{"scope":"profile"}' },
+  ]) {
+    await assert.rejects(
+      nextFixtureChanges({
+        async next() {
+          return frame;
+        },
+      }),
+      { code: "ERR_ASSERTION" },
+    );
+  }
+  await assert.rejects(
+    nextFixtureChanges(
+      {
+        async next() {
+          throw new Error("expired deadline must not read");
+        },
+      },
+      performance.now() - 1,
+    ),
+    /change event deadline exceeded/,
+  );
+});
 
 test("the database fault self-test accepts an operation only offered into a full worker budget", () => {
   const operation = {

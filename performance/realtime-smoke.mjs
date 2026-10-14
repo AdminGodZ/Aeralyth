@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { nextFixtureChanges } from "./fixture-stream.mjs";
 
 // Local Docker fixture only. Never use this script against a deployed database.
 const origin = new URL(
@@ -160,10 +161,10 @@ try {
   const initial = await second.next();
   assert.equal(initial.event, "reset");
   const start = performance.now();
+  const deliveryDeadline = start + 5000;
   sql(`UPDATE users SET display_name = 'Realtime test' WHERE id = '${owner}';`);
   for (const stream of [first, second]) {
-    const event = await stream.next();
-    assert.equal(event.event, "changes");
+    const event = await nextFixtureChanges(stream, deliveryDeadline);
     assert.deepEqual(JSON.parse(event.data), [
       { scope: "profile", folderIds: [] },
     ]);
@@ -207,7 +208,7 @@ try {
   second.close();
   const replay = await openStream(token, initial.id, secondOrigin);
   assert.equal(
-    (await replay.next()).event,
+    (await nextFixtureChanges(replay)).event,
     "changes",
     "reconnect must replay a missed change",
   );
@@ -232,8 +233,7 @@ try {
   await burst.next();
   sql(`BEGIN; SELECT realtime_enqueue('${prefix}fanout' || n, 'files') FROM generate_series(1, 512) n;
     SELECT realtime_enqueue('${owner}', 'files', ARRAY['']); COMMIT;`);
-  const burstEvent = await burst.next();
-  assert.equal(burstEvent.event, "changes");
+  const burstEvent = await nextFixtureChanges(burst);
   assert.deepEqual(JSON.parse(burstEvent.data), [
     { scope: "files", folderIds: [""] },
   ]);

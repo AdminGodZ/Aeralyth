@@ -1,5 +1,23 @@
 import assert from "node:assert/strict";
 
+// A replay or wake can emit an empty checkpoint before the requested change.
+// Keep one absolute deadline while skipping those valid control frames.
+export async function nextFixtureChanges(
+  stream,
+  deadline = performance.now() + 5_000,
+) {
+  for (;;) {
+    assert.ok(performance.now() < deadline, "change event deadline exceeded");
+    const frame = await stream.next(deadline);
+    if (frame.event === "checkpoint") {
+      assert.deepEqual(JSON.parse(frame.data), {});
+      continue;
+    }
+    assert.equal(frame.event, "changes");
+    return frame;
+  }
+}
+
 // Keep the reader so cleanup can cancel a pending read directly. Node 22 can
 // lose fetch's internal abort listener after garbage collection of its Request.
 export function createFixtureStream({
