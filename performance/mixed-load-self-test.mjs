@@ -5,7 +5,10 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { isolatedOrigin } from "./arrival-load.mjs";
+import {
+  isExpectedDatabaseStallViolation,
+  isolatedOrigin,
+} from "./arrival-load.mjs";
 
 isolatedOrigin(process.env.AERALYTH_PERF_URL ?? "http://127.0.0.1:8080/health");
 const execute = promisify(execFile);
@@ -59,7 +62,9 @@ try {
     "fault run needs a reported violation",
   );
   assert.ok(
-    report.violations.every((message) => /: (dropped |p99 )/.test(message)),
+    report.violations.every((message) =>
+      isExpectedDatabaseStallViolation(report, message),
+    ),
     `fault run failed for a reason other than tail latency or dropped arrivals: ${report.violations.join("; ")}`,
   );
   const mixed = report.phases.find((phase) => phase.name === "mixed");

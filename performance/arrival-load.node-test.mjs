@@ -3,6 +3,7 @@ import { createServer } from "node:http";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import {
+  isExpectedDatabaseStallViolation,
   isolatedOrigin,
   latencySummary,
   maintenanceIdleSummary,
@@ -10,6 +11,62 @@ import {
   runArrivalPhase,
 } from "./arrival-load.mjs";
 import { createFixtureStream } from "./fixture-stream.mjs";
+
+test("the database fault self-test accepts an operation only offered into a full worker budget", () => {
+  const operation = {
+    offered: 6,
+    started: 0,
+    completed: 0,
+    successful: 0,
+    failed: 0,
+    dropped: 6,
+    dropReasons: { "concurrency-limit": 6 },
+  };
+  const report = {
+    phases: [{ name: "mixed", operations: { "realtime-sync": operation } }],
+  };
+  const violation = "mixed/realtime-sync: no completed work";
+  assert.equal(isExpectedDatabaseStallViolation(report, violation), true);
+  assert.equal(
+    isExpectedDatabaseStallViolation(
+      report,
+      "mixed/realtime-sync: no successful coverage",
+    ),
+    true,
+  );
+  // The normal performance gate still rejects missing operation coverage.
+  assert.ok(
+    phaseViolations(
+      { name: "mixed", successful: 1, operations: report.phases[0].operations },
+      { maximumP99Ms: 1_000 },
+    ).includes(violation),
+  );
+
+  for (const changed of [
+    { offered: 0, dropped: 0, dropReasons: {} },
+    { started: 1, completed: 1, failed: 1, dropped: 5 },
+    { dropReasons: { "scheduler-late": 6 } },
+    { dropReasons: { "concurrency-limit": 5, "scheduler-late": 1 } },
+  ]) {
+    const altered = {
+      phases: [
+        {
+          name: "mixed",
+          operations: { "realtime-sync": { ...operation, ...changed } },
+        },
+      ],
+    };
+    assert.equal(isExpectedDatabaseStallViolation(altered, violation), false);
+  }
+  for (const unexpected of [
+    "baseline/realtime-sync: no completed work",
+    "mixed/unknown: no completed work",
+    "mixed: error rate 0.1",
+    "fixture cleanup: failed",
+  ]) {
+    assert.equal(isExpectedDatabaseStallViolation(report, unexpected), false);
+  }
+});
 
 test("missing initial SSE frames time out even without abort propagation", async (t) => {
   let cancelled = false;

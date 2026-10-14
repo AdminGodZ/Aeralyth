@@ -184,6 +184,28 @@ export function latencySummary(values) {
   };
 }
 
+export function isExpectedDatabaseStallViolation(report, message) {
+  if (/: (dropped |p99 )/.test(message)) return true;
+  const missing = message.match(
+    /^mixed\/([^:]+): no (?:completed work|successful coverage)$/,
+  );
+  if (!missing) return false;
+  const operation = report.phases.find((phase) => phase.name === "mixed")
+    ?.operations[missing[1]];
+  // A deliberately saturated worker budget can drop every arrival of a less
+  // frequent operation. Accept that only when the report proves none ran and
+  // every offered arrival was dropped for the injected capacity shortage.
+  return (
+    operation?.offered > 0 &&
+    operation.started === 0 &&
+    operation.completed === 0 &&
+    operation.failed === 0 &&
+    operation.dropped === operation.offered &&
+    operation.dropReasons?.["concurrency-limit"] === operation.offered &&
+    Object.keys(operation.dropReasons).length === 1
+  );
+}
+
 export function phaseViolations(
   phase,
   {
