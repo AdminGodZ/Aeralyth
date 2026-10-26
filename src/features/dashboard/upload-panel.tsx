@@ -61,6 +61,7 @@ import {
 import { useRealtimeActivity } from "@/features/realtime/realtime-provider";
 import { createAnimationFrameProgressCoalescer } from "@/features/uploads/progress-coalescer";
 import {
+  getUploadFailureMessage,
   runUploadWithRetry,
   UploadRequestError,
   waitForUploadRetry,
@@ -352,12 +353,15 @@ function useUploadPanelController({
     const activeFileIndexes = new Set<number>();
     let uploadedBytes = 0;
     let activeFileIndex: number | null = null;
+    let failedFileIndex: number | null = null;
 
     const progressPublisher = createAnimationFrameProgressCoalescer(
       (snapshot: {
         activeFileIndex: number | null;
         activeFileUploadedBytes: number;
         completedFiles: number;
+        completedFileIndexes: number[];
+        activeFileIndexes: number[];
         totalBytes?: number;
         uploadedBytes: number;
       }) => {
@@ -373,6 +377,8 @@ function useUploadPanelController({
                   snapshot.uploadedBytes,
                 ),
                 completedFiles: snapshot.completedFiles,
+                completedFileIndexes: snapshot.completedFileIndexes,
+                activeFileIndexes: snapshot.activeFileIndexes,
                 activeFileIndex: snapshot.activeFileIndex,
                 activeFileUploadedBytes: snapshot.activeFileUploadedBytes,
                 updatedAt: Date.now(),
@@ -397,6 +403,8 @@ function useUploadPanelController({
                   fileBytes,
                 ),
           completedFiles: completedFileIndexes.size,
+          completedFileIndexes: Array.from(completedFileIndexes),
+          activeFileIndexes: Array.from(activeFileIndexes),
           totalBytes,
           uploadedBytes,
         },
@@ -453,6 +461,9 @@ function useUploadPanelController({
           signal: controller.signal,
           onFileStart: startFile,
           onFileComplete: completeFile,
+          onFileError: (fileIndex) => {
+            failedFileIndex = fileIndex;
+          },
           onProgress: (
             processedBytes,
             encryptedTotalBytes,
@@ -500,15 +511,21 @@ function useUploadPanelController({
         ([, selection]) => selection.file.size,
         async ([fileIndex, selection], signal) => {
           startFile(fileIndex);
-          const uploadedRootFolderId = await uploadSelection(
-            selection,
-            fileIndex,
-            resolution,
-            folderManifest?.parentIds[fileIndex],
-            signal,
-            multipartSlots,
-            (key, loaded) => reportProgress(fileIndex, key, loaded),
-          );
+          let uploadedRootFolderId: string | null;
+          try {
+            uploadedRootFolderId = await uploadSelection(
+              selection,
+              fileIndex,
+              resolution,
+              folderManifest?.parentIds[fileIndex],
+              signal,
+              multipartSlots,
+              (key, loaded) => reportProgress(fileIndex, key, loaded),
+            );
+          } catch (error) {
+            if (!signal.aborted) failedFileIndex ??= fileIndex;
+            throw error;
+          }
           completeFile(fileIndex);
           return uploadedRootFolderId;
         },
@@ -532,10 +549,10 @@ function useUploadPanelController({
         return;
       }
 
+      activeFileIndex = failedFileIndex ?? activeFileIndex;
+      publishProgress(true);
       finishUploadWithError(
-        uploadFailure instanceof Error && uploadFailure.message
-          ? uploadFailure.message
-          : "Upload failed. Check the backend and try again.",
+        getUploadFailureMessage(uploadFailure),
         activeFileIndex,
       );
     } finally {
@@ -2123,6 +2140,8 @@ function createUploadProgressSession(
     totalBytes: items.reduce((total, item) => total + item.sizeBytes, 0),
     uploadedBytes: 0,
     completedFiles: 0,
+    completedFileIndexes: [],
+    activeFileIndexes: [],
     activeFileIndex: null,
     activeFileUploadedBytes: 0,
     startedAt: now,

@@ -39,6 +39,21 @@ export class UploadRequestError extends Error {
   }
 }
 
+export function getUploadFailureMessage(error: unknown): string {
+  if (
+    error instanceof TypeError ||
+    (error instanceof UploadRequestError && error.networkFailure)
+  ) {
+    return "The upload could not be confirmed. Check your connection and try again. If it keeps failing, contact the administrator.";
+  }
+  if (error instanceof UploadRequestError && error.status === 403) {
+    return "The storage service rejected the upload authorization. Try again. If it keeps failing, contact the administrator.";
+  }
+  return error instanceof Error && error.message
+    ? error.message
+    : "The upload could not finish. Please try again.";
+}
+
 type UploadRetryAction = "fail" | "refresh-url" | "retry";
 
 export function classifyUploadFailure(error: unknown): UploadRetryAction {

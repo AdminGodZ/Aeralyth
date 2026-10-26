@@ -71,6 +71,7 @@ export async function uploadEncryptedSelections({
   onProgress,
   onFileStart,
   onFileComplete,
+  onFileError,
 }: {
   selections: EncryptedUploadSelection[];
   parentFolderId: string | null;
@@ -86,6 +87,7 @@ export async function uploadEncryptedSelections({
   ): void;
   onFileStart(fileIndex: number): void;
   onFileComplete(fileIndex: number): void;
+  onFileError?(fileIndex: number): void;
 }): Promise<{ rootFolderId: string | null }> {
   const totalBytes = selections.reduce(
     (total, item) => total + item.file.size,
@@ -165,7 +167,10 @@ export async function uploadEncryptedSelections({
     ) {
       const fileIndex = ready[nextReady++];
       const work = uploadFile(fileIndex)
-        .catch(fail)
+        .catch((error) => {
+          if (!failure) onFileError?.(fileIndex);
+          fail(error);
+        })
         .finally(() => {
           active.delete(work);
           pump();
@@ -523,11 +528,24 @@ async function encryptAndUploadFile({
     encryptedUploadBufferSize(plan, started.ciphertextLength),
   );
   const pipelineAbort = linkedAbortController(signal);
+  let uploadedCiphertextBytes = 0;
+  let reportedPlaintextBytes = 0;
   const multipart = createMultipartUploadPipeline(
     csrfToken,
     plan.uploadId,
     pipelineAbort,
     encryptedUploadBufferSize(plan, started.ciphertextLength),
+    (bytes) => {
+      uploadedCiphertextBytes += bytes;
+      const plaintextBytes = Math.min(
+        file.size,
+        Math.floor(
+          (uploadedCiphertextBytes / started.ciphertextLength) * file.size,
+        ),
+      );
+      onChunk(plaintextBytes - reportedPlaintextBytes);
+      reportedPlaintextBytes = plaintextBytes;
+    },
   );
   let nextPartNumber = 1;
   let singleContent: Uint8Array | null = null;
@@ -542,7 +560,6 @@ async function encryptAndUploadFile({
         sourceStart + VAULT_CRYPTO_CHUNK_BYTES,
       );
       const plaintext = await file.slice(sourceStart, sourceEnd).arrayBuffer();
-      const sourceBytes = plaintext.byteLength;
       const encrypted = await client.encryptChunk(
         started.sessionId,
         chunkIndex,
@@ -551,7 +568,6 @@ async function encryptAndUploadFile({
       const ciphertext = new Uint8Array(encrypted.ciphertext);
       ciphertextBytes += ciphertext.byteLength;
       const ready = assembler.append(ciphertext);
-      onChunk(sourceBytes);
 
       if (plan.mode === "multipart") {
         nextPartNumber = await queueMultipartBuffers(
@@ -577,6 +593,7 @@ async function encryptAndUploadFile({
         throw new Error("The encrypted upload length is inconsistent.");
       }
       await uploadSingle(csrfToken, plan.uploadId, singleContent, signal);
+      onChunk(file.size);
     } else {
       const trailing = assembler.finish();
       if (trailing) {
@@ -726,6 +743,7 @@ function createMultipartUploadPipeline(
   uploadId: string,
   operation: ReturnType<typeof linkedAbortController>,
   partBytes: number,
+  onUploaded?: (bytes: number) => void,
 ): MultipartUploadPipeline {
   const presign = createPartPresigner(csrfToken, uploadId, operation.signal);
   // Four active bodies plus the producer's next part, its partial assembler,
@@ -767,6 +785,7 @@ function createMultipartUploadPipeline(
             "The storage service did not expose the multipart ETag header.",
           );
         }
+        onUploaded?.(part.content.length);
         return { partNumber: part.partNumber, etag, checksumSha256 };
       } finally {
         part.content.fill(0);

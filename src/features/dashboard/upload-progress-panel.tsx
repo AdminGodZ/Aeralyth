@@ -33,6 +33,8 @@ export type UploadProgressSession = {
   totalBytes: number;
   uploadedBytes: number;
   completedFiles: number;
+  completedFileIndexes: number[];
+  activeFileIndexes: number[];
   activeFileIndex: number | null;
   activeFileUploadedBytes: number;
   startedAt: number;
@@ -58,6 +60,11 @@ export function UploadProgressPanel({
       : (session.items[session.activeFileIndex] ?? null);
   const percentage = getUploadPercentage(session);
   const activeFilePercentage = getActiveFilePercentage(session, activeItem);
+  const confirming =
+    !failed &&
+    session.totalBytes > 0 &&
+    session.uploadedBytes >= session.totalBytes &&
+    session.completedFiles < session.items.length;
 
   return (
     <Popover open={open} onOpenChange={setOpen}>
@@ -121,7 +128,11 @@ export function UploadProgressPanel({
                       failed ? "text-destructive" : "text-muted-foreground",
                     )}
                   >
-                    {failed ? "Failed" : `${Math.round(percentage)}%`}
+                    {failed
+                      ? "Failed"
+                      : confirming
+                        ? "Confirming"
+                        : `${Math.round(percentage)}%`}
                   </span>
                 </span>
               </span>
@@ -145,13 +156,18 @@ export function UploadProgressPanel({
       <PopoverContent
         align="end"
         sideOffset={10}
+        collisionPadding={12}
         className="max-h-[min(42rem,var(--radix-popover-content-available-height))] w-[28rem] max-w-[calc(100vw-1.5rem)] overflow-y-auto overscroll-contain rounded-xl p-0 shadow-xl"
       >
         <div className="border-b px-4 py-3">
           <div className="flex items-start justify-between gap-4">
             <div>
               <p className="text-sm font-semibold">
-                {failed ? "Upload needs attention" : "Upload in progress"}
+                {failed
+                  ? "Upload needs attention"
+                  : confirming
+                    ? "Confirming upload"
+                    : "Upload in progress"}
               </p>
               <p className="mt-0.5 text-xs text-muted-foreground">
                 {formatCompletedFiles(session)}
@@ -165,7 +181,11 @@ export function UploadProgressPanel({
                   : "bg-primary/10 text-primary",
               )}
             >
-              {failed ? "Stopped" : `${Math.round(percentage)}%`}
+              {failed
+                ? "Stopped"
+                : confirming
+                  ? "Confirming"
+                  : `${Math.round(percentage)}%`}
             </span>
           </div>
         </div>
@@ -203,13 +223,21 @@ export function UploadProgressPanel({
             <div className="flex items-end justify-between gap-4">
               <div className="min-w-0">
                 <p className="truncate text-sm font-medium">
-                  {activeItem?.name ??
-                    (session.completedFiles === session.items.length
-                      ? "Finalizing upload"
-                      : "Preparing files")}
+                  {failed
+                    ? "Upload stopped"
+                    : (activeItem?.name ??
+                      (session.completedFiles === session.items.length
+                        ? "Finalizing upload"
+                        : "Preparing files"))}
                 </p>
                 <p className="truncate text-xs text-muted-foreground">
-                  {activeItem?.path ?? "Checking the uploaded objects"}
+                  {activeItem
+                    ? failed || activeItem.path !== activeItem.name
+                      ? activeItem.path
+                      : confirming
+                        ? "Confirming upload"
+                        : "Uploading file"
+                    : "Checking the uploaded objects"}
                 </p>
               </div>
               <p className="shrink-0 text-xs tabular-nums text-muted-foreground">
@@ -220,6 +248,11 @@ export function UploadProgressPanel({
             </div>
             <Progress
               value={activeFilePercentage}
+              className={
+                failed
+                  ? "bg-destructive/15 [&_[data-slot=progress-indicator]]:bg-destructive"
+                  : undefined
+              }
               aria-label={
                 activeItem
                   ? `${activeItem.name} upload progress`
@@ -252,7 +285,7 @@ export function UploadProgressPanel({
         <div className="flex items-center justify-between gap-3 border-t bg-muted/20 px-4 py-3">
           <p className="text-[11px] text-muted-foreground" aria-live="polite">
             {failed
-              ? "Review the failed file before trying the folder again."
+              ? "Select the failed files again to retry the upload."
               : "You can keep working while this finishes."}
           </p>
           <Button
@@ -282,6 +315,9 @@ function UploadMetrics({ session }: { session: UploadProgressSession }) {
   );
   const etaSeconds =
     bytesPerSecond > 0 ? remainingBytes / bytesPerSecond : null;
+  const failed = session.status === "failed";
+  const confirming =
+    remainingBytes === 0 && session.completedFiles < session.items.length;
 
   return (
     <dl className="grid grid-cols-3 divide-x rounded-lg border bg-muted/15 py-2.5">
@@ -292,12 +328,26 @@ function UploadMetrics({ session }: { session: UploadProgressSession }) {
       <Metric
         label="Speed"
         value={
-          bytesPerSecond > 0 ? `${formatBytes(bytesPerSecond)}/s` : "Starting"
+          failed
+            ? "Stopped"
+            : confirming
+              ? "Confirming"
+              : bytesPerSecond > 0
+                ? `${formatBytes(bytesPerSecond)}/s`
+                : "Starting"
         }
       />
       <Metric
         label="Remaining"
-        value={etaSeconds === null ? "Calculating" : formatDuration(etaSeconds)}
+        value={
+          failed
+            ? "—"
+            : confirming
+              ? "Confirming"
+              : etaSeconds === null
+                ? "Calculating"
+                : formatDuration(etaSeconds)
+        }
         icon={<Clock3 className="size-3" aria-hidden="true" />}
       />
     </dl>
@@ -374,22 +424,29 @@ function UploadActivityRow({
   index: number;
   session: UploadProgressSession;
 }) {
-  const completed = index < session.completedFiles;
-  const active = index === session.activeFileIndex;
-  const failed = active && session.status === "failed";
+  const completed = session.completedFileIndexes.includes(index);
+  const active = session.activeFileIndexes.includes(index);
+  const failed =
+    index === session.activeFileIndex && session.status === "failed";
   const statusLabel = completed
     ? "Uploaded"
     : failed
       ? "Failed"
-      : active
-        ? "Uploading"
-        : "Queued";
+      : session.status === "failed"
+        ? "Stopped"
+        : active
+          ? "Uploading"
+          : "Queued";
 
   return (
     <div
       className={cn(
         "flex items-center gap-2.5 px-3 py-2.5 not-last:border-b",
-        active ? "bg-primary/5" : "bg-card",
+        failed
+          ? "bg-destructive/5"
+          : active && session.status !== "failed"
+            ? "bg-primary/5"
+            : "bg-card",
       )}
     >
       <span
@@ -399,7 +456,7 @@ function UploadActivityRow({
             ? "bg-emerald-500/10 text-emerald-600 dark:text-emerald-400"
             : failed
               ? "bg-destructive/10 text-destructive"
-              : active
+              : active && session.status !== "failed"
                 ? "bg-primary/10 text-primary"
                 : "bg-muted text-muted-foreground",
         )}
@@ -408,7 +465,7 @@ function UploadActivityRow({
           <Check className="size-3.5" aria-hidden="true" />
         ) : failed ? (
           <CircleAlert className="size-3.5" aria-hidden="true" />
-        ) : active ? (
+        ) : active && session.status !== "failed" ? (
           <LoaderCircle className="size-3.5 animate-spin" aria-hidden="true" />
         ) : (
           <File className="size-3.5" aria-hidden="true" />
@@ -416,9 +473,11 @@ function UploadActivityRow({
       </span>
       <span className="min-w-0 flex-1">
         <span className="block truncate text-xs font-medium">{item.name}</span>
-        <span className="block truncate text-[11px] text-muted-foreground">
-          {item.path}
-        </span>
+        {item.path !== item.name ? (
+          <span className="block truncate text-[11px] text-muted-foreground">
+            {item.path}
+          </span>
+        ) : null}
       </span>
       <span className="shrink-0 text-right">
         <span
@@ -453,8 +512,7 @@ function getVisibleItemWindow(session: UploadProgressSession) {
 function getUploadPercentage(session: UploadProgressSession) {
   if (session.totalBytes > 0) {
     const bytesPercentage = (session.uploadedBytes / session.totalBytes) * 100;
-    return session.status === "uploading" &&
-      session.completedFiles < session.items.length
+    return session.completedFiles < session.items.length
       ? Math.min(99, bytesPercentage)
       : Math.min(100, bytesPercentage);
   }
@@ -473,12 +531,12 @@ function getActiveFilePercentage(
     return getUploadPercentage(session);
   }
   if (activeItem.sizeBytes <= 0) {
-    return session.status === "failed" ? 0 : 100;
+    return 0;
   }
 
   const percentage =
     (session.activeFileUploadedBytes / activeItem.sizeBytes) * 100;
-  return session.status === "uploading" ? Math.min(99, percentage) : percentage;
+  return Math.min(99, percentage);
 }
 
 function getHeadline(

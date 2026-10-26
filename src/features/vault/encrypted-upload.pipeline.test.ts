@@ -80,6 +80,7 @@ describe("encrypted upload scheduling", () => {
     );
 
     const client = createCryptoClient(() => 1);
+    const onProgress = vi.fn();
     const upload = uploadEncryptedSelections({
       selections: ["one", "two", "three"].map((name) => ({
         file: new File([Uint8Array.of(1)], `${name}.txt`),
@@ -89,17 +90,115 @@ describe("encrypted upload scheduling", () => {
       csrfToken: "csrf",
       client,
       signal: new AbortController().signal,
-      onProgress: () => undefined,
+      onProgress,
       onFileStart: () => undefined,
       onFileComplete: () => undefined,
     });
 
     await vi.waitFor(() => expect(activePuts).toBe(3));
+    expect(onProgress).not.toHaveBeenCalled();
     releasePuts?.();
     await upload;
 
     expect(peakPuts).toBe(3);
     expect(vaultApi.publishVaultUpload).toHaveBeenCalledTimes(3);
+    expect(onProgress).toHaveBeenLastCalledWith(3, 3, expect.any(Number), 1);
+  });
+
+  it("does not count encrypted bytes when storage rejects a single upload", async () => {
+    vaultApi.initVaultUpload.mockResolvedValue({
+      uploadId: "upload-rejected",
+      nodeId: "node-rejected",
+      mode: "single",
+      partSizeBytes: null,
+    });
+    vaultApi.getVaultContentUrl.mockResolvedValue({
+      url: "https://storage.invalid/rejected",
+      contentLength: 1,
+    });
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => new Response("AccessDenied", { status: 403 })),
+    );
+    const onProgress = vi.fn();
+    const onFileComplete = vi.fn();
+    const onFileError = vi.fn();
+
+    await expect(
+      uploadEncryptedSelections({
+        selections: [
+          {
+            file: new File([Uint8Array.of(1)], "rejected.bin"),
+            relativePath: "rejected.bin",
+          },
+        ],
+        parentFolderId: null,
+        csrfToken: "csrf",
+        client: createCryptoClient(() => 1),
+        signal: new AbortController().signal,
+        onProgress,
+        onFileStart: () => undefined,
+        onFileComplete,
+        onFileError,
+      }),
+    ).rejects.toThrow("403");
+
+    expect(onProgress).not.toHaveBeenCalled();
+    expect(onFileComplete).not.toHaveBeenCalled();
+    expect(onFileError).toHaveBeenCalledExactlyOnceWith(0);
+    expect(vaultApi.publishVaultUpload).not.toHaveBeenCalled();
+  });
+
+  it("counts multipart progress only as storage accepts each part", async () => {
+    vaultApi.initVaultUpload.mockResolvedValue({
+      uploadId: "upload-parts",
+      nodeId: "node-parts",
+      mode: "multipart",
+      partSizeBytes: 2,
+    });
+    vaultApi.getVaultPartUrls.mockImplementation(
+      async (_csrf, _upload, parts) => ({
+        parts: parts.map(({ partNumber }: { partNumber: number }) => ({
+          partNumber,
+          url: `https://storage.invalid/part-${partNumber}`,
+          contentLength: 2,
+        })),
+      }),
+    );
+    const releases = new Map<string, () => void>();
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string) => {
+        await new Promise<void>((resolve) => releases.set(url, resolve));
+        return new Response(null, {
+          status: 200,
+          headers: { ETag: '"part-etag"' },
+        });
+      }),
+    );
+    const onProgress = vi.fn();
+    const upload = uploadEncryptedSelections({
+      selections: [
+        {
+          file: new File([Uint8Array.of(1, 2, 3)], "parts.bin"),
+          relativePath: "parts.bin",
+        },
+      ],
+      parentFolderId: null,
+      csrfToken: "csrf",
+      client: createCryptoClient(() => 4),
+      signal: new AbortController().signal,
+      onProgress,
+      onFileStart: () => undefined,
+      onFileComplete: () => undefined,
+    });
+    await vi.waitFor(() => expect(releases.size).toBe(2));
+    expect(onProgress).not.toHaveBeenCalled();
+    releases.get("https://storage.invalid/part-1")?.();
+    await vi.waitFor(() => expect(onProgress).toHaveBeenCalledWith(1, 3, 0, 1));
+    releases.get("https://storage.invalid/part-2")?.();
+    await upload;
+    expect(onProgress).toHaveBeenLastCalledWith(3, 3, 0, 3);
   });
 
   it("refreshes an expired single-upload signature before retrying", async () => {

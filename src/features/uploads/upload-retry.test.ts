@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   classifyUploadFailure,
+  getUploadFailureMessage,
   retryDelayMilliseconds,
   runUploadWithRetry,
   UploadRequestError,
@@ -134,5 +135,30 @@ describe("upload retry policy", () => {
     await expect(
       waitForUploadRetry(100, controller.signal),
     ).rejects.toMatchObject({ name: "AbortError" });
+  });
+});
+
+describe("upload failure messages", () => {
+  it("explains browser transport failures without claiming the file uploaded", () => {
+    const message = getUploadFailureMessage(new TypeError("Failed to fetch"));
+    expect(message).toContain("could not be confirmed");
+    expect(message).toContain("try again");
+    expect(message).not.toContain("Failed to fetch");
+  });
+
+  it("explains storage authorization failures without exposing the signed request", () => {
+    expect(
+      getUploadFailureMessage(
+        failure(403, "<Code>SignatureDoesNotMatch</Code>"),
+      ),
+    ).toContain("rejected the upload authorization");
+  });
+
+  it("preserves actionable application errors", () => {
+    expect(
+      getUploadFailureMessage(
+        new Error("The selected folder hierarchy exceeds 100 levels."),
+      ),
+    ).toBe("The selected folder hierarchy exceeds 100 levels.");
   });
 });
