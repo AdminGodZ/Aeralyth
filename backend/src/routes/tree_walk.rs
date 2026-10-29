@@ -239,15 +239,26 @@ mod tests {
             ("vault", include_str!("vault.rs")),
         ] {
             let inspected = if name == "repositories" {
-                let (prefix, tail) = source
-                    .split_once("const PREPARE_REPOSITORY_ARCHIVE_QUERY")
-                    .expect("named one-time archive preparation");
-                let (preparation, suffix) = tail.split_once("\"#;").expect("archive SQL boundary");
-                assert!(preparation.contains("visited_ids"));
-                assert!(preparation.contains("t.depth < 100"));
-                assert!(preparation.contains("selected_tree AS MATERIALIZED"));
-                assert!(preparation.contains("SELECT * FROM tree LIMIT 50002"));
-                format!("{prefix}{suffix}")
+                // Only the named, identically bounded repository walks may
+                // recurse: archive preparation and the language aggregate.
+                let mut inspected = source.to_owned();
+                for walk in [
+                    "const PREPARE_REPOSITORY_ARCHIVE_QUERY",
+                    "const REPOSITORY_LANGUAGE_STATS_QUERY",
+                ] {
+                    let (prefix, tail) = inspected
+                        .split_once(walk)
+                        .expect("named bounded repository walk");
+                    let (walk_sql, suffix) = tail
+                        .split_once("\"#;")
+                        .expect("repository walk SQL boundary");
+                    assert!(walk_sql.contains("visited_ids"));
+                    assert!(walk_sql.contains("t.depth < 100"));
+                    assert!(walk_sql.contains("selected_tree AS MATERIALIZED"));
+                    assert!(walk_sql.contains("SELECT * FROM tree LIMIT 50002"));
+                    inspected = format!("{prefix}{suffix}");
+                }
+                inspected
             } else {
                 source.to_owned()
             };

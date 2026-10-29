@@ -13,6 +13,14 @@ export type RepositoryLanguageFile = {
   sizeBytes: number;
 };
 
+/** Server-side byte totals for readable files, keyed like `detectLanguage`. */
+export type RepositoryLanguageGroup = {
+  kind: "extension" | "filename";
+  key: string;
+  files: number;
+  bytes: number;
+};
+
 type LanguageDefinition = {
   color: string;
   name: string;
@@ -84,7 +92,9 @@ const LANGUAGE_BY_FILENAME: Record<string, LanguageDefinition> = {
   makefile: language("Makefile", "#427819"),
 };
 
-const IGNORED_DIRECTORIES = new Set([
+// The backend mirrors these rules for readable names in
+// REPOSITORY_LANGUAGE_STATS_QUERY; repository-languages.test.ts keeps them equal.
+export const LANGUAGE_IGNORED_DIRECTORIES = [
   ".next",
   ".output",
   ".turbo",
@@ -96,25 +106,45 @@ const IGNORED_DIRECTORIES = new Set([
   "pods",
   "target",
   "vendor",
-]);
+] as const;
 
-const GENERATED_FILE_PATTERN =
+export const LANGUAGE_FILENAMES = Object.keys(LANGUAGE_BY_FILENAME);
+
+const IGNORED_DIRECTORIES = new Set<string>(LANGUAGE_IGNORED_DIRECTORIES);
+
+export const GENERATED_FILE_PATTERN =
   /(?:\.bundle\.|\.generated\.|\.min\.|\.snap$|\.map$)/iu;
+
+export const LOCK_FILE_PATTERN = /(?:^|[-.])lock(?:\.|$)/iu;
 
 export function calculateRepositoryLanguages(
   files: RepositoryLanguageFile[],
+  groups: RepositoryLanguageGroup[] = [],
 ): RepositoryLanguage[] {
   const bytesByLanguage = new Map<string, { bytes: number; color: string }>();
-
-  for (const file of files) {
-    if (file.sizeBytes <= 0 || shouldIgnoreLanguageFile(file)) continue;
-    const definition = detectLanguage(file.name);
-    if (!definition) continue;
+  const add = (definition: LanguageDefinition | null, bytes: number) => {
+    if (!definition || bytes <= 0) return;
     const current = bytesByLanguage.get(definition.name);
     bytesByLanguage.set(definition.name, {
-      bytes: (current?.bytes ?? 0) + file.sizeBytes,
+      bytes: (current?.bytes ?? 0) + bytes,
       color: definition.color,
     });
+  };
+
+  for (const group of groups) {
+    add(
+      lookupLanguage(
+        group.kind === "filename"
+          ? LANGUAGE_BY_FILENAME
+          : LANGUAGE_BY_EXTENSION,
+        group.key,
+      ),
+      group.bytes,
+    );
+  }
+  for (const file of files) {
+    if (file.sizeBytes <= 0 || shouldIgnoreLanguageFile(file)) continue;
+    add(detectLanguage(file.name), file.sizeBytes);
   }
 
   const totalBytes = Array.from(bytesByLanguage.values()).reduce(
@@ -137,10 +167,18 @@ export function calculateRepositoryLanguages(
 export function detectLanguage(name: string): LanguageDefinition | null {
   const normalizedName = name.trim().toLowerCase();
   return (
-    LANGUAGE_BY_FILENAME[normalizedName] ??
-    LANGUAGE_BY_EXTENSION[getFileExtension(normalizedName)] ??
-    null
+    lookupLanguage(LANGUAGE_BY_FILENAME, normalizedName) ??
+    lookupLanguage(LANGUAGE_BY_EXTENSION, getFileExtension(normalizedName))
   );
+}
+
+function lookupLanguage(
+  table: Record<string, LanguageDefinition>,
+  key: string,
+): LanguageDefinition | null {
+  // Keys come from file names, so inherited properties such as
+  // "constructor" must not resolve to a language.
+  return Object.hasOwn(table, key) ? table[key] : null;
 }
 
 function shouldIgnoreLanguageFile(file: RepositoryLanguageFile): boolean {
@@ -152,7 +190,7 @@ function shouldIgnoreLanguageFile(file: RepositoryLanguageFile): boolean {
   return (
     pathSegments.some((segment) => IGNORED_DIRECTORIES.has(segment)) ||
     GENERATED_FILE_PATTERN.test(file.name) ||
-    /(?:^|[-.])lock(?:\.|$)/iu.test(file.name)
+    LOCK_FILE_PATTERN.test(file.name)
   );
 }
 
