@@ -193,6 +193,12 @@ goes to the standalone Next.js server. The production image reserves port 8081
 for Actix so Caddy can safely bind Railway's public `PORT` even when it is 8080.
 The startup script also selects collision-free internal ports if `PORT` is
 customized to one of the normal internal defaults.
+Caddy resolves the client address from `X-Forwarded-For` only when the request
+arrives from a trusted proxy (`AERALYTH_TRUSTED_PROXY_RANGES`, Railway's private
+ingress range `100.64.0.0/10` by default) and forwards exactly that address to
+Actix. Actix honors `X-Forwarded-For` only from a loopback peer and keys the
+per-address login limit on it; direct connections from any other peer use the
+socket address.
 Set
 `AERALYTH_ENABLE_NEXT_API_PROXY=true` only as an explicit compatibility fallback
 when running `next start` without that ingress router.
