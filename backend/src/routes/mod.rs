@@ -118,6 +118,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
                     "/repositories/{id}/archive-manifest",
                     web::get().to(repositories::archive_manifest),
                 )
+                .route(
+                    "/repositories/{id}/language-stats",
+                    web::get().to(repositories::language_stats),
+                )
                 .route("/repositories/{id}", web::get().to(repositories::detail))
                 .route("/files/summary", web::get().to(files::summary))
                 .route("/files/operations", web::post().to(files::mutate_batch))

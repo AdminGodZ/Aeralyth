@@ -53,6 +53,78 @@ const PREPARE_REPOSITORY_ARCHIVE_QUERY: &str = r#"
       count(*) FILTER(WHERE e2ee_state='encrypted')::bigint AS total_encrypted_entries
     FROM entries
 "#;
+// Folder names and filenames mirrored from src/features/repositories/repository-languages.ts.
+// Keep both lists in sync; repository-languages.test.ts compares them.
+const LANGUAGE_IGNORED_DIRECTORIES: &[&str] = &[
+    ".next",
+    ".output",
+    ".turbo",
+    "build",
+    "coverage",
+    "dist",
+    "node_modules",
+    "out",
+    "pods",
+    "target",
+    "vendor",
+];
+const LANGUAGE_FILENAMES: &[&str] = &["cmakelists.txt", "dockerfile", "justfile", "makefile"];
+// Walks the same bounded tree as the archive manifest without materializing it.
+// Readable names are grouped by extension (or by a recognized filename) here;
+// entries at or below an encrypted node are returned individually because
+// only the browser can read their names and plaintext sizes.
+const REPOSITORY_LANGUAGE_STATS_QUERY: &str = r#"
+    WITH RECURSIVE tree AS (
+      SELECT f.id, f.parent_id, f.entry_type, f.original_name, f.size_bytes, f.e2ee_state,
+        f.current_generation_id, ARRAY[f.id]::text[] AS visited_ids, 0::integer AS depth,
+        FALSE AS hidden
+      FROM visible_files f
+      WHERE f.id=$2 AND f.owner_id=$1 AND f.state='active'
+      UNION ALL
+      SELECT f.id, f.parent_id, f.entry_type, f.original_name, f.size_bytes, f.e2ee_state,
+        f.current_generation_id, t.visited_ids || f.id, t.depth+1,
+        t.hidden OR f.e2ee_state='encrypted'
+      FROM visible_files f JOIN tree t ON f.parent_id=t.id
+      WHERE f.owner_id=$1 AND f.state='active' AND t.depth < 100
+        AND NOT f.id = ANY(t.visited_ids)
+        AND (f.e2ee_state='encrypted' OR NOT lower(f.original_name) = ANY($3::text[]))
+    ), selected_tree AS MATERIALIZED (
+      SELECT * FROM tree LIMIT 50002
+    ), entries AS MATERIALIZED (
+      SELECT * FROM selected_tree WHERE depth>0
+    ), readable_files AS (
+      SELECT lower(original_name) AS normalized_name, size_bytes FROM entries
+      WHERE NOT hidden AND entry_type='file' AND size_bytes>0
+        AND original_name !~* '(\.bundle\.|\.generated\.|\.min\.|\.snap$|\.map$)'
+        AND original_name !~* '(^|[-.])lock(\.|$)'
+    ), language_groups AS (
+      SELECT CASE WHEN normalized_name = ANY($4::text[]) THEN 'filename' ELSE 'extension' END
+          AS group_kind,
+        CASE WHEN normalized_name = ANY($4::text[]) THEN normalized_name
+          ELSE COALESCE(substring(normalized_name FROM '^.+\.([^.]+)$'), '') END AS group_key,
+        size_bytes
+      FROM readable_files
+    )
+    SELECT 0 AS row_rank, 'summary' AS row_kind, count(*)::bigint AS total_entries,
+      NULL::text AS group_kind, NULL::text AS group_key, NULL::bigint AS files, NULL::bigint AS bytes,
+      NULL::text AS id, NULL::text AS parent_id, NULL::text AS entry_type,
+      NULL::text AS original_name, NULL::bigint AS size_bytes, NULL::text AS e2ee_state,
+      NULL::bytea AS vault_generation_id, NULL::bigint AS vault_record_version,
+      NULL::bytea AS vault_record_hash, 0 AS depth
+    FROM entries
+    UNION ALL
+    SELECT 1, 'group', NULL, group_kind, group_key, count(*)::bigint, sum(size_bytes)::bigint,
+      NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL, 0
+    FROM language_groups GROUP BY group_kind, group_key
+    UNION ALL
+    SELECT 2, 'node', NULL, NULL, NULL, NULL, NULL,
+      e.id, e.parent_id, e.entry_type,
+      CASE WHEN e.e2ee_state='encrypted' THEN NULL ELSE e.original_name END,
+      e.size_bytes, e.e2ee_state, e.current_generation_id, h.record_version, h.record_hash, e.depth
+    FROM entries e LEFT JOIN vault_node_heads h ON h.node_id=e.id
+    WHERE e.hidden
+    ORDER BY row_rank, depth, group_kind, group_key, id
+"#;
 const REPOSITORY_ARCHIVE_PAGE_QUERY: &str = r#"
     SELECT id,original_name,mime_type,entry_type,parent_id,size_bytes,e2ee_state,
       updated_at,vault_generation_id,vault_record_version,vault_record_hash,ordinal
@@ -436,6 +508,38 @@ struct RepositoryArchiveManifestPageResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
+struct RepositoryLanguageStatsResponse {
+    repository_id: String,
+    content_version: i64,
+    language_groups: Vec<RepositoryLanguageGroup>,
+    encrypted_entries: Vec<RepositoryLanguageEntry>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryLanguageGroup {
+    kind: String,
+    key: String,
+    files: i64,
+    bytes: i64,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RepositoryLanguageEntry {
+    id: String,
+    parent_id: Option<String>,
+    entry_type: String,
+    name: Option<String>,
+    size_bytes: i64,
+    e2ee_state: String,
+    vault_generation_id: Option<String>,
+    vault_record_version: Option<i64>,
+    vault_record_hash: Option<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct RepositoryArchiveEntry {
     #[serde(flatten)]
     entry: RepositoryEntry,
@@ -456,7 +560,9 @@ struct RepositorySummary {
     total_files: i64,
     #[serde(skip)]
     total_folders: i64,
-    #[serde(skip)]
+    /// Changes with every file or vault-head change in the tree; clients key
+    /// derived repository data such as language statistics on it.
+    #[serde(rename = "contentVersion")]
     tree_version: i64,
     #[serde(skip)]
     counts_version: i64,
@@ -1044,6 +1150,85 @@ pub async fn archive_manifest(
     )
 }
 
+pub async fn language_stats(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    path: web::Path<String>,
+) -> Result<HttpResponse> {
+    let owner = require_principal(&state, &request).await?;
+    let _interactive_permit = state.acquire_interactive_operation(&owner.id).await?;
+    let repository_id = path.into_inner();
+    let Some(repository_row) = state
+        .db
+        .query_opt(REPOSITORY_SUMMARY_QUERY, &[&repository_id, &owner.id])
+        .await
+        .map_err(crate::db::http_error)?
+    else {
+        return Ok(HttpResponse::NotFound().finish());
+    };
+    let repository = repository_summary_from_row(&repository_row);
+    // The content version changes with every file and vault-head change in
+    // the tree, so a matching validator skips the subtree walk entirely.
+    let validator = conditional::PrivateRevision::new(
+        &request,
+        "repository-language-stats-v1",
+        &(&owner.id, &owner.role),
+        &(&repository.id, &repository.root.id, repository.tree_version),
+    )?;
+    if let Some(response) = validator.not_modified(&request) {
+        return Ok(response);
+    }
+    let rows = state
+        .db
+        .query(
+            REPOSITORY_LANGUAGE_STATS_QUERY,
+            &[
+                &owner.id,
+                &repository.root.id,
+                &LANGUAGE_IGNORED_DIRECTORIES,
+                &LANGUAGE_FILENAMES,
+            ],
+        )
+        .await
+        .map_err(crate::db::http_error)?;
+    let mut language_groups = Vec::new();
+    let mut encrypted_entries = Vec::new();
+    for row in rows {
+        match row.get::<_, &str>("row_kind") {
+            "summary" => {
+                if row.get::<_, i64>("total_entries") > MAX_REPOSITORY_ARCHIVE_ENTRIES {
+                    return Ok(HttpResponse::PayloadTooLarge()
+                        .body("This repository has too many entries to analyze its languages."));
+                }
+            }
+            "group" => language_groups.push(RepositoryLanguageGroup {
+                kind: row.get("group_kind"),
+                key: row.get("group_key"),
+                files: row.get("files"),
+                bytes: row.get("bytes"),
+            }),
+            _ => encrypted_entries.push(RepositoryLanguageEntry {
+                id: row.get("id"),
+                parent_id: row.get("parent_id"),
+                entry_type: row.get("entry_type"),
+                name: row.get("original_name"),
+                size_bytes: row.get("size_bytes"),
+                e2ee_state: row.get("e2ee_state"),
+                vault_generation_id: encode_optional_bytes(row.get("vault_generation_id")),
+                vault_record_version: row.get("vault_record_version"),
+                vault_record_hash: encode_optional_bytes(row.get("vault_record_hash")),
+            }),
+        }
+    }
+
+    validator.json(&RepositoryLanguageStatsResponse {
+        repository_id: repository.id,
+        content_version: repository.tree_version,
+        language_groups,
+        encrypted_entries,
+    })
+}
+
 async fn get_repository_detail_context(
     state: &AppState,
     owner: &SessionPrincipal,
@@ -1220,11 +1405,12 @@ fn normalize_description(value: Option<&str>) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        CREATE_EMPTY_REPOSITORY_QUERY, CREATE_REPOSITORY_QUERY, MAX_REPOSITORY_ARCHIVE_BYTES,
+        CREATE_EMPTY_REPOSITORY_QUERY, CREATE_REPOSITORY_QUERY, LANGUAGE_FILENAMES,
+        LANGUAGE_IGNORED_DIRECTORIES, MAX_REPOSITORY_ARCHIVE_BYTES,
         PREPARE_REPOSITORY_ARCHIVE_QUERY, REPOSITORY_ARCHIVE_PAGE_QUERY,
         REPOSITORY_ARCHIVE_SNAPSHOT_QUERY, REPOSITORY_DETAIL_CONTEXT_QUERY,
-        REPOSITORY_SUMMARY_QUERY, UPDATE_REPOSITORY_QUERY, normalize_description,
-        normalize_repository_name,
+        REPOSITORY_LANGUAGE_STATS_QUERY, REPOSITORY_SUMMARY_QUERY, UPDATE_REPOSITORY_QUERY,
+        normalize_description, normalize_repository_name,
     };
 
     #[test]
@@ -1240,11 +1426,49 @@ mod tests {
         let source = include_str!("repositories.rs");
         let handler = source
             .split_once("pub async fn archive_manifest(")
-            .and_then(|(_, tail)| tail.split_once("async fn get_repository_detail_context("))
+            .and_then(|(_, tail)| tail.split_once("pub async fn language_stats("))
             .map(|(handler, _)| handler)
             .expect("archive handler should remain inspectable");
         assert!(!handler.contains("walk_subtree("));
         assert!(!handler.contains("Vec::with_capacity"));
+    }
+
+    #[test]
+    fn language_stats_aggregate_without_materializing_a_manifest() {
+        let query = REPOSITORY_LANGUAGE_STATS_QUERY;
+        assert!(query.contains("WITH RECURSIVE tree"));
+        assert!(query.contains("t.depth < 100"));
+        assert!(query.contains("LIMIT 50002"));
+        assert!(query.contains("GROUP BY group_kind, group_key"));
+        assert!(query.contains("vault_node_heads"));
+        assert!(!query.contains("repository_archive_entries"));
+        assert!(!query.contains("repository_archive_manifests"));
+        assert!(!query.contains("INSERT"));
+        assert!(LANGUAGE_IGNORED_DIRECTORIES.contains(&"node_modules"));
+        assert!(LANGUAGE_FILENAMES.contains(&"dockerfile"));
+
+        let source = include_str!("repositories.rs");
+        let handler = source
+            .split_once("pub async fn language_stats(")
+            .and_then(|(_, tail)| tail.split_once("async fn get_repository_detail_context("))
+            .map(|(handler, _)| handler)
+            .expect("language stats handler should remain inspectable");
+        let principal = handler
+            .find("require_principal")
+            .expect("language stats require a session");
+        let admission = handler
+            .find("acquire_interactive_operation")
+            .expect("language stats admission should be present");
+        let not_modified = handler
+            .find("not_modified")
+            .expect("unchanged trees revalidate without a walk");
+        let walk = handler
+            .find("REPOSITORY_LANGUAGE_STATS_QUERY")
+            .expect("language stats query should be present");
+        assert!(principal < admission && admission < not_modified && not_modified < walk);
+        assert!(handler.contains("MAX_REPOSITORY_ARCHIVE_ENTRIES"));
+        assert!(handler.contains("tree_version"));
+        assert!(!handler.contains("PREPARE_REPOSITORY_ARCHIVE_QUERY"));
     }
 
     #[test]
@@ -1316,6 +1540,7 @@ mod tests {
             REPOSITORY_ARCHIVE_PAGE_QUERY,
             PREPARE_REPOSITORY_ARCHIVE_QUERY,
             REPOSITORY_ARCHIVE_SNAPSHOT_QUERY,
+            REPOSITORY_LANGUAGE_STATS_QUERY,
             REPOSITORY_DETAIL_CONTEXT_QUERY,
             REPOSITORY_SUMMARY_QUERY,
             CREATE_REPOSITORY_QUERY,
@@ -1328,6 +1553,213 @@ mod tests {
                 .await
                 .expect("repository query prepares");
         }
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_language_stats_count_fixture_rows() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (mut client, connection) =
+            tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+                .await
+                .expect("connect to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            connection
+                .await
+                .expect("PostgreSQL connection stays healthy");
+        });
+        let transaction = client.transaction().await.expect("begin fixture");
+        let owner: String = transaction
+            .query_one(
+                "SELECT 'usr_lang_' || replace(gen_random_uuid()::text, '-', '')",
+                &[],
+            )
+            .await
+            .expect("fixture owner id")
+            .get(0);
+        transaction
+            .execute(
+                "INSERT INTO users(id,username,password_hash,role) VALUES($1,$1,'test-only','user')",
+                &[&owner],
+            )
+            .await
+            .expect("insert fixture owner");
+        // (id, parent, name, entry type, bytes, e2ee state, state)
+        let fixture: &[(&str, &str, &str, &str, i64, &str, &str)] = &[
+            ("root", "", "repo", "folder", 0, "legacy", "active"),
+            ("src", "root", "src", "folder", 0, "legacy", "active"),
+            ("main", "src", "main.ts", "file", 300, "legacy", "active"),
+            ("view", "src", "View.TSX", "file", 100, "legacy", "active"),
+            (
+                "minified",
+                "src",
+                "util.min.js",
+                "file",
+                500,
+                "legacy",
+                "active",
+            ),
+            ("empty", "src", "empty.rs", "file", 0, "legacy", "active"),
+            (
+                "docker",
+                "root",
+                "Dockerfile",
+                "file",
+                50,
+                "legacy",
+                "active",
+            ),
+            (
+                "cmake",
+                "root",
+                "CMakeLists.txt",
+                "file",
+                40,
+                "legacy",
+                "active",
+            ),
+            (
+                "readme",
+                "root",
+                "README.md",
+                "file",
+                70,
+                "legacy",
+                "active",
+            ),
+            (
+                "lock",
+                "root",
+                "package-lock.json",
+                "file",
+                999,
+                "legacy",
+                "active",
+            ),
+            ("license", "root", "LICENSE", "file", 10, "legacy", "active"),
+            (
+                "trashed",
+                "root",
+                "trashed.py",
+                "file",
+                999,
+                "legacy",
+                "trashed",
+            ),
+            (
+                "modules",
+                "root",
+                "node_modules",
+                "folder",
+                0,
+                "legacy",
+                "active",
+            ),
+            (
+                "vendored", "modules", "lib.js", "file", 1000, "legacy", "active",
+            ),
+            ("dist", "root", "Dist", "folder", 0, "legacy", "active"),
+            ("built", "dist", "out.js", "file", 1000, "legacy", "active"),
+            (
+                "secret",
+                "root",
+                "opaque",
+                "folder",
+                0,
+                "encrypted",
+                "active",
+            ),
+            (
+                "hidden",
+                "secret",
+                "opaque",
+                "file",
+                77,
+                "encrypted",
+                "active",
+            ),
+            (
+                "visible",
+                "secret",
+                "legacy.py",
+                "file",
+                30,
+                "legacy",
+                "active",
+            ),
+        ];
+        let id = |key: &str| format!("{owner}_{key}");
+        for (key, parent, name, entry_type, size_bytes, e2ee_state, file_state) in fixture {
+            let parent_id = (!parent.is_empty()).then(|| id(parent));
+            transaction
+                .execute(
+                    "INSERT INTO files(id,owner_id,original_name,storage_name,size_bytes,entry_type,parent_id,e2ee_state,state,trashed_at)
+                     VALUES($1,$2,$3,$1,$4,$5,$6,$7,$8,CASE WHEN $8='trashed' THEN now() END)",
+                    &[&id(key), &owner, name, size_bytes, entry_type, &parent_id, e2ee_state, file_state],
+                )
+                .await
+                .expect("insert fixture file");
+        }
+
+        let rows = transaction
+            .query(
+                REPOSITORY_LANGUAGE_STATS_QUERY,
+                &[
+                    &owner,
+                    &id("root"),
+                    &LANGUAGE_IGNORED_DIRECTORIES,
+                    &LANGUAGE_FILENAMES,
+                ],
+            )
+            .await
+            .expect("language stats query runs");
+        let summary = rows
+            .iter()
+            .find(|row| row.get::<_, &str>("row_kind") == "summary")
+            .expect("summary row is always returned");
+        // Pruned: node_modules and Dist subtrees. Excluded: the trashed file.
+        assert_eq!(summary.get::<_, i64>("total_entries"), 13);
+        let groups = rows
+            .iter()
+            .filter(|row| row.get::<_, &str>("row_kind") == "group")
+            .map(|row| {
+                (
+                    row.get::<_, String>("group_kind"),
+                    row.get::<_, String>("group_key"),
+                    row.get::<_, i64>("files"),
+                    row.get::<_, i64>("bytes"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let expected = [
+            ("extension", "", 1, 10),
+            ("extension", "md", 1, 70),
+            ("extension", "ts", 1, 300),
+            ("extension", "tsx", 1, 100),
+            ("filename", "cmakelists.txt", 1, 40),
+            ("filename", "dockerfile", 1, 50),
+        ]
+        .map(|(kind, key, files, bytes)| (kind.to_owned(), key.to_owned(), files, bytes));
+        assert_eq!(groups, expected);
+        let nodes = rows
+            .iter()
+            .filter(|row| row.get::<_, &str>("row_kind") == "node")
+            .map(|row| {
+                (
+                    row.get::<_, String>("id"),
+                    row.get::<_, Option<String>>("original_name"),
+                    row.get::<_, i64>("size_bytes"),
+                )
+            })
+            .collect::<Vec<_>>();
+        let mut expected_nodes = vec![
+            (id("hidden"), None, 77),
+            (id("visible"), Some("legacy.py".to_owned()), 30),
+        ];
+        expected_nodes.sort();
+        expected_nodes.insert(0, (id("secret"), None, 0));
+        assert_eq!(nodes, expected_nodes);
+        transaction.rollback().await.expect("discard fixture");
     }
 
     #[test]

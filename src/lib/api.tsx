@@ -269,6 +269,8 @@ export type RepositorySummary = {
   root: RepositoryRoot;
   createdAt: string;
   updatedAt: string;
+  /** Repository tree revision; absent from older API responses. */
+  contentVersion?: number;
 };
 
 export type RepositoriesData = {

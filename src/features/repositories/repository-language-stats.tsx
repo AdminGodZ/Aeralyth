@@ -1,17 +1,17 @@
 "use client";
 
 import { LoaderCircle, LockKeyhole } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
-import { requestRepositoryArchiveManifest } from "@/features/repositories/repository-archive";
 import {
-  calculateRepositoryLanguages,
-  type RepositoryLanguage,
-  type RepositoryLanguageFile,
-} from "@/features/repositories/repository-languages";
-import { useVault } from "@/features/vault/vault-provider";
-import type { RepositoryEntry, RepositorySummary } from "@/lib/api";
+  forgetVaultDerivedLanguages,
+  loadRepositoryLanguages,
+  peekRepositoryLanguages,
+} from "@/features/repositories/repository-language-stats-data";
+import type { RepositoryLanguage } from "@/features/repositories/repository-languages";
+import { useVault, VAULT_LOCKING_EVENT } from "@/features/vault/vault-provider";
+import type { RepositorySummary } from "@/lib/api";
 
 type LanguageState =
   | { status: "loading" }
@@ -19,51 +19,116 @@ type LanguageState =
   | { status: "ready"; languages: RepositoryLanguage[] }
   | { status: "error"; message: string };
 
+const IDLE_ACTIVATION_TIMEOUT_MS = 2_000;
+
 export function RepositoryLanguageStats({
   repository,
 }: {
   repository: RepositorySummary;
 }) {
   const vault = useVault();
-  const [state, setState] = useState<LanguageState>({ status: "loading" });
+  const sectionRef = useRef<HTMLElement>(null);
+  const contentVersion = repository.contentVersion;
+  const requestKey = `${repository.id}\u0000${contentVersion ?? ""}\u0000${vault.state}`;
+  const cached = peekRepositoryLanguages(
+    repository.id,
+    contentVersion,
+    vault.state,
+  );
+  const [activated, setActivated] = useState(cached !== null);
+  const [loaded, setLoaded] = useState<{
+    key: string;
+    state: LanguageState;
+  } | null>(null);
+  const state: LanguageState =
+    cached ??
+    (loaded?.key === requestKey ? loaded.state : { status: "loading" });
+  const { openNode, resolveMetadata, state: vaultState } = vault;
 
   useEffect(() => {
-    let canceled = false;
-    const controller = new AbortController();
+    window.addEventListener(VAULT_LOCKING_EVENT, forgetVaultDerivedLanguages);
+    return () =>
+      window.removeEventListener(
+        VAULT_LOCKING_EVENT,
+        forgetVaultDerivedLanguages,
+      );
+  }, []);
 
-    void loadRepositoryLanguageState({
+  // The bar sits below the fold on small screens; analyze once it is seen or
+  // the browser has nothing more urgent to do.
+  useEffect(() => {
+    if (activated) return;
+    const activate = () => setActivated(true);
+    const section = sectionRef.current;
+    const observer =
+      section && typeof IntersectionObserver === "function"
+        ? new IntersectionObserver((entries) => {
+            if (entries.some((entry) => entry.isIntersecting)) activate();
+          })
+        : null;
+    if (section) observer?.observe(section);
+    const idle =
+      typeof window.requestIdleCallback === "function"
+        ? window.requestIdleCallback(activate, {
+            timeout: IDLE_ACTIVATION_TIMEOUT_MS,
+          })
+        : null;
+    const timer = idle === null ? window.setTimeout(activate, 0) : null;
+    return () => {
+      observer?.disconnect();
+      if (idle !== null) window.cancelIdleCallback(idle);
+      if (timer !== null) window.clearTimeout(timer);
+    };
+  }, [activated]);
+
+  useEffect(() => {
+    if (!activated) return;
+    if (peekRepositoryLanguages(repository.id, contentVersion, vaultState)) {
+      return;
+    }
+    const controller = new AbortController();
+    const key = `${repository.id}\u0000${contentVersion ?? ""}\u0000${vaultState}`;
+
+    void loadRepositoryLanguages({
       repositoryId: repository.id,
-      rootFolderId: repository.root.id,
+      contentVersion,
+      vault: { state: vaultState, openNode, resolveMetadata },
       signal: controller.signal,
-      vault,
     })
       .then((nextState) => {
-        if (!canceled) setState(nextState);
+        if (!controller.signal.aborted) setLoaded({ key, state: nextState });
       })
       .catch((failure: unknown) => {
         if (
-          canceled ||
+          controller.signal.aborted ||
           (failure instanceof DOMException && failure.name === "AbortError")
         ) {
           return;
         }
-        setState({
-          status: "error",
-          message:
-            failure instanceof Error
-              ? failure.message
-              : "Repository languages could not be calculated.",
+        setLoaded({
+          key,
+          state: {
+            status: "error",
+            message:
+              failure instanceof Error
+                ? failure.message
+                : "Repository languages could not be calculated.",
+          },
         });
       });
 
-    return () => {
-      canceled = true;
-      controller.abort();
-    };
-  }, [repository.id, repository.root.id, vault]);
+    return () => controller.abort();
+  }, [
+    activated,
+    contentVersion,
+    openNode,
+    repository.id,
+    resolveMetadata,
+    vaultState,
+  ]);
 
   return (
-    <section className="border-t pt-4">
+    <section ref={sectionRef} className="border-t pt-4">
       <h2 className="font-display text-base font-semibold">Languages</h2>
       <LanguageStatsContent
         state={
@@ -76,69 +141,6 @@ export function RepositoryLanguageStats({
       />
     </section>
   );
-}
-
-async function loadRepositoryLanguageState({
-  repositoryId,
-  rootFolderId,
-  signal,
-  vault,
-}: {
-  repositoryId: string;
-  rootFolderId: string;
-  signal: AbortSignal;
-  vault: Pick<ReturnType<typeof useVault>, "openNode" | "state">;
-}): Promise<LanguageState> {
-  const manifest = await requestRepositoryArchiveManifest(repositoryId, signal);
-  const entriesById = new Map<string, RepositoryEntry>();
-  const encryptedEntries: RepositoryEntry[] = [];
-  const namesById = new Map<string, string>();
-  const sizesById = new Map<string, number>();
-
-  for (const entry of manifest.entries) {
-    entriesById.set(entry.id, entry);
-    if (entry.e2eeState === "encrypted") {
-      encryptedEntries.push(entry);
-    } else {
-      namesById.set(entry.id, entry.name);
-      sizesById.set(entry.id, entry.sizeBytes);
-    }
-  }
-  if (encryptedEntries.length > 0 && vault.state !== "unlocked") {
-    return { status: "locked" };
-  }
-
-  for (const entry of encryptedEntries) {
-    // Repository nodes share one worker and parent-key cache. Resolving them
-    // in tree order lets child manifests reuse their parent key.
-    // react-doctor-disable-next-line react-doctor/async-await-in-loop
-    const encryptedManifest = await vault.openNode(entry.id);
-    if (encryptedManifest.entryType !== entry.entryType) {
-      throw new Error("The encrypted repository metadata is inconsistent.");
-    }
-    namesById.set(entry.id, encryptedManifest.name);
-    sizesById.set(entry.id, encryptedManifest.plaintextBytes);
-  }
-
-  const files: RepositoryLanguageFile[] = [];
-  for (const entry of manifest.entries) {
-    if (entry.entryType !== "file") continue;
-    files.push({
-      name: namesById.get(entry.id) ?? entry.name,
-      path: buildRepositoryPath({
-        entry,
-        entriesById,
-        namesById,
-        rootFolderId,
-      }),
-      sizeBytes: sizesById.get(entry.id) ?? entry.sizeBytes,
-    });
-  }
-
-  return {
-    status: "ready",
-    languages: calculateRepositoryLanguages(files),
-  };
 }
 
 function LanguageStatsContent({
@@ -244,32 +246,6 @@ function LanguageStatsContent({
       </ul>
     </div>
   );
-}
-
-function buildRepositoryPath({
-  entry,
-  entriesById,
-  namesById,
-  rootFolderId,
-}: {
-  entry: RepositoryEntry;
-  entriesById: Map<string, RepositoryEntry>;
-  namesById: Map<string, string>;
-  rootFolderId: string;
-}) {
-  const segments: string[] = [];
-  const visited = new Set<string>();
-  let current: RepositoryEntry | undefined = entry;
-
-  while (current) {
-    if (visited.has(current.id)) break;
-    visited.add(current.id);
-    segments.unshift(namesById.get(current.id) ?? current.name);
-    if (current.parentId === rootFolderId) break;
-    current = current.parentId ? entriesById.get(current.parentId) : undefined;
-  }
-
-  return segments.join("/");
 }
 
 function formatPercentage(value: number) {
