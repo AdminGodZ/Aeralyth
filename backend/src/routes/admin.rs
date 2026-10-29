@@ -742,39 +742,7 @@ pub async fn user_avatar(
 ) -> Result<HttpResponse> {
     require_admin(&state, &request).await?;
     let user_id = path.into_inner();
-    let Some(row) = state
-        .db
-        .query_opt(
-            "
-                SELECT profile_image_bytes, profile_image_mime_type,
-                       COALESCE(profile_image_updated_at, updated_at)
-                         AS profile_image_version_at
-                FROM users
-                WHERE id = $1
-                  AND profile_image_bytes IS NOT NULL
-                LIMIT 1
-            ",
-            &[&user_id],
-        )
-        .await
-        .map_err(crate::db::http_error)?
-    else {
-        return Ok(HttpResponse::NotFound().finish());
-    };
-
-    let bytes: Option<Vec<u8>> = row.get("profile_image_bytes");
-    let Some(bytes) = bytes else {
-        return Ok(HttpResponse::NotFound().finish());
-    };
-    let mime_type: Option<String> = row.get("profile_image_mime_type");
-    let version = timestamps::version_micros(row.get("profile_image_version_at"));
-
-    Ok(avatar::response(
-        &request,
-        bytes,
-        mime_type.unwrap_or_else(|| "application/octet-stream".to_owned()),
-        &version,
-    ))
+    avatar::load(&state, &request, &user_id, timestamps::version_micros).await
 }
 
 pub async fn rotate_invitation(

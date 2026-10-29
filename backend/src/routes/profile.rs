@@ -375,39 +375,7 @@ pub async fn update(
 
 pub async fn avatar(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
-    let Some(row) = state
-        .db
-        .query_opt(
-            "
-                SELECT profile_image_bytes, profile_image_mime_type,
-                       COALESCE(profile_image_updated_at, updated_at)
-                         AS profile_image_version_at
-                FROM users
-                WHERE id = $1
-                  AND profile_image_bytes IS NOT NULL
-                LIMIT 1
-            ",
-            &[&user.id],
-        )
-        .await
-        .map_err(crate::db::http_error)?
-    else {
-        return Ok(HttpResponse::NotFound().finish());
-    };
-
-    let bytes: Option<Vec<u8>> = row.get("profile_image_bytes");
-    let Some(bytes) = bytes else {
-        return Ok(HttpResponse::NotFound().finish());
-    };
-    let mime_type: Option<String> = row.get("profile_image_mime_type");
-    let version = timestamps::version_millis(row.get("profile_image_version_at"));
-
-    Ok(avatar::response(
-        &request,
-        bytes,
-        mime_type.unwrap_or_else(|| "application/octet-stream".to_owned()),
-        &version,
-    ))
+    avatar::load(&state, &request, &user.id, timestamps::version_millis).await
 }
 
 pub async fn change_password(
