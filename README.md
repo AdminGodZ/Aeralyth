@@ -71,6 +71,13 @@ username: admingod
 password: admingod
 ```
 
+The production image refuses to migrate or start while any active account
+still uses this seed password. On a fresh production database, set
+`AERALYTH_BOOTSTRAP_ADMIN_PASSWORD` (at least 32 characters, for example
+`openssl rand -base64 32`) for the first deploy. The migration replaces the
+seed password only while it is still the seed, so the variable can be removed
+afterwards.
+
 ## Local Runtime
 
 Run the local stack in three processes:

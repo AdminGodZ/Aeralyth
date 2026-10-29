@@ -28,12 +28,35 @@ then
   exit 1
 fi
 
-docker compose exec -T postgres psql \
+bootstrap_password="production-test-bootstrap-password-0000"
+docker compose exec -T \
+  -e AERALYTH_BOOTSTRAP_ADMIN_PASSWORD="${bootstrap_password}" \
+  postgres psql \
   -q \
   -v ON_ERROR_STOP=1 \
   -U aeralyth \
   -d "${test_database}" \
-  -c "UPDATE users SET password_hash = crypt('production-test-password', gen_salt('bf')) WHERE id = 'usr_admingod';" >/dev/null
+  < database/production/bootstrap_admin.sql >/dev/null
+
+docker compose exec -T \
+  -e AERALYTH_BOOTSTRAP_ADMIN_PASSWORD="replacement-bootstrap-password-000000" \
+  postgres psql \
+  -q \
+  -v ON_ERROR_STOP=1 \
+  -U aeralyth \
+  -d "${test_database}" \
+  < database/production/bootstrap_admin.sql >/dev/null
+
+bootstrap_kept="$(docker compose exec -T postgres psql \
+  -tA \
+  -v ON_ERROR_STOP=1 \
+  -U aeralyth \
+  -d "${test_database}" \
+  -c "SELECT password_hash = crypt('${bootstrap_password}', password_hash) FROM users WHERE id = 'usr_admingod';")"
+if [[ "${bootstrap_kept}" != "t" ]]; then
+  echo "production bootstrap overwrote a password that was no longer the local seed" >&2
+  exit 1
+fi
 
 docker compose exec -T postgres psql \
   -q \
@@ -67,4 +90,4 @@ docker compose exec -T postgres psql \
   -d "${test_database}" \
   < database/production/preflight.sql >/dev/null
 
-echo "production preflight requires an active admin, rejects the seed password, and accepts a changed password"
+echo "production preflight requires an active admin, rejects the seed password, and accepts a one-time bootstrap password"
