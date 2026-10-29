@@ -96,6 +96,15 @@ pub struct QueuedMutationLimiter {
 pub struct QueuedMutationPermit {
     _admission: MutationPermit,
     _worker: MutationPermit,
+    waited: bool,
+}
+
+impl QueuedMutationPermit {
+    /// True when admission released the request connection to wait for a
+    /// worker. Only then can the session have changed since it was loaded.
+    pub fn waited(&self) -> bool {
+        self.waited
+    }
 }
 
 #[derive(Clone)]
@@ -427,6 +436,18 @@ impl QueuedMutationLimiter {
         )
     }
 
+    /// Takes a free worker without waiting. Tokio semaphores hand released
+    /// permits to queued waiters first, so this cannot overtake the queue.
+    pub fn try_acquire_now(&self, user_id: &str) -> Option<QueuedMutationPermit> {
+        let admission = self.admission.try_acquire(user_id).ok()?;
+        let worker = self.limiter.try_acquire(user_id).ok()?;
+        Some(QueuedMutationPermit {
+            _admission: admission,
+            _worker: worker,
+            waited: false,
+        })
+    }
+
     pub async fn acquire(&self, user_id: &str) -> Result<QueuedMutationPermit, LoadShedError> {
         crate::db::release_request_connection().await;
         let admission = self.admission.try_acquire(user_id).map_err(|()| {
@@ -436,6 +457,7 @@ impl QueuedMutationLimiter {
         Ok(QueuedMutationPermit {
             _admission: admission,
             _worker: worker,
+            waited: true,
         })
     }
 }
@@ -445,6 +467,12 @@ impl AppState {
         &self,
         user_id: &str,
     ) -> Result<QueuedMutationPermit, LoadShedError> {
+        // An idle worker keeps the request connection and the loaded session.
+        if let Some(permit) = self.recursive_operation_limiter.try_acquire_now(user_id) {
+            self.metrics
+                .record_admission_wait("bulk", Duration::ZERO, true);
+            return Ok(permit);
+        }
         self.db.release_request_connection().await;
         let started = Instant::now();
         let result = self.recursive_operation_limiter.acquire(user_id).await;
@@ -457,6 +485,11 @@ impl AppState {
         &self,
         user_id: &str,
     ) -> Result<QueuedMutationPermit, LoadShedError> {
+        if let Some(permit) = self.interactive_operation_limiter.try_acquire_now(user_id) {
+            self.metrics
+                .record_admission_wait("interactive", Duration::ZERO, true);
+            return Ok(permit);
+        }
         self.db.release_request_connection().await;
         let started = Instant::now();
         let result = self.interactive_operation_limiter.acquire(user_id).await;
@@ -837,6 +870,66 @@ mod tests {
         release_tx.send(()).unwrap();
         first.await.unwrap().unwrap();
     }
+    #[actix_web::test]
+    async fn idle_admission_does_not_wait_or_release_the_request_connection() {
+        let limiter = QueuedMutationLimiter::new(1, 1, 4, 4);
+        let fast = limiter
+            .try_acquire_now("user")
+            .expect("an idle worker is taken without waiting");
+        assert!(!fast.waited());
+        assert!(limiter.try_acquire_now("user").is_none());
+        drop(fast);
+        let queued = limiter.acquire("user").await.unwrap();
+        assert!(
+            queued.waited(),
+            "the queued path must ask callers to revalidate"
+        );
+    }
+
+    #[actix_web::test]
+    async fn the_fast_path_cannot_overtake_a_queued_waiter() {
+        let limiter = QueuedMutationLimiter::new(1, 1, 4, 4);
+        let held = limiter.try_acquire_now("holder").unwrap();
+        let waiting_limiter = limiter.clone();
+        let waiter =
+            actix_web::rt::spawn(async move { waiting_limiter.acquire("waiter").await.unwrap() });
+        tokio::task::yield_now().await;
+        drop(held);
+        assert!(
+            limiter.try_acquire_now("arrival").is_none(),
+            "a released worker belongs to the queued waiter"
+        );
+        let granted = waiter.await.unwrap();
+        assert!(granted.waited());
+    }
+
+    #[test]
+    fn admission_tries_an_idle_worker_before_releasing_the_connection() {
+        let source = include_str!("state.rs");
+        for (start, limiter) in [
+            (
+                "pub async fn acquire_recursive_operation(",
+                "recursive_operation_limiter",
+            ),
+            (
+                "pub async fn acquire_interactive_operation(",
+                "interactive_operation_limiter",
+            ),
+        ] {
+            let helper = source
+                .split_once(start)
+                .and_then(|(_, tail)| tail.split_once("\n    }\n"))
+                .map(|(helper, _)| helper)
+                .expect("admission helper source should remain inspectable");
+            let fast = helper
+                .find(&format!("{limiter}.try_acquire_now"))
+                .expect("admission must try an idle worker first");
+            let release = helper.find("release_request_connection").unwrap();
+            let wait = helper.find(&format!("{limiter}.acquire(")).unwrap();
+            assert!(fast < release && release < wait);
+        }
+    }
+
     #[actix_web::test]
     async fn interactive_and_bulk_reservations_make_independent_progress() {
         let (interactive, bulk) = QueuedMutationLimiter::partition(2, 1, 8, 4);
