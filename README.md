@@ -130,10 +130,10 @@ AERALYTH_LOGIN_ATTEMPTS_PER_ADDRESS_MINUTE=60
 AERALYTH_LOGIN_ATTEMPTS_PER_ACCOUNT_MINUTE=10
 AERALYTH_UPLOAD_CONTROL_CONCURRENCY=8
 AERALYTH_UPLOAD_CONTROL_PER_USER=3
-AERALYTH_RECURSIVE_OPERATION_CONCURRENCY=2
-AERALYTH_RECURSIVE_OPERATION_PER_USER=1
-AERALYTH_RECURSIVE_OPERATION_QUEUE_CAPACITY=8
-AERALYTH_RECURSIVE_OPERATION_PER_USER_QUEUE_CAPACITY=4
+AERALYTH_RECURSIVE_OPERATION_CONCURRENCY=6
+AERALYTH_RECURSIVE_OPERATION_PER_USER=2
+AERALYTH_RECURSIVE_OPERATION_QUEUE_CAPACITY=24
+AERALYTH_RECURSIVE_OPERATION_PER_USER_QUEUE_CAPACITY=8
 AERALYTH_STORAGE_OPERATION_CONCURRENCY=16
 AERALYTH_STORAGE_OPERATION_PER_USER=8
 AERALYTH_STORAGE_OPERATION_QUEUE_CAPACITY=32
@@ -154,7 +154,10 @@ worker queue instead of consuming PostgreSQL connections. Upload control,
 recursive tree work, and storage-provider calls have separate bounded admission
 budgets. Recursive and provider queues absorb ordinary overlap while still
 shedding excess work before it can create unbounded waiters behind lightweight
-routes.
+routes. The recursive budget defaults to `AERALYTH_DB_POOL_MAX - 2` and is split
+evenly between interactive work (folder browsing, downloads, public share-link
+views) and bulk tree work (trash, restore, delete, archive manifests), so a large
+delete never blocks browsing.
 
 `AERALYTH_COOKIE_SECURE` defaults to `false` for debug builds and `true` for
 release builds.

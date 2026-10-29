@@ -715,7 +715,7 @@ pub async fn access(
     let token = path.into_inner();
     validate_token(&token)?;
     let admission_key = sha256_hex(&token);
-    let _recursive_permit = state.acquire_recursive_operation(&admission_key).await?;
+    let _recursive_permit = state.acquire_interactive_operation(&admission_key).await?;
     let requested_folder_id = query
         .folder
         .as_deref()
@@ -772,12 +772,13 @@ pub async fn download(
     let (token, file_id) = path.into_inner();
     validate_token(&token)?;
     let admission_key = sha256_hex(&token);
-    let _recursive_permit = state.acquire_recursive_operation(&admission_key).await?;
+    let _recursive_permit = state.acquire_interactive_operation(&admission_key).await?;
     let context = get_share_download_context(&state, &token, &file_id).await?;
     authorize_share_recipient(&state, &request, &context.grant).await?;
     let Some(file) = context.file.filter(|_| context.node_authorized) else {
         return Ok(HttpResponse::NotFound().finish());
     };
+    drop(_recursive_permit);
     state.db.release_request_connection().await;
 
     if let Some(download_url) = state
@@ -1351,7 +1352,7 @@ mod tests {
         assert!(!access.contains("resolve_grant("));
         assert!(!access.contains("require_shared_node("));
         let admission = access
-            .find("acquire_recursive_operation")
+            .find("acquire_interactive_operation")
             .expect("share access admission should be present");
         let recursive_query = access
             .find("get_share_access_context(")
@@ -1375,7 +1376,7 @@ mod tests {
         assert!(!download.contains("require_shared_node("));
         assert!(!download.contains("query_opt("));
         let admission = download
-            .find("acquire_recursive_operation")
+            .find("acquire_interactive_operation")
             .expect("share download admission should be present");
         let recursive_query = download
             .find("get_share_download_context(")
