@@ -9,6 +9,10 @@ VALUES ('track_a','tracking_owner','A','test-a',0,'folder',NULL,'2020-01-01'),
 INSERT INTO repositories(id,owner_id,root_file_id) VALUES
  ('track_repo_a','tracking_owner','track_a'),('track_repo_b','tracking_owner','track_b');
 SELECT collection_changes_dispatch();
+-- New repositories are counted once by the separate recount worker.
+SELECT repository_counts_recount(repository_counts_claim());
+SELECT repository_counts_recount(repository_counts_claim());
+SELECT 1 / (repository_counts_claim() IS NULL)::int AS creation_recounts_drained;
 SELECT repository_content_version('track_repo_b') AS other_revision \gset
 INSERT INTO files(id,owner_id,original_name,storage_name,size_bytes,entry_type,parent_id)
 SELECT 'track_file_'||i,'tracking_owner','file-'||i,'storage-'||i,1,'file','track_child'
@@ -21,6 +25,12 @@ DO $$ BEGIN
    RAISE EXCEPTION 'count freshness missing'; END IF;
 END $$;
 SELECT 1 / (repository_content_version('track_repo_b')=:'other_revision'::bigint)::int AS unrelated_repository_unchanged;
+-- A bulk insert below an unchanged folder travels as one delta, not a recount.
+DO $$ BEGIN
+ IF EXISTS(SELECT 1 FROM repository_pending_changes WHERE repository_id='track_repo_a' AND counts_dirty) OR
+   (SELECT sum(files_delta) FROM repository_pending_changes WHERE repository_id='track_repo_a')<>50000 THEN
+   RAISE EXCEPTION 'bulk insert did not record a file delta'; END IF;
+END $$;
 SELECT collection_changes_dispatch();
 DO $$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM repositories WHERE id='track_repo_a' AND total_files=50000 AND total_folders=1 AND counts_version=repository_content_version(id)) THEN
@@ -45,7 +55,12 @@ END $$;
 SELECT repository_content_version('track_repo_a') AS old_a,repository_content_version('track_repo_b') AS old_b \gset
 UPDATE files SET parent_id='track_b' WHERE id='track_child';
 SELECT 1 / (repository_content_version('track_repo_a')>:'old_a'::bigint AND repository_content_version('track_repo_b')>:'old_b'::bigint)::int AS both_move_audiences_invalidated;
+-- A non-empty folder crossing repositories needs a recount of both.
+SELECT 1 / ((SELECT count(DISTINCT repository_id) FROM repository_pending_changes WHERE counts_dirty)=2)::int AS move_requests_recounts;
 SELECT collection_changes_dispatch();
+SELECT repository_counts_recount(repository_counts_claim());
+SELECT repository_counts_recount(repository_counts_claim());
+SELECT 1 / (repository_counts_claim() IS NULL)::int AS recounts_drained;
 DO $$ BEGIN
  IF NOT EXISTS(SELECT 1 FROM repositories WHERE id='track_repo_a' AND total_files=0 AND total_folders=0) OR
  NOT EXISTS(SELECT 1 FROM repositories WHERE id='track_repo_b' AND total_files=50000 AND total_folders=1) THEN RAISE EXCEPTION 'move counts wrong'; END IF;

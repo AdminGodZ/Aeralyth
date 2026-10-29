@@ -31,6 +31,10 @@ describe.each([
     "038-quiet-maintenance-notifications",
   ],
   ["039_trashed_parent_child_counts.sql", "039-trashed-parent-child-counts"],
+  [
+    "041_incremental_repository_counts.sql",
+    "041-incremental-repository-counts",
+  ],
 ])("%s", (fileName, version) => {
   const migration = readFileSync(resolve(migrationRoot, fileName), "utf8");
 

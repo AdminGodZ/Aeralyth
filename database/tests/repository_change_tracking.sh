@@ -15,7 +15,8 @@ else
     "${runner[@]}" psql -X -q -v ON_ERROR_STOP=1 -U aeralyth -d "$test_database" < "$migration" >/dev/null
   done
 fi
-for migration in database/init/029_durable_tree_operations.sql database/init/030_repository_change_tracking.sql; do
+for migration in database/init/[0-9][0-9][0-9]_*.sql; do
+  [[ "${migration##*/}" < 029_ ]] && continue
   "${runner[@]}" psql -X -q -v ON_ERROR_STOP=1 -U aeralyth -d "$test_database" < "$migration" >/dev/null
 done
 # Prepare the actual route SQL so schema/type drift fails this test.
@@ -29,6 +30,8 @@ print("SELECT repository_content_version('track_repo_b') AS actual_version \\gse
 print("EXECUTE PREPARE_REPOSITORY_ARCHIVE_QUERY('track_repo_b','tracking_owner','track_b',:actual_version) \\gset")
 print("SELECT 1 / (:total_entries::int=50001)::int AS actual_preparation_bounded;")
 PY
+# Incremental counts equal the full walk after random committed changes.
+"${runner[@]}" psql -X -q -v ON_ERROR_STOP=1 -U aeralyth -d "$test_database" < database/tests/repository_incremental_counts.sql
 # A ledger-protected replay must not invoke the full-table validator. A fresh
 # install above already ran the original hierarchy validation before replacement.
 "${runner[@]}" psql -X -q -v ON_ERROR_STOP=1 -U aeralyth -d "$test_database" <<'SQL'
@@ -37,4 +40,4 @@ BEGIN RAISE EXCEPTION 'replay unexpectedly revalidated hierarchy'; END $$;
 SQL
 "${runner[@]}" psql -X -q -v ON_ERROR_STOP=1 -U aeralyth -d "$test_database" < database/init/015_collection_hierarchy_performance.sql >/dev/null
 "${runner[@]}" psql -X -q -v ON_ERROR_STOP=1 -U aeralyth -d "$test_database" < database/init/015_collection_hierarchy_performance.sql >/dev/null
-printf '%s\n' 'PASS repository revisions, async timestamps/counts, manifest plans, migration015 replay'
+printf '%s\n' 'PASS repository revisions, async timestamps/counts, incremental count equivalence, recount backoff, manifest plans, migration015 replay'
