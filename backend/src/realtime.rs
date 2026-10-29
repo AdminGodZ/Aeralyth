@@ -190,6 +190,10 @@ pub async fn run(
         database_url.clone(),
         shutdown.clone(),
     )));
+    let mut counts = ConnectionTask(tokio::spawn(maintain_repository_counts(
+        database_url.clone(),
+        shutdown.clone(),
+    )));
     while !*shutdown.borrow() {
         let listener_shutdown = shutdown.clone();
         tokio::select! {
@@ -206,9 +210,13 @@ pub async fn run(
             _ = tokio::time::sleep(Duration::from_secs(1)) => {}
         }
     }
-    // Let the worker cancel its SQL before closing its dedicated connection.
-    // The guard still aborts both tasks if the supervisor itself is cancelled.
-    let _ = tokio::time::timeout(Duration::from_secs(2), &mut collections.0).await;
+    // Let the workers cancel their SQL before closing their dedicated
+    // connections. The guards still abort the tasks if the supervisor itself
+    // is cancelled.
+    let _ = tokio::time::timeout(Duration::from_secs(2), async {
+        let _ = tokio::join!(&mut collections.0, &mut counts.0);
+    })
+    .await;
 }
 
 /// One bounded query validates every distinct session and checks per-user
@@ -323,8 +331,37 @@ impl Drop for ConnectionTask {
     }
 }
 
-/// Collection recounts may traverse large repositories. Their independent
-/// connection prevents that work from blocking event dispatch or auth checks.
+/// Collection maintenance has independent connections, so it never blocks
+/// event dispatch or auth checks. `None` means shut down.
+async fn connect_maintenance(
+    database_url: &str,
+    application_name: &str,
+    shutdown: &mut watch::Receiver<bool>,
+) -> Option<Result<(tokio_postgres::Client, ConnectionTask), tokio_postgres::Error>> {
+    let mut config = database_url.parse::<tokio_postgres::Config>().ok()?;
+    config.application_name(application_name);
+    config.connect_timeout(Duration::from_secs(5));
+    config.options(
+        "-c statement_timeout=10000 -c lock_timeout=1000 -c idle_in_transaction_session_timeout=15000",
+    );
+    let connection = tokio::select! {
+        _ = shutdown.changed() => return None,
+        connection = config.connect(NoTls) => connection,
+    };
+    Some(connection.map(|(client, connection)| {
+        (
+            client,
+            ConnectionTask(tokio::spawn(async move {
+                if let Err(error) = connection.await {
+                    tracing::warn!(%error, "collection maintenance connection closed");
+                }
+            })),
+        )
+    }))
+}
+
+/// Timestamp propagation and repository count deltas. Each pass is bounded and
+/// never walks a whole repository; full recounts run in their own task.
 async fn maintain_collections(database_url: String, mut shutdown: watch::Receiver<bool>) {
     let mut connected: Option<(tokio_postgres::Client, ConnectionTask)> = None;
     let mut backoff = Duration::from_secs(1);
@@ -338,28 +375,16 @@ async fn maintain_collections(database_url: String, mut shutdown: watch::Receive
             _ = tokio::time::sleep(delay) => {},
         }
         if connected.is_none() {
-            let Ok(mut config) = database_url.parse::<tokio_postgres::Config>() else {
-                return;
-            };
-            config.application_name("aeralyth-collection-maintenance");
-            config.connect_timeout(Duration::from_secs(5));
-            config.options("-c statement_timeout=10000 -c lock_timeout=1000 -c idle_in_transaction_session_timeout=15000");
-            let connection = tokio::select! {
-                _ = shutdown.changed() => return,
-                connection = config.connect(NoTls) => connection,
-            };
-            match connection {
-                Ok((client, connection)) => {
-                    connected = Some((
-                        client,
-                        ConnectionTask(tokio::spawn(async move {
-                            if let Err(error) = connection.await {
-                                tracing::warn!(%error, "collection maintenance connection closed");
-                            }
-                        })),
-                    ));
-                }
-                Err(error) => {
+            match connect_maintenance(
+                &database_url,
+                "aeralyth-collection-maintenance",
+                &mut shutdown,
+            )
+            .await
+            {
+                None => return,
+                Some(Ok(connection)) => connected = Some(connection),
+                Some(Err(error)) => {
                     tracing::warn!(%error, "collection maintenance connection unavailable");
                     delay = backoff;
                     backoff = (backoff * 2).min(Duration::from_secs(30));
@@ -372,8 +397,10 @@ async fn maintain_collections(database_url: String, mut shutdown: watch::Receive
             client,
             &mut shutdown,
             "SELECT collection_changes_dispatch()",
+            &[],
         )
         .await
+        .map(|row| row.map(|row| row.get::<_, i32>(0)))
         {
             Ok(Some(count)) => {
                 backoff = Duration::from_secs(1);
@@ -394,17 +421,95 @@ async fn maintain_collections(database_url: String, mut shutdown: watch::Receive
     }
 }
 
+/// Full repository recounts, one repository per statement. The claim commits
+/// a backoff before the walk starts, so a recount that times out is retried
+/// later while other repositories go first.
+async fn maintain_repository_counts(database_url: String, mut shutdown: watch::Receiver<bool>) {
+    let mut connected: Option<(tokio_postgres::Client, ConnectionTask)> = None;
+    let mut backoff = Duration::from_secs(1);
+    let mut delay = Duration::ZERO;
+    loop {
+        if *shutdown.borrow() {
+            return;
+        }
+        tokio::select! {
+            _ = shutdown.changed() => return,
+            _ = tokio::time::sleep(delay) => {},
+        }
+        if connected
+            .as_ref()
+            .is_some_and(|(client, _)| client.is_closed())
+        {
+            connected = None;
+        }
+        if connected.is_none() {
+            match connect_maintenance(&database_url, "aeralyth-repository-counts", &mut shutdown)
+                .await
+            {
+                None => return,
+                Some(Ok(connection)) => connected = Some(connection),
+                Some(Err(error)) => {
+                    tracing::warn!(%error, "repository count connection unavailable");
+                    delay = backoff;
+                    backoff = (backoff * 2).min(Duration::from_secs(30));
+                    continue;
+                }
+            }
+        }
+        let client = &connected.as_ref().expect("connected").0;
+        let claimed = match collection_batch(
+            client,
+            &mut shutdown,
+            "SELECT repository_counts_claim()",
+            &[],
+        )
+        .await
+        {
+            Ok(Some(row)) => row.get::<_, Option<String>>(0),
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, "repository count claim interrupted; durable work will retry");
+                connected = None;
+                delay = backoff;
+                backoff = (backoff * 2).min(Duration::from_secs(30));
+                continue;
+            }
+        };
+        backoff = Duration::from_secs(1);
+        let Some(repository_id) = claimed else {
+            delay = Duration::from_secs(1);
+            continue;
+        };
+        delay = Duration::from_millis(100);
+        match collection_batch(
+            client,
+            &mut shutdown,
+            "SELECT repository_counts_recount($1)",
+            &[&repository_id],
+        )
+        .await
+        {
+            Ok(Some(_)) => {}
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(%error, repository_id, "repository recount failed; retrying after backoff");
+            }
+        }
+    }
+}
+
 async fn collection_batch(
     client: &tokio_postgres::Client,
     shutdown: &mut watch::Receiver<bool>,
     query: &str,
-) -> Result<Option<i32>, tokio_postgres::Error> {
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<Option<tokio_postgres::Row>, tokio_postgres::Error> {
     tokio::select! {
         _ = shutdown.changed() => {
             let _ = tokio::time::timeout(Duration::from_secs(1), client.cancel_token().cancel_query(NoTls)).await;
             Ok(None)
         }
-        result = client.query_one(query, &[]) => result.map(|row| Some(row.get(0))),
+        result = client.query_one(query, params) => result.map(Some),
     }
 }
 
@@ -571,6 +676,7 @@ mod tests {
                 &collection,
                 &mut shutdown,
                 "SELECT 1::integer FROM pg_sleep(30)",
+                &[],
             )
             .await;
             (result, collection)
