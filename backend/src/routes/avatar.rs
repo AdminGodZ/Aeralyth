@@ -1,6 +1,8 @@
 use actix_web::http::header::{CACHE_CONTROL, CONTENT_TYPE, ETAG, IF_NONE_MATCH};
 use actix_web::{HttpRequest, HttpResponse};
 
+use super::conditional::etag_matches;
+
 const VERSIONED_AVATAR_CACHE_CONTROL: &str = "private, max-age=31536000, immutable";
 const UNVERSIONED_AVATAR_CACHE_CONTROL: &str = "private, no-cache";
 
@@ -39,13 +41,6 @@ pub fn response(
         .insert_header((CACHE_CONTROL, cache_control))
         .insert_header((ETAG, etag))
         .body(bytes)
-}
-
-fn etag_matches(header: &str, etag: &str) -> bool {
-    header.split(',').any(|candidate| {
-        let candidate = candidate.trim();
-        candidate == "*" || candidate.strip_prefix("W/").unwrap_or(candidate) == etag
-    })
 }
 
 #[cfg(test)]

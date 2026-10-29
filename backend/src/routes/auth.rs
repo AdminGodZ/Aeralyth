@@ -2,7 +2,7 @@ use actix_web::cookie::{Cookie, SameSite, time::Duration};
 use actix_web::http::header::LOCATION;
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::net::{IpAddr, Ipv4Addr};

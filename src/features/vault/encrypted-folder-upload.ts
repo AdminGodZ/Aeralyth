@@ -3,6 +3,10 @@ import { detectedCryptoConcurrency } from "@/features/vault/bounded-async";
 import { enqueueShareDirectorySync } from "@/features/vault/share-directory-sync";
 import { publishVaultFoldersBatch } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
+import { abortReason, throwIfAborted } from "@/lib/abort";
+import { parentDirectory } from "@/lib/paths";
+
+const ABORT_MESSAGE = "The upload was cancelled.";
 
 const FOLDER_BATCH_SIZE = 100;
 const FOLDER_CRYPTO_CONCURRENCY = 4;
@@ -111,7 +115,7 @@ export async function publishEncryptedFolderTree({
   const operation = new AbortController();
   const abort = () => {
     operation.abort(signal.reason);
-    emit({ type: "failed", error: abortReason(signal) });
+    emit({ type: "failed", error: abortReason(signal, ABORT_MESSAGE) });
   };
   signal.addEventListener("abort", abort, { once: true });
   if (signal.aborted) abort();
@@ -131,9 +135,9 @@ export async function publishEncryptedFolderTree({
       lastModified: Date.now(),
     });
     sessions.set(started.sessionId, started.nodeId);
-    assertNotAborted(operation.signal);
+    throwIfAborted(operation.signal, ABORT_MESSAGE);
     const complete = await client.finalizeEncryption(started.sessionId);
-    assertNotAborted(operation.signal);
+    throwIfAborted(operation.signal, ABORT_MESSAGE);
     return {
       path,
       sessionId: started.sessionId,
@@ -193,7 +197,7 @@ export async function publishEncryptedFolderTree({
   };
 
   try {
-    assertNotAborted(operation.signal);
+    throwIfAborted(operation.signal, ABORT_MESSAGE);
     for (const path of allPaths) {
       const existing = existingFolders?.get(path);
       if (existing) folderIds.set(path, existing.id);
@@ -216,7 +220,7 @@ export async function publishEncryptedFolderTree({
 
     const concurrency = detectedCryptoConcurrency(FOLDER_CRYPTO_CONCURRENCY);
     while (hasReady() || active.size || pending.length || publication) {
-      assertNotAborted(operation.signal);
+      throwIfAborted(operation.signal, ABORT_MESSAGE);
       while (
         hasReady() &&
         active.size < concurrency &&
@@ -281,7 +285,7 @@ export async function publishEncryptedFolderTree({
         }
       }
     }
-    assertNotAborted(operation.signal);
+    throwIfAborted(operation.signal, ABORT_MESSAGE);
   } catch (error) {
     operation.abort(error);
     // Worker messages cannot be interrupted. Wait for every started session to
@@ -300,19 +304,4 @@ export async function publishEncryptedFolderTree({
     clearTimeout(flushTimer);
     signal.removeEventListener("abort", abort);
   }
-}
-
-function parentDirectory(path: string): string {
-  const separator = path.lastIndexOf("/");
-  return separator < 0 ? "" : path.slice(0, separator);
-}
-
-function assertNotAborted(signal: AbortSignal): void {
-  if (signal.aborted) throw abortReason(signal);
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ?? new DOMException("The upload was cancelled.", "AbortError")
-  );
 }

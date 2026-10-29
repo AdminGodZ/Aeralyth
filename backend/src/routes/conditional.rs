@@ -90,7 +90,7 @@ pub fn private_json<T: Serialize>(request: &HttpRequest, value: &T) -> Result<Ht
         .body(body))
 }
 
-fn etag_matches(header: &str, etag: &str) -> bool {
+pub(super) fn etag_matches(header: &str, etag: &str) -> bool {
     let etag = etag.strip_prefix("W/").unwrap_or(etag);
     header.split(',').any(|candidate| {
         let candidate = candidate.trim();

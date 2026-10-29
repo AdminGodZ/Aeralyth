@@ -207,11 +207,14 @@ describe("repository archive paths", () => {
     expect(menuSource).toContain("isUnlocked:");
     expect(archiveSource).toContain("if (needsVault && !vault.isUnlocked())");
     expect(archiveSource).toContain("createStreamingZipDestination");
-    expect(archiveSource).toContain("readEncryptedFileStream");
+    expect(archiveSource).toContain("readEncryptedArchiveFileStream");
     expect(archiveSource).not.toContain("downloadedFiles");
-    expect(archiveSource).toContain(
-      "plan.recordHash !== entry.vaultRecordHash",
+    const streamSource = readFileSync(
+      resolve(import.meta.dirname, "../archive/archive-file-streams.ts"),
+      "utf8",
     );
+    expect(streamSource).toContain("readEncryptedFileStream");
+    expect(streamSource).toContain("plan.recordHash !== entry.vaultRecordHash");
     expect(archiveSource).not.toContain("new Map<string, VaultDownloadPlan>");
   });
 });

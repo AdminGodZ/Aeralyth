@@ -340,9 +340,7 @@ export type RepositoryArchiveEntry = RepositoryEntry & {
   contentVersion: string;
 };
 
-export type FolderArchiveEntry = RepositoryArchiveEntry & {
-  contentVersion: string;
-};
+export type FolderArchiveEntry = RepositoryArchiveEntry;
 
 export type FolderArchiveManifest = {
   rootId: string;

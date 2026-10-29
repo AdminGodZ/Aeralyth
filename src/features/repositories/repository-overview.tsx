@@ -1,6 +1,5 @@
 "use client";
 
-import { formatDistanceToNow } from "date-fns";
 import {
   BookMarked,
   ChevronRight,
@@ -17,6 +16,7 @@ import { Input } from "@/components/ui/input";
 import { Skeleton } from "@/components/ui/skeleton";
 import { UploadPanel } from "@/features/dashboard/upload-panel";
 import { NewRepositoryDialog } from "@/features/repositories/new-repository-dialog";
+import { formatRepositoryDate } from "@/features/repositories/repository-dates";
 import { useResolvedVaultNames } from "@/features/repositories/use-resolved-vault-names";
 import type { RepositoriesState } from "@/lib/api";
 
@@ -219,13 +219,4 @@ export function RepositoryOverview({
       </div>
     </div>
   );
-}
-
-function formatRepositoryDate(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.valueOf())) {
-    return "recently";
-  }
-
-  return formatDistanceToNow(date, { addSuffix: true });
 }

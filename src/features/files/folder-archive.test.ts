@@ -187,7 +187,7 @@ describe("folder archive manifest", () => {
     );
     expect(archiveSource).toContain("entry.contentVersion");
     expect(archiveSource).toContain("createStreamingZipDestination");
-    expect(archiveSource).toContain("readEncryptedFileStream");
+    expect(archiveSource).toContain("readEncryptedArchiveFileStream");
     expect(archiveSource).not.toContain("downloadedFiles");
     expect(archiveSource).not.toContain("new Map<string, VaultDownloadPlan>");
   });

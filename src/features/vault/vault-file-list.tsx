@@ -56,7 +56,9 @@ import {
 } from "@/features/vault/vault-name-presentation";
 import { useVault, VAULT_LOCKING_EVENT } from "@/features/vault/vault-provider";
 import { VaultShareDialog } from "@/features/vault/vault-share-dialog";
+import { isAbortError } from "@/lib/abort";
 import type { FileEntry, FileSort, FileSortDirection } from "@/lib/api";
+import { formatBytes } from "@/lib/format";
 
 type ResolvedEntry = FileEntry & {
   resolved: boolean;
@@ -1300,10 +1302,6 @@ function VaultFileRow({
   );
 }
 
-function isAbortError(value: unknown): boolean {
-  return value instanceof DOMException && value.name === "AbortError";
-}
-
 function ActionMenuForm({
   action,
   csrfToken,
@@ -1397,18 +1395,6 @@ function fileKind(name: string, mimeType: string | null): string {
   return extension && extension !== name
     ? extension.toUpperCase().slice(0, 12)
     : "File";
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let value = bytes / 1024;
-  let index = 0;
-  while (value >= 1024 && index < units.length - 1) {
-    value /= 1024;
-    index += 1;
-  }
-  return `${value >= 10 ? value.toFixed(0) : value.toFixed(1)} ${units[index]}`;
 }
 
 function formatDate(value: string): string {

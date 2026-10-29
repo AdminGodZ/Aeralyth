@@ -1,4 +1,5 @@
 import ignore, { type Ignore } from "ignore";
+import { baseName, parentDirectory } from "@/lib/paths";
 
 export type GitIgnoreSelection = {
   file: File;
@@ -210,16 +211,6 @@ function relativeToDirectory(path: string, directory: string): string | null {
     return null;
   }
   return path.slice(directory.length + 1);
-}
-
-function parentDirectory(path: string): string {
-  const separator = path.lastIndexOf("/");
-  return separator < 0 ? "" : path.slice(0, separator);
-}
-
-function baseName(path: string): string {
-  const separator = path.lastIndexOf("/");
-  return separator < 0 ? path : path.slice(separator + 1);
 }
 
 function pathDepth(path: string): number {

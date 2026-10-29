@@ -39,6 +39,7 @@ import {
   type VaultUploadPlan,
 } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
+import { baseName, parentDirectory } from "@/lib/paths";
 
 const VAULT_PRESIGN_BATCH_SIZE = 4;
 const VAULT_UPLOAD_CONCURRENCY = 4;
@@ -981,16 +982,6 @@ function normalizeRelativePath(path: string): string {
     throw new Error("The selected path is invalid.");
   }
   return normalized.join("/");
-}
-
-function parentDirectory(path: string): string {
-  const separator = path.lastIndexOf("/");
-  return separator < 0 ? "" : path.slice(0, separator);
-}
-
-function baseName(path: string): string {
-  const separator = path.lastIndexOf("/");
-  return separator < 0 ? path : path.slice(separator + 1);
 }
 
 function pathDepth(path: string): number {

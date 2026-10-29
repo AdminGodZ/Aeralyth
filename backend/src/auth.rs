@@ -156,6 +156,18 @@ pub fn hash_session_token(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
 }
 
+/// Lowercase hex SHA-256 of `value`, encoded into one preallocated buffer.
+pub fn sha256_hex(value: &str) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let digest = Sha256::digest(value.as_bytes());
+    let mut encoded = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AuthUser {
@@ -442,6 +454,27 @@ pub async fn require_csrf(state: &AppState, request: &HttpRequest, csrf_token: &
     }
 
     Err(error::ErrorForbidden("csrf token invalid"))
+}
+
+/// CSRF check for JSON and fetch requests, which send the token as a header.
+pub async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<()> {
+    let csrf_token = request
+        .headers()
+        .get("x-csrf-token")
+        .and_then(|value| value.to_str().ok())
+        .ok_or_else(|| error::ErrorForbidden("csrf token required"))?;
+    require_csrf(state, request, csrf_token).await
+}
+
+pub fn normalize_username(username: &str) -> String {
+    username.trim().to_ascii_lowercase()
+}
+
+pub fn is_valid_username(username: &str) -> bool {
+    (3..=32).contains(&username.len())
+        && username.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
+        })
 }
 
 fn session_principal_from_row(row: &tokio_postgres::Row) -> SessionPrincipal {

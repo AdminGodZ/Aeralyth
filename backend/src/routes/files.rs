@@ -12,7 +12,10 @@ use tokio::fs::{File as AsyncFile, OpenOptions};
 use tokio::io::AsyncWriteExt;
 use tokio_postgres::IsolationLevel;
 
-use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
+use crate::auth::{
+    SessionPrincipal, is_valid_username, normalize_username, parse_json_body, require_csrf,
+    require_header_csrf, require_principal,
+};
 use crate::db::{query_cached, query_one_cached, query_opt_cached};
 use crate::routes::local_file_stream::local_download_response;
 use crate::routes::share_links::{
@@ -3342,16 +3345,6 @@ async fn find_resumable_upload(
     Ok(row.map(file_upload_from_row))
 }
 
-async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<()> {
-    let csrf_token = request
-        .headers()
-        .get("x-csrf-token")
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| error::ErrorForbidden("csrf token required"))?;
-
-    require_csrf(state, request, csrf_token).await
-}
-
 async fn require_upload_actor(
     state: &AppState,
     request: &HttpRequest,
@@ -3499,19 +3492,6 @@ fn upload_redirect_location(parent_id: Option<&str>, status: &str) -> String {
         Some(parent_id) => format!("/files?folder={parent_id}&file={status}"),
         None => format!("/files?file={status}"),
     }
-}
-
-fn normalize_username(username: &str) -> String {
-    username.trim().to_ascii_lowercase()
-}
-
-fn is_valid_username(username: &str) -> bool {
-    let length = username.len();
-
-    (3..=32).contains(&length)
-        && username.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '.' | '_' | '-')
-        })
 }
 
 fn file_kind(name: &str, mime_type: Option<&str>) -> String {

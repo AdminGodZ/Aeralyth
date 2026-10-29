@@ -45,6 +45,10 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { useRealtimeActivity } from "@/features/realtime/realtime-provider";
+import {
+  formatShareDateTime,
+  formatShareExpiration,
+} from "@/features/sharing/share-dates";
 import { cn } from "@/lib/utils";
 
 type AccessScope = "public" | "account";
@@ -107,11 +111,6 @@ const MINUTE_OPTIONS = Array.from({ length: 60 }, (_, minute) =>
 const DEFAULT_EXPIRATION: ExpirationChoice = "604800";
 const MIN_LINK_LIFETIME_SECONDS = 5 * 60;
 const MAX_LINK_LIFETIME_SECONDS = 365 * 24 * 60 * 60;
-const shareDateTimeFormatter = new Intl.DateTimeFormat("en", {
-  dateStyle: "medium",
-  timeStyle: "short",
-  timeZone: "UTC",
-});
 
 type ShareLinkDialogProps = {
   open: boolean;
@@ -1119,13 +1118,13 @@ function ShareLinkFacts({
         <ShareLinkFact
           icon={CalendarDays}
           label="Created"
-          value={formatDateTime(createdAt)}
+          value={formatShareDateTime(createdAt)}
         />
       ) : null}
       <ShareLinkFact
         icon={CalendarClock}
         label="Expires"
-        value={expirationValue(expiresAt)}
+        value={formatShareExpiration(expiresAt)}
         className={createdAt ? undefined : "sm:col-span-2"}
       />
     </dl>
@@ -1303,14 +1302,6 @@ async function requestRotateShareLink(
 
 function permissionLabel(permission: Permission): string {
   return permission === "editor" ? "Can modify" : "Can view and download";
-}
-
-function formatDateTime(value: string): string {
-  return `${shareDateTimeFormatter.format(new Date(value))} UTC`;
-}
-
-function expirationValue(value: string | null): string {
-  return value ? formatDateTime(value) : "Never";
 }
 
 function getExpirationSeconds(

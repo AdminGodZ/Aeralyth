@@ -4,9 +4,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tokio_postgres::Row;
 
+use crate::auth::sha256_hex;
 use crate::db::Database;
 use crate::storage::Storage;
 
@@ -266,7 +266,7 @@ impl BucketUsageCache {
                 if token_hashes.len() >= TOKEN_HISTORY {
                     token_hashes.remove(0);
                 }
-                token_hashes.push(token_hash(token));
+                token_hashes.push(sha256_hex(token));
             }
             let updated = if page.next_token.is_none() {
                 self.db
@@ -359,7 +359,7 @@ fn page_totals(progress: &ScanProgress, page: &BucketPage) -> Result<(i64, i64),
     if page.next_token.as_ref().is_some_and(|token| {
         token.is_empty()
             || Some(token) == progress.token.as_ref()
-            || progress.token_hashes.contains(&token_hash(token))
+            || progress.token_hashes.contains(&sha256_hex(token))
     }) {
         return Err("Bucket pagination stopped making progress".to_owned());
     }
@@ -373,10 +373,6 @@ fn page_totals(progress: &ScanProgress, page: &BucketPage) -> Result<(i64, i64),
         object_count = object_count.checked_add(1).ok_or("Object count overflow")?;
     }
     Ok((used_bytes, object_count))
-}
-
-fn token_hash(token: &str) -> String {
-    format!("{:x}", Sha256::digest(token.as_bytes()))
 }
 
 async fn fetch_page(storage: &Storage, token: Option<String>) -> Result<BucketPage, String> {
@@ -831,7 +827,7 @@ mod tests {
         immediately_retry(&cache, &namespace).await;
         let mut resumed = cache.claim(&namespace).await.unwrap().unwrap();
         assert_eq!(resumed.pages, 2);
-        assert_eq!(resumed.token_hashes, vec![token_hash("A"), token_hash("B")]);
+        assert_eq!(resumed.token_hashes, vec![sha256_hex("A"), sha256_hex("B")]);
         let result = cache
             .run_chunk(
                 &namespace,

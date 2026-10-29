@@ -61,6 +61,7 @@ import {
   VAULT_AUTO_LOCK_OPTIONS,
 } from "@/features/vault/vault-preferences";
 import type { CurrentUser } from "@/lib/api";
+import { getInitials } from "@/lib/format";
 
 type ProfileSettingsFormProps = {
   currentUser: CurrentUser;
@@ -1091,15 +1092,4 @@ function AccountDetail({
       <dd className="flex min-h-5 items-center">{children}</dd>
     </div>
   );
-}
-
-function getInitials(value: string) {
-  const initials = value
-    .split(/[\s._-]+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("");
-
-  return initials || "A";
 }

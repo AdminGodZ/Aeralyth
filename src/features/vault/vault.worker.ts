@@ -25,6 +25,7 @@ import {
   encodeWrapper,
 } from "@/features/vault/cbor";
 import { incrementalCiphertextLeafHash } from "@/features/vault/incremental-ciphertext-hash";
+import { estimateMetadataBytes } from "@/features/vault/metadata-size";
 import { isVaultNodeId } from "@/features/vault/node-id";
 import {
   ARGON2ID_PROFILE,
@@ -2028,19 +2029,6 @@ function evictMetadata(key: string): void {
     metadataMemoryBytes -= bytes;
     metadataMemorySizes.delete(key);
   }
-}
-
-function estimateMetadataBytes(result: VaultCachedMetadataResult): number {
-  const manifest = result.manifest;
-  return (
-    256 +
-    result.nodeId.length * 2 +
-    result.recordHash.length * 2 +
-    manifest.name.length * 2 +
-    (manifest.mimeType?.length ?? 0) * 2 +
-    (manifest.parentId?.length ?? 0) * 2 +
-    manifest.generationId.byteLength
-  );
 }
 
 function assertMetadataReference(reference: VaultMetadataReference): void {

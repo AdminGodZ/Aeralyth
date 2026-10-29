@@ -138,52 +138,66 @@ function Calendar({
         ...classNames,
       }}
       components={{
-        Root: ({ className: rootClassName, rootRef, ...rootProps }) => (
-          <div
-            data-slot="calendar"
-            ref={rootRef}
-            className={cn(rootClassName)}
-            {...rootProps}
-          />
-        ),
-        Chevron: ({ className: iconClassName, orientation, ...iconProps }) => {
-          if (orientation === "left") {
-            return (
-              <ChevronLeftIcon
-                className={cn("size-4", iconClassName)}
-                {...iconProps}
-              />
-            );
-          }
-          if (orientation === "right") {
-            return (
-              <ChevronRightIcon
-                className={cn("size-4", iconClassName)}
-                {...iconProps}
-              />
-            );
-          }
-          return (
-            <ChevronDownIcon
-              className={cn("size-4", iconClassName)}
-              {...iconProps}
-            />
-          );
-        },
-        DayButton: (dayButtonProps) => (
-          <CalendarDayButton {...dayButtonProps} />
-        ),
-        WeekNumber: ({ children, ...weekNumberProps }) => (
-          <td {...weekNumberProps}>
-            <div className="flex size-(--cell-size) items-center justify-center text-center">
-              {children}
-            </div>
-          </td>
-        ),
+        Root: CalendarRoot,
+        Chevron: CalendarChevron,
+        DayButton: CalendarDayButton,
+        WeekNumber: CalendarWeekNumber,
         ...components,
       }}
       {...props}
     />
+  );
+}
+
+type CalendarComponentProps<
+  Name extends keyof NonNullable<
+    React.ComponentProps<typeof DayPicker>["components"]
+  >,
+> = React.ComponentProps<
+  NonNullable<
+    NonNullable<React.ComponentProps<typeof DayPicker>["components"]>[Name]
+  >
+>;
+
+function CalendarRoot({
+  className,
+  rootRef,
+  ...props
+}: CalendarComponentProps<"Root">) {
+  return (
+    <div
+      data-slot="calendar"
+      ref={rootRef}
+      className={cn(className)}
+      {...props}
+    />
+  );
+}
+
+function CalendarChevron({
+  className,
+  orientation,
+  ...props
+}: CalendarComponentProps<"Chevron">) {
+  const Icon =
+    orientation === "left"
+      ? ChevronLeftIcon
+      : orientation === "right"
+        ? ChevronRightIcon
+        : ChevronDownIcon;
+  return <Icon className={cn("size-4", className)} {...props} />;
+}
+
+function CalendarWeekNumber({
+  children,
+  ...props
+}: CalendarComponentProps<"WeekNumber">) {
+  return (
+    <td {...props}>
+      <div className="flex size-(--cell-size) items-center justify-center text-center">
+        {children}
+      </div>
+    </td>
   );
 }
 

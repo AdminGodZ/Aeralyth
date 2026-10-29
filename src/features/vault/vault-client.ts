@@ -31,6 +31,7 @@ import type {
   VaultWorkerResult,
 } from "@/features/vault/vault-messages";
 import { VAULT_WORKER_URL } from "@/generated/worker-assets";
+import { abortReason } from "@/lib/abort";
 
 type WorkerCommand = VaultWorkerRequest extends infer Request
   ? Request extends { id: number }
@@ -753,13 +754,6 @@ function createShareMaterialCollector(
       return { ...material, wrappers };
     },
   };
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
 }
 
 function expectResult<Type extends VaultWorkerResult["type"]>(

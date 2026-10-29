@@ -8,6 +8,8 @@ import { ResumableDownload } from "@/features/vault/resumable-download";
 import { createTransferMetrics } from "@/features/vault/transfer-metrics";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
 import type { VaultDecryptionStart } from "@/features/vault/vault-messages";
+import { abortReason } from "@/lib/abort";
+import { randomFileToken, triggerBlobDownload } from "@/lib/browser-download";
 
 type SaveFilePicker = (options: {
   suggestedName: string;
@@ -108,13 +110,16 @@ export async function downloadEncryptedFile({
         const completed = await originPrivateDownload.fileHandle.getFile();
         signal?.throwIfAborted();
         const cleanup = originPrivateDownload;
-        triggerBlobDownload(completed, manifest.name, () =>
+        triggerBlobDownload(completed, safeDownloadName(manifest.name), () =>
           cleanup.directory.removeEntry(cleanup.fileName),
         );
         originPrivateDownload = null;
       }
     } else {
-      triggerBlobDownload(new Blob(plaintextParts), manifest.name);
+      triggerBlobDownload(
+        new Blob(plaintextParts),
+        safeDownloadName(manifest.name),
+      );
     }
     metrics.finish("completed");
     onProgress?.(100);
@@ -455,37 +460,6 @@ async function createOriginPrivateDownload(): Promise<OriginPrivateDownload | nu
     }
     return null;
   }
-}
-
-function triggerBlobDownload(
-  blob: Blob,
-  fileName: string,
-  release?: () => void | Promise<void>,
-): void {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = safeDownloadName(fileName);
-  anchor.rel = "noopener";
-  anchor.click();
-  setTimeout(() => {
-    URL.revokeObjectURL(url);
-    void Promise.resolve(release?.()).catch(() => undefined);
-  }, 60_000);
-}
-
-function randomFileToken(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
-  );
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
 }
 
 function safeDownloadName(name: string): string {

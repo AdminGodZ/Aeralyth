@@ -3,12 +3,14 @@ use actix_web::http::header::{
 };
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
+use sha2::Sha256;
 use tokio::fs::File as AsyncFile;
 
-use crate::auth::{parse_json_body, require_csrf, require_principal, session_principal};
+use crate::auth::{
+    parse_json_body, require_header_csrf, require_principal, session_principal, sha256_hex,
+};
 use crate::routes::local_file_stream::local_file_stream;
 use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
 use crate::routes::tree_jobs::{self, Action, MutationResult};
@@ -1227,15 +1229,6 @@ fn require_matching_mutation_header(request: &HttpRequest, token: &str) -> Resul
     Ok(())
 }
 
-async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<()> {
-    let csrf_token = request
-        .headers()
-        .get("x-csrf-token")
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| error::ErrorForbidden("csrf token required"))?;
-    require_csrf(state, request, csrf_token).await
-}
-
 fn validate_access_scope(value: &str) -> Result<&'static str> {
     match value.trim() {
         "public" => Ok("public"),
@@ -1295,17 +1288,6 @@ fn token_for_link(secret: &str, link_id: &str, token_version: i64) -> Result<Str
     Ok(URL_SAFE_NO_PAD.encode(mac.finalize().into_bytes()))
 }
 
-fn sha256_hex(value: &str) -> String {
-    const HEX: &[u8; 16] = b"0123456789abcdef";
-    let digest = Sha256::digest(value.as_bytes());
-    let mut encoded = String::with_capacity(digest.len() * 2);
-    for byte in digest {
-        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
-        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
-    }
-    encoded
-}
-
 fn no_store(builder: &mut actix_web::HttpResponseBuilder) -> &mut actix_web::HttpResponseBuilder {
     builder
         .insert_header((CACHE_CONTROL, "private, no-store"))
@@ -1329,10 +1311,10 @@ mod tests {
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
 
-        let source = include_str!("share_links.rs");
+        let source = include_str!("../auth.rs");
         let encoder = source
-            .split_once("fn sha256_hex(")
-            .and_then(|(_, tail)| tail.split_once("fn no_store("))
+            .split_once("pub fn sha256_hex(")
+            .and_then(|(_, tail)| tail.split_once("#[derive("))
             .map(|(encoder, _)| encoder)
             .expect("share token hex encoder should remain inspectable");
         assert!(encoder.contains("String::with_capacity(digest.len() * 2)"));

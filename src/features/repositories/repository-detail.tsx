@@ -1,6 +1,5 @@
 "use client";
 
-import { formatDistanceToNow } from "date-fns";
 import {
   BookMarked,
   ChevronRight,
@@ -19,6 +18,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { RepositoryCodeMenu } from "@/features/repositories/repository-code-menu";
+import { formatRepositoryDate } from "@/features/repositories/repository-dates";
 import { RepositoryDescription } from "@/features/repositories/repository-description";
 import { getRepositoryFilePresentation } from "@/features/repositories/repository-file-types";
 import { RepositoryFileViewer } from "@/features/repositories/repository-file-viewer";
@@ -543,13 +543,4 @@ function formatTreeCount(totalFiles: number, totalFolders: number) {
   const files = totalFiles === 1 ? "1 file" : `${totalFiles} files`;
   const folders = totalFolders === 1 ? "1 folder" : `${totalFolders} folders`;
   return `${files} · ${folders}`;
-}
-
-function formatRepositoryDate(value: string) {
-  const date = new Date(value);
-  if (Number.isNaN(date.valueOf())) {
-    return "recently";
-  }
-
-  return formatDistanceToNow(date, { addSuffix: true });
 }
