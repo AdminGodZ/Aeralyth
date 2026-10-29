@@ -672,6 +672,22 @@ pub async fn rotate(
         }))
 }
 
+// Revoking a link also expires its unfinished uploads, so the storage sweeper aborts
+// them and frees the owner's pending slots right away.
+const REVOKE_SHARE_LINK_QUERY: &str = "
+    WITH revoked AS (
+      UPDATE share_links
+      SET revoked_at = COALESCE(revoked_at, now()), updated_at = now()
+      WHERE id = $1 AND owner_id = $2
+      RETURNING id
+    )
+    UPDATE file_uploads
+    SET expires_at = LEAST(expires_at, now())
+    WHERE share_link_id IN (SELECT id FROM revoked)
+      AND owner_id = $2
+      AND status IN ('initializing', 'pending')
+";
+
 pub async fn revoke(
     state: web::Data<AppState>,
     request: HttpRequest,
@@ -681,14 +697,7 @@ pub async fn revoke(
     require_header_csrf(&state, &request).await?;
     state
         .db
-        .execute(
-            "
-                UPDATE share_links
-                SET revoked_at = COALESCE(revoked_at, now()), updated_at = now()
-                WHERE id = $1 AND owner_id = $2
-            ",
-            &[&path.into_inner(), &owner.id],
-        )
+        .execute(REVOKE_SHARE_LINK_QUERY, &[&path.into_inner(), &owner.id])
         .await
         .map_err(crate::db::http_error)?;
 
@@ -1411,6 +1420,7 @@ mod tests {
             super::SHARE_DOWNLOAD_CONTEXT_QUERY,
             SHARE_TOKEN_VERSION_LOCK_QUERY,
             SHARE_TOKEN_ROTATE_QUERY,
+            super::REVOKE_SHARE_LINK_QUERY,
         ] {
             client.prepare(query).await.expect("share query prepares");
         }
