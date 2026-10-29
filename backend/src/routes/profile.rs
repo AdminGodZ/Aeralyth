@@ -1,5 +1,9 @@
+use std::future::Future;
+use std::time::Duration;
+
 use actix_multipart::Multipart;
-use actix_web::http::header::LOCATION;
+use actix_web::http::header::{CONTENT_LENGTH, LOCATION};
+use actix_web::web::Bytes;
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use futures_util::StreamExt;
 use serde::Deserialize;
@@ -15,6 +19,13 @@ use super::auth::expired_session_cookie;
 use super::avatar;
 
 const MAX_PROFILE_IMAGE_BYTES: usize = 2 * 1024 * 1024;
+// The form is paced by the client, so bound it as a whole: field data, part count,
+// and time. Oversized images still drain within this budget to keep the friendly
+// image-too-large redirect.
+const MAX_PROFILE_FORM_BYTES: usize = 8 * 1024 * 1024;
+const MAX_PROFILE_FORM_PARTS: usize = 32;
+const PROFILE_FORM_IDLE_TIMEOUT: Duration = Duration::from_secs(10);
+const PROFILE_FORM_TOTAL_TIMEOUT: Duration = Duration::from_secs(60);
 const PASSWORD_CHANGE_JSON_LIMIT: usize = 1024;
 const MIN_NEW_PASSWORD_BYTES: usize = 12;
 const MAX_NEW_PASSWORD_BYTES: usize = 72;
@@ -52,6 +63,7 @@ const PROFILE_UPDATE_QUERY: &str = "
         END,
         updated_at = now()
     WHERE id = $12
+      AND status = 'active'
     RETURNING id
 ";
 
@@ -99,12 +111,63 @@ struct ProfileImage {
     size_bytes: i64,
 }
 
+struct ProfileFormBudget {
+    deadline: tokio::time::Instant,
+    remaining_bytes: usize,
+    remaining_parts: usize,
+}
+
+impl ProfileFormBudget {
+    fn new() -> Self {
+        Self {
+            deadline: tokio::time::Instant::now() + PROFILE_FORM_TOTAL_TIMEOUT,
+            remaining_bytes: MAX_PROFILE_FORM_BYTES,
+            remaining_parts: MAX_PROFILE_FORM_PARTS,
+        }
+    }
+
+    async fn wait<F: Future>(&self, future: F) -> Result<F::Output> {
+        let now = tokio::time::Instant::now();
+        if now >= self.deadline {
+            return Err(error::ErrorRequestTimeout("profile form deadline exceeded"));
+        }
+        tokio::time::timeout_at(self.deadline.min(now + PROFILE_FORM_IDLE_TIMEOUT), future)
+            .await
+            .map_err(|_| error::ErrorRequestTimeout("profile form deadline exceeded"))
+    }
+
+    fn take_part(&mut self) -> Result<()> {
+        self.remaining_parts = self
+            .remaining_parts
+            .checked_sub(1)
+            .ok_or_else(|| error::ErrorPayloadTooLarge("profile form has too many fields"))?;
+        Ok(())
+    }
+
+    fn take_bytes(&mut self, length: usize) -> Result<()> {
+        self.remaining_bytes = self
+            .remaining_bytes
+            .checked_sub(length)
+            .ok_or_else(|| error::ErrorPayloadTooLarge("profile form is too large"))?;
+        Ok(())
+    }
+}
+
 pub async fn update(
     state: web::Data<AppState>,
     request: HttpRequest,
     mut payload: Multipart,
 ) -> Result<HttpResponse> {
-    let user = require_principal(&state, &request).await?;
+    let declared_length = request
+        .headers()
+        .get(CONTENT_LENGTH)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<usize>().ok());
+    if declared_length.is_some_and(|length| length > MAX_PROFILE_FORM_BYTES) {
+        return Err(error::ErrorPayloadTooLarge("profile form is too large"));
+    }
+
+    require_principal(&state, &request).await?;
     let mut csrf_validated = false;
     if let Some(token) = request
         .headers()
@@ -114,9 +177,13 @@ pub async fn update(
         require_csrf(&state, &request, token).await?;
         csrf_validated = true;
     }
+    // Return the scarce request connection before polling the client-paced body.
+    state.db.release_request_connection().await;
+    let mut budget = ProfileFormBudget::new();
     let mut update = ProfileUpdate::default();
 
-    while let Some(field_result) = payload.next().await {
+    while let Some(field_result) = budget.wait(payload.next()).await? {
+        budget.take_part()?;
         let mut field = field_result.map_err(error::ErrorBadRequest)?;
         let content_disposition = match field.content_disposition() {
             Some(content_disposition) => content_disposition,
@@ -126,7 +193,7 @@ pub async fn update(
                 ));
             }
             None => {
-                drain_field(&mut field).await?;
+                drain_field(&mut field, &mut budget).await?;
                 continue;
             }
         };
@@ -145,38 +212,42 @@ pub async fn update(
                     "csrf token must be the first form field",
                 ));
             }
-            let token = read_limited_text_field_without_drain(&mut field, 512).await?;
+            let token = read_limited_text_field_without_drain(&mut field, 512, &mut budget).await?;
             require_csrf(&state, &request, &token).await?;
+            state.db.release_request_connection().await;
             csrf_validated = true;
             continue;
         }
 
         match field_name.as_str() {
             CSRF_FIELD => {
-                drain_field(&mut field).await?;
+                drain_field(&mut field, &mut budget).await?;
             }
             "display_name" => {
-                update.display_name = Some(read_limited_text_field(&mut field, 256).await?);
+                update.display_name =
+                    Some(read_limited_text_field(&mut field, 256, &mut budget).await?);
             }
             "theme_preference" => {
-                update.theme_preference = Some(read_limited_text_field(&mut field, 32).await?);
+                update.theme_preference =
+                    Some(read_limited_text_field(&mut field, 32, &mut budget).await?);
             }
             "accent_color" => {
-                update.accent_color = Some(read_limited_text_field(&mut field, 32).await?);
+                update.accent_color =
+                    Some(read_limited_text_field(&mut field, 32, &mut budget).await?);
             }
             "folder_zip_prompt_enabled" => {
-                let value = read_limited_text_field(&mut field, 32).await?;
+                let value = read_limited_text_field(&mut field, 32, &mut budget).await?;
                 update.folder_zip_prompt_enabled = normalize_boolean_preference(&value);
             }
             "vault_auto_lock_minutes" => {
-                let value = read_limited_text_field(&mut field, 8).await?;
+                let value = read_limited_text_field(&mut field, 8, &mut budget).await?;
                 update.vault_auto_lock_minutes =
                     Some(normalize_vault_auto_lock_minutes(&value).ok_or_else(|| {
                         error::ErrorBadRequest("invalid automatic lock duration")
                     })?);
             }
             "trash_retention_days" => {
-                let value = read_limited_text_field(&mut field, 8).await?;
+                let value = read_limited_text_field(&mut field, 8, &mut budget).await?;
                 let minutes = value
                     .trim()
                     .parse::<i32>()
@@ -187,14 +258,14 @@ pub async fn update(
                 update.trash_retention_minutes.get_or_insert(minutes);
             }
             "trash_retention_minutes" => {
-                let value = read_limited_text_field(&mut field, 8).await?;
+                let value = read_limited_text_field(&mut field, 8, &mut budget).await?;
                 update.trash_retention_minutes =
                     Some(normalize_trash_retention_minutes(&value).ok_or_else(|| {
                         error::ErrorBadRequest("trash retention must be 1 to 525600 minutes")
                     })?);
             }
             "remove_profile_image" => {
-                let value = read_limited_text_field(&mut field, 32).await?;
+                let value = read_limited_text_field(&mut field, 32, &mut budget).await?;
                 update.remove_profile_image = matches!(value.as_str(), "1" | "true" | "on");
             }
             "profile_image" => {
@@ -204,22 +275,23 @@ pub async fn update(
                     .filter(|filename| !filename.is_empty())
                     .is_none()
                 {
-                    drain_field(&mut field).await?;
+                    drain_field(&mut field, &mut budget).await?;
                     continue;
                 }
 
                 let Some(mime_type) = field.content_type().map(|mime| mime.to_string()) else {
-                    drain_field(&mut field).await?;
+                    drain_field(&mut field, &mut budget).await?;
                     return Ok(redirect("/settings?profile=invalid-image"));
                 };
 
                 if !is_allowed_profile_image_mime_type(&mime_type) {
-                    drain_field(&mut field).await?;
+                    drain_field(&mut field, &mut budget).await?;
                     return Ok(redirect("/settings?profile=invalid-image"));
                 }
 
                 let Some(bytes) =
-                    read_limited_binary_field(&mut field, MAX_PROFILE_IMAGE_BYTES).await?
+                    read_limited_binary_field(&mut field, MAX_PROFILE_IMAGE_BYTES, &mut budget)
+                        .await?
                 else {
                     return Ok(redirect("/settings?profile=image-too-large"));
                 };
@@ -237,7 +309,7 @@ pub async fn update(
                 });
             }
             _ => {
-                drain_field(&mut field).await?;
+                drain_field(&mut field, &mut budget).await?;
             }
         }
     }
@@ -271,6 +343,8 @@ pub async fn update(
             (PROFILE_IMAGE_KEEP, None, None, None)
         };
 
+    // The body wait may outlast the session or account; never apply a stale principal.
+    let user = crate::auth::revalidate_principal(&state, &request).await?;
     let updated = state
         .db
         .query_opt(
@@ -407,10 +481,23 @@ fn map_password_error(password_error: PasswordError) -> actix_web::Error {
     }
 }
 
-async fn drain_field(field: &mut actix_multipart::Field) -> Result<()> {
-    while let Some(chunk) = field.next().await {
-        chunk.map_err(error::ErrorBadRequest)?;
-    }
+async fn next_field_chunk(
+    field: &mut actix_multipart::Field,
+    budget: &mut ProfileFormBudget,
+) -> Result<Option<Bytes>> {
+    let Some(chunk_result) = budget.wait(field.next()).await? else {
+        return Ok(None);
+    };
+    let chunk = chunk_result.map_err(error::ErrorBadRequest)?;
+    budget.take_bytes(chunk.len())?;
+    Ok(Some(chunk))
+}
+
+async fn drain_field(
+    field: &mut actix_multipart::Field,
+    budget: &mut ProfileFormBudget,
+) -> Result<()> {
+    while next_field_chunk(field, budget).await?.is_some() {}
 
     Ok(())
 }
@@ -418,8 +505,9 @@ async fn drain_field(field: &mut actix_multipart::Field) -> Result<()> {
 async fn read_limited_text_field(
     field: &mut actix_multipart::Field,
     max_bytes: usize,
+    budget: &mut ProfileFormBudget,
 ) -> Result<String> {
-    let Some(bytes) = read_limited_binary_field(field, max_bytes).await? else {
+    let Some(bytes) = read_limited_binary_field(field, max_bytes, budget).await? else {
         return Err(error::ErrorBadRequest("form field is too large"));
     };
 
@@ -429,11 +517,11 @@ async fn read_limited_text_field(
 async fn read_limited_text_field_without_drain(
     field: &mut actix_multipart::Field,
     max_bytes: usize,
+    budget: &mut ProfileFormBudget,
 ) -> Result<String> {
     let mut bytes = Vec::new();
 
-    while let Some(chunk_result) = field.next().await {
-        let chunk = chunk_result.map_err(error::ErrorBadRequest)?;
+    while let Some(chunk) = next_field_chunk(field, budget).await? {
         if bytes.len().saturating_add(chunk.len()) > max_bytes {
             return Err(error::ErrorBadRequest("form field is too large"));
         }
@@ -446,14 +534,13 @@ async fn read_limited_text_field_without_drain(
 async fn read_limited_binary_field(
     field: &mut actix_multipart::Field,
     max_bytes: usize,
+    budget: &mut ProfileFormBudget,
 ) -> Result<Option<Vec<u8>>> {
     let mut bytes = Vec::new();
 
-    while let Some(chunk_result) = field.next().await {
-        let chunk = chunk_result.map_err(error::ErrorBadRequest)?;
-
+    while let Some(chunk) = next_field_chunk(field, budget).await? {
         if bytes.len().saturating_add(chunk.len()) > max_bytes {
-            drain_field(field).await?;
+            drain_field(field, budget).await?;
             return Ok(None);
         }
 
@@ -541,9 +628,11 @@ fn redirect(location: &'static str) -> HttpResponse {
 #[cfg(test)]
 mod tests {
     use super::{
-        PASSWORD_CHANGE_QUERY, PROFILE_UPDATE_QUERY, normalize_trash_retention_minutes,
+        MAX_PROFILE_FORM_BYTES, MAX_PROFILE_FORM_PARTS, PASSWORD_CHANGE_QUERY,
+        PROFILE_UPDATE_QUERY, ProfileFormBudget, normalize_trash_retention_minutes,
         normalize_vault_auto_lock_minutes, validate_new_password,
     };
+    use actix_web::http::StatusCode;
 
     #[test]
     fn password_change_requires_a_bcrypt_safe_strong_length() {
@@ -638,7 +727,9 @@ mod tests {
             .expect("profile fields must remain explicitly bounded");
         assert!(missing_disposition < fallback && fallback < field_dispatch);
         assert!(handler.contains("field_name != CSRF_FIELD"));
-        assert!(handler.contains("read_limited_text_field_without_drain(&mut field, 512)"));
+        assert!(
+            handler.contains("read_limited_text_field_without_drain(&mut field, 512, &mut budget)")
+        );
 
         let no_drain_reader = source
             .split_once("async fn read_limited_text_field_without_drain(")
@@ -646,6 +737,99 @@ mod tests {
             .map(|(reader, _)| reader)
             .expect("native CSRF reader should remain inspectable");
         assert!(!no_drain_reader.contains("drain_field"));
+    }
+
+    #[test]
+    fn profile_update_releases_the_request_connection_before_the_body_wait() {
+        let source = include_str!("profile.rs");
+        let handler = source
+            .split_once("pub async fn update(")
+            .and_then(|(_, tail)| tail.split_once("pub async fn avatar("))
+            .map(|(handler, _)| handler)
+            .expect("profile update handler should remain inspectable");
+        let header_csrf = handler
+            .find(".get(\"x-csrf-token\")")
+            .expect("profile update must inspect header CSRF first");
+        let release = handler
+            .find("release_request_connection()")
+            .expect("profile update must release the request connection");
+        let multipart = handler
+            .find("budget.wait(payload.next())")
+            .expect("profile update must poll multipart within its budget");
+        let fallback_csrf = handler
+            .find("require_csrf(&state, &request, &token)")
+            .expect("native multipart CSRF fallback must remain");
+        let fallback_release = handler[fallback_csrf..]
+            .find("release_request_connection()")
+            .map(|offset| fallback_csrf + offset)
+            .expect("native CSRF fallback must release its connection");
+        let revalidate = handler
+            .find("revalidate_principal(&state, &request)")
+            .expect("profile update must revalidate after the body wait");
+        let mutation = handler
+            .find("PROFILE_UPDATE_QUERY")
+            .expect("profile update must apply its patch");
+
+        assert!(header_csrf < release && release < multipart);
+        assert!(fallback_csrf < fallback_release && fallback_release < revalidate);
+        assert!(multipart < revalidate && revalidate < mutation);
+        assert!(!handler.contains("drain_field(&mut field).await"));
+        assert!(
+            PROFILE_UPDATE_QUERY
+                .to_ascii_lowercase()
+                .contains("and status = 'active'")
+        );
+    }
+
+    #[test]
+    fn profile_form_budget_bounds_aggregate_bytes_and_parts() {
+        let mut budget = ProfileFormBudget::new();
+        budget
+            .take_bytes(MAX_PROFILE_FORM_BYTES)
+            .expect("the full byte budget should be usable");
+        let error = budget
+            .take_bytes(1)
+            .expect_err("bytes past the budget must fail");
+        assert_eq!(
+            error.as_response_error().status_code(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+
+        let mut budget = ProfileFormBudget::new();
+        for _ in 0..MAX_PROFILE_FORM_PARTS {
+            budget
+                .take_part()
+                .expect("parts within the budget should pass");
+        }
+        let error = budget
+            .take_part()
+            .expect_err("parts past the budget must fail");
+        assert_eq!(
+            error.as_response_error().status_code(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+    }
+
+    #[actix_web::test]
+    async fn profile_form_budget_times_out_a_stalled_body() {
+        let mut budget = ProfileFormBudget::new();
+        budget.deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(20);
+        let error = budget
+            .wait(std::future::pending::<()>())
+            .await
+            .expect_err("a stalled body must hit the deadline");
+        assert_eq!(
+            error.as_response_error().status_code(),
+            StatusCode::REQUEST_TIMEOUT
+        );
+        let error = budget
+            .wait(std::future::ready(()))
+            .await
+            .expect_err("an expired budget must reject further polls");
+        assert_eq!(
+            error.as_response_error().status_code(),
+            StatusCode::REQUEST_TIMEOUT
+        );
     }
 
     #[test]
