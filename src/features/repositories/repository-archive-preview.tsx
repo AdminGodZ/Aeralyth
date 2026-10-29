@@ -4,6 +4,7 @@ import { FileArchive, FileText, Folder, LoaderCircle } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import { formatHexDump } from "@/features/repositories/repository-file-types";
+import { formatBytes } from "@/lib/format";
 
 type ArchiveEntry = {
   compressedSize: number;
@@ -137,15 +138,4 @@ export function RepositoryArchivePreview({ blob }: { blob: Blob }) {
       )}
     </div>
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes <= 0) return bytes === 0 ? "0 B" : "—";
-  const units = ["B", "KB", "MB", "GB"];
-  const unitIndex = Math.min(
-    Math.floor(Math.log(bytes) / Math.log(1024)),
-    units.length - 1,
-  );
-  const value = bytes / 1024 ** unitIndex;
-  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }

@@ -8,6 +8,7 @@ import {
   Share2,
   Star,
 } from "lucide-react";
+import { formatBytes } from "@/lib/format";
 import { useFileSummary } from "./realtime-provider";
 import type { FileSummary } from "./summary-resource";
 
@@ -79,23 +80,4 @@ function FileMetric({
       </div>
     </div>
   );
-}
-
-function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value <= 0) {
-    return "0 B";
-  }
-
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let unitIndex = 0;
-  let size = value;
-
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
-  }
-
-  return `${size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1)} ${
-    units[unitIndex]
-  }`;
 }

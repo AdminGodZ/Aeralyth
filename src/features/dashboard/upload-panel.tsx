@@ -66,11 +66,15 @@ import {
   UploadRequestError,
   waitForUploadRetry,
 } from "@/features/uploads/upload-retry";
-import { WeightedSemaphore } from "@/features/vault/bounded-async";
+import {
+  mapWithConcurrency,
+  WeightedSemaphore,
+} from "@/features/vault/bounded-async";
 import { uploadEncryptedSelections } from "@/features/vault/encrypted-upload";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import { useVault } from "@/features/vault/vault-provider";
 import { FOLDER_ZIP_WORKER_URL } from "@/generated/worker-assets";
+import { isAbortError } from "@/lib/abort";
 
 type UploadSelection = {
   file: File;
@@ -2040,48 +2044,6 @@ function getObjectUploadFailureMessage(responseText: string) {
   }
 
   return trimmed.replace(/\s+/g, " ").slice(0, 300);
-}
-
-async function mapWithConcurrency<T, R>(
-  values: T[],
-  concurrency: number,
-  operation: (value: T) => Promise<R>,
-) {
-  const results = new Array<R>(values.length);
-  let nextIndex = 0;
-  let failure: unknown;
-
-  const workers = Array.from(
-    { length: Math.min(Math.max(1, concurrency), values.length) },
-    async () => {
-      while (failure === undefined) {
-        const index = nextIndex;
-        nextIndex += 1;
-
-        if (index >= values.length) {
-          return;
-        }
-
-        try {
-          results[index] = await operation(values[index]);
-        } catch (error) {
-          failure = error;
-        }
-      }
-    },
-  );
-
-  await Promise.all(workers);
-
-  if (failure !== undefined) {
-    throw failure;
-  }
-
-  return results;
-}
-
-function isAbortError(error: unknown) {
-  return error instanceof DOMException && error.name === "AbortError";
 }
 
 function isFolderSelection(files: UploadSelection[]) {

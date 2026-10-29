@@ -17,6 +17,7 @@ import Link from "next/link";
 import { AeralythLogo } from "@/components/aeralyth-logo";
 import { DottedSurface } from "@/components/dotted-surface";
 import { Button } from "@/components/ui/button";
+import { formatShareExpiration } from "@/features/sharing/share-dates";
 import {
   SharedEntryDeleteButton,
   ShareEditorUpload,
@@ -45,11 +46,6 @@ const sharedSizeFormatter = new Intl.NumberFormat("en", {
 });
 const sharedDateFormatter = new Intl.DateTimeFormat("en", {
   dateStyle: "medium",
-  timeZone: "UTC",
-});
-const sharedDateTimeFormatter = new Intl.DateTimeFormat("en", {
-  dateStyle: "medium",
-  timeStyle: "short",
   timeZone: "UTC",
 });
 
@@ -171,7 +167,7 @@ function SharedLinkFacts({
       <SharedLinkFact
         icon={CalendarClock}
         label="Expires"
-        value={expirationValue(expiresAt)}
+        value={formatShareExpiration(expiresAt)}
       />
     </dl>
   );
@@ -495,12 +491,4 @@ function formatBytes(bytes: number): string {
 
 function formatDate(value: string): string {
   return sharedDateFormatter.format(new Date(value));
-}
-
-function formatDateTime(value: string): string {
-  return `${sharedDateTimeFormatter.format(new Date(value))} UTC`;
-}
-
-function expirationValue(value: string | null): string {
-  return value ? formatDateTime(value) : "Never";
 }

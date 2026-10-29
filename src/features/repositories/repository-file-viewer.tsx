@@ -38,7 +38,9 @@ import type { RepositoryFilePresentation } from "@/features/repositories/reposit
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import { useVault, VAULT_LOCKING_EVENT } from "@/features/vault/vault-provider";
+import { isAbortError } from "@/lib/abort";
 import type { RepositoryEntry } from "@/lib/api";
+import { formatBytes } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 const FILE_LOADING_WIDTHS = [38, 61, 84, 49, 72, 95, 55, 78, 43, 66];
@@ -545,10 +547,6 @@ function FilePresentationIcon({
   );
 }
 
-function isAbortError(failure: unknown): boolean {
-  return failure instanceof DOMException && failure.name === "AbortError";
-}
-
 function shouldForceSafeRawText(
   file: Awaited<ReturnType<typeof prepareRepositoryFile>>,
 ): boolean {
@@ -562,16 +560,4 @@ function shouldForceSafeRawText(
     mimeType.includes("xml") ||
     /\.svg$/iu.test(file.name)
   );
-}
-
-function formatBytes(bytes: number): string {
-  if (!Number.isFinite(bytes) || bytes < 0) return "—";
-  if (bytes === 0) return "0 B";
-  const units = ["B", "KB", "MB", "GB"];
-  const unitIndex = Math.min(
-    Math.floor(Math.log(bytes) / Math.log(1024)),
-    units.length - 1,
-  );
-  const value = bytes / 1024 ** unitIndex;
-  return `${value >= 10 || unitIndex === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIndex]}`;
 }

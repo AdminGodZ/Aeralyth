@@ -44,6 +44,7 @@ import type {
   RepositoriesState,
   RepositoryDetailState,
 } from "@/lib/api";
+import { getInitials } from "@/lib/format";
 
 type DashboardFrameProps = {
   children: ReactNode;
@@ -605,17 +606,6 @@ function FilesEmptyState({
       </p>
     </div>
   );
-}
-
-function getInitials(username: string) {
-  const initials = username
-    .split(/[\s._-]+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("");
-
-  return initials || "A";
 }
 
 function getSortQuery(sort?: FileSort, direction?: FileSortDirection) {

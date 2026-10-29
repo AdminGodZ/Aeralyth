@@ -4,7 +4,9 @@ use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use futures_util::StreamExt;
 use serde::Deserialize;
 
-use crate::auth::{CSRF_FIELD, parse_json_body, require_csrf, require_principal};
+use crate::auth::{
+    CSRF_FIELD, parse_json_body, require_csrf, require_header_csrf, require_principal,
+};
 use crate::passwords::PasswordError;
 use crate::state::AppState;
 use crate::timestamps;
@@ -388,15 +390,6 @@ pub async fn change_password(
         .finish())
 }
 
-async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<()> {
-    let token = request
-        .headers()
-        .get("x-csrf-token")
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| error::ErrorForbidden("csrf token required"))?;
-    require_csrf(state, request, token).await
-}
-
 fn validate_new_password(password: &str) -> Result<()> {
     if !(MIN_NEW_PASSWORD_BYTES..=MAX_NEW_PASSWORD_BYTES).contains(&password.len()) {
         return Err(error::ErrorBadRequest(
@@ -600,7 +593,7 @@ mod tests {
         let source = include_str!("profile.rs");
         let handler = source
             .split_once("pub async fn change_password(")
-            .and_then(|(_, tail)| tail.split_once("async fn require_header_csrf("))
+            .and_then(|(_, tail)| tail.split_once("fn validate_new_password("))
             .map(|(handler, _)| handler)
             .expect("password handler should remain inspectable");
         let authentication = handler

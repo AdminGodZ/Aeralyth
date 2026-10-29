@@ -1,4 +1,9 @@
 import {
+  archivePercentage,
+  readEncryptedArchiveFileStream,
+  readLegacyArchiveFileStream,
+} from "@/features/archive/archive-file-streams";
+import {
   claimArchivePath,
   createStreamingZipDestination,
   normalizeArchiveSegment,
@@ -7,19 +12,20 @@ import {
 } from "@/features/archive/browser-archive";
 import { archiveCompressionLevel } from "@/features/archive/compression-policy";
 import { createAnimationFrameProgressCoalescer } from "@/features/uploads/progress-coalescer";
-import { readEncryptedFileStream } from "@/features/vault/encrypted-download";
-import {
-  toBase64Url,
-  type VaultDownloadPlan,
-  type VaultManifest,
+import type {
+  VaultDownloadPlan,
+  VaultManifest,
 } from "@/features/vault/protocol";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
+import { throwIfAborted } from "@/lib/abort";
 import type {
   FolderArchiveEntry,
   FolderArchiveManifest,
   RepositoryEntry,
 } from "@/lib/api";
+
+const ABORT_MESSAGE = "The folder download was canceled.";
 
 const MAX_FOLDER_ARCHIVE_ENTRIES = 50_000;
 const MAX_FOLDER_ARCHIVE_BYTES = 2 * 1024 * 1024 * 1024;
@@ -60,7 +66,7 @@ export async function downloadFolderArchive({
   signal?: AbortSignal;
   onProgress?(progress: FolderArchiveProgress): void;
 }): Promise<void> {
-  throwIfAborted(signal);
+  throwIfAborted(signal, ABORT_MESSAGE);
   const progress = onProgress
     ? createAnimationFrameProgressCoalescer(onProgress)
     : null;
@@ -96,10 +102,10 @@ export async function downloadFolderArchive({
     encryptedEntries.length + (folder.e2eeState === "encrypted" ? 1 : 0);
 
   if (folder.e2eeState === "encrypted") {
-    throwIfAborted(signal);
+    throwIfAborted(signal, ABORT_MESSAGE);
     const rootPlan = await getVaultDownloadPlan(folder.id, signal);
     const rootManifest = await vault.openNode(folder.id, rootPlan, signal);
-    throwIfAborted(signal);
+    throwIfAborted(signal, ABORT_MESSAGE);
     if (rootManifest.entryType !== "folder") {
       throw new Error("The encrypted folder metadata is inconsistent.");
     }
@@ -126,7 +132,7 @@ export async function downloadFolderArchive({
       signal,
     });
     for (const entry of archiveManifest.entries) {
-      throwIfAborted(signal);
+      throwIfAborted(signal, ABORT_MESSAGE);
       let encrypted:
         | { manifest: VaultManifest; plan: VaultDownloadPlan }
         | undefined;
@@ -136,7 +142,7 @@ export async function downloadFolderArchive({
         // react-doctor-disable-next-line react-doctor/async-await-in-loop
         const plan = await getVaultDownloadPlan(entry.id, signal);
         const manifest = await vault.openNode(entry.id, plan, signal);
-        throwIfAborted(signal);
+        throwIfAborted(signal, ABORT_MESSAGE);
         if (
           manifest.entryType !== entry.entryType ||
           manifest.parentId !== entry.parentId
@@ -182,6 +188,7 @@ export async function downloadFolderArchive({
             ...encrypted,
             client: vault.client,
             signal,
+            subject: "folder",
           })
         : await readLegacyArchiveFileStream(entry, resolvedName, signal);
       // A ZIP writer has one ordered output stream, so entries are consumed
@@ -215,9 +222,9 @@ export async function downloadFolderArchive({
       });
     }
 
-    throwIfAborted(signal);
+    throwIfAborted(signal, ABORT_MESSAGE);
     const archive = await destination.close();
-    throwIfAborted(signal);
+    throwIfAborted(signal, ABORT_MESSAGE);
     if (needsVault && !vault.isUnlocked()) {
       throw new DOMException(
         "The vault locked before the ZIP download completed.",
@@ -306,84 +313,6 @@ export function buildFolderArchivePath({
   throw new Error("A folder entry is outside the selected folder.");
 }
 
-async function readLegacyArchiveFileStream(
-  entry: FolderArchiveEntry,
-  resolvedName: string,
-  signal?: AbortSignal,
-): Promise<ReadableStream<Uint8Array>> {
-  const response = await fetch(
-    `/api/files/${encodeURIComponent(entry.id)}/download?version=${encodeURIComponent(entry.contentVersion)}`,
-    { signal, cache: "no-store" },
-  );
-  if (!response.ok) {
-    throw new Error(`Could not download ${resolvedName} (${response.status}).`);
-  }
-  if (!response.body) {
-    throw new Error(`Could not stream ${resolvedName}.`);
-  }
-  return requireExactStreamLength(
-    response.body,
-    entry.sizeBytes,
-    `The downloaded size of ${resolvedName} changed.`,
-  );
-}
-
-function readEncryptedArchiveFileStream({
-  entry,
-  manifest,
-  plan,
-  client,
-  signal,
-}: {
-  entry: FolderArchiveEntry;
-  manifest: VaultManifest | undefined;
-  plan: VaultDownloadPlan | undefined;
-  client: VaultCryptoClient | null;
-  signal?: AbortSignal;
-}): ReadableStream<Uint8Array> {
-  if (!manifest || !plan || !client) {
-    throw new Error("The encrypted folder is not unlocked.");
-  }
-  if (
-    plan.nodeId !== entry.id ||
-    plan.generationId !== toBase64Url(manifest.generationId) ||
-    plan.generationId !== entry.vaultGenerationId ||
-    plan.recordHash !== entry.vaultRecordHash
-  ) {
-    throw new Error("The encrypted folder changed during ZIP preparation.");
-  }
-  return requireExactStreamLength(
-    readEncryptedFileStream({ plan, manifest, client, signal }),
-    manifest.plaintextBytes,
-    `The downloaded size of ${manifest.name} changed.`,
-  );
-}
-
-function requireExactStreamLength(
-  stream: ReadableStream<Uint8Array>,
-  expectedBytes: number,
-  errorMessage: string,
-): ReadableStream<Uint8Array> {
-  let receivedBytes = 0;
-  return stream.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        receivedBytes += chunk.byteLength;
-        if (receivedBytes > expectedBytes) throw new Error(errorMessage);
-        controller.enqueue(chunk);
-      },
-      flush() {
-        if (receivedBytes !== expectedBytes) throw new Error(errorMessage);
-      },
-    }),
-  );
-}
-
-function archivePercentage(processedBytes: number, totalBytes: number): number {
-  if (totalBytes === 0) return 99;
-  return Math.min(99, 20 + (processedBytes / totalBytes) * 79);
-}
-
 function reportNameProgress(
   onProgress: ((progress: FolderArchiveProgress) => void) | undefined,
   completed: number,
@@ -424,13 +353,5 @@ function isArchiveEntry(value: unknown): value is FolderArchiveEntry {
         entry.vaultGenerationId.length > 0 &&
         typeof entry.vaultRecordHash === "string" &&
         entry.vaultRecordHash.length > 0))
-  );
-}
-
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (!signal?.aborted) return;
-  throw (
-    signal.reason ??
-    new DOMException("The folder download was canceled.", "AbortError")
   );
 }

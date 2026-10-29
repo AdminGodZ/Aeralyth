@@ -2,6 +2,9 @@ import {
   mapWithConcurrency,
   WeightedSemaphore,
 } from "@/features/vault/bounded-async";
+import { abortReason } from "@/lib/abort";
+
+const ABORT_MESSAGE = "Upload canceled";
 
 export const LEGACY_FILE_CONCURRENCY = 3;
 export const LEGACY_CONCURRENT_FILE_MAX_BYTES = 8 * 1024 * 1024;
@@ -13,7 +16,8 @@ export async function scheduleLegacyUploads<Input, Output>(
   upload: (input: Input, signal: AbortSignal) => Promise<Output>,
 ): Promise<Output[]> {
   const controller = new AbortController();
-  const abortFromParent = () => controller.abort(abortReason(parentSignal));
+  const abortFromParent = () =>
+    controller.abort(abortReason(parentSignal, ABORT_MESSAGE));
   if (parentSignal.aborted) abortFromParent();
   else parentSignal.addEventListener("abort", abortFromParent, { once: true });
 
@@ -46,8 +50,4 @@ export async function scheduleLegacyUploads<Input, Output>(
   } finally {
     parentSignal.removeEventListener("abort", abortFromParent);
   }
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return signal.reason ?? new DOMException("Upload canceled", "AbortError");
 }

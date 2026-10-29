@@ -19,6 +19,7 @@ import {
 } from "@/components/ui/popover";
 import { popupSurfaceClassName } from "@/components/ui/popup-surface";
 import { Progress } from "@/components/ui/progress";
+import { formatBytes } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
 export type UploadProgressItem = {
@@ -576,24 +577,4 @@ function formatDuration(seconds: number) {
   return remainingSeconds > 0
     ? `~${minutes}m ${remainingSeconds}s`
     : `~${minutes} min`;
-}
-
-function formatBytes(value: number) {
-  if (!Number.isFinite(value) || value <= 0) {
-    return "0 B";
-  }
-
-  const units = ["B", "KB", "MB", "GB", "TB"];
-  let unitIndex = 0;
-  let size = value;
-
-  while (size >= 1024 && unitIndex < units.length - 1) {
-    size /= 1024;
-    unitIndex += 1;
-  }
-
-  const formattedSize =
-    size >= 10 || unitIndex === 0 ? size.toFixed(0) : size.toFixed(1);
-
-  return `${formattedSize} ${units[unitIndex]}`;
 }

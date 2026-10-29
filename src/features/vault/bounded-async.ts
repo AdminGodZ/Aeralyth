@@ -1,3 +1,5 @@
+import { abortReason } from "@/lib/abort";
+
 const NO_FAILURE = Symbol("no failure");
 
 type WeightedWaiter = {
@@ -319,11 +321,4 @@ export async function mapWithConcurrency<Input, Output>(
   await Promise.all(workers);
   if (failure !== NO_FAILURE) throw failure;
   return results;
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
 }

@@ -4,7 +4,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use tokio_postgres::{IsolationLevel, Row};
 
-use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
+use crate::auth::{SessionPrincipal, parse_json_body, require_header_csrf, require_principal};
 use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
 use crate::state::AppState;
 use crate::timestamps;
@@ -1215,16 +1215,6 @@ fn normalize_description(value: Option<&str>) -> Result<Option<String>> {
         ));
     }
     Ok((!description.is_empty()).then(|| description.to_owned()))
-}
-
-async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<()> {
-    let csrf_token = request
-        .headers()
-        .get("x-csrf-token")
-        .and_then(|value| value.to_str().ok())
-        .ok_or_else(|| error::ErrorForbidden("csrf token required"))?;
-
-    require_csrf(state, request, csrf_token).await
 }
 
 #[cfg(test)]

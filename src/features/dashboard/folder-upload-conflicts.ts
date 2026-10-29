@@ -2,6 +2,7 @@ import {
   mapWithConcurrency,
   WeightedSemaphore,
 } from "@/features/vault/bounded-async";
+import { baseName, parentDirectory } from "@/lib/paths";
 
 export const UPLOAD_PATH_LOOKUP_CONCURRENCY = 4;
 export const UPLOAD_TREE_REQUEST_CONCURRENCY = 1;
@@ -209,16 +210,6 @@ function uniqueMatch(
 
 function comparableName(name: string) {
   return name.normalize("NFC").toLocaleLowerCase();
-}
-
-function parentDirectory(path: string) {
-  const separator = path.lastIndexOf("/");
-  return separator < 0 ? "" : path.slice(0, separator);
-}
-
-function baseName(path: string) {
-  const separator = path.lastIndexOf("/");
-  return separator < 0 ? path : path.slice(separator + 1);
 }
 
 function pathDepth(path: string) {

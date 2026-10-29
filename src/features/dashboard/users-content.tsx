@@ -87,6 +87,7 @@ import type {
   CurrentUser,
   Invitation,
 } from "@/lib/api";
+import { getInitials } from "@/lib/format";
 
 const adminDateFormatter = new Intl.DateTimeFormat("en", {
   month: "short",
@@ -1217,17 +1218,6 @@ function InvitationStatusBadge({ status }: { status: Invitation["status"] }) {
       <span className="capitalize">{status}</span>
     </Badge>
   );
-}
-
-function getInitials(username: string) {
-  const initials = username
-    .split(/[\s._-]+/)
-    .filter(Boolean)
-    .slice(0, 2)
-    .map((part) => part[0]?.toUpperCase())
-    .join("");
-
-  return initials || "A";
 }
 
 function formatDate(value: string) {

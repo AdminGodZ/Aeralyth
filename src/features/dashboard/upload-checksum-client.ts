@@ -3,6 +3,9 @@ import type {
   UploadChecksumWorkerResponse,
 } from "@/features/dashboard/upload-checksum-messages";
 import { UPLOAD_CHECKSUM_WORKER_URL } from "@/generated/worker-assets";
+import { abortReason } from "@/lib/abort";
+
+const ABORT_MESSAGE = "Upload canceled";
 
 type PendingChecksum = {
   resolve(value: string): void;
@@ -19,7 +22,8 @@ export function sha256BlobBase64(
   blob: Blob,
   signal?: AbortSignal,
 ): Promise<string> {
-  if (signal?.aborted) return Promise.reject(abortReason(signal));
+  if (signal?.aborted)
+    return Promise.reject(abortReason(signal, ABORT_MESSAGE));
 
   const worker = getChecksumWorker();
   const id = nextChecksumId;
@@ -38,7 +42,7 @@ export function sha256BlobBase64(
         } catch {
           // The caller still receives its abort reason if the worker died first.
         }
-        reject(abortReason(signal));
+        reject(abortReason(signal, ABORT_MESSAGE));
       };
       signal.addEventListener("abort", pending.abort, { once: true });
     }
@@ -120,8 +124,4 @@ function failChecksumWorker(worker: Worker, error: Error): void {
   for (const id of pendingChecksums.keys()) {
     finishPending(id, (pending) => pending.reject(error));
   }
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return signal.reason ?? new DOMException("Upload canceled", "AbortError");
 }

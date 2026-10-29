@@ -1,3 +1,4 @@
+import { estimateMetadataBytes } from "@/features/vault/metadata-size";
 import { isVaultNodeId } from "@/features/vault/node-id";
 import type {
   VaultDownloadPlan,
@@ -21,6 +22,7 @@ import {
   recordVaultMetadataPerformance,
   vaultPerformanceNow,
 } from "@/features/vault/vault-metadata-performance";
+import { abortReason } from "@/lib/abort";
 
 export type VaultMetadataResolutionOptions = {
   signal?: AbortSignal;
@@ -755,19 +757,6 @@ function cacheAccountingKey(
   return `${kind}:${revision}`;
 }
 
-function estimateMetadataBytes(result: VaultCachedMetadataResult): number {
-  const manifest = result.manifest;
-  return (
-    256 +
-    result.nodeId.length * 2 +
-    result.recordHash.length * 2 +
-    manifest.name.length * 2 +
-    (manifest.mimeType?.length ?? 0) * 2 +
-    (manifest.parentId?.length ?? 0) * 2 +
-    manifest.generationId.byteLength
-  );
-}
-
 function estimateMetadataPlanBytes(plan: VaultMetadataPlan): number {
   return (
     512 +
@@ -804,11 +793,4 @@ function waitForOperation<Value>(
       },
     );
   });
-}
-
-function abortReason(signal: AbortSignal): unknown {
-  return (
-    signal.reason ??
-    new DOMException("The operation was aborted.", "AbortError")
-  );
 }

@@ -6,10 +6,9 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use actix_web::{body::to_bytes, cookie::Cookie, test::TestRequest, web};
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use tokio::time::Instant;
 
-use crate::auth::{SESSION_COOKIE, hash_session_token, require_principal};
+use crate::auth::{SESSION_COOKIE, hash_session_token, require_principal, sha256_hex};
 use crate::db::scope_request;
 use crate::state::{AppState, QueuedMutationLimiter};
 
@@ -446,7 +445,7 @@ async fn measure_provider_bulk_and_browse_admission_contention() {
         ("backend/src/auth.rs", include_str!("../auth.rs")),
         ("backend/src/db.rs", include_str!("../db.rs")),
     ] {
-        source_sha256.insert(name, format!("{:x}", Sha256::digest(source.as_bytes())));
+        source_sha256.insert(name, sha256_hex(source));
     }
     let report = serde_json::json!({
         "generated_unix_ms": SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis(),

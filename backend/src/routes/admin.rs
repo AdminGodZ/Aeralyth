@@ -3,7 +3,10 @@ use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
-use crate::auth::{AuthUser, parse_json_body, require_admin, require_admin_user, require_csrf};
+use crate::auth::{
+    AuthUser, is_valid_username, normalize_username, parse_json_body, require_admin,
+    require_admin_user, require_csrf,
+};
 use crate::state::AppState;
 use crate::timestamps;
 
@@ -1241,10 +1244,6 @@ async fn expire_invitations_for_id(state: &AppState, invitation_id: &str) -> Res
     Ok(())
 }
 
-fn normalize_username(username: &str) -> String {
-    username.trim().to_lowercase()
-}
-
 fn normalize_display_name(display_name: &str) -> Option<String> {
     let display_name = display_name
         .chars()
@@ -1257,15 +1256,6 @@ fn normalize_display_name(display_name: &str) -> Option<String> {
     }
 
     Some(display_name.chars().take(80).collect())
-}
-
-fn is_valid_username(username: &str) -> bool {
-    let len = username.len();
-
-    (3..=32).contains(&len)
-        && username.chars().all(|character| {
-            character.is_ascii_alphanumeric() || matches!(character, '_' | '-' | '.')
-        })
 }
 
 fn normalize_role(role: &str) -> Option<String> {

@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use sha2::{Digest, Sha256};
 use tokio_postgres::IsolationLevel;
 
-use crate::auth::{SessionPrincipal, parse_json_body, require_csrf, require_principal};
+use crate::auth::{SessionPrincipal, parse_json_body, require_header_csrf, require_principal};
 use crate::collection_timestamps::touch_ancestor_collections;
 use crate::config::E2eeMode;
 use crate::db::{query_one_cached, query_opt_cached};
@@ -7485,15 +7485,6 @@ fn require_vault_enabled(state: &AppState) -> Result<()> {
         return Err(error::ErrorNotFound("encrypted vault is disabled"));
     }
     Ok(())
-}
-
-async fn require_header_csrf(state: &AppState, request: &HttpRequest) -> Result<()> {
-    let token = request
-        .headers()
-        .get("x-csrf-token")
-        .and_then(|value| value.to_str().ok())
-        .unwrap_or_default();
-    require_csrf(state, request, token).await
 }
 
 async fn migration_summary(state: &AppState, user: &SessionPrincipal) -> Result<MigrationSummary> {

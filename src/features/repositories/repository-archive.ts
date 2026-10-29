@@ -1,4 +1,9 @@
 import {
+  archivePercentage,
+  readEncryptedArchiveFileStream,
+  readLegacyArchiveFileStream,
+} from "@/features/archive/archive-file-streams";
+import {
   claimArchivePath,
   createStreamingZipDestination,
   normalizeArchiveSegment,
@@ -7,14 +12,13 @@ import {
 } from "@/features/archive/browser-archive";
 import { archiveCompressionLevel } from "@/features/archive/compression-policy";
 import { createAnimationFrameProgressCoalescer } from "@/features/uploads/progress-coalescer";
-import { readEncryptedFileStream } from "@/features/vault/encrypted-download";
-import {
-  toBase64Url,
-  type VaultDownloadPlan,
-  type VaultManifest,
+import type {
+  VaultDownloadPlan,
+  VaultManifest,
 } from "@/features/vault/protocol";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
+import { throwIfAborted } from "@/lib/abort";
 import type {
   RepositoryArchiveEntry,
   RepositoryArchiveManifest,
@@ -22,6 +26,8 @@ import type {
   RepositoryEntry,
   RepositorySummary,
 } from "@/lib/api";
+
+const ABORT_MESSAGE = "The repository download was canceled.";
 
 const MAX_REPOSITORY_ARCHIVE_ENTRIES = 50_000;
 const MAX_REPOSITORY_ARCHIVE_PAGE_ENTRIES = 1_000;
@@ -57,7 +63,7 @@ export async function downloadRepositoryArchive({
   signal?: AbortSignal;
   onProgress?(progress: RepositoryArchiveProgress): void;
 }): Promise<void> {
-  throwIfAborted(signal);
+  throwIfAborted(signal, ABORT_MESSAGE);
   const progress = onProgress
     ? createAnimationFrameProgressCoalescer(onProgress)
     : null;
@@ -106,7 +112,7 @@ export async function downloadRepositoryArchive({
     });
     while (true) {
       for (const entry of manifestPage.entries) {
-        throwIfAborted(signal);
+        throwIfAborted(signal, ABORT_MESSAGE);
         if (seenEntryIds.has(entry.id)) {
           throw new Error(
             "The repository archive manifest contains duplicate entries.",
@@ -126,7 +132,7 @@ export async function downloadRepositoryArchive({
           // react-doctor-disable-next-line react-doctor/async-await-in-loop
           const plan = await getVaultDownloadPlan(entry.id, signal);
           const vaultManifest = await vault.openNode(entry.id, plan, signal);
-          throwIfAborted(signal);
+          throwIfAborted(signal, ABORT_MESSAGE);
           if (
             vaultManifest.entryType !== entry.entryType ||
             vaultManifest.parentId !== entry.parentId
@@ -180,6 +186,7 @@ export async function downloadRepositoryArchive({
               ...encrypted,
               client: vault.client,
               signal,
+              subject: "repository",
             })
           : await readLegacyArchiveFileStream(entry, resolvedName, signal);
         // A ZIP writer has one ordered output stream, so entries are consumed
@@ -233,9 +240,9 @@ export async function downloadRepositoryArchive({
     ) {
       throw new Error("The repository archive manifest is incomplete.");
     }
-    throwIfAborted(signal);
+    throwIfAborted(signal, ABORT_MESSAGE);
     const archive = await destination.close();
-    throwIfAborted(signal);
+    throwIfAborted(signal, ABORT_MESSAGE);
     if (needsVault && !vault.isUnlocked()) {
       throw new DOMException(
         "The vault locked before the ZIP download completed.",
@@ -366,84 +373,6 @@ function requireMatchingManifestPage(
   }
 }
 
-async function readLegacyArchiveFileStream(
-  entry: RepositoryArchiveEntry,
-  resolvedName: string,
-  signal?: AbortSignal,
-): Promise<ReadableStream<Uint8Array>> {
-  const response = await fetch(
-    `/api/files/${encodeURIComponent(entry.id)}/download?version=${encodeURIComponent(entry.contentVersion)}`,
-    { signal, cache: "no-store" },
-  );
-  if (!response.ok) {
-    throw new Error(`Could not download ${resolvedName} (${response.status}).`);
-  }
-  if (!response.body) {
-    throw new Error(`Could not stream ${resolvedName}.`);
-  }
-  return requireExactStreamLength(
-    response.body,
-    entry.sizeBytes,
-    `The downloaded size of ${resolvedName} changed.`,
-  );
-}
-
-function readEncryptedArchiveFileStream({
-  entry,
-  manifest,
-  plan,
-  client,
-  signal,
-}: {
-  entry: RepositoryArchiveEntry;
-  manifest: VaultManifest | undefined;
-  plan: VaultDownloadPlan | undefined;
-  client: VaultCryptoClient | null;
-  signal?: AbortSignal;
-}): ReadableStream<Uint8Array> {
-  if (!manifest || !plan || !client) {
-    throw new Error("The encrypted repository is not unlocked.");
-  }
-  if (
-    plan.nodeId !== entry.id ||
-    plan.generationId !== toBase64Url(manifest.generationId) ||
-    plan.generationId !== entry.vaultGenerationId ||
-    plan.recordHash !== entry.vaultRecordHash
-  ) {
-    throw new Error("The encrypted repository changed during ZIP preparation.");
-  }
-  return requireExactStreamLength(
-    readEncryptedFileStream({ plan, manifest, client, signal }),
-    manifest.plaintextBytes,
-    `The downloaded size of ${manifest.name} changed.`,
-  );
-}
-
-function requireExactStreamLength(
-  stream: ReadableStream<Uint8Array>,
-  expectedBytes: number,
-  errorMessage: string,
-): ReadableStream<Uint8Array> {
-  let receivedBytes = 0;
-  return stream.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        receivedBytes += chunk.byteLength;
-        if (receivedBytes > expectedBytes) throw new Error(errorMessage);
-        controller.enqueue(chunk);
-      },
-      flush() {
-        if (receivedBytes !== expectedBytes) throw new Error(errorMessage);
-      },
-    }),
-  );
-}
-
-function archivePercentage(processedBytes: number, totalBytes: number): number {
-  if (totalBytes === 0) return 99;
-  return Math.min(99, 20 + (processedBytes / totalBytes) * 79);
-}
-
 export function buildArchivePath({
   entry,
   pathsById,
@@ -501,13 +430,5 @@ function isRepositoryArchiveEntry(
         entry.vaultGenerationId.length > 0 &&
         typeof entry.vaultRecordHash === "string" &&
         entry.vaultRecordHash.length > 0))
-  );
-}
-
-function throwIfAborted(signal: AbortSignal | undefined): void {
-  if (!signal?.aborted) return;
-  throw (
-    signal.reason ??
-    new DOMException("The repository download was canceled.", "AbortError")
   );
 }

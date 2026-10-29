@@ -7,6 +7,12 @@ import type {
   FolderZipWorkerResponse,
 } from "@/features/dashboard/folder-zip-messages";
 import { FOLDER_ZIP_WORKER_URL } from "@/generated/worker-assets";
+import { abortReason } from "@/lib/abort";
+import { randomFileToken } from "@/lib/browser-download";
+
+export { triggerBlobDownload } from "@/lib/browser-download";
+
+const ABORT_MESSAGE = "The ZIP download was canceled.";
 
 export type BrowserArchiveProgress = Extract<
   FolderZipWorkerResponse,
@@ -123,7 +129,7 @@ export function createBrowserZip({
   compressionMode?: FolderZipCompressionMode;
 }): Promise<Blob> {
   if (signal?.aborted) {
-    return Promise.reject(abortReason(signal));
+    return Promise.reject(abortReason(signal, ABORT_MESSAGE));
   }
   if (typeof Worker === "undefined") {
     return Promise.reject(
@@ -163,7 +169,7 @@ export function createBrowserZip({
       } catch {
         // A failed worker must not prevent the caller's abort from settling.
       }
-      settle(() => reject(abortReason(signal)));
+      settle(() => reject(abortReason(signal, ABORT_MESSAGE)));
     };
     signal?.addEventListener("abort", abort, { once: true });
     worker.addEventListener(
@@ -251,23 +257,6 @@ export function parseArchiveTimestamp(value: string): number {
   return Number.isFinite(timestamp) ? timestamp : Date.now();
 }
 
-export function triggerBlobDownload(
-  blob: Blob,
-  fileName: string,
-  release?: () => void | Promise<void>,
-): void {
-  const url = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = url;
-  anchor.download = fileName;
-  anchor.rel = "noopener";
-  anchor.click();
-  setTimeout(() => {
-    URL.revokeObjectURL(url);
-    void Promise.resolve(release?.()).catch(() => undefined);
-  }, 60_000);
-}
-
 class OriginPrivateArchiveWriter extends Writer<Blob> {
   private closed = false;
 
@@ -332,18 +321,4 @@ async function createOriginPrivateArchiveWriter(): Promise<{
     }
     return null;
   }
-}
-
-function randomFileToken(): string {
-  const bytes = crypto.getRandomValues(new Uint8Array(16));
-  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
-    "",
-  );
-}
-
-function abortReason(signal: AbortSignal | undefined): unknown {
-  return (
-    signal?.reason ??
-    new DOMException("The ZIP download was canceled.", "AbortError")
-  );
 }
