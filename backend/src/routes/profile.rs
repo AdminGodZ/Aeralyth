@@ -373,7 +373,7 @@ pub async fn change_password(
 
     let new_hash = state
         .passwords
-        .hash(&body.new_password)
+        .hash_legacy_password(&body.new_password)
         .await
         .map_err(map_password_error)?;
     let changed = state

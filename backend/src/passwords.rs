@@ -7,7 +7,11 @@ use std::time::{Duration, Instant};
 
 use tokio::sync::Semaphore;
 
+// One-password credentials are 32-byte Argon2id outputs derived in the browser, so
+// bcrypt only adds a cheap server-side layer. Raw legacy passwords get no client
+// stretching and need a real work factor.
 const BCRYPT_COST: u32 = 6;
+const LEGACY_PASSWORD_BCRYPT_COST: u32 = 12;
 const DUMMY_PASSWORD: &str = "aeralyth-invalid-login";
 const MAX_TRACKED_LOGIN_KEYS: usize = 4_096;
 
@@ -51,9 +55,18 @@ impl PasswordService {
         })
     }
 
-    pub async fn hash(&self, password: &str) -> Result<String, PasswordError> {
+    /// Hash a client-derived one-password credential.
+    pub async fn hash(&self, credential: &str) -> Result<String, PasswordError> {
+        let credential = credential.to_owned();
+        self.run(move || bcrypt::hash(credential, BCRYPT_COST))
+            .await
+    }
+
+    /// Hash a raw human password for a legacy (`auth_version = 0`) account.
+    pub async fn hash_legacy_password(&self, password: &str) -> Result<String, PasswordError> {
         let password = password.to_owned();
-        self.run(move || bcrypt::hash(password, BCRYPT_COST)).await
+        self.run(move || bcrypt::hash(password, LEGACY_PASSWORD_BCRYPT_COST))
+            .await
     }
 
     pub async fn verify_candidate(
@@ -227,6 +240,28 @@ mod tests {
             service.hash("password").await,
             Err(PasswordError::Busy)
         ));
+    }
+
+    #[actix_web::test]
+    async fn legacy_passwords_use_a_stronger_work_factor_than_credentials() {
+        let service = PasswordService::new(2, 4).expect("password service should initialize");
+        let legacy = service
+            .hash_legacy_password("correct horse battery")
+            .await
+            .expect("legacy password should hash");
+        let credential = service
+            .hash("client-derived-credential")
+            .await
+            .expect("credential should hash");
+
+        assert!(legacy.starts_with("$2b$12$"));
+        assert!(credential.starts_with("$2b$06$"));
+        assert!(
+            service
+                .verify_candidate("correct horse battery", Some(&legacy))
+                .await
+                .expect("legacy hash should verify")
+        );
     }
 
     #[test]
