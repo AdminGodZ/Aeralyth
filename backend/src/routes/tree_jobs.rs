@@ -1,5 +1,6 @@
 //! Large tree mutations publish a durable root fence and advance in short transactions.
 //! The HTTP path only probes a small tree. Workers never retain the entire tree in RAM.
+use std::collections::HashSet;
 use std::time::Duration;
 
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
@@ -13,7 +14,7 @@ use crate::db::{
 use crate::state::AppState;
 
 use super::files::DELETE_TREE_BATCH_QUERY;
-use super::tree_walk::{TreeWalkScope, update_tree_state, walk_subtree};
+use super::tree_walk::{TreeWalkNode, TreeWalkScope, update_tree_state, walk_subtree};
 
 pub(crate) const SYNC_NODE_LIMIT: usize = 256;
 const JOB_BATCH_SIZE: i64 = 256;
@@ -183,6 +184,138 @@ pub(crate) async fn mutate(
         }
         Err(_) => {
             // Explicit rollback also cancels a timed-out synchronous operation.
+            let _ = transaction.rollback().await;
+            Err(error::ErrorServiceUnavailable(
+                "tree operation admission timed out; retry",
+            ))
+        }
+    }
+}
+
+pub(crate) const BATCH_ROOT_LIMIT: usize = 256;
+
+#[derive(Debug, Default)]
+pub(crate) struct BatchMutation {
+    pub completed: Vec<String>,
+    pub missing: Vec<String>,
+    /// Roots the caller must retry one by one through `mutate`: they need a
+    /// durable job, a precise conflict, or another job already holds the owner.
+    pub deferred: Vec<String>,
+}
+
+/// Applies one owner action to many selected roots in one synchronous
+/// transaction, sharing `mutate`'s lock, deadline and 256-node budget. Roots
+/// that do not fit are deferred untouched, so large trees keep their durable
+/// job path and its progress polling.
+pub(crate) async fn mutate_many(
+    db: &Database,
+    owner_id: &str,
+    root_ids: &[String],
+    action: Action,
+) -> Result<BatchMutation> {
+    debug_assert!(root_ids.len() <= BATCH_ROOT_LIMIT);
+    let mut client = db.get().await.map_err(crate::db::http_error)?;
+    let transaction = client
+        .transaction()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    let result = tokio::time::timeout(OPERATION_DEADLINE, async {
+        transaction.batch_execute("SET LOCAL statement_timeout = '2s'; SET LOCAL lock_timeout = '1s';").await.map_err(retryable_database_error)?;
+        query_one_cached(&transaction, "SELECT pg_advisory_xact_lock(hashtextextended('aeralyth:tree-operation:' || $1::text, 0))",
+            &[&owner_id],
+        ).await.map_err(retryable_database_error)?;
+        let mut batch = BatchMutation::default();
+        if query_opt_cached(&transaction, "SELECT id FROM tree_operation_jobs WHERE owner_id = $1 AND status IN ('pending','running')",
+            &[&owner_id],
+        ).await.map_err(retryable_database_error)?.is_some() {
+            batch.deferred = root_ids.to_vec();
+            return Ok(batch);
+        }
+        let found = query_cached(&transaction, "SELECT id FROM visible_files AS files WHERE id = ANY($1::text[]) AND owner_id = $2 AND state = $3 ORDER BY id FOR UPDATE",
+            &[&root_ids, &owner_id, &action.root_state()],
+        ).await.map_err(retryable_database_error)?
+            .into_iter().map(|row| row.get::<_, String>("id")).collect::<HashSet<_>>();
+        let blocked = if matches!(action, Action::Restore) {
+            query_cached(&transaction, "SELECT node.id FROM files AS node JOIN files AS parent ON parent.id = node.parent_id WHERE node.id = ANY($1::text[]) AND (parent.owner_id <> $2 OR parent.state <> 'active' OR NOT tree_operation_visible(parent.id, parent.owner_id))",
+                &[&root_ids, &owner_id],
+            ).await.map_err(retryable_database_error)?
+                .into_iter().map(|row| row.get::<_, String>("id")).collect::<HashSet<_>>()
+        } else {
+            HashSet::new()
+        };
+
+        let mut seen = HashSet::new();
+        let mut nodes: Vec<TreeWalkNode> = Vec::new();
+        for root_id in root_ids {
+            if !found.contains(root_id) {
+                batch.missing.push(root_id.clone());
+            } else if blocked.contains(root_id) {
+                batch.deferred.push(root_id.clone());
+            } else if seen.contains(root_id) {
+                // A selected descendant of an earlier selected root.
+                batch.completed.push(root_id.clone());
+            } else {
+                let budget = SYNC_NODE_LIMIT.saturating_sub(seen.len());
+                let tree = if budget == 0 { None } else {
+                    walk_subtree(&transaction, TreeWalkScope {
+                        owner_id, root_id, root_state: Some(action.root_state()), child_state: None,
+                        e2ee_state: None, max_nodes: budget,
+                    }).await.map_err(retryable_database_error)?
+                };
+                match tree {
+                    Some(tree) if !tree.truncated => {
+                        for node in tree.nodes {
+                            if seen.insert(node.id.clone()) {
+                                nodes.push(node);
+                            }
+                        }
+                        batch.completed.push(root_id.clone());
+                    }
+                    _ => batch.deferred.push(root_id.clone()),
+                }
+            }
+        }
+        if nodes.is_empty() {
+            return Ok(batch);
+        }
+        match action {
+            Action::Trash | Action::Restore => {
+                update_tree_state(&transaction, &nodes, owner_id, if matches!(action,Action::Trash) { "trashed" } else { "active" }).await.map_err(retryable_database_error)?;
+            }
+            Action::Delete => {
+                let ids = nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>();
+                transaction.batch_execute("SAVEPOINT small_tree_dependencies").await.map_err(retryable_database_error)?;
+                let mut ready = false;
+                for _ in 0..8 {
+                    ready = query_one_cached(&transaction, "SELECT tree_operation_drain_dependencies($1,$2,$3)", &[&owner_id,&ids,&256_i32]).await.map_err(retryable_database_error)?.get(0);
+                    if ready { break; }
+                }
+                if !ready {
+                    // Per-root deletion can fall back to a durable job.
+                    transaction.batch_execute("ROLLBACK TO SAVEPOINT small_tree_dependencies").await.map_err(retryable_database_error)?;
+                    batch.deferred.append(&mut batch.completed);
+                    return Ok(batch);
+                }
+                transaction.batch_execute("RELEASE SAVEPOINT small_tree_dependencies").await.map_err(retryable_database_error)?;
+                // One statement: foreign keys see the whole set at once.
+                query_one_cached(&transaction, DELETE_TREE_BATCH_QUERY, &[&ids, &owner_id]).await.map_err(retryable_database_error)?;
+            }
+        }
+        Ok::<_, actix_web::Error>(batch)
+    }).await;
+    match result {
+        Ok(Ok(batch)) => {
+            transaction
+                .commit()
+                .await
+                .map_err(error::ErrorInternalServerError)?;
+            Ok(batch)
+        }
+        Ok(Err(error)) => {
+            let _ = transaction.rollback().await;
+            Err(error)
+        }
+        Err(_) => {
             let _ = transaction.rollback().await;
             Err(error::ErrorServiceUnavailable(
                 "tree operation admission timed out; retry",
@@ -496,6 +629,164 @@ mod tests {
         }
         assert_eq!(discovery_quotas(1), vec![256]);
         assert_eq!(discovery_quotas(256), vec![1; 256]);
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires isolated PostgreSQL with migration 029"]
+    async fn batch_mutations_apply_small_selections_and_defer_the_rest() {
+        let _serial = DATABASE_TEST_LOCK.lock().await;
+        let config = Config::from_env().expect("test configuration");
+        let db = Database::create(
+            &config.database_url,
+            DatabasePoolSettings {
+                role: PoolRole::Maintenance,
+                max_size: 2,
+                min_size: 1,
+                checkout_queue_capacity: 4,
+                wait_timeout: Duration::from_secs(2),
+                max_lifetime: Duration::from_secs(1800),
+                lifetime_jitter: Duration::ZERO,
+            },
+            Metrics::new(&config),
+        )
+        .await
+        .expect("test database");
+        let owner = "usr_tree_batch";
+        let ids = |values: &[&str]| {
+            values
+                .iter()
+                .map(|value| (*value).to_owned())
+                .collect::<Vec<_>>()
+        };
+        let states = |values: &'static [&'static str]| {
+            let db = db.clone();
+            async move {
+                let rows = db
+                    .query(
+                        "SELECT id, state FROM files WHERE id = ANY($1::text[]) ORDER BY id",
+                        &[&values],
+                    )
+                    .await
+                    .unwrap();
+                rows.into_iter()
+                    .map(|row| {
+                        format!(
+                            "{}={}",
+                            row.get::<_, String>("id"),
+                            row.get::<_, String>("state")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+            }
+        };
+        db.execute(
+            "INSERT INTO users(id,username,password_hash,role) VALUES($1,$1,'unused','user')",
+            &[&owner],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO files(id,owner_id,original_name,storage_name,size_bytes,entry_type) VALUES
+            ('tb_folder',$1,'folder','tb/folder',0,'folder'),
+            ('tb_big',$1,'big','tb/big',0,'folder')",
+            &[&owner],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO files(id,owner_id,original_name,storage_name,size_bytes,parent_id) VALUES
+            ('tb_a',$1,'a','tb/a',1,NULL),
+            ('tb_b',$1,'b','tb/b',1,NULL),
+            ('tb_child',$1,'child','tb/child',1,'tb_folder')",
+            &[&owner],
+        )
+        .await
+        .unwrap();
+        db.execute("INSERT INTO files(id,owner_id,original_name,storage_name,size_bytes,parent_id) SELECT 'tb_big_'||n,$1,'leaf-'||n,'tb/big/'||n,1,'tb_big' FROM generate_series(1,300) n", &[&owner]).await.unwrap();
+
+        // Small roots, a selected descendant, an unknown id and a tree over the
+        // synchronous budget, all in one request.
+        let trash = mutate_many(
+            &db,
+            owner,
+            &ids(&[
+                "tb_child",
+                "tb_folder",
+                "tb_a",
+                "tb_b",
+                "tb_missing",
+                "tb_big",
+            ]),
+            Action::Trash,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            trash.completed,
+            ids(&["tb_child", "tb_folder", "tb_a", "tb_b"])
+        );
+        assert_eq!(trash.missing, ids(&["tb_missing"]));
+        assert_eq!(trash.deferred, ids(&["tb_big"]));
+        assert_eq!(
+            states(&["tb_a", "tb_b", "tb_big", "tb_child", "tb_folder"]).await,
+            [
+                "tb_a=trashed",
+                "tb_b=trashed",
+                "tb_big=active",
+                "tb_child=trashed",
+                "tb_folder=trashed"
+            ]
+        );
+        let active_big: i64 = db
+            .query_one(
+                "SELECT count(*) FROM files WHERE parent_id = 'tb_big' AND state = 'active'",
+                &[],
+            )
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(active_big, 300, "a deferred tree is left untouched");
+
+        // A durable job owns the owner's tree lane; everything defers to it.
+        let job = mutate(&db, owner, "tb_big", Action::Trash, None, None)
+            .await
+            .unwrap();
+        assert!(matches!(job, MutationResult::Queued(_)));
+        let blocked = mutate_many(&db, owner, &ids(&["tb_a"]), Action::Restore)
+            .await
+            .unwrap();
+        assert_eq!(blocked.deferred, ids(&["tb_a"]));
+        assert!(blocked.completed.is_empty());
+        for _ in 0..32 {
+            let pending: i64 = db.query_one("SELECT count(*) FROM tree_operation_jobs WHERE owner_id = $1 AND status <> 'complete'", &[&owner]).await.unwrap().get(0);
+            if pending == 0 {
+                break;
+            }
+            process_batch(&db).await.unwrap();
+        }
+
+        // Restoring a child under a trashed parent needs the per-item conflict.
+        let restore = mutate_many(&db, owner, &ids(&["tb_child", "tb_a"]), Action::Restore)
+            .await
+            .unwrap();
+        assert_eq!(restore.completed, ids(&["tb_a"]));
+        assert_eq!(restore.deferred, ids(&["tb_child"]));
+        assert_eq!(
+            states(&["tb_a", "tb_child"]).await,
+            ["tb_a=active", "tb_child=trashed"]
+        );
+
+        let delete = mutate_many(&db, owner, &ids(&["tb_folder", "tb_b"]), Action::Delete)
+            .await
+            .unwrap();
+        assert_eq!(delete.completed, ids(&["tb_folder", "tb_b"]));
+        assert!(states(&["tb_b", "tb_child", "tb_folder"]).await.is_empty());
+        let queued: i64 = db.query_one("SELECT count(*) FROM storage_deletion_jobs WHERE object_key IN ('usr_tree_batch/tb/b','tb/b','usr_tree_batch/tb/child','tb/child')", &[]).await.unwrap().get(0);
+        assert_eq!(queued, 2, "deleted files queue their stored objects");
+
+        db.execute("DELETE FROM users WHERE id = $1", &[&owner])
+            .await
+            .unwrap();
     }
 
     #[actix_web::test]

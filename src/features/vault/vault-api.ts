@@ -354,6 +354,87 @@ export async function mutateFileTree(
   }
 }
 
+const FILE_TREE_BATCH_LIMIT = 256;
+
+export type FileTreeBatchResult = {
+  completed: string[];
+  missing: string[];
+  deferred: string[];
+};
+
+/**
+ * Applies one mutation to a multi-selection with one request per 256 ids.
+ * Deferred ids need a durable job or a precise per-item error, so callers
+ * finish them through `mutateFileTree`. A chunk that fails, including against
+ * an API without the batch route, is deferred to that per-item path as well.
+ */
+export async function mutateFileTrees(
+  entryIds: readonly string[],
+  mutation: FileTreeMutation,
+  csrfToken: string,
+  signal?: AbortSignal,
+): Promise<FileTreeBatchResult> {
+  const result: FileTreeBatchResult = {
+    completed: [],
+    missing: [],
+    deferred: [],
+  };
+  for (let start = 0; start < entryIds.length; start += FILE_TREE_BATCH_LIMIT) {
+    const ids = entryIds.slice(start, start + FILE_TREE_BATCH_LIMIT);
+    try {
+      // react-doctor-disable-next-line react-doctor/async-await-in-loop
+      const payload = await runVaultRecursiveOperation(async () => {
+        const response = await fetch("/api/files/operations", {
+          method: "POST",
+          credentials: "same-origin",
+          headers: {
+            Accept: "application/json",
+            "Content-Type": "application/json",
+            "X-CSRF-Token": csrfToken,
+          },
+          body: JSON.stringify({ action: mutation, ids }),
+          signal,
+        });
+        if (!response.ok)
+          throw new VaultApiError(
+            (await response.text()) || "The file operation failed.",
+            response.status,
+            response.headers.get("retry-after"),
+          );
+        return (await response.json()) as Partial<FileTreeBatchResult>;
+      }, signal);
+      const chunk = validFileTreeBatch(payload, ids);
+      if (!chunk)
+        throw new Error("The file operation returned an invalid response.");
+      result.completed.push(...chunk.completed);
+      result.missing.push(...chunk.missing);
+      result.deferred.push(...chunk.deferred);
+    } catch (error) {
+      if (signal?.aborted) throw error;
+      result.deferred.push(...ids);
+    }
+  }
+  return result;
+}
+
+function validFileTreeBatch(
+  payload: Partial<FileTreeBatchResult>,
+  ids: readonly string[],
+): FileTreeBatchResult | null {
+  const lists = [payload.completed, payload.missing, payload.deferred];
+  if (!lists.every((list) => Array.isArray(list))) return null;
+  const returned = lists.flat();
+  const requested = new Set(ids);
+  if (
+    returned.length !== requested.size ||
+    new Set(returned).size !== returned.length ||
+    !returned.every((id) => typeof id === "string" && requested.has(id))
+  ) {
+    return null;
+  }
+  return payload as FileTreeBatchResult;
+}
+
 export function getUnlockMaterial(
   signal?: AbortSignal,
 ): Promise<VaultUnlockMaterial> {

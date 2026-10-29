@@ -120,6 +120,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
                 )
                 .route("/repositories/{id}", web::get().to(repositories::detail))
                 .route("/files/summary", web::get().to(files::summary))
+                .route("/files/operations", web::post().to(files::mutate_batch))
                 .route("/files/operations/{id}", web::get().to(tree_jobs::status))
                 .route("/files", web::get().to(files::list_files))
                 .route(
