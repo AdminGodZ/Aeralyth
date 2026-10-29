@@ -2620,46 +2620,6 @@ async fn list_entries(
         .await;
     }
 
-    let predicate = match view {
-        "files" => "files.state = 'active' AND files.parent_id IS NOT DISTINCT FROM $2",
-        "trash" => {
-            "files.state = 'trashed' AND NOT EXISTS (
-              SELECT 1 FROM visible_files AS parent
-              WHERE parent.id = files.parent_id AND parent.state = 'trashed'
-            )"
-        }
-        "favorites" => "files.state = 'active' AND files.favorite = true",
-        "recent" => "files.state = 'active'",
-        _ => "files.state = 'active'",
-    };
-    let rank = "CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END";
-    let name = "lower(files.original_name)";
-    let date = if view == "trash" {
-        "COALESCE(files.trashed_at, files.updated_at)"
-    } else {
-        "files.updated_at"
-    };
-    let comparison = if direction == "ASC" { ">" } else { "<" };
-    let (cursor_predicate, order) = match effective_sort {
-        "size" => (
-            format!(
-                "$3::integer IS NULL OR {rank} > $3 OR ({rank} = $3 AND (files.size_bytes {comparison} $5 OR (files.size_bytes = $5 AND ({name} > $4 OR ({name} = $4 AND files.id > $7)))))"
-            ),
-            format!("{rank} ASC, files.size_bytes {direction}, {name} ASC, files.id ASC"),
-        ),
-        "updated" => (
-            format!(
-                "$3::integer IS NULL OR {rank} > $3 OR ({rank} = $3 AND ({date} {comparison} $6::text::timestamptz OR ({date} = $6::text::timestamptz AND ({name} > $4 OR ({name} = $4 AND files.id > $7)))))"
-            ),
-            format!("{rank} ASC, {date} {direction}, {name} ASC, files.id ASC"),
-        ),
-        _ => (
-            format!(
-                "$3::integer IS NULL OR {rank} > $3 OR ({rank} = $3 AND ({name} {comparison} $4 OR ({name} = $4 AND files.id > $7)))"
-            ),
-            format!("{rank} ASC, {name} {direction}, files.id ASC"),
-        ),
-    };
     let folder_id = folder_id.map(str::to_owned);
     let cursor_rank = cursor.as_ref().map(|value| value.rank);
     let cursor_name = cursor.as_ref().map(|value| value.name.clone());
@@ -2668,47 +2628,12 @@ async fn list_entries(
     let cursor_id = cursor.as_ref().map(|value| value.id.clone());
     let row_limit = i64::try_from(page_size + 1)
         .map_err(|_| error::ErrorInternalServerError("invalid page size"))?;
-    let sql = format!(
-        "
-            SELECT
-              files.id,
-              files.original_name,
-              files.mime_type,
-              files.entry_type,
-              files.parent_id,
-              files.size_bytes,
-              files.state,
-              files.e2ee_state,
-              files.favorite,
-              NULL::text AS owner_username,
-              (files.legacy_share_count > 0 OR files.vault_share_count > 0) AS shared,
-              (
-                files.permanent_share_link_count > 0
-                OR COALESCE(files.latest_share_link_expiry > now(), FALSE)
-              ) AS has_active_share_link,
-              NULL::timestamptz AS shared_at,
-              files.created_at,
-              files.updated_at,
-              files.trashed_at,
-              files.current_generation_id AS vault_generation_id,
-              heads.record_version AS vault_record_version,
-              heads.record_hash AS vault_record_hash,
-              {rank}::integer AS cursor_rank,
-              {name} AS cursor_name,
-              {date} AS cursor_date
-            FROM visible_files AS files
-            LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
-            WHERE files.owner_id = $1
-              AND ($2::text IS NULL OR $2::text IS NOT NULL)
-              AND ($4::text IS NULL OR $4::text IS NOT NULL)
-              AND ($5::bigint IS NULL OR $5::bigint IS NOT NULL)
-              AND ($6::text IS NULL OR $6::text IS NOT NULL)
-              AND ($7::text IS NULL OR $7::text IS NOT NULL)
-              AND {predicate}
-              AND ({cursor_predicate})
-            ORDER BY {order}
-            LIMIT $8
-        "
+    let sql = owned_listing_sql(
+        view,
+        folder_id.is_some(),
+        effective_sort,
+        direction,
+        cursor.is_some(),
     );
 
     let rows = state
@@ -2736,6 +2661,136 @@ async fn list_entries(
         effective_sort,
         direction,
         page_size,
+    )
+}
+
+/// Builds the owned listing so every shape stays index-sargable under generic plans: the folder
+/// predicate is a plain equality (or `IS NULL` at the root), first pages carry no keyset, and
+/// cursor pages compare row values instead of OR-chains the planner cannot turn into index bounds.
+fn owned_listing_sql(
+    view: &str,
+    in_folder: bool,
+    sort: &str,
+    direction: &str,
+    has_cursor: bool,
+) -> String {
+    let predicate = match view {
+        "files" if in_folder => "files.state = 'active' AND files.parent_id = $2",
+        "files" => "files.state = 'active' AND files.parent_id IS NULL",
+        "trash" => {
+            "files.state = 'trashed' AND NOT EXISTS (
+              SELECT 1 FROM visible_files AS parent
+              WHERE parent.id = files.parent_id AND parent.state = 'trashed'
+            )"
+        }
+        "favorites" => "files.state = 'active' AND files.favorite = true",
+        "recent" => "files.state = 'active'",
+        _ => "files.state = 'active'",
+    };
+    let rank = "CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END";
+    let name = "lower(files.original_name)";
+    let date = if view == "trash" {
+        "COALESCE(files.trashed_at, files.updated_at)"
+    } else {
+        "files.updated_at"
+    };
+    // (sort column, cursor parameter, outer column) for sorts ordered before the name tiebreak.
+    let sort_key = match sort {
+        "size" => Some(("files.size_bytes", "$5", "size_bytes")),
+        "updated" => Some((date, "$6::text::timestamptz", "cursor_date")),
+        _ => None,
+    };
+    let order = match sort_key {
+        Some((column, _, _)) => {
+            format!("{rank} ASC, {column} {direction}, {name} ASC, files.id ASC")
+        }
+        None => format!("{rank} ASC, {name} {direction}, files.id ASC"),
+    };
+    let page = |keyset: &str| {
+        format!(
+            "
+            SELECT
+              files.id,
+              files.original_name,
+              files.mime_type,
+              files.entry_type,
+              files.parent_id,
+              files.size_bytes,
+              files.state,
+              files.e2ee_state,
+              files.favorite,
+              NULL::text AS owner_username,
+              (files.legacy_share_count > 0 OR files.vault_share_count > 0) AS shared,
+              (
+                files.permanent_share_link_count > 0
+                OR COALESCE(files.latest_share_link_expiry > now(), FALSE)
+              ) AS has_active_share_link,
+              NULL::timestamptz AS shared_at,
+              files.created_at,
+              files.updated_at,
+              files.trashed_at,
+              files.current_generation_id AS vault_generation_id,
+              heads.record_version AS vault_record_version,
+              heads.record_hash AS vault_record_hash,
+              ({rank})::integer AS cursor_rank,
+              {name} AS cursor_name,
+              {date} AS cursor_date
+            FROM visible_files AS files
+            LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
+            WHERE files.owner_id = $1
+              AND ($2::text IS NULL OR $2::text IS NOT NULL)
+              AND ($3::integer IS NULL OR $3::integer IS NOT NULL)
+              AND ($4::text IS NULL OR $4::text IS NOT NULL)
+              AND ($5::bigint IS NULL OR $5::bigint IS NOT NULL)
+              AND ($6::text IS NULL OR $6::text IS NOT NULL)
+              AND ($7::text IS NULL OR $7::text IS NOT NULL)
+              AND {predicate}
+              AND ({keyset})
+            ORDER BY {order}
+            LIMIT $8
+        "
+        )
+    };
+
+    if !has_cursor {
+        return page("TRUE");
+    }
+    if direction == "ASC" {
+        return page(&match sort_key {
+            Some((column, value, _)) => {
+                format!("({rank}, {column}, {name}, files.id) > ($3, {value}, $4, $7)")
+            }
+            None => format!("({rank}, {name}, files.id) > ($3, $4, $7)"),
+        });
+    }
+
+    // A descending sort key with ascending tiebreaks cannot be one row comparison, so the page
+    // is the rest of the cursor's rank (bounded by the sort key) followed by the next rank.
+    let (same_rank, outer_order) = match sort_key {
+        Some((column, value, outer)) => (
+            format!(
+                "{rank} = $3 AND {column} <= {value} AND ({column} < {value} OR ({name}, files.id) > ($4, $7))"
+            ),
+            format!("cursor_rank ASC, {outer} DESC, cursor_name ASC, id ASC"),
+        ),
+        None => (
+            format!("{rank} = $3 AND {name} <= $4 AND ({name} < $4 OR files.id > $7)"),
+            "cursor_rank ASC, cursor_name DESC, id ASC".to_owned(),
+        ),
+    };
+    format!(
+        "
+            SELECT *
+            FROM (
+              ({same_rank_page})
+              UNION ALL
+              ({next_rank_page})
+            ) AS page
+            ORDER BY {outer_order}
+            LIMIT $8
+        ",
+        same_rank_page = page(&same_rank),
+        next_rank_page = page(&format!("{rank} > $3")),
     )
 }
 
@@ -3615,10 +3670,11 @@ mod tests {
     use actix_web::test::TestRequest;
 
     use super::{
-        DOWNLOAD_FILE_QUERY, FOLDER_ARCHIVE_ACCESS_QUERY, FOLDER_ARCHIVE_ENTRIES_QUERY,
+        DOWNLOAD_FILE_QUERY, FOLDER_ARCHIVE_ACCESS_QUERY, FOLDER_ARCHIVE_ENTRIES_QUERY, FileCursor,
         MAX_FOLDER_ARCHIVE_BYTES, MAX_FOLDER_ARCHIVE_ENTRIES, OWNED_FOLDER_CONTEXT_QUERY,
         PlannedFolder, SHARED_FOLDER_CONTEXT_QUERY, UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER,
-        local_upload_chunk, parse_download_version, plan_folder_manifest, sanitize_upload_path,
+        decode_file_cursor, file_page_from_rows, local_upload_chunk, owned_listing_sql,
+        parse_download_version, plan_folder_manifest, sanitize_upload_path,
     };
 
     #[test]
@@ -3786,6 +3842,184 @@ mod tests {
                 .prepare(query)
                 .await
                 .expect("folder archive query prepares");
+        }
+    }
+
+    #[test]
+    fn owned_listing_keeps_folder_and_cursor_predicates_sargable() {
+        for view in ["files", "trash", "favorites", "recent"] {
+            for in_folder in [false, true] {
+                for sort in ["name", "size", "updated"] {
+                    for direction in ["ASC", "DESC"] {
+                        for has_cursor in [false, true] {
+                            let sql =
+                                owned_listing_sql(view, in_folder, sort, direction, has_cursor);
+                            assert!(!sql.contains("IS NOT DISTINCT FROM"));
+                            assert!(!sql.contains("$3::integer IS NULL OR CASE"));
+                            assert_eq!(
+                                sql.contains("UNION ALL"),
+                                has_cursor && direction == "DESC"
+                            );
+                            for parameter in 1..=8 {
+                                assert!(sql.contains(&format!("${parameter}")));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        assert!(
+            owned_listing_sql("files", true, "name", "ASC", false).contains("files.parent_id = $2")
+        );
+        assert!(
+            owned_listing_sql("files", false, "name", "ASC", false)
+                .contains("files.parent_id IS NULL")
+        );
+        assert!(
+            owned_listing_sql("files", true, "size", "ASC", true).contains(
+                "(CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END, files.size_bytes, \
+                 lower(files.original_name), files.id) > ($3, $5, $4, $7)"
+            )
+        );
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_owned_listing_pages_match_the_unpaged_order() {
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (mut client, connection) =
+            tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+                .await
+                .expect("connect to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            connection
+                .await
+                .expect("PostgreSQL connection stays healthy");
+        });
+        let transaction = client
+            .transaction()
+            .await
+            .expect("test transaction should start");
+        // Duplicate lowercase names, sizes and timestamps force every tiebreak column to matter.
+        transaction
+            .batch_execute(
+                "INSERT INTO users (id, username, password_hash, role, status)
+                   VALUES ('usr_listing_keyset', 'listing_keyset', 'not-a-login-hash', 'user', 'active');
+                 INSERT INTO files (
+                   id, owner_id, original_name, storage_name, size_bytes, state, favorite,
+                   entry_type, parent_id, updated_at, trashed_at
+                 ) VALUES
+                   ('fil_lk_parent', 'usr_listing_keyset', 'Parent', 'tests/lk-parent', 0,
+                    'active', false, 'folder', NULL, '2026-01-01 00:00:00+00', NULL),
+                   ('fil_lk_root_a', 'usr_listing_keyset', 'alpha', 'tests/lk-root-a', 5,
+                    'active', true, 'file', NULL, '2026-01-02 00:00:00+00', NULL),
+                   ('fil_lk_root_b', 'usr_listing_keyset', 'Alpha', 'tests/lk-root-b', 5,
+                    'active', false, 'file', NULL, '2026-01-02 00:00:00+00', NULL),
+                   ('fil_lk_trash_a', 'usr_listing_keyset', 'gone', 'tests/lk-trash-a', 1,
+                    'trashed', false, 'file', NULL, '2026-01-03 00:00:00+00',
+                    '2026-02-01 00:00:00+00'),
+                   ('fil_lk_trash_b', 'usr_listing_keyset', 'Gone', 'tests/lk-trash-b', 1,
+                    'trashed', false, 'file', NULL, '2026-01-03 00:00:00+00',
+                    '2026-02-01 00:00:00+00'),
+                   ('fil_lk_trash_c', 'usr_listing_keyset', 'old', 'tests/lk-trash-c', 9,
+                    'trashed', false, 'folder', NULL, '2026-01-04 00:00:00+00', NULL);
+                 INSERT INTO files (
+                   id, owner_id, original_name, storage_name, size_bytes, state, favorite,
+                   entry_type, parent_id, updated_at
+                 ) VALUES
+                   ('fil_lk_f1', 'usr_listing_keyset', 'docs', 'tests/lk-f1', 0,
+                    'active', true, 'folder', 'fil_lk_parent', '2026-03-01 00:00:00+00'),
+                   ('fil_lk_f2', 'usr_listing_keyset', 'drafts', 'tests/lk-f2', 0,
+                    'active', false, 'folder', 'fil_lk_parent', '2026-03-01 00:00:00+00'),
+                   ('fil_lk_f3', 'usr_listing_keyset', 'archive', 'tests/lk-f3', 0,
+                    'active', false, 'folder', 'fil_lk_parent', '2026-03-02 00:00:00+00'),
+                   ('fil_lk_a1', 'usr_listing_keyset', 'b.txt', 'tests/lk-a1', 10,
+                    'active', true, 'file', 'fil_lk_parent', '2026-03-03 00:00:00+00'),
+                   ('fil_lk_a2', 'usr_listing_keyset', 'B.txt', 'tests/lk-a2', 10,
+                    'active', false, 'file', 'fil_lk_parent', '2026-03-03 00:00:00+00'),
+                   ('fil_lk_a3', 'usr_listing_keyset', 'a.txt', 'tests/lk-a3', 10,
+                    'active', false, 'file', 'fil_lk_parent', '2026-03-04 00:00:00+00'),
+                   ('fil_lk_a4', 'usr_listing_keyset', 'c.txt', 'tests/lk-a4', 3,
+                    'active', true, 'file', 'fil_lk_parent', '2026-03-03 00:00:00+00'),
+                   ('fil_lk_a5', 'usr_listing_keyset', 'c.txt', 'tests/lk-a5', 30,
+                    'active', false, 'file', 'fil_lk_parent', '2026-03-05 00:00:00+00'),
+                   ('fil_lk_a6', 'usr_listing_keyset', 'd.txt', 'tests/lk-a6', 3,
+                    'active', false, 'file', 'fil_lk_parent', '2026-03-03 00:00:00+00');",
+            )
+            .await
+            .expect("listing fixtures should insert");
+
+        let owner = "usr_listing_keyset".to_owned();
+        let row_limit = 1_000_i64;
+        for (view, folder) in [
+            ("files", None),
+            ("files", Some("fil_lk_parent")),
+            ("trash", None),
+            ("favorites", None),
+            ("recent", None),
+        ] {
+            let folder_param = folder.map(str::to_owned);
+            for sort in ["name", "size", "updated"] {
+                for direction in ["ASC", "DESC"] {
+                    let unpaged = transaction
+                        .query(
+                            &owned_listing_sql(view, folder.is_some(), sort, direction, false),
+                            &[
+                                &owner,
+                                &folder_param,
+                                &None::<i32>,
+                                &None::<String>,
+                                &None::<i64>,
+                                &None::<String>,
+                                &None::<String>,
+                                &row_limit,
+                            ],
+                        )
+                        .await
+                        .expect("unpaged listing should execute")
+                        .into_iter()
+                        .map(|row| row.get::<_, String>("id"))
+                        .collect::<Vec<_>>();
+                    assert!(unpaged.len() >= 2, "{view} {folder:?} needs fixtures");
+
+                    let mut paged = Vec::new();
+                    let mut cursor: Option<FileCursor> = None;
+                    loop {
+                        let rows = transaction
+                            .query(
+                                &owned_listing_sql(
+                                    view,
+                                    folder.is_some(),
+                                    sort,
+                                    direction,
+                                    cursor.is_some(),
+                                ),
+                                &[
+                                    &owner,
+                                    &folder_param,
+                                    &cursor.as_ref().map(|value| value.rank),
+                                    &cursor.as_ref().map(|value| value.name.clone()),
+                                    &cursor.as_ref().map(|value| value.size),
+                                    &cursor.as_ref().map(|value| value.date.clone()),
+                                    &cursor.as_ref().map(|value| value.id.clone()),
+                                    &3_i64,
+                                ],
+                            )
+                            .await
+                            .expect("cursor listing should execute");
+                        let page = file_page_from_rows(rows, view, folder, sort, direction, 2)
+                            .expect("page should build");
+                        paged.extend(page.entries.into_iter().map(|entry| entry.id));
+                        let Some(next) = page.next_cursor else {
+                            break;
+                        };
+                        cursor = decode_file_cursor(Some(&next), view, folder, sort, direction)
+                            .expect("cursor should decode");
+                    }
+                    assert_eq!(paged, unpaged, "{view} {folder:?} {sort} {direction}");
+                }
+            }
         }
     }
 
