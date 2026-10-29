@@ -126,11 +126,15 @@ impl Config {
             1,
             upload_control_concurrency,
         );
-        let recursive_operation_concurrency =
-            env_usize("AERALYTH_RECURSIVE_OPERATION_CONCURRENCY", 2, 1, 16);
+        let recursive_operation_concurrency = env_usize(
+            "AERALYTH_RECURSIVE_OPERATION_CONCURRENCY",
+            default_recursive_operation_concurrency(database_pool_max),
+            1,
+            16,
+        );
         let recursive_operation_per_user = env_usize(
             "AERALYTH_RECURSIVE_OPERATION_PER_USER",
-            1,
+            2.min(recursive_operation_concurrency),
             1,
             recursive_operation_concurrency,
         );
@@ -142,7 +146,9 @@ impl Config {
         );
         let recursive_operation_per_user_queue_capacity = env_usize(
             "AERALYTH_RECURSIVE_OPERATION_PER_USER_QUEUE_CAPACITY",
-            recursive_operation_per_user.saturating_mul(4),
+            recursive_operation_per_user
+                .saturating_mul(4)
+                .min(recursive_operation_queue_capacity),
             recursive_operation_per_user,
             recursive_operation_queue_capacity,
         );
@@ -437,6 +443,12 @@ fn is_railway_bucket_endpoint(endpoint: &str) -> bool {
         })
 }
 
+/// Admitted traversals each hold a request connection while they query, so the default budget
+/// leaves two request connections free for session lookups and other short handlers.
+fn default_recursive_operation_concurrency(database_pool_max: usize) -> usize {
+    database_pool_max.saturating_sub(2).clamp(2, 16)
+}
+
 fn env_u32(name: &str, default: u32, min: u32, max: u32) -> u32 {
     env::var(name)
         .ok()
@@ -447,7 +459,42 @@ fn env_u32(name: &str, default: u32, min: u32, max: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::is_railway_bucket_endpoint;
+    use super::{default_recursive_operation_concurrency, is_railway_bucket_endpoint};
+    use crate::state::QueuedMutationLimiter;
+    use std::time::Duration;
+    use tokio::time::timeout;
+
+    #[test]
+    fn default_traversal_budget_scales_with_the_request_pool() {
+        assert_eq!(default_recursive_operation_concurrency(1), 2);
+        assert_eq!(default_recursive_operation_concurrency(4), 2);
+        assert_eq!(default_recursive_operation_concurrency(8), 6);
+        assert_eq!(default_recursive_operation_concurrency(32), 16);
+    }
+
+    #[actix_web::test]
+    async fn default_traversal_budget_runs_concurrent_browsing_per_user_and_across_users() {
+        let workers = default_recursive_operation_concurrency(8);
+        let per_user = 2.min(workers);
+        let (interactive, bulk) =
+            QueuedMutationLimiter::partition(workers, per_user, workers * 4, per_user * 4);
+        let wait = Duration::from_millis(100);
+
+        let first = timeout(wait, interactive.acquire("user")).await.unwrap();
+        let second = timeout(wait, interactive.acquire("user"))
+            .await
+            .expect("one user can open a folder while a download is admitted")
+            .unwrap();
+        let other = timeout(wait, interactive.acquire("other-user"))
+            .await
+            .expect("other users are not serialized behind one user's browsing")
+            .unwrap();
+        let held_bulk = timeout(wait, bulk.acquire("user"))
+            .await
+            .expect("bulk keeps its own workers")
+            .unwrap();
+        drop((first.unwrap(), second, other, held_bulk));
+    }
 
     #[test]
     fn recognizes_only_railway_bucket_hosts_for_lifecycle_guarding() {
