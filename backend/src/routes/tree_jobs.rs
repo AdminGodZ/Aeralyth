@@ -7,7 +7,9 @@ use deadpool_postgres::GenericClient;
 use tokio::sync::watch;
 
 use crate::auth::require_principal;
-use crate::db::{Database, DatabaseError, query_opt_cached};
+use crate::db::{
+    Database, DatabaseError, execute_cached, query_cached, query_one_cached, query_opt_cached,
+};
 use crate::state::AppState;
 
 use super::files::DELETE_TREE_BATCH_QUERY;
@@ -73,12 +75,10 @@ pub(crate) async fn mutate(
         transaction.batch_execute("SET LOCAL statement_timeout = '2s'; SET LOCAL lock_timeout = '1s';").await.map_err(retryable_database_error)?;
         // This lock lasts only for admission and at most 256 synchronous nodes.
         // All physical writers take the shared side in the database guard.
-        transaction.query_one(
-            "SELECT pg_advisory_xact_lock(hashtextextended('aeralyth:tree-operation:' || $1::text, 0))",
+        query_one_cached(&transaction, "SELECT pg_advisory_xact_lock(hashtextextended('aeralyth:tree-operation:' || $1::text, 0))",
             &[&owner_id],
         ).await.map_err(retryable_database_error)?;
-        if let Some(job) = transaction.query_opt(
-            "SELECT id, root_id, action FROM tree_operation_jobs WHERE owner_id = $1 AND status IN ('pending','running')",
+        if let Some(job) = query_opt_cached(&transaction, "SELECT id, root_id, action FROM tree_operation_jobs WHERE owner_id = $1 AND status IN ('pending','running')",
             &[&owner_id],
         ).await.map_err(retryable_database_error)? {
             if job.get::<_, String>("root_id") == root_id && job.get::<_, String>("action") == action.as_str() {
@@ -86,16 +86,14 @@ pub(crate) async fn mutate(
             }
             return Err(error::ErrorConflict("another tree operation is still processing"));
         }
-        let root = transaction.query_opt(
-            "SELECT id FROM visible_files AS files WHERE id = $1 AND owner_id = $2 AND state = $3 FOR UPDATE",
+        let root = query_opt_cached(&transaction, "SELECT id FROM visible_files AS files WHERE id = $1 AND owner_id = $2 AND state = $3 FOR UPDATE",
             &[&root_id, &owner_id, &action.root_state()],
         ).await.map_err(retryable_database_error)?;
         if root.is_none() {
             return Ok(MutationResult::Missing);
         }
         if matches!(action, Action::Restore) {
-            let invalid_parent: bool = transaction.query_one(
-                "SELECT EXISTS(SELECT 1 FROM files AS node JOIN files AS parent ON parent.id = node.parent_id WHERE node.id = $1 AND (parent.owner_id <> $2 OR parent.state <> 'active' OR NOT tree_operation_visible(parent.id, parent.owner_id)))",
+            let invalid_parent: bool = query_one_cached(&transaction, "SELECT EXISTS(SELECT 1 FROM files AS node JOIN files AS parent ON parent.id = node.parent_id WHERE node.id = $1 AND (parent.owner_id <> $2 OR parent.state <> 'active' OR NOT tree_operation_visible(parent.id, parent.owner_id)))",
                 &[&root_id, &owner_id],
             ).await.map_err(retryable_database_error)?.get(0);
             if invalid_parent {
@@ -103,8 +101,7 @@ pub(crate) async fn mutate(
             }
         }
         if let Some(grant) = editor_grant {
-            let authorized = transaction.query_opt(
-                "WITH RECURSIVE ancestors AS (
+            let authorized = query_opt_cached(&transaction, "WITH RECURSIVE ancestors AS (
                     SELECT id,parent_id,ARRAY[id]::text[] AS visited_ids,0 AS depth FROM visible_files AS files WHERE id=$1 AND owner_id=$2 AND state='active'
                     UNION ALL SELECT parent.id,parent.parent_id,child.visited_ids || parent.id,child.depth+1
                     FROM visible_files AS parent JOIN ancestors AS child ON parent.id=child.parent_id
@@ -129,7 +126,7 @@ pub(crate) async fn mutate(
             let ids = tree.nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>();
             let mut ready = false;
             for _ in 0..8 {
-                ready = transaction.query_one("SELECT tree_operation_drain_dependencies($1,$2,$3)", &[&owner_id,&ids,&256_i32]).await.map_err(retryable_database_error)?.get(0);
+                ready = query_one_cached(&transaction, "SELECT tree_operation_drain_dependencies($1,$2,$3)", &[&owner_id,&ids,&256_i32]).await.map_err(retryable_database_error)?.get(0);
                 if ready { break; }
             }
             if !ready {
@@ -139,18 +136,16 @@ pub(crate) async fn mutate(
             transaction.batch_execute("RELEASE SAVEPOINT small_tree_dependencies").await.map_err(retryable_database_error)?;
         }
         if requires_job {
-            let id: i64 = transaction.query_one(
-                "INSERT INTO tree_operation_jobs(owner_id,root_id,action,child_state) VALUES($1,$2,$3,$4) RETURNING id",
+            let id: i64 = query_one_cached(&transaction, "INSERT INTO tree_operation_jobs(owner_id,root_id,action,child_state) VALUES($1,$2,$3,$4) RETURNING id",
                 &[&owner_id, &root_id, &action.as_str(), &child_state],
             ).await.map_err(retryable_database_error)?.get(0);
-            transaction.execute(
-                "INSERT INTO tree_operation_nodes(job_id,node_id,parent_id,depth,entry_type,expanded)
+            execute_cached(&transaction, "INSERT INTO tree_operation_nodes(job_id,node_id,parent_id,depth,entry_type,expanded)
                  SELECT $1,id,parent_id,0,entry_type,entry_type <> 'folder' FROM files WHERE id=$2 AND owner_id=$3",
                 &[&id, &root_id, &owner_id],
             ).await.map_err(retryable_database_error)?;
             // Publication changes collection revisions even before the first worker batch.
-            transaction.execute("SELECT set_config('aeralyth.tree_job_id',$1,true)", &[&id.to_string()]).await.map_err(retryable_database_error)?;
-            transaction.execute("UPDATE files SET updated_at=clock_timestamp() WHERE id=$1 AND owner_id=$2", &[&root_id,&owner_id]).await.map_err(retryable_database_error)?;
+            execute_cached(&transaction, "SELECT set_config('aeralyth.tree_job_id',$1,true)", &[&id.to_string()]).await.map_err(retryable_database_error)?;
+            execute_cached(&transaction, "UPDATE files SET updated_at=clock_timestamp() WHERE id=$1 AND owner_id=$2", &[&root_id,&owner_id]).await.map_err(retryable_database_error)?;
             return Ok(MutationResult::Queued(id));
         }
         match action {
@@ -160,7 +155,7 @@ pub(crate) async fn mutate(
             Action::Delete => {
                 tree.nodes.sort_unstable_by(|a,b| b.depth.cmp(&a.depth).then(a.id.cmp(&b.id)));
                 let ids = tree.nodes.iter().map(|node| node.id.as_str()).collect::<Vec<_>>();
-                transaction.query_one(DELETE_TREE_BATCH_QUERY, &[&ids, &owner_id]).await.map_err(retryable_database_error)?;
+                query_one_cached(&transaction, DELETE_TREE_BATCH_QUERY, &[&ids, &owner_id]).await.map_err(retryable_database_error)?;
             }
         }
         Ok::<_, actix_web::Error>(MutationResult::Complete)
@@ -237,28 +232,28 @@ async fn process_batch(db: &Database) -> Result<bool, DatabaseError> {
     transaction
         .batch_execute("SET LOCAL statement_timeout='2s'; SET LOCAL lock_timeout='500ms';")
         .await?;
-    let audience = transaction.query("SELECT delta.job_id,delta.owner_id FROM tree_operation_counter_deltas AS delta JOIN tree_operation_jobs AS jobs ON jobs.id=delta.job_id WHERE jobs.status='complete' ORDER BY delta.job_id,delta.owner_id LIMIT $1 FOR UPDATE OF delta SKIP LOCKED", &[&16_i64]).await?;
+    let audience = query_cached(&transaction, "SELECT delta.job_id,delta.owner_id FROM tree_operation_counter_deltas AS delta JOIN tree_operation_jobs AS jobs ON jobs.id=delta.job_id WHERE jobs.status='complete' ORDER BY delta.job_id,delta.owner_id LIMIT $1 FOR UPDATE OF delta SKIP LOCKED", &[&16_i64]).await?;
     for target in &audience {
         let owner: String = target.get("owner_id");
         let id: i64 = target.get("job_id");
-        transaction
-            .query_one(
-                "SELECT realtime_enqueue($1,'files'),realtime_enqueue($1,'shared')",
-                &[&owner],
-            )
-            .await?;
-        transaction
-            .execute(
-                "DELETE FROM tree_operation_counter_deltas WHERE job_id=$1 AND owner_id=$2",
-                &[&id, &owner],
-            )
-            .await?;
+        query_one_cached(
+            &transaction,
+            "SELECT realtime_enqueue($1,'files'),realtime_enqueue($1,'shared')",
+            &[&owner],
+        )
+        .await?;
+        execute_cached(
+            &transaction,
+            "DELETE FROM tree_operation_counter_deltas WHERE job_id=$1 AND owner_id=$2",
+            &[&id, &owner],
+        )
+        .await?;
     }
 
     let job = query_opt_cached(&transaction,
         "SELECT id,owner_id,root_id,action,child_state,phase FROM tree_operation_jobs WHERE status IN ('pending','running') AND available_at <= now() ORDER BY available_at,id LIMIT 1 FOR UPDATE SKIP LOCKED", &[]).await?;
     let Some(job) = job else {
-        transaction.execute("DELETE FROM tree_operation_jobs WHERE id IN (SELECT jobs.id FROM tree_operation_jobs AS jobs WHERE jobs.status='complete' AND jobs.completed_at < now()-interval '7 days' AND NOT EXISTS(SELECT 1 FROM tree_operation_counter_deltas AS delta WHERE delta.job_id=jobs.id) AND NOT EXISTS(SELECT 1 FROM tree_operation_nodes AS nodes WHERE nodes.job_id=jobs.id) ORDER BY jobs.id LIMIT 256)", &[]).await?;
+        execute_cached(&transaction, "DELETE FROM tree_operation_jobs WHERE id IN (SELECT jobs.id FROM tree_operation_jobs AS jobs WHERE jobs.status='complete' AND jobs.completed_at < now()-interval '7 days' AND NOT EXISTS(SELECT 1 FROM tree_operation_counter_deltas AS delta WHERE delta.job_id=jobs.id) AND NOT EXISTS(SELECT 1 FROM tree_operation_nodes AS nodes WHERE nodes.job_id=jobs.id) ORDER BY jobs.id LIMIT 256)", &[]).await?;
         transaction.commit().await?;
         return Ok(!audience.is_empty());
     };
@@ -267,17 +262,15 @@ async fn process_batch(db: &Database) -> Result<bool, DatabaseError> {
     let owner_id: String = job.get("owner_id");
     let root_id: String = job.get("root_id");
     let action: String = job.get("action");
-    transaction
-        .execute(
-            "SELECT set_config('aeralyth.tree_job_id',$1,true)",
+    execute_cached(&transaction, "SELECT set_config('aeralyth.tree_job_id',$1,true)",
             &[&job_id.to_string()],
         )
         .await?;
-    transaction.execute("UPDATE tree_operation_jobs SET status='running',available_at=clock_timestamp(),updated_at=now(),last_error=NULL WHERE id=$1", &[&job_id]).await?;
+    execute_cached(&transaction, "UPDATE tree_operation_jobs SET status='running',available_at=clock_timestamp(),updated_at=now(),last_error=NULL WHERE id=$1", &[&job_id]).await?;
     if job.get::<_, String>("phase") == "discover" {
-        let parents = transaction.query("SELECT node_id,depth,last_child_id FROM tree_operation_nodes WHERE job_id=$1 AND NOT expanded ORDER BY depth,node_id LIMIT $2", &[&job_id,&JOB_BATCH_SIZE]).await?;
+        let parents = query_cached(&transaction, "SELECT node_id,depth,last_child_id FROM tree_operation_nodes WHERE job_id=$1 AND NOT expanded ORDER BY depth,node_id LIMIT $2", &[&job_id,&JOB_BATCH_SIZE]).await?;
         if parents.is_empty() {
-            transaction.execute("UPDATE tree_operation_jobs SET phase='mutate' WHERE id=$1", &[&job_id]).await?;
+            execute_cached(&transaction, "UPDATE tree_operation_jobs SET phase='mutate' WHERE id=$1", &[&job_id]).await?;
         } else {
             let parent_ids = parents.iter().map(|row| row.get::<_,String>("node_id")).collect::<Vec<_>>();
             let child_state: Option<String> = job.get("child_state");
@@ -286,7 +279,7 @@ async fn process_batch(db: &Database) -> Result<bool, DatabaseError> {
             // Divide the total row budget across parents. An outer LIMIT over
             // 256 children per parent would repeatedly read up to 65,536 rows.
             let quotas = discovery_quotas(parents.len());
-            let children = transaction.query("SELECT child.id,child.parent_id,child.entry_type,parent.depth,(parent.ordinality-1)::integer AS parent_index FROM unnest($2::text[],$3::integer[],$4::text[],$6::integer[]) WITH ORDINALITY AS parent(node_id,depth,last_child_id,quota,ordinality) LEFT JOIN LATERAL (SELECT id,parent_id,entry_type FROM files WHERE owner_id=$1 AND parent_id=parent.node_id AND id > COALESCE(parent.last_child_id,'') AND ($5::text IS NULL OR state=$5) ORDER BY id LIMIT parent.quota) AS child ON true ORDER BY parent.ordinality,child.id", &[&owner_id,&parent_ids,&parent_depths,&parent_cursors,&child_state,&quotas]).await?;
+            let children = query_cached(&transaction, "SELECT child.id,child.parent_id,child.entry_type,parent.depth,(parent.ordinality-1)::integer AS parent_index FROM unnest($2::text[],$3::integer[],$4::text[],$6::integer[]) WITH ORDINALITY AS parent(node_id,depth,last_child_id,quota,ordinality) LEFT JOIN LATERAL (SELECT id,parent_id,entry_type FROM files WHERE owner_id=$1 AND parent_id=parent.node_id AND id > COALESCE(parent.last_child_id,'') AND ($5::text IS NULL OR state=$5) ORDER BY id LIMIT parent.quota) AS child ON true ORDER BY parent.ordinality,child.id", &[&owner_id,&parent_ids,&parent_depths,&parent_cursors,&child_state,&quotas]).await?;
             let mut child_counts = vec![0_usize; parents.len()];
             let mut last_ids = vec![None::<String>; parents.len()];
             let mut ids = Vec::with_capacity(children.len());
@@ -304,7 +297,7 @@ async fn process_batch(db: &Database) -> Result<bool, DatabaseError> {
                 depths.push(child.get::<_,i32>("depth") + 1);
             }
             if !ids.is_empty() {
-                transaction.execute("INSERT INTO tree_operation_nodes(job_id,node_id,parent_id,depth,entry_type,expanded) SELECT $1,node_id,parent_id,depth,entry_type,entry_type <> 'folder' FROM unnest($2::text[],$3::text[],$4::integer[],$5::text[]) AS nodes(node_id,parent_id,depth,entry_type) ON CONFLICT(job_id,node_id) DO NOTHING", &[&job_id,&ids,&child_parents,&depths,&kinds]).await?;
+                execute_cached(&transaction, "INSERT INTO tree_operation_nodes(job_id,node_id,parent_id,depth,entry_type,expanded) SELECT $1,node_id,parent_id,depth,entry_type,entry_type <> 'folder' FROM unnest($2::text[],$3::text[],$4::integer[],$5::text[]) AS nodes(node_id,parent_id,depth,entry_type) ON CONFLICT(job_id,node_id) DO NOTHING", &[&job_id,&ids,&child_parents,&depths,&kinds]).await?;
             }
             let mut expanded_ids = Vec::new();
             let mut cursor_parent_ids = Vec::new();
@@ -318,37 +311,34 @@ async fn process_batch(db: &Database) -> Result<bool, DatabaseError> {
                 }
             }
             if !expanded_ids.is_empty() {
-                transaction.execute("UPDATE tree_operation_nodes SET expanded=true WHERE job_id=$1 AND node_id=ANY($2::text[])", &[&job_id,&expanded_ids]).await?;
+                execute_cached(&transaction, "UPDATE tree_operation_nodes SET expanded=true WHERE job_id=$1 AND node_id=ANY($2::text[])", &[&job_id,&expanded_ids]).await?;
             }
             if !cursor_parent_ids.is_empty() {
-                transaction.execute("UPDATE tree_operation_nodes AS nodes SET last_child_id=cursor.last_child_id FROM unnest($2::text[],$3::text[]) AS cursor(node_id,last_child_id) WHERE nodes.job_id=$1 AND nodes.node_id=cursor.node_id", &[&job_id,&cursor_parent_ids,&cursor_child_ids]).await?;
+                execute_cached(&transaction, "UPDATE tree_operation_nodes AS nodes SET last_child_id=cursor.last_child_id FROM unnest($2::text[],$3::text[]) AS cursor(node_id,last_child_id) WHERE nodes.job_id=$1 AND nodes.node_id=cursor.node_id", &[&job_id,&cursor_parent_ids,&cursor_child_ids]).await?;
             }
         }
     } else {
-        let nodes = transaction.query("SELECT node_id FROM tree_operation_nodes WHERE job_id=$1 AND NOT processed ORDER BY depth DESC,node_id LIMIT $2", &[&job_id,&JOB_BATCH_SIZE]).await?;
+        let nodes = query_cached(&transaction, "SELECT node_id FROM tree_operation_nodes WHERE job_id=$1 AND NOT processed ORDER BY depth DESC,node_id LIMIT $2", &[&job_id,&JOB_BATCH_SIZE]).await?;
         if nodes.is_empty() {
             // Change the root revision in the same transaction that removes the fence.
-            transaction
-                .execute(
-                    "UPDATE files SET updated_at=clock_timestamp() WHERE id=$1 AND owner_id=$2",
+            execute_cached(&transaction, "UPDATE files SET updated_at=clock_timestamp() WHERE id=$1 AND owner_id=$2",
                     &[&root_id, &owner_id],
                 )
                 .await?;
-            transaction.execute("UPDATE tree_operation_jobs SET status='complete',completed_at=now(),updated_at=now() WHERE id=$1", &[&job_id]).await?;
-            transaction.query_one("SELECT realtime_enqueue($1,'files'),realtime_enqueue($1,'repositories')", &[&owner_id]).await?;
+            execute_cached(&transaction, "UPDATE tree_operation_jobs SET status='complete',completed_at=now(),updated_at=now() WHERE id=$1", &[&job_id]).await?;
+            query_one_cached(&transaction, "SELECT realtime_enqueue($1,'files'),realtime_enqueue($1,'repositories')", &[&owner_id]).await?;
         } else {
             let ids = nodes
                 .iter()
                 .map(|row| row.get::<_, String>("node_id"))
                 .collect::<Vec<_>>();
             if action == "delete" {
-                let ready: bool = transaction.query_one("SELECT tree_operation_drain_dependencies($1,$2,$3)", &[&owner_id,&ids,&256_i32]).await?.get(0);
+                let ready: bool = query_one_cached(&transaction, "SELECT tree_operation_drain_dependencies($1,$2,$3)", &[&owner_id,&ids,&256_i32]).await?.get(0);
                 if !ready {
-                    transaction.execute("UPDATE tree_operation_jobs SET available_at=clock_timestamp(),updated_at=now() WHERE id=$1", &[&job_id]).await?;
+                    execute_cached(&transaction, "UPDATE tree_operation_jobs SET available_at=clock_timestamp(),updated_at=now() WHERE id=$1", &[&job_id]).await?;
                     return Ok(());
                 }
-                transaction
-                    .query_one(DELETE_TREE_BATCH_QUERY, &[&ids, &owner_id])
+                query_one_cached(&transaction, DELETE_TREE_BATCH_QUERY, &[&ids, &owner_id])
                     .await?;
             } else {
                 let new_state = if action == "trash" {
@@ -356,10 +346,10 @@ async fn process_batch(db: &Database) -> Result<bool, DatabaseError> {
                 } else {
                     "active"
                 };
-                transaction.execute("UPDATE files SET state=$3,trashed_at=CASE WHEN $3='trashed' THEN now() ELSE NULL END,updated_at=now() WHERE owner_id=$2 AND id=ANY($1::text[])", &[&ids,&owner_id,&new_state]).await?;
+                execute_cached(&transaction, "UPDATE files SET state=$3,trashed_at=CASE WHEN $3='trashed' THEN now() ELSE NULL END,updated_at=now() WHERE owner_id=$2 AND id=ANY($1::text[])", &[&ids,&owner_id,&new_state]).await?;
             }
-            transaction.execute("DELETE FROM tree_operation_nodes WHERE job_id=$1 AND node_id=ANY($2::text[])", &[&job_id,&ids]).await?;
-            transaction.execute("UPDATE tree_operation_jobs SET processed_nodes=processed_nodes+$2,available_at=clock_timestamp(),updated_at=now() WHERE id=$1", &[&job_id,&(ids.len() as i64)]).await?;
+            execute_cached(&transaction, "DELETE FROM tree_operation_nodes WHERE job_id=$1 AND node_id=ANY($2::text[])", &[&job_id,&ids]).await?;
+            execute_cached(&transaction, "UPDATE tree_operation_jobs SET processed_nodes=processed_nodes+$2,available_at=clock_timestamp(),updated_at=now() WHERE id=$1", &[&job_id,&(ids.len() as i64)]).await?;
         }
     }
         Ok::<_,tokio_postgres::Error>(())

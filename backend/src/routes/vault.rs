@@ -15,7 +15,7 @@ use tokio_postgres::IsolationLevel;
 use crate::auth::{SessionPrincipal, parse_json_body, require_header_csrf, require_principal};
 use crate::collection_timestamps::touch_ancestor_collections;
 use crate::config::E2eeMode;
-use crate::db::{query_one_cached, query_opt_cached};
+use crate::db::{execute_cached, query_cached, query_one_cached, query_opt_cached};
 use crate::e2ee::{
     ARGON2ID_ALGORITHM, ARGON2ID_MEMORY_BYTES, ARGON2ID_OPERATIONS, ARGON2ID_OUTPUT_BYTES,
     CRYPTO_CHUNK_BYTES, DecodedWrapper, FORMAT_VERSION, MAX_CIPHERTEXT_BYTES, MAX_SHARE_WRAPPERS,
@@ -1089,8 +1089,7 @@ pub async fn claim_migration(
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let candidate = transaction
-        .query_opt(MIGRATION_CLAIM_QUERY, &[&user.id])
+    let candidate = query_opt_cached(&transaction, MIGRATION_CLAIM_QUERY, &[&user.id])
         .await
         .map_err(error::ErrorInternalServerError)?;
     let Some(candidate) = candidate else {
@@ -1105,9 +1104,9 @@ pub async fn claim_migration(
         }));
     };
     let node_id: String = candidate.get("id");
-    let stale_upload = transaction
-        .query_opt(
-            "
+    let stale_upload = query_opt_cached(
+        &transaction,
+        "
                 SELECT id, object_key, multipart_upload_id
                 FROM vault_uploads
                 WHERE owner_id = $1 AND node_id = $2
@@ -1115,43 +1114,43 @@ pub async fn claim_migration(
                 LIMIT 1
                 FOR UPDATE
             ",
-            &[&user.id, &node_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&user.id, &node_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     if let Some(stale_upload) = stale_upload {
         let upload_id: String = stale_upload.get("id");
         let object_key: Option<String> = stale_upload.get("object_key");
         let multipart_upload_id: Option<String> = stale_upload.get("multipart_upload_id");
         if let Some(object_key) = object_key {
-            transaction
-                .execute(
-                    "
+            execute_cached(
+                &transaction,
+                "
                         INSERT INTO storage_deletion_jobs (object_key, multipart_upload_id)
                         VALUES ($1, $2)
                         ON CONFLICT (object_key) DO UPDATE
                         SET multipart_upload_id = EXCLUDED.multipart_upload_id,
                             available_at = now(), locked_until = NULL
                     ",
-                    &[&object_key, &multipart_upload_id],
-                )
-                .await
-                .map_err(error::ErrorInternalServerError)?;
-            transaction
-                .execute(
-                    "UPDATE vault_uploads SET status = 'aborting', expires_at = now() WHERE id = $1",
-                    &[&upload_id],
-                )
-                .await
-                .map_err(error::ErrorInternalServerError)?;
+                &[&object_key, &multipart_upload_id],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+            execute_cached(
+                &transaction,
+                "UPDATE vault_uploads SET status = 'aborting', expires_at = now() WHERE id = $1",
+                &[&upload_id],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
         } else {
-            transaction
-                .execute(
-                    "UPDATE vault_uploads SET status = 'aborted' WHERE id = $1",
-                    &[&upload_id],
-                )
-                .await
-                .map_err(error::ErrorInternalServerError)?;
+            execute_cached(
+                &transaction,
+                "UPDATE vault_uploads SET status = 'aborted' WHERE id = $1",
+                &[&upload_id],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
         }
         transaction
             .commit()
@@ -1160,27 +1159,25 @@ pub async fn claim_migration(
         return Ok(HttpResponse::Conflict()
             .body("an interrupted migration upload is being cleaned up; retry shortly"));
     }
-    transaction
-        .execute(
-            "DELETE FROM vault_uploads WHERE owner_id = $1 AND node_id = $2 AND status = 'aborted'",
-            &[&user.id, &node_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "DELETE FROM vault_uploads WHERE owner_id = $1 AND node_id = $2 AND status = 'aborted'",
+        &[&user.id, &node_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     let entry_type: String = candidate.get("entry_type");
     let legacy_object_key =
         (entry_type == "file").then(|| candidate.get::<_, String>("storage_name"));
     // Match publication/file mutation lock order: file revision shard, then progress counter.
-    transaction
-        .execute(
-            "UPDATE files SET e2ee_state = 'staged', updated_at = now() WHERE id = $1 AND owner_id = $2",
+    execute_cached(&transaction, "UPDATE files SET e2ee_state = 'staged', updated_at = now() WHERE id = $1 AND owner_id = $2",
             &[&node_id, &user.id],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "
                 INSERT INTO vault_migrations (
                   node_id, owner_id, legacy_object_key, state, attempts, last_error
                 ) VALUES ($1, $2, $3, 'encrypting', 1, NULL)
@@ -1189,14 +1186,17 @@ pub async fn claim_migration(
                     legacy_object_key = EXCLUDED.legacy_object_key,
                     staged_object_key = NULL, last_error = NULL, updated_at = now()
             ",
-            &[&node_id, &user.id, &legacy_object_key],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute("DELETE FROM file_shares WHERE file_id = $1", &[&node_id])
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&node_id, &user.id, &legacy_object_key],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "DELETE FROM file_shares WHERE file_id = $1",
+        &[&node_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     let response = MigrationNodeResponse {
         node_id: node_id.clone(),
         parent_id: candidate.get("parent_id"),
@@ -1250,9 +1250,9 @@ pub async fn setup(
         .await
         .map_err(error::ErrorInternalServerError)?;
     lock_account_for_mutation(&transaction, &user).await?;
-    let inserted = transaction
-        .execute(
-            "
+    let inserted = execute_cached(
+        &transaction,
+        "
                 INSERT INTO user_vaults (
                   user_id, format_version, kdf_algorithm, kdf_salt,
                   kdf_operations, kdf_memory_bytes, kdf_output_bytes,
@@ -1264,64 +1264,64 @@ pub async fn setup(
                 VALUES ($1, 1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
                 ON CONFLICT (user_id) DO NOTHING
             ",
-            &[
-                &user.id,
-                &ARGON2ID_ALGORITHM,
-                &material.kdf_salt,
-                &(ARGON2ID_OPERATIONS as i64),
-                &(ARGON2ID_MEMORY_BYTES as i64),
-                &(ARGON2ID_OUTPUT_BYTES as i32),
-                &material.password_wrapper_id,
-                &material.password_root_ciphertext,
-                &material.recovery_salt,
-                &material.recovery_wrapper_id,
-                &material.recovery_root_ciphertext,
-                &material.identity_record_id,
-                &material.identity_private_ciphertext,
-                &material.account_state_record_id,
-                &material.encrypted_account_state,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[
+            &user.id,
+            &ARGON2ID_ALGORITHM,
+            &material.kdf_salt,
+            &(ARGON2ID_OPERATIONS as i64),
+            &(ARGON2ID_MEMORY_BYTES as i64),
+            &(ARGON2ID_OUTPUT_BYTES as i32),
+            &material.password_wrapper_id,
+            &material.password_root_ciphertext,
+            &material.recovery_salt,
+            &material.recovery_wrapper_id,
+            &material.recovery_root_ciphertext,
+            &material.identity_record_id,
+            &material.identity_private_ciphertext,
+            &material.account_state_record_id,
+            &material.encrypted_account_state,
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
 
     if inserted != 1 {
         return Ok(HttpResponse::Conflict().body("vault is already configured"));
     }
 
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "
                 INSERT INTO vault_identity_keys (
                   user_id, key_version, x25519_public_key, ed25519_public_key,
                   fingerprint_sha256, status
                 )
                 VALUES ($1, $2, $3, $4, $5, 'active')
             ",
-            &[
-                &user.id,
-                &(material.identity_key_version as i64),
-                &material.x25519_public_key,
-                &material.ed25519_public_key,
-                &material.fingerprint_sha256,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[
+            &user.id,
+            &(material.identity_key_version as i64),
+            &material.x25519_public_key,
+            &material.ed25519_public_key,
+            &material.fingerprint_sha256,
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     if state.config.e2ee_mode == E2eeMode::Migrate {
-        transaction
-            .execute(
-                "
+        execute_cached(
+            &transaction,
+            "
                     DELETE FROM file_shares AS shares
                     USING files
                     WHERE shares.file_id = files.id
                       AND files.owner_id = $1
                       AND files.e2ee_state <> 'encrypted'
                 ",
-                &[&user.id],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+            &[&user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     }
     transaction
         .commit()
@@ -1659,30 +1659,30 @@ pub async fn change_one_password(
         .await
         .map_err(error::ErrorInternalServerError)?;
     validate_password_account_state(&transaction, &user, body.vault.is_some()).await?;
-    let changed = transaction
-        .execute(
-            "
+    let changed = execute_cached(
+        &transaction,
+        "
                 UPDATE users
                 SET password_hash = $1, auth_kdf_salt = $2, updated_at = now()
                 WHERE id = $3 AND password_hash = $4
                   AND auth_version = 1 AND status = 'active'
             ",
-            &[
-                &new_hash,
-                &body.new_salt.as_slice(),
-                &user.id,
-                &current_hash,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[
+            &new_hash,
+            &body.new_salt.as_slice(),
+            &user.id,
+            &current_hash,
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     if changed != 1 {
         return Ok(HttpResponse::Conflict().body("password changed concurrently; try again"));
     }
     if let Some(material) = body.vault {
-        let changed = transaction
-            .execute(
-                "
+        let changed = execute_cached(
+            &transaction,
+            "
                     UPDATE user_vaults
                     SET kdf_salt = $1,
                         password_wrapper_id = $2,
@@ -1690,24 +1690,27 @@ pub async fn change_one_password(
                         updated_at = now()
                     WHERE user_id = $4 AND vault_version = $5
                 ",
-                &[
-                    &material.kdf_salt,
-                    &material.password_wrapper_id,
-                    &material.password_ciphertext,
-                    &user.id,
-                    &material.expected_vault_version,
-                ],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+            &[
+                &material.kdf_salt,
+                &material.password_wrapper_id,
+                &material.password_ciphertext,
+                &user.id,
+                &material.expected_vault_version,
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
         if changed != 1 {
             return Ok(HttpResponse::Conflict().body("vault material changed; unlock again"));
         }
     }
-    transaction
-        .execute("DELETE FROM sessions WHERE user_id = $1", &[&user.id])
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "DELETE FROM sessions WHERE user_id = $1",
+        &[&user.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     transaction
         .commit()
         .await
@@ -2040,9 +2043,7 @@ pub async fn init_upload(
         state.config.storage_quota_bytes,
     )
     .await?;
-    transaction
-        .execute(
-            "
+    execute_cached(&transaction, "
                 INSERT INTO vault_uploads (
                   id, node_id, owner_id, parent_id, entry_type,
                   generation_number, generation_id, object_key,
@@ -2576,29 +2577,29 @@ pub async fn publish_record(
         .await
         .map_err(error::ErrorInternalServerError)?;
     lock_share_topology(&transaction, &user.id).await?;
-    let file = transaction
-        .query_opt(
-            "
+    let file = query_opt_cached(
+        &transaction,
+        "
                 SELECT owner_id, parent_id, current_generation_number,
                        current_generation_id, size_bytes, entry_type
                 FROM visible_files AS files
                 WHERE id = $1 AND owner_id = $2 AND e2ee_state = 'encrypted'
                 FOR UPDATE
             ",
-            &[&node_id, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&node_id, &user.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     let Some(file) = file else {
         return Ok(HttpResponse::NotFound().finish());
     };
-    let head = transaction
-        .query_one(
-            "SELECT record_version, record_hash FROM vault_node_heads WHERE node_id = $1 FOR UPDATE",
-            &[&node_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let head = query_one_cached(
+        &transaction,
+        "SELECT record_version, record_hash FROM vault_node_heads WHERE node_id = $1 FOR UPDATE",
+        &[&node_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     validate_head_cas(
         head.get("record_version"),
         head.get::<_, Vec<u8>>("record_hash").as_slice(),
@@ -2641,13 +2642,13 @@ pub async fn publish_record(
     replace_owner_wrappers(&transaction, &user.id, &decoded).await?;
     insert_share_wrappers(&transaction, committed_share_wrappers.iter().copied(), None).await?;
     update_node_head(&transaction, &user.id, &decoded).await?;
-    transaction
-        .execute(
-            "UPDATE files SET updated_at = now() WHERE id = $1",
-            &[&node_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "UPDATE files SET updated_at = now() WHERE id = $1",
+        &[&node_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     transaction
         .commit()
         .await
@@ -3110,9 +3111,9 @@ pub async fn publish_share_directory(
         .await
         .map_err(error::ErrorInternalServerError)?;
     lock_share_topology(&transaction, &principal.id).await?;
-    let job = transaction
-        .query_opt(
-            "
+    let job = query_opt_cached(
+        &transaction,
+        "
                 SELECT jobs.record_version, files.entry_type,
                        files.current_generation_number,
                        files.current_generation_id,
@@ -3133,16 +3134,16 @@ pub async fn publish_share_directory(
                   AND files.owner_id = $2
                 FOR UPDATE OF jobs
             ",
-            &[&node_id, &principal.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&node_id, &principal.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     let Some(job) = job else {
         return Ok(HttpResponse::NoContent().finish());
     };
-    let shares = transaction
-        .query(
-            "
+    let shares = query_cached(
+        &transaction,
+        "
                 WITH RECURSIVE ancestors AS (
                   SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
                          0::integer AS depth FROM visible_files AS files
@@ -3164,10 +3165,10 @@ pub async fn publish_share_directory(
                 ORDER BY shares.id
                 FOR SHARE OF shares
             ",
-            &[&node_id, &principal.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&node_id, &principal.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     if shares.is_empty() {
         if body.directory_cbor.is_some()
             || body.directory_signature.is_some()
@@ -3177,13 +3178,13 @@ pub async fn publish_share_directory(
                 "active shares changed; refresh the share directory",
             ));
         }
-        transaction
-            .execute(
-                "DELETE FROM vault_share_sync_jobs WHERE node_id = $1 AND owner_id = $2",
-                &[&node_id, &principal.id],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+        execute_cached(
+            &transaction,
+            "DELETE FROM vault_share_sync_jobs WHERE node_id = $1 AND owner_id = $2",
+            &[&node_id, &principal.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
         transaction
             .commit()
             .await
@@ -3346,28 +3347,28 @@ pub async fn publish_share_directory(
     }
     let directory_cbor_bytes: &[u8] = directory_cbor.as_ref();
     let directory_signature_bytes: &[u8] = directory_signature.as_ref();
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "
                 DELETE FROM vault_share_wrappers AS wrappers
                 USING vault_shares AS shares
                 WHERE wrappers.share_id = shares.id
                   AND shares.owner_id = $1
                   AND wrappers.node_id = $2
             ",
-            &[&principal.id, &node_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&principal.id, &node_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     insert_share_wrappers(
         &transaction,
         material.iter(),
         Some((&commitment, "directory")),
     )
     .await?;
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "
                 INSERT INTO vault_share_wrapper_directories (
                   node_id, record_version, owner_id, signer_key_version,
                   canonical_cbor, signature, wrapper_set_root, wrapper_count
@@ -3378,26 +3379,26 @@ pub async fn publish_share_directory(
                   wrapper_set_root = EXCLUDED.wrapper_set_root,
                   wrapper_count = EXCLUDED.wrapper_count
             ",
-            &[
-                &node_id,
-                &validation_snapshot.record_version,
-                &principal.id,
-                &validation_snapshot.signer_key_version,
-                &directory_cbor_bytes,
-                &directory_signature_bytes,
-                &commitment.root.as_slice(),
-                &commitment.count,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "DELETE FROM vault_share_sync_jobs WHERE node_id = $1 AND owner_id = $2",
-            &[&node_id, &principal.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[
+            &node_id,
+            &validation_snapshot.record_version,
+            &principal.id,
+            &validation_snapshot.signer_key_version,
+            &directory_cbor_bytes,
+            &directory_signature_bytes,
+            &commitment.root.as_slice(),
+            &commitment.count,
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "DELETE FROM vault_share_sync_jobs WHERE node_id = $1 AND owner_id = $2",
+        &[&node_id, &principal.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     transaction
         .commit()
         .await
@@ -3522,9 +3523,7 @@ pub async fn create_share(
         .await
         .map_err(error::ErrorInternalServerError)?;
     lock_share_topology(&transaction, &user.id).await?;
-    let root = transaction
-        .query_opt(
-            "SELECT entry_type FROM visible_files AS files WHERE id = $1 AND owner_id = $2 AND e2ee_state = 'encrypted' AND state = 'active' FOR UPDATE",
+    let root = query_opt_cached(&transaction, "SELECT entry_type FROM visible_files AS files WHERE id = $1 AND owner_id = $2 AND e2ee_state = 'encrypted' AND state = 'active' FOR UPDATE",
             &[&body.root_node_id, &user.id],
         )
         .await
@@ -3539,27 +3538,25 @@ pub async fn create_share(
             "shared subtree changed; regenerate the share material",
         ));
     }
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "
                 INSERT INTO vault_shares (
                   id, owner_id, root_node_id, active_epoch, status,
                   record_version, record_hash
                 )
                 VALUES ($1, $2, $3, 1, 'active', 1, $4)
             ",
-            &[
-                &body.share_id,
-                &user.id,
-                &body.root_node_id,
-                &share_hash.as_slice(),
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "INSERT INTO vault_share_epochs (share_id, epoch, status, protocol_version, wrapper_set_root, wrapper_count, published_at) VALUES ($1, 1, 'published', $2, $3, $4, now())",
+        &[
+            &body.share_id,
+            &user.id,
+            &body.root_node_id,
+            &share_hash.as_slice(),
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    execute_cached(&transaction, "INSERT INTO vault_share_epochs (share_id, epoch, status, protocol_version, wrapper_set_root, wrapper_count, published_at) VALUES ($1, 1, 'published', $2, $3, $4, now())",
             &[
                 &body.share_id,
                 &(SHARE_ENVELOPE_VERSION as i16),
@@ -3570,17 +3567,17 @@ pub async fn create_share(
         .await
         .map_err(error::ErrorInternalServerError)?;
     insert_owner_epoch_key(&transaction, &body.share_id, 1, &owner_epoch_key).await?;
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "
                 INSERT INTO vault_share_recipients (
                   share_id, recipient_id, recipient_key_version, status
                 ) VALUES ($1, $2, $3, 'active')
             ",
-            &[&body.share_id, &body.recipient_id, &recipient_key_version],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&body.share_id, &body.recipient_id, &recipient_key_version],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     insert_share_wrappers(
         &transaction,
         wrappers.iter(),
@@ -3588,24 +3585,24 @@ pub async fn create_share(
     )
     .await?;
     insert_share_envelopes(&transaction, &envelopes).await?;
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "
                 INSERT INTO file_shares (
                   id, file_id, owner_id, recipient_id, counts_toward_shared
                 )
                 VALUES (gen_random_uuid()::text, $1, $2, $3, $4)
                 ON CONFLICT (file_id, recipient_id) DO NOTHING
             ",
-            &[
-                &body.root_node_id,
-                &user.id,
-                &body.recipient_id,
-                &counts_toward_shared,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[
+            &body.root_node_id,
+            &user.id,
+            &body.recipient_id,
+            &counts_toward_shared,
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     transaction
         .commit()
         .await
@@ -3761,9 +3758,9 @@ pub async fn pending_epoch_rotation(
         .start()
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let share = transaction
-        .query_opt(
-            "
+    let share = query_opt_cached(
+        &transaction,
+        "
                 SELECT shares.root_node_id, shares.pending_epoch,
                        shares.fence_snapshot_hash, shares.record_version,
                        shares.record_hash, pending.recipient_id AS revoked_recipient_id
@@ -3776,10 +3773,10 @@ pub async fn pending_epoch_rotation(
                   AND shares.publication_fenced = TRUE
                 FOR SHARE OF shares
             ",
-            &[&share_id, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&share_id, &user.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     let Some(share) = share else {
         return Ok(HttpResponse::NotFound().finish());
     };
@@ -3859,18 +3856,18 @@ pub async fn begin_epoch_rotation(
             .start()
             .await
             .map_err(error::ErrorInternalServerError)?;
-        let share = transaction
-            .query_opt(
-                "
+        let share = query_opt_cached(
+            &transaction,
+            "
                     SELECT root_node_id, active_epoch, record_version, record_hash,
                            status, publication_fenced
                     FROM vault_shares
                     WHERE id = $1 AND owner_id = $2
                 ",
-                &[&share_id, &user.id],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+            &[&share_id, &user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
         let Some(share) = share else {
             return Ok(HttpResponse::NotFound().finish());
         };
@@ -3879,9 +3876,7 @@ pub async fn begin_epoch_rotation(
         {
             return Ok(HttpResponse::Conflict().body("share is already rotating or revoked"));
         }
-        let recipient = transaction
-            .query_opt(
-                "SELECT 1 FROM vault_share_recipients WHERE share_id = $1 AND recipient_id = $2 AND status = 'active'",
+        let recipient = query_opt_cached(&transaction, "SELECT 1 FROM vault_share_recipients WHERE share_id = $1 AND recipient_id = $2 AND status = 'active'",
                 &[&share_id, &body.revoked_recipient_id],
             )
             .await
@@ -3927,19 +3922,19 @@ pub async fn begin_epoch_rotation(
         .await
         .map_err(error::ErrorInternalServerError)?;
     lock_share_topology(&transaction, &user.id).await?;
-    let share = transaction
-        .query_opt(
-            "
+    let share = query_opt_cached(
+        &transaction,
+        "
                 SELECT root_node_id, active_epoch, record_version, record_hash,
                        status, publication_fenced
                 FROM vault_shares
                 WHERE id = $1 AND owner_id = $2
                 FOR UPDATE
             ",
-            &[&share_id, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&share_id, &user.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     let Some(share) = share else {
         return Ok(HttpResponse::NotFound().finish());
     };
@@ -3955,9 +3950,7 @@ pub async fn begin_epoch_rotation(
     {
         return Ok(HttpResponse::Conflict().body("share changed; retry the rotation"));
     }
-    let recipient = transaction
-        .query_opt(
-            "SELECT 1 FROM vault_share_recipients WHERE share_id = $1 AND recipient_id = $2 AND status = 'active' FOR UPDATE",
+    let recipient = query_opt_cached(&transaction, "SELECT 1 FROM vault_share_recipients WHERE share_id = $1 AND recipient_id = $2 AND status = 'active' FOR UPDATE",
             &[&share_id, &body.revoked_recipient_id],
         )
         .await
@@ -3974,43 +3967,43 @@ pub async fn begin_epoch_rotation(
     let pending_epoch = active_epoch
         .checked_add(1)
         .ok_or_else(|| error::ErrorInternalServerError("share epoch exhausted"))?;
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "
                 UPDATE vault_shares
                 SET pending_epoch = $1, publication_fenced = TRUE,
                     status = 'rotating', updated_at = now()
                 WHERE id = $2
             ",
-            &[&pending_epoch, &share_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "INSERT INTO vault_share_epochs (share_id, epoch, status) VALUES ($1, $2, 'pending')",
-            &[&share_id, &pending_epoch],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "
+        &[&pending_epoch, &share_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "INSERT INTO vault_share_epochs (share_id, epoch, status) VALUES ($1, $2, 'pending')",
+        &[&share_id, &pending_epoch],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "
                 INSERT INTO vault_share_pending_revocations (
                   share_id, pending_epoch, recipient_id
                 ) VALUES ($1, $2, $3)
             ",
-            &[&share_id, &pending_epoch, &body.revoked_recipient_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "UPDATE vault_shares SET fence_snapshot_hash = $1 WHERE id = $2",
-            &[&fence_snapshot_hash.as_slice(), &share_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&share_id, &pending_epoch, &body.revoked_recipient_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "UPDATE vault_shares SET fence_snapshot_hash = $1 WHERE id = $2",
+        &[&fence_snapshot_hash.as_slice(), &share_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     let retained_recipients =
         load_epoch_rotation_recipients(&transaction, &share_id, &body.revoked_recipient_id).await?;
     transaction
@@ -4038,13 +4031,13 @@ pub async fn begin_epoch_rotation(
 }
 
 async fn load_epoch_rotation_recipients(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     share_id: &str,
     revoked_recipient_id: &str,
 ) -> Result<Vec<EpochRecipientMaterial>> {
-    let recipient_rows = transaction
-        .query(
-            "
+    let recipient_rows = query_cached(
+        transaction,
+        "
                 SELECT recipients.recipient_id, recipients.recipient_key_version,
                        identity.x25519_public_key, identity.ed25519_public_key,
                        identity.fingerprint_sha256
@@ -4057,10 +4050,10 @@ async fn load_epoch_rotation_recipients(
                   AND recipients.recipient_id <> $2
                 ORDER BY recipients.recipient_id
             ",
-            &[&share_id, &revoked_recipient_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&share_id, &revoked_recipient_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     Ok(recipient_rows
         .into_iter()
         .map(|row| {
@@ -4263,16 +4256,12 @@ pub async fn publish_epoch_rotation(
     )
     .await?;
     insert_share_envelopes(&transaction, &envelopes).await?;
-    transaction
-        .execute(
-            "UPDATE vault_share_epochs SET status = 'retired', retired_at = now() WHERE share_id = $1 AND epoch = $2",
+    execute_cached(&transaction, "UPDATE vault_share_epochs SET status = 'retired', retired_at = now() WHERE share_id = $1 AND epoch = $2",
             &[&share_id, &active_epoch],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "UPDATE vault_share_epochs SET status = 'published', protocol_version = $3, wrapper_set_root = $4, wrapper_count = $5, published_at = now() WHERE share_id = $1 AND epoch = $2 AND status = 'pending'",
+    execute_cached(&transaction, "UPDATE vault_share_epochs SET status = 'published', protocol_version = $3, wrapper_set_root = $4, wrapper_count = $5, published_at = now() WHERE share_id = $1 AND epoch = $2 AND status = 'pending'",
             &[
                 &share_id,
                 &pending_epoch,
@@ -4283,43 +4272,41 @@ pub async fn publish_epoch_rotation(
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "UPDATE vault_share_recipients SET status = 'revoked', revoked_at = now() WHERE share_id = $1 AND recipient_id = $2",
+    execute_cached(&transaction, "UPDATE vault_share_recipients SET status = 'revoked', revoked_at = now() WHERE share_id = $1 AND recipient_id = $2",
             &[&share_id, &revoked],
         )
         .await
         .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "DELETE FROM file_shares WHERE file_id = $1 AND recipient_id = $2",
-            &[&root_node_id, &revoked],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "DELETE FROM file_shares WHERE file_id = $1 AND recipient_id = $2",
+        &[&root_node_id, &revoked],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "
                 INSERT INTO vault_revocation_cutoffs (
                   share_id, retired_epoch, published_epoch,
                   cutoff_record_version, cutoff_record_hash,
                   revoked_recipient_id
                 ) VALUES ($1, $2, $3, $4, $5, $6)
             ",
-            &[
-                &share_id,
-                &active_epoch,
-                &pending_epoch,
-                &next_record_version,
-                &cutoff_hash.as_slice(),
-                &revoked,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "
+        &[
+            &share_id,
+            &active_epoch,
+            &pending_epoch,
+            &next_record_version,
+            &cutoff_hash.as_slice(),
+            &revoked,
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "
                 UPDATE vault_shares
                 SET active_epoch = $1, pending_epoch = NULL,
                     publication_fenced = FALSE, fence_snapshot_hash = NULL,
@@ -4328,22 +4315,22 @@ pub async fn publish_epoch_rotation(
                     record_hash = $3, updated_at = now()
                 WHERE id = $4
             ",
-            &[
-                &pending_epoch,
-                &next_record_version,
-                &cutoff_hash.as_slice(),
-                &share_id,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "DELETE FROM vault_share_pending_revocations WHERE share_id = $1 AND pending_epoch = $2",
-            &[&share_id, &pending_epoch],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[
+            &pending_epoch,
+            &next_record_version,
+            &cutoff_hash.as_slice(),
+            &share_id,
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "DELETE FROM vault_share_pending_revocations WHERE share_id = $1 AND pending_epoch = $2",
+        &[&share_id, &pending_epoch],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     transaction
         .commit()
         .await
@@ -4372,49 +4359,49 @@ pub async fn abort_epoch_rotation(
         .await
         .map_err(error::ErrorInternalServerError)?;
     lock_share_topology(&transaction, &user.id).await?;
-    let share = transaction
-        .query_opt(
-            "
+    let share = query_opt_cached(
+        &transaction,
+        "
                 SELECT pending_epoch FROM vault_shares
                 WHERE id = $1 AND owner_id = $2 AND status = 'rotating'
                 FOR UPDATE
             ",
-            &[&share_id, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&share_id, &user.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     let Some(share) = share else {
         return Ok(HttpResponse::NoContent().finish());
     };
     if share.get::<_, Option<i64>>("pending_epoch") != Some(pending_epoch) {
         return Err(error::ErrorConflict("share rotation epoch changed"));
     }
-    transaction
-        .execute(
-            "DELETE FROM vault_share_pending_revocations WHERE share_id = $1 AND pending_epoch = $2",
-            &[&share_id, &pending_epoch],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "DELETE FROM vault_share_epochs WHERE share_id = $1 AND epoch = $2 AND status = 'pending'",
-            &[&share_id, &pending_epoch],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "DELETE FROM vault_share_pending_revocations WHERE share_id = $1 AND pending_epoch = $2",
+        &[&share_id, &pending_epoch],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "DELETE FROM vault_share_epochs WHERE share_id = $1 AND epoch = $2 AND status = 'pending'",
+        &[&share_id, &pending_epoch],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "
                 UPDATE vault_shares
                 SET pending_epoch = NULL, publication_fenced = FALSE,
                     fence_snapshot_hash = NULL, status = 'active', updated_at = now()
                 WHERE id = $1
             ",
-            &[&share_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&share_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     transaction
         .commit()
         .await
@@ -4469,27 +4456,27 @@ fn validate_owner_epoch_key(request: &OwnerEpochKey) -> Result<OwnerEpochKeyMate
 }
 
 async fn insert_owner_epoch_key(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     share_id: &str,
     epoch: i64,
     material: &OwnerEpochKeyMaterial,
 ) -> Result<()> {
-    transaction
-        .execute(
-            "
+    execute_cached(
+        transaction,
+        "
                 INSERT INTO vault_share_owner_keys (
                   share_id, epoch, wrapper_id, root_ciphertext
                 ) VALUES ($1, $2, $3, $4)
             ",
-            &[
-                &share_id,
-                &epoch,
-                &material.wrapper_id.as_slice(),
-                &material.ciphertext.as_slice(),
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[
+            &share_id,
+            &epoch,
+            &material.wrapper_id.as_slice(),
+            &material.ciphertext.as_slice(),
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     Ok(())
 }
 
@@ -4734,9 +4721,7 @@ async fn read_owned_subtree_snapshot(
         .start()
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let root_exists = transaction
-        .query_opt(
-            "SELECT 1 FROM visible_files AS files WHERE id = $1 AND owner_id = $2 AND e2ee_state = 'encrypted' AND state = 'active'",
+    let root_exists = query_opt_cached(&transaction, "SELECT 1 FROM visible_files AS files WHERE id = $1 AND owner_id = $2 AND e2ee_state = 'encrypted' AND state = 'active'",
             &[&root_node_id, &owner_id],
         )
         .await
@@ -4779,8 +4764,7 @@ async fn load_epoch_publication_snapshot(
             WHERE id = $1 AND owner_id = $2 AND status = 'rotating'
         "
     };
-    let Some(share) = transaction
-        .query_opt(share_query, &[&share_id, &owner_id])
+    let Some(share) = query_opt_cached(transaction, share_query, &[&share_id, &owner_id])
         .await
         .map_err(error::ErrorInternalServerError)?
     else {
@@ -4788,35 +4772,33 @@ async fn load_epoch_publication_snapshot(
     };
     let root_node_id: String = share.get("root_node_id");
     let pending_epoch: Option<i64> = share.get("pending_epoch");
-    let revoked_recipient_id = transaction
-        .query_opt(
-            "SELECT recipient_id FROM vault_share_pending_revocations WHERE share_id = $1 AND pending_epoch = $2",
+    let revoked_recipient_id = query_opt_cached(transaction, "SELECT recipient_id FROM vault_share_pending_revocations WHERE share_id = $1 AND pending_epoch = $2",
             &[&share_id, &pending_epoch],
         )
         .await
         .map_err(error::ErrorInternalServerError)?
         .ok_or_else(|| error::ErrorConflict("pending share revocation changed"))?
         .get::<_, String>("recipient_id");
-    let retained_recipients = transaction
-        .query(
-            "
+    let retained_recipients = query_cached(
+        transaction,
+        "
                 SELECT recipient_id, recipient_key_version
                 FROM vault_share_recipients
                 WHERE share_id = $1 AND status = 'active' AND recipient_id <> $2
                 ORDER BY recipient_id
             ",
-            &[&share_id, &revoked_recipient_id],
+        &[&share_id, &revoked_recipient_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    .into_iter()
+    .map(|row| {
+        (
+            row.get::<_, String>("recipient_id"),
+            row.get::<_, i64>("recipient_key_version"),
         )
-        .await
-        .map_err(error::ErrorInternalServerError)?
-        .into_iter()
-        .map(|row| {
-            (
-                row.get::<_, String>("recipient_id"),
-                row.get::<_, i64>("recipient_key_version"),
-            )
-        })
-        .collect();
+    })
+    .collect();
     let nodes = subtree_snapshot(transaction, &root_node_id, owner_id).await?;
     Ok(Some(EpochPublicationSnapshot {
         root_node_id,
@@ -4882,8 +4864,7 @@ async fn load_share_directory_snapshot(
               AND files.owner_id = $2
         "
     };
-    let Some(job) = transaction
-        .query_opt(job_query, &[&node_id, &owner_id])
+    let Some(job) = query_opt_cached(transaction, job_query, &[&node_id, &owner_id])
         .await
         .map_err(error::ErrorInternalServerError)?
     else {
@@ -4935,8 +4916,7 @@ async fn load_share_directory_snapshot(
             ORDER BY shares.id
         "
     };
-    let shares = transaction
-        .query(share_query, &[&node_id, &owner_id])
+    let shares = query_cached(transaction, share_query, &[&node_id, &owner_id])
         .await
         .map_err(error::ErrorInternalServerError)?
         .into_iter()
@@ -4999,9 +4979,9 @@ async fn subtree_snapshot(
         .collect::<HashMap<_, _>>();
     let mut snapshot = Vec::with_capacity(node_ids.len());
     for ids in node_ids.chunks(TREE_MUTATION_BATCH_SIZE) {
-        let rows = transaction
-            .query(
-                "
+        let rows = query_cached(
+            transaction,
+            "
                     SELECT files.id, files.entry_type,
                            files.current_generation_number,
                            files.current_generation_id,
@@ -5014,10 +4994,10 @@ async fn subtree_snapshot(
                       AND files.e2ee_state = 'encrypted'
                     ORDER BY requested.ordinal
                 ",
-                &[&ids, &owner_id],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+            &[&ids, &owner_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
         snapshot.extend(rows.into_iter().map(|row| {
             let node_id: String = row.get("id");
             let (parent_id, depth) = hierarchy
@@ -5085,30 +5065,30 @@ fn share_record_hash(
 }
 
 async fn committed_share_wrappers<'a>(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     decoded: &'a DecodedNodeRecord,
     node_id: &str,
     parent_id: Option<&str>,
     owner_id: &str,
     include_generation: bool,
 ) -> Result<Vec<&'a ShareWrapperMaterial>> {
-    let node_exists = transaction
-        .query_opt(
-            "SELECT 1 FROM visible_files AS files WHERE id = $1",
-            &[&node_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?
-        .is_some();
+    let node_exists = query_opt_cached(
+        transaction,
+        "SELECT 1 FROM visible_files AS files WHERE id = $1",
+        &[&node_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    .is_some();
     let anchor = if node_exists {
         Some(node_id)
     } else {
         parent_id
     };
     let shares = if let Some(anchor) = anchor {
-        transaction
-            .query(
-                "
+        query_cached(
+            transaction,
+            "
                     WITH RECURSIVE ancestors AS (
                       SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
                              0::integer AS depth FROM visible_files AS files
@@ -5130,10 +5110,10 @@ async fn committed_share_wrappers<'a>(
                     ORDER BY shares.id
                     FOR SHARE OF shares
                 ",
-                &[&anchor, &owner_id],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?
+            &[&anchor, &owner_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?
     } else {
         Vec::new()
     };
@@ -5189,7 +5169,7 @@ async fn committed_share_wrappers<'a>(
 }
 
 async fn publication_share_wrappers<'a>(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     decoded: &'a DecodedNodeRecord,
     node_id: &str,
     parent_id: Option<&str>,
@@ -5215,14 +5195,14 @@ async fn publication_share_wrappers<'a>(
         ));
     }
 
-    let node_exists = transaction
-        .query_opt(
-            "SELECT 1 FROM visible_files AS files WHERE id = $1",
-            &[&node_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?
-        .is_some();
+    let node_exists = query_opt_cached(
+        transaction,
+        "SELECT 1 FROM visible_files AS files WHERE id = $1",
+        &[&node_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    .is_some();
     let anchor = if node_exists {
         Some(node_id)
     } else {
@@ -5231,9 +5211,9 @@ async fn publication_share_wrappers<'a>(
     let Some(anchor) = anchor else {
         return Ok((Vec::new(), false));
     };
-    let row = transaction
-        .query_one(
-            "
+    let row = query_one_cached(
+        transaction,
+        "
                 SELECT EXISTS (
                   WITH RECURSIVE ancestors AS (
                     SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
@@ -5256,24 +5236,24 @@ async fn publication_share_wrappers<'a>(
                   LIMIT 1
                 ) AS required
             ",
-            &[&anchor, &owner_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&anchor, &owner_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     Ok((Vec::new(), row.get("required")))
 }
 
 async fn update_share_sync_job(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     node_id: &str,
     owner_id: &str,
     record_version: i64,
     required: bool,
 ) -> Result<()> {
     if required {
-        transaction
-            .execute(
-                "
+        execute_cached(
+            transaction,
+            "
                     INSERT INTO vault_share_sync_jobs (
                       node_id, owner_id, record_version
                     ) VALUES ($1, $2, $3)
@@ -5284,24 +5264,24 @@ async fn update_share_sync_job(
                       last_error = NULL,
                       updated_at = now()
                 ",
-                &[&node_id, &owner_id, &record_version],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+            &[&node_id, &owner_id, &record_version],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     } else {
-        transaction
-            .execute(
-                "DELETE FROM vault_share_sync_jobs WHERE node_id = $1 AND owner_id = $2",
-                &[&node_id, &owner_id],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+        execute_cached(
+            transaction,
+            "DELETE FROM vault_share_sync_jobs WHERE node_id = $1 AND owner_id = $2",
+            &[&node_id, &owner_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     }
     Ok(())
 }
 
 async fn insert_share_wrappers<'a>(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     wrappers: impl IntoIterator<Item = &'a ShareWrapperMaterial>,
     commitment: Option<(&WrapperSetCommitment, &'static str)>,
 ) -> Result<()> {
@@ -5376,9 +5356,9 @@ async fn insert_share_wrappers<'a>(
             merkle_proofs.push(merkle_proof);
         }
 
-        transaction
-            .execute(
-                "
+        execute_cached(
+            transaction,
+            "
             INSERT INTO vault_share_wrappers (
               wrapper_id, share_id, epoch, node_id, generation_id,
               wrapper_kind, record_version, canonical_cbor, wrapper_hash,
@@ -5399,29 +5379,29 @@ async fn insert_share_wrappers<'a>(
               merkle_leaf_index, merkle_proof
             )
             ",
-                &[
-                    &wrapper_ids,
-                    &share_ids,
-                    &epochs,
-                    &node_ids,
-                    &generation_ids,
-                    &wrapper_kinds,
-                    &record_versions,
-                    &canonical_records,
-                    &wrapper_hashes,
-                    &leaf_indices,
-                    &merkle_proofs,
-                    &commitment_source,
-                ],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+            &[
+                &wrapper_ids,
+                &share_ids,
+                &epochs,
+                &node_ids,
+                &generation_ids,
+                &wrapper_kinds,
+                &record_versions,
+                &canonical_records,
+                &wrapper_hashes,
+                &leaf_indices,
+                &merkle_proofs,
+                &commitment_source,
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     }
     Ok(())
 }
 
 async fn insert_share_envelopes(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     envelopes: &[ShareEnvelopeMaterial],
 ) -> Result<()> {
     if envelopes.is_empty() {
@@ -5465,9 +5445,9 @@ async fn insert_share_envelopes(
         envelope_hashes.push(envelope.hash.to_vec());
     }
 
-    transaction
-        .execute(
-            "
+    execute_cached(
+        transaction,
+        "
             INSERT INTO vault_share_envelopes (
               envelope_id, share_id, epoch, sender_id,
               sender_key_version, recipient_id, recipient_key_version,
@@ -5495,27 +5475,27 @@ async fn insert_share_envelopes(
               canonical_cbor, signature, envelope_hash
             )
             ",
-            &[
-                &envelope_ids,
-                &share_ids,
-                &epochs,
-                &sender_ids,
-                &sender_key_versions,
-                &recipient_ids,
-                &recipient_key_versions,
-                &node_ids,
-                &generation_scopes,
-                &record_versions,
-                &previous_record_hashes,
-                &encapsulated_keys,
-                &ciphertexts,
-                &canonical_records,
-                &signatures,
-                &envelope_hashes,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[
+            &envelope_ids,
+            &share_ids,
+            &epochs,
+            &sender_ids,
+            &sender_key_versions,
+            &recipient_ids,
+            &recipient_key_versions,
+            &node_ids,
+            &generation_scopes,
+            &record_versions,
+            &previous_record_hashes,
+            &encapsulated_keys,
+            &ciphertexts,
+            &canonical_records,
+            &signatures,
+            &envelope_hashes,
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     Ok(())
 }
 
@@ -5679,34 +5659,34 @@ async fn publish_record_transaction(
         .await
         .map_err(error::ErrorInternalServerError)?;
     lock_share_topology(&transaction, &user.id).await?;
-    let upload_status = transaction
-        .query_opt(
-            "
+    let upload_status = query_opt_cached(
+        &transaction,
+        "
                 SELECT status
                 FROM vault_uploads
                 WHERE id = $1 AND owner_id = $2
                 FOR UPDATE
             ",
-            &[&upload.id, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?
-        .map(|row| row.get::<_, String>("status"));
+        &[&upload.id, &user.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    .map(|row| row.get::<_, String>("status"));
     if !matches!(upload_status.as_deref(), Some("pending" | "completing")) {
         return Err(error::ErrorConflict("upload state changed; retry"));
     }
-    let existing = transaction
-        .query_opt(
-            "
+    let existing = query_opt_cached(
+        &transaction,
+        "
                 SELECT owner_id, parent_id, entry_type, e2ee_state,
                        current_generation_number, current_generation_id,
                        storage_name
                 FROM visible_files AS files WHERE id = $1 FOR UPDATE
             ",
-            &[&upload.node_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&upload.node_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
 
     let mut is_migration = false;
     if let Some(existing) = existing.as_ref() {
@@ -5719,17 +5699,17 @@ async fn publish_record_transaction(
         match existing.get::<_, String>("e2ee_state").as_str() {
             "encrypted" => {}
             "staged" => {
-                let migration = transaction
-                    .query_opt(
-                        "
+                let migration = query_opt_cached(
+                    &transaction,
+                    "
                             SELECT state FROM vault_migrations
                             WHERE node_id = $1 AND owner_id = $2
                             FOR UPDATE
                         ",
-                        &[&upload.node_id, &user.id],
-                    )
-                    .await
-                    .map_err(error::ErrorInternalServerError)?;
+                    &[&upload.node_id, &user.id],
+                )
+                .await
+                .map_err(error::ErrorInternalServerError)?;
                 if migration
                     .as_ref()
                     .map(|row| row.get::<_, String>("state"))
@@ -5750,13 +5730,13 @@ async fn publish_record_transaction(
         ));
     }
 
-    let head = transaction
-        .query_opt(
-            "SELECT record_version, record_hash FROM vault_node_heads WHERE node_id = $1 FOR UPDATE",
-            &[&upload.node_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let head = query_opt_cached(
+        &transaction,
+        "SELECT record_version, record_hash FROM vault_node_heads WHERE node_id = $1 FOR UPDATE",
+        &[&upload.node_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     match head {
         Some(head) => validate_head_cas(
             head.get("record_version"),
@@ -5807,9 +5787,7 @@ async fn publish_record_transaction(
     let object_checksum = metadata.and_then(|value| value.checksum_sha256.clone());
     let object_etag = metadata.and_then(|value| value.etag.clone());
     if existing.is_none() {
-        transaction
-            .execute(
-                "
+        execute_cached(&transaction, "
                     INSERT INTO files (
                       id, owner_id, original_name, storage_name, mime_type,
                       size_bytes, entry_type, parent_id, checksum_sha256,
@@ -5836,9 +5814,9 @@ async fn publish_record_transaction(
             .map_err(error::ErrorInternalServerError)?;
     } else if let Some(existing) = existing.as_ref() {
         let old_storage_name: String = existing.get("storage_name");
-        transaction
-            .execute(
-                "
+        execute_cached(
+            &transaction,
+            "
                     UPDATE files
                     SET original_name = $1,
                         storage_name = $2, mime_type = 'application/octet-stream',
@@ -5847,34 +5825,30 @@ async fn publish_record_transaction(
                         current_generation_id = $7, updated_at = now()
                     WHERE id = $8 AND owner_id = $9
                 ",
-                &[
-                    &format!(
-                        "encrypted-{}",
-                        upload.node_id.chars().rev().take(8).collect::<String>()
-                    ),
-                    &storage_name,
-                    &size_bytes,
-                    &object_checksum,
-                    &object_etag,
-                    &upload.generation_number,
-                    &upload.generation_id,
-                    &upload.node_id,
-                    &user.id,
-                ],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+            &[
+                &format!(
+                    "encrypted-{}",
+                    upload.node_id.chars().rev().take(8).collect::<String>()
+                ),
+                &storage_name,
+                &size_bytes,
+                &object_checksum,
+                &object_etag,
+                &upload.generation_number,
+                &upload.generation_id,
+                &upload.node_id,
+                &user.id,
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
         if upload.entry_type == "file" && old_storage_name != storage_name {
-            transaction
-                .execute(
-                    "UPDATE vault_object_generations SET status = 'retired', retired_at = now() WHERE node_id = $1 AND status = 'published'",
+            execute_cached(&transaction, "UPDATE vault_object_generations SET status = 'retired', retired_at = now() WHERE node_id = $1 AND status = 'published'",
                     &[&upload.node_id],
                 )
                 .await
                 .map_err(error::ErrorInternalServerError)?;
-            transaction
-                .execute(
-                    "INSERT INTO storage_deletion_jobs (object_key) VALUES ($1) ON CONFLICT (object_key) DO NOTHING",
+            execute_cached(&transaction, "INSERT INTO storage_deletion_jobs (object_key) VALUES ($1) ON CONFLICT (object_key) DO NOTHING",
                     &[&old_storage_name],
                 )
                 .await
@@ -5886,23 +5860,23 @@ async fn publish_record_transaction(
             } else {
                 "complete"
             };
-            transaction
-                .execute(
-                    "
+            execute_cached(
+                &transaction,
+                "
                         UPDATE vault_migrations
                         SET staged_object_key = $1, state = $2,
                             last_error = NULL, updated_at = now()
                         WHERE node_id = $3 AND owner_id = $4
                     ",
-                    &[
-                        &upload.object_key,
-                        &migration_state,
-                        &upload.node_id,
-                        &user.id,
-                    ],
-                )
-                .await
-                .map_err(error::ErrorInternalServerError)?;
+                &[
+                    &upload.object_key,
+                    &migration_state,
+                    &upload.node_id,
+                    &user.id,
+                ],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
         }
     }
 
@@ -5920,9 +5894,9 @@ async fn publish_record_transaction(
     insert_share_wrappers(&transaction, committed_share_wrappers.iter().copied(), None).await?;
     update_node_head(&transaction, &user.id, decoded).await?;
     if upload.entry_type == "file" {
-        transaction
-            .execute(
-                "
+        execute_cached(
+            &transaction,
+            "
                     INSERT INTO vault_object_generations (
                       node_id, owner_id, generation_number, generation_id,
                       object_key, ciphertext_length, chunk_count,
@@ -5930,28 +5904,26 @@ async fn publish_record_transaction(
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'published')
                 ",
-                &[
-                    &upload.node_id,
-                    &user.id,
-                    &upload.generation_number,
-                    &upload.generation_id,
-                    &storage_name,
-                    &upload.ciphertext_length,
-                    &upload.chunk_count,
-                    &decoded.verified.bootstrap.ciphertext_merkle_root.as_slice(),
-                ],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+            &[
+                &upload.node_id,
+                &user.id,
+                &upload.generation_number,
+                &upload.generation_id,
+                &storage_name,
+                &upload.ciphertext_length,
+                &upload.chunk_count,
+                &decoded.verified.bootstrap.ciphertext_merkle_root.as_slice(),
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     }
     if upload.entry_type == "file" && !is_migration {
         touch_ancestor_collections(&transaction, upload.parent_id.as_deref(), &user.id)
             .await
             .map_err(error::ErrorInternalServerError)?;
     }
-    let published = transaction
-        .execute(
-            "UPDATE vault_uploads SET status = 'published', published_at = now() WHERE id = $1 AND owner_id = $2 AND status IN ('pending', 'completing')",
+    let published = execute_cached(&transaction, "UPDATE vault_uploads SET status = 'published', published_at = now() WHERE id = $1 AND owner_id = $2 AND status IN ('pending', 'completing')",
             &[&upload.id, &user.id],
         )
         .await
@@ -6175,9 +6147,9 @@ async fn publish_folder_batch_transaction(
         .map_err(error::ErrorInternalServerError)?;
     lock_share_topology(&transaction, &user.id).await?;
 
-    let existing = transaction
-        .query(
-            "
+    let existing = query_cached(
+        &transaction,
+        "
                 SELECT files.id, files.owner_id, files.parent_id, files.entry_type,
                        files.state, files.e2ee_state, files.size_bytes,
                        files.current_generation_number, files.current_generation_id,
@@ -6192,10 +6164,10 @@ async fn publish_folder_batch_transaction(
                 WHERE files.id = ANY($1::text[])
                 FOR UPDATE OF files
             ",
-            &[&node_ids],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&node_ids],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     if !existing.is_empty() {
         if existing.len() != node_ids.len() {
             return Err(error::ErrorConflict(
@@ -6246,18 +6218,18 @@ async fn publish_folder_batch_transaction(
 
     if !external_parent_ids.is_empty() {
         let external_parent_ids = external_parent_ids.into_iter().collect::<Vec<_>>();
-        let parents = transaction
-            .query(
-                "
+        let parents = query_cached(
+            &transaction,
+            "
                     SELECT id, owner_id, entry_type, state, e2ee_state
                     FROM visible_files AS files
                     WHERE id = ANY($1::text[])
                     FOR SHARE
                 ",
-                &[&external_parent_ids],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+            &[&external_parent_ids],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
         if parents.len() != external_parent_ids.len()
             || parents.iter().any(|row| {
                 row.get::<_, String>("owner_id") != user.id
@@ -6270,9 +6242,9 @@ async fn publish_folder_batch_transaction(
         }
     }
 
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "
                 INSERT INTO files (
                   id, owner_id, original_name, storage_name, mime_type,
                   size_bytes, entry_type, parent_id, e2ee_state,
@@ -6287,14 +6259,14 @@ async fn publish_folder_batch_transaction(
                   $1::text[], $2::text[], $3::bytea[]
                 ) AS batch(id, parent_id, generation_id)
             ",
-            &[&node_ids, &parent_ids, &generation_ids, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&node_ids, &parent_ids, &generation_ids, &user.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
 
-    let share_states = transaction
-        .query(
-            "
+    let share_states = query_cached(
+        &transaction,
+        "
                 WITH RECURSIVE requested AS (
                   SELECT id AS start_id FROM unnest($1::text[]) AS input(id)
                 ), ancestors AS (
@@ -6327,10 +6299,10 @@ async fn publish_folder_batch_transaction(
                   ON shares.root_node_id = ancestors.id AND shares.owner_id = $2
                 GROUP BY requested.start_id
             ",
-            &[&node_ids, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&node_ids, &user.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     let share_sync_required = share_states
         .into_iter()
         .map(|row| {
@@ -6351,9 +6323,9 @@ async fn publish_folder_batch_transaction(
         })
         .collect::<Result<HashMap<_, _>>>()?;
 
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "
                 INSERT INTO vault_node_records (
                   node_id, owner_id, record_version, record_hash,
                   previous_record_hash, bootstrap_cbor, bootstrap_signature,
@@ -6371,22 +6343,22 @@ async fn publish_folder_batch_transaction(
                   encrypted_manifest, manifest_hash, signer_key_version
                 )
             ",
-            &[
-                &node_ids,
-                &record_hashes,
-                &bootstrap_cbors,
-                &signatures,
-                &encrypted_manifests,
-                &manifest_hashes,
-                &signer_key_versions,
-                &user.id,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "
+        &[
+            &node_ids,
+            &record_hashes,
+            &bootstrap_cbors,
+            &signatures,
+            &encrypted_manifests,
+            &manifest_hashes,
+            &signer_key_versions,
+            &user.id,
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "
                 INSERT INTO vault_wrappers (
                   wrapper_id, owner_id, node_id, parent_node_id,
                   wrapper_kind, record_version, canonical_cbor, wrapper_hash
@@ -6401,21 +6373,21 @@ async fn publish_folder_batch_transaction(
                   canonical_cbor, wrapper_hash
                 )
             ",
-            &[
-                &wrapper_ids,
-                &node_ids,
-                &parent_ids,
-                &wrapper_kinds,
-                &wrapper_cbors,
-                &wrapper_hashes,
-                &user.id,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    transaction
-        .execute(
-            "
+        &[
+            &wrapper_ids,
+            &node_ids,
+            &parent_ids,
+            &wrapper_kinds,
+            &wrapper_cbors,
+            &wrapper_hashes,
+            &user.id,
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    execute_cached(
+        &transaction,
+        "
                 INSERT INTO vault_node_heads (
                   node_id, owner_id, record_version, record_hash
                 )
@@ -6423,29 +6395,29 @@ async fn publish_folder_batch_transaction(
                 FROM unnest($1::text[], $2::bytea[])
                   AS batch(node_id, record_hash)
             ",
-            &[&node_ids, &record_hashes, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&node_ids, &record_hashes, &user.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     let sync_node_ids = node_ids
         .iter()
         .filter(|node_id| share_sync_required.get(*node_id) == Some(&true))
         .cloned()
         .collect::<Vec<_>>();
     if !sync_node_ids.is_empty() {
-        transaction
-            .execute(
-                "
+        execute_cached(
+            &transaction,
+            "
                     INSERT INTO vault_share_sync_jobs (
                       node_id, owner_id, record_version
                     )
                     SELECT node_id, $2, 1
                     FROM unnest($1::text[]) AS batch(node_id)
                 ",
-                &[&sync_node_ids, &user.id],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+            &[&sync_node_ids, &user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     }
     transaction
         .commit()
@@ -6606,7 +6578,7 @@ fn validate_completed_parts(
 }
 
 async fn insert_node_record(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     owner_id: &str,
     decoded: &DecodedNodeRecord,
 ) -> Result<()> {
@@ -6618,9 +6590,9 @@ async fn insert_node_record(
     let bootstrap_cbor: &[u8] = decoded.bootstrap_cbor.as_ref();
     let signature: &[u8] = decoded.signature.as_ref();
     let encrypted_manifest: &[u8] = decoded.encrypted_manifest.as_ref();
-    transaction
-        .execute(
-            "
+    execute_cached(
+        transaction,
+        "
                 INSERT INTO vault_node_records (
                   node_id, owner_id, record_version, record_hash,
                   previous_record_hash, bootstrap_cbor, bootstrap_signature,
@@ -6628,26 +6600,26 @@ async fn insert_node_record(
                 )
                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
             ",
-            &[
-                &bootstrap.node_id,
-                &owner_id,
-                &record_version,
-                &decoded.verified.record_hash.as_slice(),
-                &bootstrap.previous_record_hash.map(|value| value.to_vec()),
-                &bootstrap_cbor,
-                &signature,
-                &encrypted_manifest,
-                &bootstrap.manifest_hash.as_slice(),
-                &signer_key_version,
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[
+            &bootstrap.node_id,
+            &owner_id,
+            &record_version,
+            &decoded.verified.record_hash.as_slice(),
+            &bootstrap.previous_record_hash.map(|value| value.to_vec()),
+            &bootstrap_cbor,
+            &signature,
+            &encrypted_manifest,
+            &bootstrap.manifest_hash.as_slice(),
+            &signer_key_version,
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     Ok(())
 }
 
 async fn replace_owner_wrappers(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     owner_id: &str,
     decoded: &DecodedNodeRecord,
 ) -> Result<()> {
@@ -6666,43 +6638,43 @@ async fn replace_owner_wrappers(
         let canonical: &[u8] = material.canonical.as_ref();
         let node_id = identifier(&wrapper.node_id);
         let parent_node_id = wrapper.parent_node_id.as_ref().map(identifier);
-        transaction
-            .execute(
-                "
+        execute_cached(
+            transaction,
+            "
                     INSERT INTO vault_wrappers (
                       wrapper_id, owner_id, node_id, parent_node_id,
                       wrapper_kind, record_version, canonical_cbor, wrapper_hash
                     )
                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
                 ",
-                &[
-                    &wrapper.wrapper_id.as_slice(),
-                    &owner_id,
-                    &node_id,
-                    &parent_node_id,
-                    &kind,
-                    &record_version,
-                    &canonical,
-                    &material.hash.as_slice(),
-                ],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+            &[
+                &wrapper.wrapper_id.as_slice(),
+                &owner_id,
+                &node_id,
+                &parent_node_id,
+                &kind,
+                &record_version,
+                &canonical,
+                &material.hash.as_slice(),
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
     }
     Ok(())
 }
 
 async fn update_node_head(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     owner_id: &str,
     decoded: &DecodedNodeRecord,
 ) -> Result<()> {
     let bootstrap = &decoded.verified.bootstrap;
     let record_version = i64::try_from(bootstrap.record_version)
         .map_err(|_| error::ErrorBadRequest("record version is invalid"))?;
-    transaction
-        .execute(
-            "
+    execute_cached(
+        transaction,
+        "
                 INSERT INTO vault_node_heads (
                   node_id, owner_id, record_version, record_hash
                 )
@@ -6712,15 +6684,15 @@ async fn update_node_head(
                   record_hash = EXCLUDED.record_hash,
                   updated_at = now()
             ",
-            &[
-                &bootstrap.node_id,
-                &owner_id,
-                &record_version,
-                &decoded.verified.record_hash.as_slice(),
-            ],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[
+            &bootstrap.node_id,
+            &owner_id,
+            &record_version,
+            &decoded.verified.record_hash.as_slice(),
+        ],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     Ok(())
 }
 
@@ -6747,19 +6719,19 @@ fn validate_head_cas(
 }
 
 async fn reject_fenced_share_write(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     node_id: &str,
     parent_id: Option<&str>,
     owner_id: &str,
 ) -> Result<()> {
-    let anchor = if transaction
-        .query_opt(
-            "SELECT 1 FROM visible_files AS files WHERE id = $1",
-            &[&node_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?
-        .is_some()
+    let anchor = if query_opt_cached(
+        transaction,
+        "SELECT 1 FROM visible_files AS files WHERE id = $1",
+        &[&node_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    .is_some()
     {
         Some(node_id)
     } else {
@@ -6768,9 +6740,9 @@ async fn reject_fenced_share_write(
     let Some(anchor) = anchor else {
         return Ok(());
     };
-    let row = transaction
-        .query_one(
-            "
+    let row = query_one_cached(
+        transaction,
+        "
                 SELECT EXISTS (
                   WITH RECURSIVE ancestors AS (
                     SELECT id, parent_id, ARRAY[id]::text[] AS visited_ids,
@@ -6793,10 +6765,10 @@ async fn reject_fenced_share_write(
                   LIMIT 1
                 ) AS blocked
             ",
-            &[&anchor, &owner_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&anchor, &owner_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     if row.get::<_, bool>("blocked") {
         return Err(error::ErrorConflict(
             "a share epoch rotation is publishing; regenerate after it completes",
@@ -6806,16 +6778,16 @@ async fn reject_fenced_share_write(
 }
 
 async fn lock_share_topology(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     owner_id: &str,
 ) -> Result<()> {
-    transaction
-        .query_one(
-            "SELECT pg_advisory_xact_lock(hashtextextended($1, 11881376))",
-            &[&owner_id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    query_one_cached(
+        transaction,
+        "SELECT pg_advisory_xact_lock(hashtextextended($1, 11881376))",
+        &[&owner_id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     Ok(())
 }
 
@@ -6870,10 +6842,13 @@ async fn load_shared_plan(
             .transaction()
             .await
             .map_err(error::ErrorInternalServerError)?;
-        let row = transaction
-            .query_opt(SHARED_DOWNLOAD_SNAPSHOT_QUERY, &[&node_id, &user.id])
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+        let row = query_opt_cached(
+            &transaction,
+            SHARED_DOWNLOAD_SNAPSHOT_QUERY,
+            &[&node_id, &user.id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
         // The row owns the complete consistent snapshot. Release all share,
         // recipient, and epoch locks before decoding, hashing, base64 work, or S3
         // URL signing; those steps cannot extend revocation safety after response.
@@ -7504,30 +7479,30 @@ async fn migration_summary(state: &AppState, user: &SessionPrincipal) -> Result<
 }
 
 async fn lock_account_for_mutation(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     user: &SessionPrincipal,
 ) -> Result<()> {
     // Setup and password changes serialize on the account row. Refresh the
     // principal after acquiring it, since lock admission may also have waited.
-    let account = transaction
-        .query_opt(
-            "SELECT id FROM users WHERE id = $1 AND role = $2 AND status = 'active' FOR UPDATE",
-            &[&user.id, &user.role],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let account = query_opt_cached(
+        transaction,
+        "SELECT id FROM users WHERE id = $1 AND role = $2 AND status = 'active' FOR UPDATE",
+        &[&user.id, &user.role],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     if account.is_none() {
         return Err(error::ErrorUnauthorized(
             "authentication changed; retry request",
         ));
     }
-    let session = transaction
-        .query_opt(
-            "SELECT 1 FROM sessions WHERE id = $1 AND user_id = $2 AND expires_at > clock_timestamp()",
-            &[&user.session_id, &user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let session = query_opt_cached(
+        transaction,
+        "SELECT 1 FROM sessions WHERE id = $1 AND user_id = $2 AND expires_at > clock_timestamp()",
+        &[&user.session_id, &user.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     if session.is_none() {
         return Err(error::ErrorUnauthorized(
             "authentication changed; retry request",
@@ -7537,19 +7512,19 @@ async fn lock_account_for_mutation(
 }
 
 async fn validate_password_account_state(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     user: &SessionPrincipal,
     includes_vault: bool,
 ) -> Result<()> {
     lock_account_for_mutation(transaction, user).await?;
-    let configured: bool = transaction
-        .query_one(
-            "SELECT EXISTS(SELECT 1 FROM user_vaults WHERE user_id = $1)",
-            &[&user.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?
-        .get(0);
+    let configured: bool = query_one_cached(
+        transaction,
+        "SELECT EXISTS(SELECT 1 FROM user_vaults WHERE user_id = $1)",
+        &[&user.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?
+    .get(0);
     if configured != includes_vault {
         return Err(error::ErrorConflict(
             "vault password material must be changed together with the account password",
@@ -9586,7 +9561,7 @@ mod tests {
             .and_then(|(_, tail)| tail.split_once("enum SharedDownloadCpuResponse"))
             .map(|(handler, _)| handler)
             .expect("shared download handler should remain inspectable");
-        assert_eq!(handler.matches(".query_opt(").count(), 1);
+        assert_eq!(handler.matches("query_opt_cached(").count(), 1);
         let commit = handler.find(".commit()").expect("snapshot must commit");
         let release = handler
             .find("drop(client)")
@@ -9649,15 +9624,7 @@ mod tests {
         use tokio_postgres::error::SqlState;
 
         let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
-        let (mut snapshot_client, snapshot_connection) =
-            tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
-                .await
-                .expect("connect snapshot client to PostgreSQL");
-        actix_web::rt::spawn(async move {
-            snapshot_connection
-                .await
-                .expect("snapshot PostgreSQL connection stays healthy");
-        });
+        let mut snapshot_client = crate::db::test_client(&database_url).await;
         let (contender, contender_connection) =
             tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
                 .await

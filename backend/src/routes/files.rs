@@ -16,7 +16,7 @@ use crate::auth::{
     SessionPrincipal, is_valid_username, normalize_username, parse_json_body, require_csrf,
     require_header_csrf, require_principal,
 };
-use crate::db::{query_cached, query_one_cached, query_opt_cached};
+use crate::db::{execute_cached, query_cached, query_one_cached, query_opt_cached};
 use crate::routes::local_file_stream::local_download_response;
 use crate::routes::share_links::{
     EditorShareGrant, editor_grant_from_header, editor_parent, validate_editor_replacement,
@@ -857,9 +857,7 @@ pub async fn init_upload(
     )
     .await?;
 
-    let insert_result = transaction
-        .execute(
-            "
+    let insert_result = execute_cached(&transaction, "
                 INSERT INTO file_uploads (
                   id,
                   file_id,
@@ -1862,10 +1860,13 @@ pub async fn folder_archive_manifest(
         .start()
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let Some(access) = transaction
-        .query_opt(FOLDER_ARCHIVE_ACCESS_QUERY, &[&root_id, &user.id])
-        .await
-        .map_err(error::ErrorInternalServerError)?
+    let Some(access) = query_opt_cached(
+        &transaction,
+        FOLDER_ARCHIVE_ACCESS_QUERY,
+        &[&root_id, &user.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?
     else {
         return Ok(HttpResponse::NotFound().finish());
     };
@@ -1905,10 +1906,13 @@ pub async fn folder_archive_manifest(
     let mut ordered_entries = Vec::with_capacity(descendant_ids.len());
     let mut total_bytes = 0_i64;
     for ids in descendant_ids.chunks(TREE_MUTATION_BATCH_SIZE) {
-        let rows = transaction
-            .query(FOLDER_ARCHIVE_ENTRIES_QUERY, &[&ids, &owner_id])
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+        let rows = query_cached(
+            &transaction,
+            FOLDER_ARCHIVE_ENTRIES_QUERY,
+            &[&ids, &owner_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
         for row in rows {
             let id: String = row.get("id");
             let updated_at: time::OffsetDateTime = row.get("updated_at");
