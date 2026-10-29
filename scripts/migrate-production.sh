@@ -23,14 +23,20 @@ for migration in "${migrations[@]}"; do
     psql "${DATABASE_URL}" -X -v ON_ERROR_STOP=1 -f "${migration}"
 done
 
-production_environment=false
-case "${AERALYTH_ENV:-}" in
-  [Pp][Rr][Oo][Dd][Uu][Cc][Tt][Ii][Oo][Nn]) production_environment=true ;;
-esac
-
-if [[ "${production_environment}" == "true" || -n "${RAILWAY_PROJECT_ID:-}" ]]; then
-  echo "Running production data preflight"
+if [[ -n "${AERALYTH_BOOTSTRAP_ADMIN_PASSWORD:-}" ]]; then
+  if [[ "${#AERALYTH_BOOTSTRAP_ADMIN_PASSWORD}" -lt 32 ]]; then
+    echo "AERALYTH_BOOTSTRAP_ADMIN_PASSWORD must contain at least 32 characters" >&2
+    exit 1
+  fi
+  echo "Replacing the local seed administrator password"
   PGOPTIONS="${migration_pgoptions}" \
-    psql "${DATABASE_URL}" -X -v ON_ERROR_STOP=1 \
-    -f "${project_root}/database/production/preflight.sql"
+    psql "${DATABASE_URL}" -X -q -v ON_ERROR_STOP=1 \
+    -f "${project_root}/database/production/bootstrap_admin.sql"
 fi
+
+# The image is a production artifact, so the seed credential check never
+# depends on deployment-specific environment labels.
+echo "Running production data preflight"
+PGOPTIONS="${migration_pgoptions}" \
+  psql "${DATABASE_URL}" -X -v ON_ERROR_STOP=1 \
+  -f "${project_root}/database/production/preflight.sql"

@@ -83,6 +83,18 @@ export AERALYTH_API_PORT="${api_port}"
 export AERALYTH_API_ORIGIN="http://127.0.0.1:${api_port}"
 export AERALYTH_FRONTEND_PORT="${frontend_port}"
 
+if [[ -z "${DATABASE_URL:-}" ]]; then
+  echo "DATABASE_URL is required in production" >&2
+  exit 1
+fi
+if ! PGOPTIONS="${PGOPTIONS:+${PGOPTIONS} }-c client_min_messages=warning" \
+  psql "${DATABASE_URL}" -X -q -v ON_ERROR_STOP=1 \
+  -f /app/database/production/preflight.sql
+then
+  echo "Production data preflight failed; refusing to start" >&2
+  exit 1
+fi
+
 /app/bin/aeralyth-api &
 api_pid=$!
 
