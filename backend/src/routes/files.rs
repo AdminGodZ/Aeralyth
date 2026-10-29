@@ -23,7 +23,10 @@ use crate::routes::share_links::{
 };
 use crate::routes::tree_jobs::{self, Action, MutationResult};
 use crate::routes::tree_walk::{TREE_MUTATION_BATCH_SIZE, TreeWalkScope, walk_subtree};
-use crate::routes::upload_reservations::{reservation_amount, reserve_upload_capacity};
+use crate::routes::upload_reservations::{
+    PENDING_UPLOAD_SECONDS, UNTOUCHED_SHARE_LINK_UPLOAD_SECONDS, initial_pending_upload_seconds,
+    reservation_amount, reserve_upload_capacity,
+};
 use crate::state::{AppState, LoadShedError};
 use crate::storage::UploadedPart;
 use crate::timestamps;
@@ -848,6 +851,7 @@ pub async fn init_upload(
     reserve_upload_capacity(
         &transaction,
         &actor.owner_id,
+        actor.share_link_id.as_deref(),
         reservation,
         state.config.storage_quota_bytes,
     )
@@ -874,7 +878,7 @@ pub async fn init_upload(
                   status,
                   expires_at
                 )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, $13, 'initializing', now() + interval '24 hours')
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11, $12, $13, 'initializing', now() + ($14::bigint * interval '1 second'))
             ",
             &[
                 &upload_id,
@@ -890,6 +894,7 @@ pub async fn init_upload(
                 &actor.share_link_id,
                 &replacement_file_id,
                 &reservation.ledger_bytes,
+                &initial_pending_upload_seconds(actor.share_link_id.as_deref()),
             ],
         )
         .await;
@@ -988,8 +993,13 @@ pub async fn init_upload(
     let activated = state
         .db
         .execute(
-            "UPDATE file_uploads SET multipart_upload_id = $1, status = 'pending', expires_at = now() + interval '24 hours' WHERE id = $2 AND owner_id = $3 AND status = 'initializing'",
-            &[&prepared.multipart_upload_id, &upload_id, &actor.owner_id],
+            "UPDATE file_uploads SET multipart_upload_id = $1, status = 'pending', expires_at = now() + ($4::bigint * interval '1 second') WHERE id = $2 AND owner_id = $3 AND status = 'initializing'",
+            &[
+                &prepared.multipart_upload_id,
+                &upload_id,
+                &actor.owner_id,
+                &initial_pending_upload_seconds(actor.share_link_id.as_deref()),
+            ],
         )
         .await;
 
@@ -1053,6 +1063,7 @@ pub async fn upload_content(
     if upload.mode != "local" || upload.status != "pending" {
         return Ok(HttpResponse::Conflict().finish());
     }
+    extend_written_share_link_upload(&state, &actor, &upload.id).await?;
     state.db.release_request_connection().await;
 
     let object_path = state
@@ -1283,6 +1294,7 @@ pub async fn presign_upload_content(
     if upload.mode != "single" || upload.status != "pending" {
         return Ok(HttpResponse::Conflict().finish());
     }
+    extend_written_share_link_upload(&state, &actor, &upload.id).await?;
     let body =
         parse_json_body::<UploadChecksumRequest>(&request, body, UPLOAD_CONTROL_JSON_LIMIT).await?;
 
@@ -1353,6 +1365,7 @@ pub async fn presign_upload_part(
     if upload.mode != "multipart" || upload.status != "pending" {
         return Ok(HttpResponse::Conflict().finish());
     }
+    extend_written_share_link_upload(&state, &actor, &upload.id).await?;
     let body =
         parse_json_body::<UploadChecksumRequest>(&request, body, UPLOAD_CONTROL_JSON_LIMIT).await?;
 
@@ -1418,6 +1431,7 @@ pub async fn presign_upload_parts(
     if upload.mode != "multipart" || upload.status != "pending" {
         return Ok(HttpResponse::Conflict().finish());
     }
+    extend_written_share_link_upload(&state, &actor, &upload.id).await?;
     let body =
         parse_json_body::<UploadPartUrlsRequest>(&request, body, UPLOAD_CONTROL_JSON_LIMIT).await?;
     if body.parts.is_empty() || body.parts.len() > MAX_PRESIGN_PARTS {
@@ -3343,6 +3357,37 @@ async fn find_resumable_upload(
         .map_err(crate::db::http_error)?;
 
     Ok(row.map(file_upload_from_row))
+}
+
+/// Share-link uploads start with a short untouched lifetime. The first write request
+/// restores the normal pending lifetime, so only idle intents expire early.
+async fn extend_written_share_link_upload(
+    state: &AppState,
+    actor: &UploadActor,
+    upload_id: &str,
+) -> Result<()> {
+    if actor.share_link_id.is_none() {
+        return Ok(());
+    }
+    state
+        .db
+        .execute(
+            "
+                UPDATE file_uploads
+                SET expires_at = now() + ($3::bigint * interval '1 second')
+                WHERE id = $1 AND owner_id = $2 AND status = 'pending'
+                  AND expires_at <= now() + ($4::bigint * interval '1 second')
+            ",
+            &[
+                &upload_id,
+                &actor.owner_id,
+                &PENDING_UPLOAD_SECONDS,
+                &UNTOUCHED_SHARE_LINK_UPLOAD_SECONDS,
+            ],
+        )
+        .await
+        .map_err(crate::db::http_error)?;
+    Ok(())
 }
 
 async fn require_upload_actor(

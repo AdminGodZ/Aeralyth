@@ -2035,6 +2035,7 @@ pub async fn init_upload(
     reserve_upload_capacity(
         &transaction,
         &user.id,
+        None,
         reservation,
         state.config.storage_quota_bytes,
     )
