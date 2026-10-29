@@ -413,7 +413,10 @@ pub async fn list_files(
     } else {
         None
     };
-    if _recursive_permit.is_some() {
+    if _recursive_permit
+        .as_ref()
+        .is_some_and(crate::state::QueuedMutationPermit::waited)
+    {
         crate::auth::revalidate_principal(&state, &request).await?;
     }
     let folder_context = match view {
@@ -2026,7 +2029,9 @@ pub async fn download(
 ) -> Result<HttpResponse> {
     let user = require_principal(&state, &request).await?;
     let _recursive_permit = state.acquire_interactive_operation(&user.id).await?;
-    crate::auth::revalidate_principal(&state, &request).await?;
+    if _recursive_permit.waited() {
+        crate::auth::revalidate_principal(&state, &request).await?;
+    }
     let expected_version = query
         .version
         .as_deref()
@@ -3846,6 +3851,35 @@ mod tests {
                 .prepare(query)
                 .await
                 .expect("folder archive query prepares");
+        }
+    }
+
+    #[test]
+    fn hot_reads_skip_revalidation_only_when_admission_did_not_wait() {
+        // Skipping is safe only because nothing releases the request
+        // connection between the principal load and admission. Handlers that
+        // read a body or wait on CPU work first must revalidate unconditionally.
+        let source = include_str!("files.rs");
+        for (start, end) in [
+            (
+                "pub async fn list_files(",
+                "let folder_context = match view",
+            ),
+            ("pub async fn download(", "let expected_version = query"),
+        ] {
+            let handler = source
+                .split_once(start)
+                .and_then(|(_, tail)| tail.split_once(end))
+                .map(|(handler, _)| handler)
+                .expect("hot read handler should remain inspectable");
+            let principal = handler.find("require_principal(").unwrap();
+            let admission = handler.find("acquire_interactive_operation(").unwrap();
+            let between = &handler[principal..admission];
+            assert!(!between.contains("release_request_connection"));
+            assert!(!between.contains("Payload"));
+            assert!(!between.contains(".run("));
+            assert!(handler[admission..].contains("waited"));
+            assert!(handler[admission..].contains("revalidate_principal("));
         }
     }
 
