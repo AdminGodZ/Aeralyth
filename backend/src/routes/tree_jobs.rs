@@ -18,6 +18,12 @@ use super::tree_walk::{TreeWalkScope, update_tree_state, walk_subtree};
 pub(crate) const SYNC_NODE_LIMIT: usize = 256;
 const JOB_BATCH_SIZE: i64 = 256;
 const OPERATION_DEADLINE: Duration = Duration::from_secs(3);
+const IDLE_POLL_MIN: Duration = Duration::from_millis(500);
+const IDLE_POLL_MAX: Duration = Duration::from_secs(5);
+
+/// Starts this process's worker as soon as a request commits a job. Polling
+/// still covers jobs queued by another replica and delayed retries.
+static WORKER_WAKE: tokio::sync::Notify = tokio::sync::Notify::const_new();
 
 #[derive(Clone, Copy)]
 pub(crate) enum Action {
@@ -166,6 +172,9 @@ pub(crate) async fn mutate(
                 .commit()
                 .await
                 .map_err(error::ErrorInternalServerError)?;
+            if matches!(outcome, MutationResult::Queued(_)) {
+                WORKER_WAKE.notify_one();
+            }
             Ok(outcome)
         }
         Ok(Err(error)) => {
@@ -373,15 +382,29 @@ async fn process_batch(db: &Database) -> Result<bool, DatabaseError> {
     Ok(true)
 }
 
+/// Idle polls back off so an empty queue costs a transaction every few seconds,
+/// not twice a second. Locally queued jobs wake the worker immediately.
+fn next_idle_poll(current: Duration) -> Duration {
+    current.saturating_mul(2).min(IDLE_POLL_MAX)
+}
+
 pub(crate) async fn run(db: Database, mut shutdown: watch::Receiver<bool>) {
+    let mut idle_poll = IDLE_POLL_MIN;
     loop {
         if *shutdown.borrow() {
             break;
         }
         // This outer deadline also bounds completion delivery and job checkout.
         let delay = match tokio::time::timeout(Duration::from_secs(4), process_batch(&db)).await {
-            Ok(Ok(true)) => Duration::from_millis(1),
-            Ok(Ok(false)) => Duration::from_millis(500),
+            Ok(Ok(true)) => {
+                idle_poll = IDLE_POLL_MIN;
+                Duration::from_millis(1)
+            }
+            Ok(Ok(false)) => {
+                let delay = idle_poll;
+                idle_poll = next_idle_poll(idle_poll);
+                delay
+            }
             failure => {
                 tracing::warn!(
                     ?failure,
@@ -392,6 +415,7 @@ pub(crate) async fn run(db: Database, mut shutdown: watch::Receiver<bool>) {
         };
         tokio::select! {
             _ = tokio::time::sleep(delay) => {},
+            _ = WORKER_WAKE.notified() => { idle_poll = IDLE_POLL_MIN; },
             _ = shutdown.changed() => { if *shutdown.borrow() { break; } }
         }
     }
@@ -406,6 +430,43 @@ mod tests {
     use std::time::Instant;
 
     static DATABASE_TEST_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn idle_polling_backs_off_to_a_bounded_interval() {
+        let mut poll = IDLE_POLL_MIN;
+        let mut schedule = Vec::new();
+        for _ in 0..6 {
+            schedule.push(poll);
+            poll = next_idle_poll(poll);
+        }
+        assert_eq!(
+            schedule,
+            [500, 1_000, 2_000, 4_000, 5_000, 5_000].map(Duration::from_millis)
+        );
+    }
+
+    #[test]
+    fn queued_mutations_wake_the_worker_after_commit() {
+        let source = include_str!("tree_jobs.rs");
+        let mutate = source
+            .split_once("pub(crate) async fn mutate(")
+            .and_then(|(_, tail)| tail.split_once("fn next_idle_poll("))
+            .map(|(mutate, _)| mutate)
+            .expect("mutation source should remain inspectable");
+        let commit = mutate.find(".commit()").expect("mutation commits");
+        let wake = mutate
+            .find("WORKER_WAKE.notify_one()")
+            .expect("queued jobs wake the worker");
+        assert!(commit < wake, "the worker must not race an uncommitted job");
+    }
+
+    #[actix_web::test]
+    async fn a_wake_sent_before_the_worker_waits_is_not_lost() {
+        WORKER_WAKE.notify_one();
+        tokio::time::timeout(Duration::from_millis(100), WORKER_WAKE.notified())
+            .await
+            .expect("notify_one stores a permit for the next wait");
+    }
 
     fn rss_kib() -> u64 {
         std::process::Command::new("ps")
