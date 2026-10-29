@@ -64,6 +64,12 @@ const MULTIPART_LIFECYCLE_RULE_ID: &str = "aeralyth-abort-incomplete-multipart";
 
 const COUNTER_RECONCILIATION_BATCH_SIZE: i64 = 500;
 const STORAGE_JOB_LEASE_SECONDS: i64 = 5 * 60;
+const STORAGE_DELETION_BULK_CLAIM_SIZE: i64 = 500;
+const S3_DELETE_OBJECTS_MAX_KEYS: usize = 1_000;
+// Bulk-claimed jobs have no lease heartbeat, so a claim (plus the per-job
+// claim's bulk-eligible jobs) should fit one DeleteObjects request instead of
+// queueing behind its own chunks.
+const _: () = assert!(STORAGE_DELETION_BULK_CLAIM_SIZE as usize <= S3_DELETE_OBJECTS_MAX_KEYS);
 const STORAGE_JOB_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(60);
 const MAINTENANCE_DEAD_LETTER_ATTEMPTS: i32 = 12;
 const RETRY_DELAY_FLOOR_SECONDS: i64 = 10;
@@ -218,6 +224,116 @@ const CLAIM_STORAGE_DELETION_JOBS_QUERY: &str = "
           AND vault_uploads.multipart_upload_id IS NULL
       ) AS discover_multipart
     FROM claimed_jobs
+";
+// Plain single-object jobs need only one bulk provider call, so they are claimed
+// in larger batches. Multipart aborts, provider-session discovery, and objects
+// outside the bulk-delete prefix stay on the per-job claim below.
+const CLAIM_BULK_STORAGE_DELETION_JOBS_QUERY: &str = "
+    WITH claimed AS (
+      SELECT jobs.id
+      FROM storage_deletion_jobs AS jobs
+      WHERE jobs.available_at <= now()
+        AND jobs.dead_lettered_at IS NULL
+        AND (jobs.locked_until IS NULL OR jobs.locked_until < now())
+        AND jobs.multipart_upload_id IS NULL
+        AND starts_with(jobs.object_key, $2)
+        AND NOT EXISTS (
+          SELECT 1
+          FROM vault_uploads
+          WHERE vault_uploads.object_key = jobs.object_key
+            AND vault_uploads.upload_mode = 'multipart'
+            AND vault_uploads.status IN ('aborting', 'aborted')
+            AND vault_uploads.multipart_upload_id IS NULL
+        )
+      ORDER BY jobs.id
+      LIMIT $3
+      FOR UPDATE OF jobs SKIP LOCKED
+    )
+    UPDATE storage_deletion_jobs AS jobs
+    SET locked_until = now() + ($1::bigint * interval '1 second'),
+        lease_token = gen_random_uuid()::text
+    FROM claimed
+    WHERE jobs.id = claimed.id
+    RETURNING
+      jobs.id,
+      jobs.object_key,
+      jobs.multipart_upload_id,
+      jobs.attempts,
+      jobs.lease_token,
+      false AS discover_multipart
+";
+// Set-based equivalent of the success branch of `finish_storage_deletion_job`:
+// only jobs still held under the caller's lease are touched, a job whose
+// multipart upload changed since the claim is released for another pass, and
+// the rest are deleted together with their upload and migration bookkeeping.
+const FINISH_STORAGE_DELETION_BATCH_QUERY: &str = "
+    WITH finished_input AS (
+      SELECT *
+      FROM unnest($1::bigint[], $2::text[], $3::text[])
+        AS finished_input(id, lease_token, multipart_upload_id)
+    ), held AS MATERIALIZED (
+      SELECT
+        jobs.id,
+        jobs.lease_token,
+        jobs.multipart_upload_id IS NOT DISTINCT FROM finished_input.multipart_upload_id
+          AS unchanged
+      FROM storage_deletion_jobs AS jobs
+      JOIN finished_input
+        ON finished_input.id = jobs.id
+       AND finished_input.lease_token = jobs.lease_token
+      ORDER BY jobs.id
+      FOR UPDATE OF jobs
+    ), released AS (
+      UPDATE storage_deletion_jobs AS jobs
+      SET available_at = now(), locked_until = NULL, lease_token = NULL
+      FROM held
+      WHERE jobs.id = held.id
+        AND jobs.lease_token = held.lease_token
+        AND NOT held.unchanged
+      RETURNING jobs.id
+    ), finished AS (
+      DELETE FROM storage_deletion_jobs AS jobs
+      USING held
+      WHERE jobs.id = held.id
+        AND jobs.lease_token = held.lease_token
+        AND held.unchanged
+      RETURNING jobs.object_key
+    ), aborted_file_uploads AS (
+      UPDATE file_uploads
+      SET status = 'aborted'
+      WHERE object_key IN (SELECT object_key FROM finished) AND status = 'aborting'
+      RETURNING 1
+    ), aborted_vault_uploads AS (
+      UPDATE vault_uploads
+      SET status = 'aborted'
+      WHERE object_key IN (SELECT object_key FROM finished) AND status = 'aborting'
+      RETURNING 1
+    ), completed_migrations AS (
+      UPDATE vault_migrations
+      SET state = 'complete', updated_at = now()
+      WHERE legacy_object_key IN (SELECT object_key FROM finished)
+        AND state = 'cleanup_queued'
+      RETURNING 1
+    )
+    SELECT
+      (SELECT count(*) FROM finished)::bigint AS finished,
+      (SELECT count(*) FROM released)::bigint AS released
+";
+// Set-based equivalent of the failure branch of `finish_storage_deletion_job`.
+const FAIL_STORAGE_DELETION_BATCH_QUERY: &str = "
+    UPDATE storage_deletion_jobs AS jobs
+    SET attempts = jobs.attempts + 1,
+        available_at = now() + (failed.delay_seconds * interval '1 second'),
+        locked_until = NULL,
+        lease_token = NULL,
+        dead_lettered_at = CASE
+          WHEN jobs.attempts + 1 >= $5 THEN now()
+          ELSE jobs.dead_lettered_at
+        END,
+        last_error = failed.last_error
+    FROM unnest($1::bigint[], $2::text[], $3::bigint[], $4::text[])
+      AS failed(id, lease_token, delay_seconds, last_error)
+    WHERE jobs.id = failed.id AND jobs.lease_token = failed.lease_token
 ";
 const COMPLETE_MIGRATION_CLEANUP_QUERY: &str = "
     UPDATE vault_migrations
@@ -1521,18 +1637,22 @@ impl Storage {
         Ok(())
     }
 
+    fn bulk_delete_available(&self) -> bool {
+        matches!(self, Self::S3 { .. })
+    }
+
     fn supports_bulk_delete(&self, object_key: &str) -> bool {
-        matches!(self, Self::S3 { .. }) && object_key.starts_with(STORAGE_OBJECT_PREFIX)
+        self.bulk_delete_available() && object_key.starts_with(STORAGE_OBJECT_PREFIX)
     }
 
     pub async fn delete_objects(&self, object_keys: &[String]) -> Vec<Result<(), StorageError>> {
         if object_keys.is_empty() {
             return Vec::new();
         }
-        if object_keys.len() > 1_000
+        if object_keys.len() > S3_DELETE_OBJECTS_MAX_KEYS
             || !object_keys.iter().all(|key| self.supports_bulk_delete(key))
         {
-            let message = if object_keys.len() > 1_000 {
+            let message = if object_keys.len() > S3_DELETE_OBJECTS_MAX_KEYS {
                 "S3 bulk deletion accepts at most 1,000 objects"
             } else {
                 "the object batch is not eligible for S3 bulk deletion"
@@ -3280,7 +3400,7 @@ async fn finish_storage_deletion_job(
         }
         Err(error) => {
             let delay_seconds = retry_delay_seconds(attempts);
-            let error_message = error.to_string().chars().take(500).collect::<String>();
+            let error_message = storage_deletion_error_message(&error);
             db.execute(
                 "
                     UPDATE storage_deletion_jobs
@@ -3307,6 +3427,95 @@ async fn finish_storage_deletion_job(
         }
     }
     Ok(())
+}
+
+fn storage_deletion_error_message(error: &StorageError) -> String {
+    error.to_string().chars().take(500).collect()
+}
+
+/// Finalizes a batch of bulk deletions with one statement for the successes
+/// and one for the failures, with the same lease fencing and bookkeeping as
+/// `finish_storage_deletion_job`.
+async fn finish_storage_deletion_batch(
+    db: &Database,
+    outcomes: Vec<(StorageDeletionJob, Result<(), StorageError>)>,
+) -> Result<(), Box<dyn StdError + Send + Sync>> {
+    let mut finished_ids = Vec::new();
+    let mut finished_lease_tokens = Vec::new();
+    let mut finished_multipart_upload_ids = Vec::new();
+    let mut failed_ids = Vec::new();
+    let mut failed_lease_tokens = Vec::new();
+    let mut failed_delay_seconds = Vec::new();
+    let mut failed_errors = Vec::new();
+    for (job, deletion_result) in outcomes {
+        match deletion_result {
+            Ok(()) => {
+                finished_ids.push(job.id);
+                finished_lease_tokens.push(job.lease_token);
+                finished_multipart_upload_ids.push(job.multipart_upload_id);
+            }
+            Err(error) => {
+                failed_ids.push(job.id);
+                failed_lease_tokens.push(job.lease_token);
+                failed_delay_seconds.push(retry_delay_seconds(job.attempts));
+                failed_errors.push(storage_deletion_error_message(&error));
+            }
+        }
+    }
+    if !finished_ids.is_empty() {
+        db.query_one(
+            FINISH_STORAGE_DELETION_BATCH_QUERY,
+            &[
+                &finished_ids,
+                &finished_lease_tokens,
+                &finished_multipart_upload_ids,
+            ],
+        )
+        .await?;
+    }
+    if !failed_ids.is_empty() {
+        db.execute(
+            FAIL_STORAGE_DELETION_BATCH_QUERY,
+            &[
+                &failed_ids,
+                &failed_lease_tokens,
+                &failed_delay_seconds,
+                &failed_errors,
+                &MAINTENANCE_DEAD_LETTER_ATTEMPTS,
+            ],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+fn bulk_delete_chunks<Item>(items: Vec<Item>) -> Vec<Vec<Item>> {
+    let mut items = items.into_iter().peekable();
+    let mut chunks = Vec::new();
+    while items.peek().is_some() {
+        chunks.push(items.by_ref().take(S3_DELETE_OBJECTS_MAX_KEYS).collect());
+    }
+    chunks
+}
+
+async fn claim_storage_deletion_jobs(
+    db: &Database,
+    query: &str,
+    params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
+) -> Result<Vec<StorageDeletionJob>, Box<dyn StdError + Send + Sync>> {
+    Ok(db
+        .query(query, params)
+        .await?
+        .into_iter()
+        .map(|job| StorageDeletionJob {
+            id: job.get("id"),
+            object_key: job.get("object_key"),
+            multipart_upload_id: job.get("multipart_upload_id"),
+            discover_multipart: job.get("discover_multipart"),
+            attempts: job.get("attempts"),
+            lease_token: job.get("lease_token"),
+        })
+        .collect())
 }
 
 async fn run_with_storage_job_lease<OperationFuture>(
@@ -3358,22 +3567,28 @@ async fn process_deletion_jobs(
     storage: &Storage,
     storage_concurrency: usize,
 ) -> Result<bool, Box<dyn StdError + Send + Sync>> {
-    let jobs = db
-        .query(
+    let mut jobs = if storage.bulk_delete_available() {
+        claim_storage_deletion_jobs(
+            db,
+            CLAIM_BULK_STORAGE_DELETION_JOBS_QUERY,
+            &[
+                &STORAGE_JOB_LEASE_SECONDS,
+                &STORAGE_OBJECT_PREFIX,
+                &STORAGE_DELETION_BULK_CLAIM_SIZE,
+            ],
+        )
+        .await?
+    } else {
+        Vec::new()
+    };
+    jobs.extend(
+        claim_storage_deletion_jobs(
+            db,
             CLAIM_STORAGE_DELETION_JOBS_QUERY,
             &[&STORAGE_JOB_LEASE_SECONDS],
         )
-        .await?
-        .into_iter()
-        .map(|job| StorageDeletionJob {
-            id: job.get("id"),
-            object_key: job.get("object_key"),
-            multipart_upload_id: job.get("multipart_upload_id"),
-            discover_multipart: job.get("discover_multipart"),
-            attempts: job.get("attempts"),
-            lease_token: job.get("lease_token"),
-        })
-        .collect::<Vec<_>>();
+        .await?,
+    );
 
     let did_work = !jobs.is_empty();
     let (bulk_jobs, individual_jobs): (Vec<_>, Vec<_>) = jobs.into_iter().partition(|job| {
@@ -3381,17 +3596,21 @@ async fn process_deletion_jobs(
             && job.multipart_upload_id.is_none()
             && storage.supports_bulk_delete(&job.object_key)
     });
-    let bulk_keys = bulk_jobs
-        .iter()
-        .map(|job| job.object_key.clone())
-        .collect::<Vec<_>>();
-    let bulk_results = storage.delete_objects(&bulk_keys).await;
     let bulk_outcomes = run_bounded_storage_tasks(
-        bulk_jobs.into_iter().zip(bulk_results),
+        bulk_delete_chunks(bulk_jobs),
         storage_concurrency,
-        |(job, result)| finish_storage_deletion_job(db, job, result),
+        |jobs| async move {
+            let keys = jobs
+                .iter()
+                .map(|job| job.object_key.clone())
+                .collect::<Vec<_>>();
+            let results = storage.delete_objects(&keys).await;
+            jobs.into_iter().zip(results).collect::<Vec<_>>()
+        },
     )
     .await;
+    let bulk_finished =
+        finish_storage_deletion_batch(db, bulk_outcomes.into_iter().flatten().collect()).await;
     let individual_outcomes =
         run_bounded_storage_tasks(individual_jobs, storage_concurrency, |job| async move {
             let object_key = job.object_key.clone();
@@ -3412,7 +3631,8 @@ async fn process_deletion_jobs(
             finish_storage_deletion_job(db, job, deletion_result).await
         })
         .await;
-    for outcome in bulk_outcomes.into_iter().chain(individual_outcomes) {
+    bulk_finished?;
+    for outcome in individual_outcomes {
         outcome?;
     }
 
@@ -4234,14 +4454,511 @@ mod tests {
                 .await
                 .expect("postgres connection should remain healthy");
         });
-        client
-            .prepare(CLAIM_STORAGE_DELETION_JOBS_QUERY)
-            .await
-            .expect("the storage deletion claim query should prepare");
+        for query in [
+            CLAIM_STORAGE_DELETION_JOBS_QUERY,
+            CLAIM_BULK_STORAGE_DELETION_JOBS_QUERY,
+            FINISH_STORAGE_DELETION_BATCH_QUERY,
+            FAIL_STORAGE_DELETION_BATCH_QUERY,
+        ] {
+            client
+                .prepare(query)
+                .await
+                .expect("the storage deletion queries should prepare");
+        }
         client
             .prepare(EXPIRE_TRASH_BATCH_QUERY)
             .await
             .expect("the trash expiry query should prepare");
+    }
+
+    #[test]
+    fn bulk_storage_deletion_claims_only_plain_objects_in_provider_sized_batches() {
+        let query = CLAIM_BULK_STORAGE_DELETION_JOBS_QUERY;
+        for fence in [
+            "jobs.available_at <= now()",
+            "jobs.dead_lettered_at IS NULL",
+            "(jobs.locked_until IS NULL OR jobs.locked_until < now())",
+            "jobs.multipart_upload_id IS NULL",
+            "starts_with(jobs.object_key, $2)",
+            "vault_uploads.multipart_upload_id IS NULL",
+            "ORDER BY jobs.id",
+            "LIMIT $3",
+            "FOR UPDATE OF jobs SKIP LOCKED",
+            "lease_token = gen_random_uuid()::text",
+        ] {
+            assert!(query.contains(fence), "bulk claim lost {fence}");
+        }
+
+        for query in [
+            FINISH_STORAGE_DELETION_BATCH_QUERY,
+            FAIL_STORAGE_DELETION_BATCH_QUERY,
+        ] {
+            assert!(query.contains("lease_token = "));
+            assert!(query.contains("unnest("));
+        }
+        assert!(
+            FINISH_STORAGE_DELETION_BATCH_QUERY
+                .contains("legacy_object_key IN (SELECT object_key FROM finished)")
+        );
+        assert!(FINISH_STORAGE_DELETION_BATCH_QUERY.contains("state = 'cleanup_queued'"));
+    }
+
+    #[test]
+    fn bulk_deletion_chunks_never_exceed_the_provider_key_limit() {
+        assert!(bulk_delete_chunks(Vec::<usize>::new()).is_empty());
+        let chunks = bulk_delete_chunks((0..2_501).collect::<Vec<_>>());
+        assert_eq!(
+            chunks.iter().map(Vec::len).collect::<Vec<_>>(),
+            [1_000, 1_000, 501]
+        );
+        assert!(
+            chunks.into_iter().flatten().eq(0..2_501),
+            "chunking must keep every job exactly once and in order"
+        );
+    }
+
+    type DeleteObjectsRequests = Arc<std::sync::Mutex<Vec<Vec<String>>>>;
+
+    /// An S3 endpoint that accepts every request but reports a per-key
+    /// `AccessDenied` for bulk-deleted keys containing `denied`.
+    fn partially_failing_s3() -> (
+        Storage,
+        DeleteObjectsRequests,
+        actix_web::dev::ServerHandle,
+        actix_web::rt::task::JoinHandle<std::io::Result<()>>,
+    ) {
+        use actix_web::{App, HttpRequest, HttpResponse, HttpServer, web};
+        let requests = DeleteObjectsRequests::default();
+        let observed = Arc::clone(&requests);
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let endpoint = format!("http://{}", listener.local_addr().unwrap());
+        let server = HttpServer::new(move || {
+            let observed = Arc::clone(&observed);
+            App::new().default_service(web::to(move |request: HttpRequest, body: web::Bytes| {
+                let observed = Arc::clone(&observed);
+                async move {
+                    if !request.query_string().contains("delete") {
+                        return HttpResponse::NoContent().finish();
+                    }
+                    let body = String::from_utf8_lossy(&body);
+                    let keys = body
+                        .split("<Key>")
+                        .skip(1)
+                        .filter_map(|entry| entry.split("</Key>").next())
+                        .map(str::to_owned)
+                        .collect::<Vec<_>>();
+                    let errors = keys
+                        .iter()
+                        .filter(|key| key.contains("denied"))
+                        .map(|key| format!(
+                            "<Error><Key>{key}</Key><Code>AccessDenied</Code><Message>Access Denied</Message></Error>"
+                        ))
+                        .collect::<String>();
+                    observed.lock().unwrap().push(keys);
+                    HttpResponse::Ok().content_type("application/xml").body(format!(
+                        "<DeleteResult xmlns=\"http://s3.amazonaws.com/doc/2006-03-01/\">{errors}</DeleteResult>"
+                    ))
+                }
+            }))
+        })
+        .workers(1)
+        .listen(listener)
+        .unwrap()
+        .run();
+        let handle = server.handle();
+        let task = actix_web::rt::spawn(server);
+        let client = aws_sdk_s3::Client::from_conf(
+            aws_sdk_s3::config::Builder::new()
+                .behavior_version_latest()
+                .region(Region::new("us-east-1"))
+                .credentials_provider(Credentials::new("test", "test", None, None, "test"))
+                .endpoint_url(endpoint.clone())
+                .force_path_style(true)
+                .build(),
+        );
+        let config = Config::from_env().unwrap();
+        let storage = Storage::S3 {
+            client: client.clone(),
+            maintenance_client: client,
+            maintenance_budget: Arc::new(Semaphore::new(4)),
+            namespace: endpoint,
+            metrics: Metrics::new(&config),
+            bucket: "test".to_owned(),
+            legacy_root: PathBuf::new(),
+            presign_seconds: 60,
+            multipart_threshold_bytes: 1,
+            multipart_part_bytes: 1,
+            multipart_orphan_grace_seconds: 1,
+            lifecycle_backstop_enabled: false,
+        };
+        (storage, requests, handle, task)
+    }
+
+    #[actix_web::test]
+    async fn bulk_deletion_reports_partial_per_key_failures() {
+        let (storage, requests, handle, task) = partially_failing_s3();
+        let keys = [
+            "users/test/files/first",
+            "users/test/files/denied",
+            "users/test/files/second",
+        ]
+        .map(str::to_owned);
+
+        let results = storage.delete_objects(&keys).await;
+
+        assert!(results[0].is_ok() && results[2].is_ok());
+        let failure = results[1].as_ref().unwrap_err().to_string();
+        assert!(failure.contains("AccessDenied"), "{failure}");
+        assert_eq!(*requests.lock().unwrap(), [keys.to_vec()]);
+        handle.stop(true).await;
+        task.await.unwrap().unwrap();
+    }
+
+    async fn storage_deletion_test_database(owner: &str) -> Database {
+        let config = Config::from_env().unwrap();
+        let db = Database::create(
+            &config.database_url,
+            crate::db::DatabasePoolSettings {
+                role: crate::db::PoolRole::Maintenance,
+                max_size: 2,
+                min_size: 1,
+                checkout_queue_capacity: 4,
+                wait_timeout: Duration::from_secs(2),
+                max_lifetime: Duration::from_secs(1800),
+                lifetime_jitter: Duration::ZERO,
+            },
+            Metrics::new(&config),
+        )
+        .await
+        .unwrap();
+        clean_storage_deletion_fixtures(&db, owner).await;
+        db.execute(
+            "INSERT INTO users(id,username,password_hash,role) VALUES($1,$1,'unused','user')",
+            &[&owner],
+        )
+        .await
+        .unwrap();
+        db
+    }
+
+    async fn clean_storage_deletion_fixtures(db: &Database, owner: &str) {
+        db.execute(
+            "DELETE FROM storage_deletion_jobs WHERE starts_with(object_key, 'users/' || $1 || '/')",
+            &[&owner],
+        )
+        .await
+        .unwrap();
+        db.execute("DELETE FROM users WHERE id = $1", &[&owner])
+            .await
+            .unwrap();
+    }
+
+    /// Seeds one lane of claimed jobs covering every finalization branch and
+    /// returns them with the outcome the provider reported for each.
+    async fn seed_storage_deletion_lane(
+        db: &Database,
+        owner: &str,
+        lane: &str,
+    ) -> Vec<(StorageDeletionJob, Result<(), StorageError>)> {
+        let prefix = format!("users/{owner}/{lane}");
+        db.execute(
+            "INSERT INTO files(id,owner_id,original_name,storage_name,size_bytes,entry_type)
+             VALUES('fil_' || $1 || '_' || $2, $1, 'migrated', $3 || '/legacy', 0, 'file')",
+            &[&owner, &lane, &prefix],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO vault_migrations(node_id,owner_id,legacy_object_key,state)
+             VALUES('fil_' || $1 || '_' || $2, $1, $3 || '/migration', 'cleanup_queued')",
+            &[&owner, &lane, &prefix],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO vault_uploads(
+               id,node_id,owner_id,entry_type,generation_number,generation_id,object_key,
+               ciphertext_length,chunk_count,upload_mode,status
+             ) VALUES(
+               'vup_' || $1 || '_' || $2, 'nod_' || $1 || '_' || $2, $1, 'file', 1,
+               decode(md5($3), 'hex'), $3 || '/vault', 1, 1, 'single', 'aborting'
+             )",
+            &[&owner, &lane, &prefix],
+        )
+        .await
+        .unwrap();
+        db.execute(
+            "INSERT INTO file_uploads(id,file_id,owner_id,original_name,object_key,size_bytes,upload_mode,status,expires_at)
+             SELECT 'upl_' || $1 || '_' || $2 || '_' || scenario, 'fil_future_' || $1 || '_' || $2 || '_' || scenario,
+               $1, scenario, $3 || '/' || scenario, 1, 'single', 'aborting', now() + interval '1 hour'
+             FROM unnest(ARRAY['done','changed','stale','failed','dead','failed-stale']) AS scenario",
+            &[&owner, &lane, &prefix],
+        )
+        .await
+        .unwrap();
+        // Upload creation reserves usage in the application, not in a trigger.
+        db.execute(
+            "UPDATE user_storage_usage
+             SET pending_uploads = (
+               SELECT count(*) FROM file_uploads WHERE owner_id = $1 AND status = 'aborting'
+             ) + (
+               SELECT count(*) FROM vault_uploads WHERE owner_id = $1 AND status = 'aborting'
+             )
+             WHERE owner_id = $1",
+            &[&owner],
+        )
+        .await
+        .unwrap();
+        // (scenario, current multipart id, attempts, held token, token the worker presents, outcome)
+        let scenarios = [
+            ("done", None, 0, "ours", "ours", true),
+            ("vault", None, 0, "ours", "ours", true),
+            ("migration", None, 0, "ours", "ours", true),
+            (
+                "changed",
+                Some("upload-arrived-after-claim"),
+                0,
+                "ours",
+                "ours",
+                true,
+            ),
+            ("stale", None, 0, "theirs", "ours", true),
+            ("failed", None, 3, "ours", "ours", false),
+            (
+                "dead",
+                None,
+                MAINTENANCE_DEAD_LETTER_ATTEMPTS - 1,
+                "ours",
+                "ours",
+                false,
+            ),
+            ("failed-stale", None, 0, "theirs", "ours", false),
+        ];
+        let mut outcomes = Vec::new();
+        for (scenario, multipart_upload_id, attempts, held, presented, succeeded) in scenarios {
+            let object_key = format!("{prefix}/{scenario}");
+            let id: i64 = db
+                .query_one(
+                    "INSERT INTO storage_deletion_jobs(object_key,multipart_upload_id,attempts,locked_until,lease_token)
+                     VALUES($1,$2,$3,now() + interval '5 minutes',$4) RETURNING id",
+                    &[&object_key, &multipart_upload_id, &attempts, &format!("{lane}-{held}")],
+                )
+                .await
+                .unwrap()
+                .get("id");
+            outcomes.push((
+                StorageDeletionJob {
+                    id,
+                    object_key,
+                    multipart_upload_id: None,
+                    discover_multipart: false,
+                    attempts,
+                    lease_token: format!("{lane}-{presented}"),
+                },
+                if succeeded {
+                    Ok(())
+                } else {
+                    Err(storage_message("provider refused the deletion"))
+                },
+            ));
+        }
+        outcomes
+    }
+
+    type StorageDeletionState = (
+        String,
+        bool,
+        Option<i32>,
+        Option<String>,
+        Option<bool>,
+        Option<bool>,
+        Option<bool>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    );
+
+    async fn storage_deletion_lane_state(
+        db: &Database,
+        owner: &str,
+        lane: &str,
+    ) -> Vec<StorageDeletionState> {
+        db.query(
+            "SELECT scenario,
+               jobs.id IS NOT NULL AS job_exists,
+               jobs.attempts,
+               replace(jobs.lease_token, $2 || '-', '') AS lease_token,
+               jobs.locked_until IS NULL AS unlocked,
+               jobs.available_at > now() AS delayed,
+               jobs.dead_lettered_at IS NOT NULL AS dead_lettered,
+               jobs.last_error,
+               file_uploads.status AS file_status,
+               vault_uploads.status AS vault_status,
+               vault_migrations.state AS migration_state
+             FROM unnest(ARRAY['done','vault','migration','changed','stale','failed','dead','failed-stale'])
+               AS scenario
+             LEFT JOIN storage_deletion_jobs AS jobs
+               ON jobs.object_key = 'users/' || $1 || '/' || $2 || '/' || scenario
+             LEFT JOIN file_uploads
+               ON file_uploads.object_key = 'users/' || $1 || '/' || $2 || '/' || scenario
+             LEFT JOIN vault_uploads
+               ON vault_uploads.object_key = 'users/' || $1 || '/' || $2 || '/' || scenario
+             LEFT JOIN vault_migrations
+               ON vault_migrations.legacy_object_key = 'users/' || $1 || '/' || $2 || '/' || scenario
+             ORDER BY scenario",
+            &[&owner, &lane],
+        )
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|row| {
+            (
+                row.get(0),
+                row.get(1),
+                row.get(2),
+                row.get(3),
+                row.get(4),
+                row.get(5),
+                row.get(6),
+                row.get(7),
+                row.get(8),
+                row.get(9),
+                row.get(10),
+            )
+        })
+        .collect()
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn batched_storage_deletion_finalization_matches_per_object_finalization() {
+        let owner = "usr_deletion_batch_equivalence";
+        let db = storage_deletion_test_database(owner).await;
+        let per_object = seed_storage_deletion_lane(&db, owner, "per-object").await;
+        let batched = seed_storage_deletion_lane(&db, owner, "batched").await;
+
+        for (job, outcome) in per_object {
+            finish_storage_deletion_job(&db, job, outcome)
+                .await
+                .unwrap();
+        }
+        finish_storage_deletion_batch(&db, batched).await.unwrap();
+
+        let expected = storage_deletion_lane_state(&db, owner, "per-object").await;
+        let actual = storage_deletion_lane_state(&db, owner, "batched").await;
+        assert_eq!(actual, expected);
+
+        let by_scenario = actual
+            .iter()
+            .map(|state| (state.0.as_str(), state))
+            .collect::<HashMap<_, _>>();
+        for finished in ["done", "vault", "migration"] {
+            assert!(!by_scenario[finished].1, "{finished} job should be deleted");
+        }
+        assert_eq!(by_scenario["done"].8.as_deref(), Some("aborted"));
+        assert_eq!(by_scenario["vault"].9.as_deref(), Some("aborted"));
+        assert_eq!(by_scenario["migration"].10.as_deref(), Some("complete"));
+        let changed = by_scenario["changed"];
+        assert!(changed.1 && changed.3.is_none() && changed.4 == Some(true));
+        assert_eq!(changed.8.as_deref(), Some("aborting"));
+        let failed = by_scenario["failed"];
+        assert_eq!(
+            (failed.2, failed.3.as_deref(), failed.5, failed.6),
+            (Some(4), None, Some(true), Some(false))
+        );
+        assert_eq!(failed.7.as_deref(), Some("provider refused the deletion"));
+        assert_eq!(by_scenario["dead"].6, Some(true));
+
+        clean_storage_deletion_fixtures(&db, owner).await;
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn batched_storage_deletion_never_finalizes_a_stale_lease() {
+        let owner = "usr_deletion_batch_fencing";
+        let db = storage_deletion_test_database(owner).await;
+        let outcomes = seed_storage_deletion_lane(&db, owner, "fenced").await;
+        let before = storage_deletion_lane_state(&db, owner, "fenced").await;
+        // Another worker re-claimed every job after our lease expired.
+        db.execute(
+            "UPDATE storage_deletion_jobs SET lease_token = 'fenced-theirs'
+             WHERE starts_with(object_key, 'users/' || $1 || '/fenced/')",
+            &[&owner],
+        )
+        .await
+        .unwrap();
+
+        finish_storage_deletion_batch(&db, outcomes).await.unwrap();
+
+        let after = storage_deletion_lane_state(&db, owner, "fenced").await;
+        assert_eq!(after.len(), before.len());
+        for (before, after) in before.iter().zip(&after) {
+            assert_eq!(after.3.as_deref(), Some("theirs"), "{}", after.0);
+            assert_eq!(
+                (
+                    &after.0, after.1, after.2, after.4, after.5, after.6, &after.7
+                ),
+                (
+                    &before.0, before.1, before.2, before.4, before.5, before.6, &before.7
+                ),
+            );
+            assert_eq!(
+                (&after.8, &after.9, &after.10),
+                (&before.8, &before.9, &before.10)
+            );
+        }
+
+        clean_storage_deletion_fixtures(&db, owner).await;
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn deletion_worker_bulk_deletes_and_records_partial_provider_failures() {
+        let owner = "usr_deletion_batch_worker";
+        let db = storage_deletion_test_database(owner).await;
+        let (storage, requests, handle, task) = partially_failing_s3();
+        let prefix = format!("users/{owner}/files");
+        db.execute(
+            "INSERT INTO storage_deletion_jobs(object_key, multipart_upload_id)
+             SELECT $1 || '/' || name, CASE WHEN name = 'multipart' THEN 'upload-1' END
+             FROM unnest(ARRAY['first','denied','second','multipart']) AS name",
+            &[&prefix],
+        )
+        .await
+        .unwrap();
+
+        while process_deletion_jobs(&db, &storage, 4).await.unwrap() {}
+
+        let remaining = db
+            .query(
+                "SELECT object_key, attempts, lease_token IS NULL AS released, last_error
+                 FROM storage_deletion_jobs WHERE starts_with(object_key, $1) ORDER BY object_key",
+                &[&prefix],
+            )
+            .await
+            .unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(
+            remaining[0].get::<_, String>("object_key"),
+            format!("{prefix}/denied")
+        );
+        assert_eq!(remaining[0].get::<_, i32>("attempts"), 1);
+        assert!(remaining[0].get::<_, bool>("released"));
+        assert!(
+            remaining[0]
+                .get::<_, String>("last_error")
+                .contains("AccessDenied")
+        );
+        let bulk_keys = requests.lock().unwrap().concat();
+        assert!(!bulk_keys.iter().any(|key| key.ends_with("/multipart")));
+        for name in ["first", "denied", "second"] {
+            assert!(bulk_keys.contains(&format!("{prefix}/{name}")));
+        }
+
+        clean_storage_deletion_fixtures(&db, owner).await;
+        handle.stop(true).await;
+        task.await.unwrap().unwrap();
     }
 
     #[actix_web::test]
