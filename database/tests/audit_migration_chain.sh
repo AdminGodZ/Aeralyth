@@ -282,5 +282,6 @@ concurrent_replay database/init/032_bucket_usage_snapshots.sql 032-bucket-usage-
 concurrent_replay database/init/035_multipart_reconciliation.sql 035-multipart-reconciliation 035
 concurrent_replay database/init/037_bounded_hierarchy_updates.sql 037-bounded-hierarchy-updates 037
 concurrent_replay database/init/038_quiet_maintenance_notifications.sql 038-quiet-maintenance-notifications 038
+concurrent_replay database/init/039_trashed_parent_child_counts.sql 039-trashed-parent-child-counts 039
 "${checksum_command[@]}" -c "${result_dir}/chain-sources.sha256"
 printf 'PASS: full migration chain audit completed at %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"

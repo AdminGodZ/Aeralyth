@@ -169,10 +169,58 @@ wait "${parent_writer}"
 test "$(sql -c 'SELECT expire_trash_batch(500)')" = '1'
 sql <<'SQL'
 DO $$ BEGIN
-  IF (SELECT trash_child_count FROM files WHERE id = 'fil_lock_parent') <> 1
-    OR (SELECT next_due_at FROM trash_expiry_owners WHERE owner_id = 'usr_expiry') IS NOT NULL
+  IF (SELECT next_due_at FROM trash_expiry_owners WHERE owner_id = 'usr_expiry') IS NOT NULL
   THEN RAISE EXCEPTION 'concurrent active sibling publication broke nonleaf eligibility'; END IF;
 END $$;
+-- Active folders do not track children; entering the trash recounts them.
+UPDATE files SET state = 'trashed', trashed_at = now() - interval '11 minutes' WHERE id = 'fil_lock_parent';
+DO $$ BEGIN
+  IF (SELECT trash_child_count FROM files WHERE id = 'fil_lock_parent') <> 1
+    OR expire_trash_batch(500) <> 0
+  THEN RAISE EXCEPTION 'trashing a parent did not count its surviving child'; END IF;
+END $$;
+UPDATE files SET state = 'active', trashed_at = NULL WHERE id = 'fil_lock_parent';
+-- Child writes under an active parent must not rewrite the parent row.
+DO $$ DECLARE original_xmin TEXT; BEGIN
+  SELECT xmin::text INTO original_xmin FROM files WHERE id = 'fil_lock_parent';
+  INSERT INTO files (id, owner_id, original_name, storage_name, size_bytes, parent_id)
+  VALUES ('fil_lock_second', 'usr_expiry', 'second', 'expiry/lock-second', 1, 'fil_lock_parent');
+  UPDATE files SET parent_id = NULL WHERE id = 'fil_lock_second';
+  DELETE FROM files WHERE id = 'fil_lock_second';
+  IF (SELECT xmin::text FROM files WHERE id = 'fil_lock_parent') <> original_xmin
+  THEN RAISE EXCEPTION 'active parent was rewritten by child edge changes'; END IF;
+END $$;
+-- A stale count from an earlier trash period must be replaced, not reused.
+DELETE FROM files WHERE id = 'fil_lock_active';
+UPDATE files SET state = 'trashed', trashed_at = now() - interval '11 minutes' WHERE id = 'fil_lock_parent';
+DO $$ BEGIN
+  IF (SELECT trash_child_count FROM files WHERE id = 'fil_lock_parent') <> 0
+    OR expire_trash_batch(500) <> 1
+  THEN RAISE EXCEPTION 're-trashed empty parent kept a stale child count'; END IF;
+END $$;
+INSERT INTO files (id, owner_id, original_name, storage_name, size_bytes, entry_type, state, trashed_at, parent_id)
+VALUES ('fil_race_parent', 'usr_expiry', 'race', 'expiry/race-parent', 0, 'folder', 'active', NULL, NULL),
+       ('fil_race_a', 'usr_expiry', 'a', 'expiry/race-a', 1, 'file', 'active', NULL, 'fil_race_parent'),
+       ('fil_race_b', 'usr_expiry', 'b', 'expiry/race-b', 1, 'file', 'active', NULL, 'fil_race_parent');
+SQL
+# The parent enters the trash and holds its lifecycle lock while a sibling is
+# deleted. The delete must wait, then decrement the now-trashed parent.
+sql >"${test_log}" <<'SQL' &
+BEGIN;
+UPDATE files SET state = 'trashed', trashed_at = now() - interval '11 minutes' WHERE id = 'fil_race_parent';
+SELECT pg_sleep(1);
+COMMIT;
+SQL
+race_writer=$!
+sleep 0.2
+sql -c "SET statement_timeout = '5s'; DELETE FROM files WHERE id = 'fil_race_a'" >/dev/null
+wait "${race_writer}"
+sql <<'SQL'
+DO $$ BEGIN
+  IF (SELECT trash_child_count FROM files WHERE id = 'fil_race_parent') <> 1
+  THEN RAISE EXCEPTION 'child removal racing parent trash lost its decrement'; END IF;
+END $$;
+DELETE FROM files WHERE id IN ('fil_race_b', 'fil_race_parent');
 INSERT INTO files (id, owner_id, original_name, storage_name, size_bytes, state, trashed_at)
 VALUES ('fil_generations', 'usr_expiry', 'generations', 'expiry/generation-current', 1, 'trashed', now() - interval '11 minutes');
 INSERT INTO vault_object_generations (node_id, owner_id, generation_number, generation_id,

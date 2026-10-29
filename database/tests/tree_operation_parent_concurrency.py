@@ -57,10 +57,11 @@ try:
         stdout, stderr = process.communicate(timeout=10)
         if process.returncode:
             raise RuntimeError(f"Concurrent upload failed: {stdout} {stderr}")
-    count = run("SELECT trash_child_count FROM files WHERE id='parent_concurrency_root';").strip()
+    # Active parents do not track children (039); entering the trash counts them.
+    count = run("UPDATE files SET state='trashed' WHERE id='parent_concurrency_root'; SELECT trash_child_count FROM files WHERE id='parent_concurrency_root';").strip()
     if count != "2":
         raise RuntimeError(f"Derived parent child count mismatch: {count}")
-    print("Two concurrent sibling insertions, both holding compatible parent locks, committed with migration 034 child_count=2")
+    print("Two concurrent sibling insertions, both holding compatible parent locks, committed; trashing the parent counted child_count=2")
 
     for isolation, code in [("REPEATABLE READ", "40001"), ("READ COMMITTED", "23514")]:
         run("UPDATE files SET state='active' WHERE id='parent_concurrency_root';")
