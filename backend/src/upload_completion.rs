@@ -3,7 +3,7 @@ use std::io;
 use std::time::SystemTime;
 
 use crate::collection_timestamps::touch_ancestor_collections;
-use crate::db::Database;
+use crate::db::{Database, execute_cached, query_cached, query_one_cached, query_opt_cached};
 use crate::storage::ObjectMetadata;
 
 #[derive(Clone, Debug)]
@@ -59,12 +59,10 @@ pub(crate) const UPLOAD_CLAIM_OWNERS_QUERY: &str = "
 /// a bounded candidate batch; advisory locks must never be evaluated over a queue
 /// scan before its LIMIT. A publishing owner is skipped instead of blocking peers.
 pub(crate) async fn lock_upload_claim_owners(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     owner_ids: &[String],
 ) -> Result<Vec<String>, tokio_postgres::Error> {
-    let rows = transaction
-        .query(UPLOAD_CLAIM_OWNERS_QUERY, &[&owner_ids])
-        .await?;
+    let rows = query_cached(transaction, UPLOAD_CLAIM_OWNERS_QUERY, &[&owner_ids]).await?;
     Ok(rows.into_iter().map(|row| row.get("owner_id")).collect())
 }
 
@@ -86,8 +84,7 @@ pub(crate) async fn claim_file_upload_completions(
         None => (
             None,
             String::new(),
-            transaction
-                .query_one("SELECT clock_timestamp()", &[])
+            query_one_cached(&transaction, "SELECT clock_timestamp()", &[])
                 .await?
                 .get::<_, SystemTime>(0),
         ),
@@ -98,8 +95,7 @@ pub(crate) async fn claim_file_upload_completions(
         if remaining == 0 {
             break;
         }
-        let candidates = transaction.query(
-            "SELECT uploads.id, uploads.owner_id, uploads.completion_available_at
+        let candidates = query_cached(&transaction, "SELECT uploads.id, uploads.owner_id, uploads.completion_available_at
              FROM file_uploads AS uploads
              WHERE uploads.status = 'completing'
                AND uploads.completion_dead_lettered_at IS NULL
@@ -131,8 +127,7 @@ pub(crate) async fn claim_file_upload_completions(
         // This separate statement takes a fresh READ COMMITTED snapshot after
         // the owner fence. A publication that committed during selection is
         // visible here, and no new publication can pass our shared owner locks.
-        let rows = transaction.query(
-            "WITH claimed AS (
+        let rows = query_cached(&transaction, "WITH claimed AS (
                   SELECT uploads.id FROM file_uploads AS uploads
                   WHERE uploads.id = ANY($1) AND uploads.owner_id = ANY($2)
                     AND uploads.status = 'completing'
@@ -225,22 +220,25 @@ pub(crate) async fn finalize_file_upload_record(
     let transaction = client.transaction().await?;
     // Acquire the publication fence before the upload row, as tree workers do.
     // Contended owners yield without blocking unrelated completion work.
-    let owner_gate: bool = transaction.query_one(
-        "SELECT pg_try_advisory_xact_lock_shared(hashtextextended('aeralyth:tree-operation:' || $1::text, 0))",
+    let owner_gate: bool = query_one_cached(&transaction, "SELECT pg_try_advisory_xact_lock_shared(hashtextextended('aeralyth:tree-operation:' || $1::text, 0))",
         &[&upload.owner_id],
     ).await?.get(0);
-    if !owner_gate || transaction.query_opt(
-        "SELECT version FROM tree_operation_owners WHERE owner_id = $1 FOR SHARE SKIP LOCKED",
-        &[&upload.owner_id],
-    ).await?.is_none() {
+    if !owner_gate
+        || query_opt_cached(
+            &transaction,
+            "SELECT version FROM tree_operation_owners WHERE owner_id = $1 FOR SHARE SKIP LOCKED",
+            &[&upload.owner_id],
+        )
+        .await?
+        .is_none()
+    {
         transaction.rollback().await?;
         drop(client);
         defer_file_upload_for_tree_operation(db, upload).await?;
         return Ok(FileUploadFinalizeOutcome::Deferred);
     }
     // A separate command takes a fresh snapshot after the publication lock.
-    let fenced: bool = transaction.query_one(
-        "SELECT EXISTS (SELECT 1 FROM tree_operation_jobs AS jobs
+    let fenced: bool = query_one_cached(&transaction, "SELECT EXISTS (SELECT 1 FROM tree_operation_jobs AS jobs
          WHERE jobs.owner_id = $1 AND jobs.status IN ('pending', 'running')
            AND (tree_operation_ancestor($2, $1, jobs.root_id)
              OR tree_operation_ancestor($3, $1, jobs.root_id)
@@ -254,9 +252,7 @@ pub(crate) async fn finalize_file_upload_record(
         defer_file_upload_for_tree_operation(db, upload).await?;
         return Ok(FileUploadFinalizeOutcome::Deferred);
     }
-    let current = transaction
-        .query_opt(
-            "SELECT status, completion_lease_token FROM file_uploads WHERE id = $1 AND owner_id = $2 FOR UPDATE",
+    let current = query_opt_cached(&transaction, "SELECT status, completion_lease_token FROM file_uploads WHERE id = $1 AND owner_id = $2 FOR UPDATE",
             &[&upload.id, &upload.owner_id],
         )
         .await?;
@@ -280,22 +276,22 @@ pub(crate) async fn finalize_file_upload_record(
 
     let replacement = if let Some(replacement_file_id) = upload.replacement_file_id.as_deref() {
         let target = if upload.share_link_id.is_some() {
-            transaction
-                .query_opt(
-                    "
+            query_opt_cached(
+                &transaction,
+                "
                         SELECT storage_name, parent_id
                         FROM files
                         WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
                           AND state = 'active' AND e2ee_state IN ('legacy', 'staged')
                         FOR UPDATE
                     ",
-                    &[&replacement_file_id, &upload.owner_id],
-                )
-                .await?
+                &[&replacement_file_id, &upload.owner_id],
+            )
+            .await?
         } else {
-            transaction
-                .query_opt(
-                    "
+            query_opt_cached(
+                &transaction,
+                "
                         SELECT storage_name, parent_id
                         FROM files
                         WHERE id = $1 AND owner_id = $2 AND entry_type = 'file'
@@ -304,14 +300,14 @@ pub(crate) async fn finalize_file_upload_record(
                           AND lower(original_name) = lower($4)
                         FOR UPDATE
                     ",
-                    &[
-                        &replacement_file_id,
-                        &upload.owner_id,
-                        &upload.parent_id,
-                        &upload.original_name,
-                    ],
-                )
-                .await?
+                &[
+                    &replacement_file_id,
+                    &upload.owner_id,
+                    &upload.parent_id,
+                    &upload.original_name,
+                ],
+            )
+            .await?
         };
         let Some(target) = target else {
             transaction.rollback().await?;
@@ -326,8 +322,7 @@ pub(crate) async fn finalize_file_upload_record(
         |target| target.get::<_, Option<String>>("parent_id"),
     );
     if let Some(parent_id) = parent_folder_id.as_deref() {
-        let parent_gate: bool = transaction.query_one(
-            "SELECT pg_try_advisory_xact_lock_shared(hashtextextended('aeralyth:file-parent-lifecycle:' || $1::text, 0))",
+        let parent_gate: bool = query_one_cached(&transaction, "SELECT pg_try_advisory_xact_lock_shared(hashtextextended('aeralyth:file-parent-lifecycle:' || $1::text, 0))",
             &[&parent_id],
         ).await?.get(0);
         if !parent_gate {
@@ -336,29 +331,29 @@ pub(crate) async fn finalize_file_upload_record(
             defer_file_upload_for_tree_operation(db, upload).await?;
             return Ok(FileUploadFinalizeOutcome::Deferred);
         }
-        let parent = transaction
-            .query_opt(
-                "SELECT id FROM files WHERE id = $1 AND owner_id = $2
+        let parent = query_opt_cached(
+            &transaction,
+            "SELECT id FROM files WHERE id = $1 AND owner_id = $2
              AND state = 'active' AND entry_type = 'folder' FOR KEY SHARE",
-                &[&parent_id, &upload.owner_id],
-            )
-            .await?;
+            &[&parent_id, &upload.owner_id],
+        )
+        .await?;
         if parent.is_none() {
             // Release the reservation and queue provider cleanup atomically.
             // Signed single PUTs retain their existing write deadline.
-            transaction
-                .query_opt(
-                    FILE_UPLOAD_CLEANUP_QUERY,
-                    &[
-                        &upload.multipart_upload_id,
-                        &upload.id,
-                        &upload.owner_id,
-                        &upload.object_key,
-                        &vec!["completing".to_owned()],
-                        &Some(upload.completion_lease_token.as_str()),
-                    ],
-                )
-                .await?;
+            query_opt_cached(
+                &transaction,
+                FILE_UPLOAD_CLEANUP_QUERY,
+                &[
+                    &upload.multipart_upload_id,
+                    &upload.id,
+                    &upload.owner_id,
+                    &upload.object_key,
+                    &vec!["completing".to_owned()],
+                    &Some(upload.completion_lease_token.as_str()),
+                ],
+            )
+            .await?;
             transaction.commit().await?;
             return Ok(FileUploadFinalizeOutcome::ParentUnavailable);
         }
@@ -374,9 +369,9 @@ pub(crate) async fn finalize_file_upload_record(
         };
         let presign_seconds = i64::try_from(presign_seconds)
             .map_err(|_| io::Error::other("invalid signature lifetime"))?;
-        transaction
-            .execute(
-                "
+        execute_cached(
+            &transaction,
+            "
                     INSERT INTO storage_deletion_jobs (object_key, available_at)
                     VALUES ($1, now() + ($2::bigint * interval '1 second'))
                     ON CONFLICT (object_key) DO UPDATE SET
@@ -385,12 +380,12 @@ pub(crate) async fn finalize_file_upload_record(
                         EXCLUDED.available_at
                       )
                 ",
-                &[&previous_object_key, &presign_seconds],
-            )
-            .await?;
-        transaction
-            .execute(
-                "
+            &[&previous_object_key, &presign_seconds],
+        )
+        .await?;
+        execute_cached(
+            &transaction,
+            "
                     UPDATE files
                     SET original_name = $1,
                         storage_name = $2,
@@ -401,22 +396,22 @@ pub(crate) async fn finalize_file_upload_record(
                         updated_at = now()
                     WHERE id = $7 AND owner_id = $8
                 ",
-                &[
-                    &upload.original_name,
-                    &upload.object_key,
-                    &upload.mime_type,
-                    &upload.size_bytes,
-                    &metadata.checksum_sha256,
-                    &metadata.etag,
-                    &replacement_file_id,
-                    &upload.owner_id,
-                ],
-            )
-            .await?;
+            &[
+                &upload.original_name,
+                &upload.object_key,
+                &upload.mime_type,
+                &upload.size_bytes,
+                &metadata.checksum_sha256,
+                &metadata.etag,
+                &replacement_file_id,
+                &upload.owner_id,
+            ],
+        )
+        .await?;
     } else {
-        transaction
-            .execute(
-                "
+        execute_cached(
+            &transaction,
+            "
                     INSERT INTO files (
                       id,
                       owner_id,
@@ -432,24 +427,24 @@ pub(crate) async fn finalize_file_upload_record(
                     VALUES ($1, $2, $3, $4, $5, $6, 'file', $7, $8, $9)
                     ON CONFLICT (id) DO NOTHING
                 ",
-                &[
-                    &upload.file_id,
-                    &upload.owner_id,
-                    &upload.original_name,
-                    &upload.object_key,
-                    &upload.mime_type,
-                    &upload.size_bytes,
-                    &upload.parent_id,
-                    &metadata.checksum_sha256,
-                    &metadata.etag,
-                ],
-            )
-            .await?;
+            &[
+                &upload.file_id,
+                &upload.owner_id,
+                &upload.original_name,
+                &upload.object_key,
+                &upload.mime_type,
+                &upload.size_bytes,
+                &upload.parent_id,
+                &metadata.checksum_sha256,
+                &metadata.etag,
+            ],
+        )
+        .await?;
     }
     touch_ancestor_collections(&transaction, parent_folder_id.as_deref(), &upload.owner_id).await?;
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "
                 UPDATE file_uploads
                 SET status = 'completed',
                     completed_at = now(),
@@ -464,15 +459,15 @@ pub(crate) async fn finalize_file_upload_record(
                   AND completion_lease_token = $5
                   AND status = 'completing'
             ",
-            &[
-                &upload.id,
-                &upload.owner_id,
-                &metadata.checksum_sha256,
-                &metadata.etag,
-                &upload.completion_lease_token,
-            ],
-        )
-        .await?;
+        &[
+            &upload.id,
+            &upload.owner_id,
+            &metadata.checksum_sha256,
+            &metadata.etag,
+            &upload.completion_lease_token,
+        ],
+    )
+    .await?;
     transaction.commit().await?;
 
     Ok(FileUploadFinalizeOutcome::Completed)

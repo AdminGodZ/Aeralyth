@@ -31,7 +31,7 @@ use tokio::time::{Instant, MissedTickBehavior, interval_at, sleep};
 use tokio_postgres::{AsyncMessage, NoTls};
 
 use crate::config::Config;
-use crate::db::Database;
+use crate::db::{Database, execute_cached, query_cached, query_one_cached, query_opt_cached};
 use crate::e2ee::{UPLOAD_PART_BYTES, uses_vault_multipart_upload};
 use crate::observability::Metrics;
 use crate::upload_completion::{
@@ -2243,12 +2243,12 @@ async fn process_user_deletion_batch(
 ) -> Result<(), Box<dyn StdError + Send + Sync>> {
     let mut client = db.get().await?;
     let transaction = client.transaction().await?;
-    let Some(job) = transaction
-        .query_opt(
-            "SELECT phase, lease_token FROM user_deletion_jobs WHERE user_id = $1 FOR UPDATE",
-            &[&user_id],
-        )
-        .await?
+    let Some(job) = query_opt_cached(
+        &transaction,
+        "SELECT phase, lease_token FROM user_deletion_jobs WHERE user_id = $1 FOR UPDATE",
+        &[&user_id],
+    )
+    .await?
     else {
         transaction.commit().await?;
         return Ok(());
@@ -2260,9 +2260,7 @@ async fn process_user_deletion_batch(
         return Ok(());
     }
     if phase != claimed_phase {
-        transaction
-            .execute(
-                "UPDATE user_deletion_jobs SET locked_until = NULL, lease_token = NULL WHERE user_id = $1 AND lease_token = $2",
+        execute_cached(&transaction, "UPDATE user_deletion_jobs SET locked_until = NULL, lease_token = NULL WHERE user_id = $1 AND lease_token = $2",
                 &[&user_id, &lease_token],
             )
             .await?;
@@ -2271,25 +2269,25 @@ async fn process_user_deletion_batch(
     }
 
     if phase == "finalize" {
-        let user = transaction
-            .query_opt(
-                "SELECT id FROM users WHERE id = $1 AND status = 'deleting' FOR UPDATE",
+        let user = query_opt_cached(
+            &transaction,
+            "SELECT id FROM users WHERE id = $1 AND status = 'deleting' FOR UPDATE",
+            &[&user_id],
+        )
+        .await?;
+        if user.is_none() {
+            execute_cached(
+                &transaction,
+                "DELETE FROM user_deletion_jobs WHERE user_id = $1",
                 &[&user_id],
             )
             .await?;
-        if user.is_none() {
-            transaction
-                .execute(
-                    "DELETE FROM user_deletion_jobs WHERE user_id = $1",
-                    &[&user_id],
-                )
-                .await?;
             transaction.commit().await?;
             return Ok(());
         }
-        let residual_objects: bool = transaction
-            .query_one(
-                "
+        let residual_objects: bool = query_one_cached(
+            &transaction,
+            "
                     SELECT EXISTS (
                       SELECT 1 FROM file_uploads WHERE owner_id = $1
                       UNION ALL
@@ -2306,24 +2304,22 @@ async fn process_user_deletion_batch(
                       WHERE owner_id = $1 AND entry_type = 'file'
                     ) AS residual_objects
                 ",
-                &[&user_id],
-            )
-            .await?
-            .get("residual_objects");
+            &[&user_id],
+        )
+        .await?
+        .get("residual_objects");
         if residual_objects {
-            transaction
-                .execute(
-                    "UPDATE user_deletion_jobs SET phase = 'file_uploads', locked_until = NULL, lease_token = NULL, updated_at = now() WHERE user_id = $1 AND lease_token = $2",
+            execute_cached(&transaction, "UPDATE user_deletion_jobs SET phase = 'file_uploads', locked_until = NULL, lease_token = NULL, updated_at = now() WHERE user_id = $1 AND lease_token = $2",
                     &[&user_id, &lease_token],
                 )
                 .await?;
         } else {
-            transaction
-                .execute(
-                    "DELETE FROM users WHERE id = $1 AND status = 'deleting'",
-                    &[&user_id],
-                )
-                .await?;
+            execute_cached(
+                &transaction,
+                "DELETE FROM users WHERE id = $1 AND status = 'deleting'",
+                &[&user_id],
+            )
+            .await?;
         }
         transaction.commit().await?;
         return Ok(());
@@ -2337,9 +2333,9 @@ async fn process_user_deletion_batch(
         phase.as_str()
     };
     let affected = i64::try_from(affected).unwrap_or(i64::MAX);
-    transaction
-        .execute(
-            "
+    execute_cached(
+        &transaction,
+        "
                 UPDATE user_deletion_jobs
                 SET phase = $2,
                     processed_rows = processed_rows + $3,
@@ -2351,9 +2347,9 @@ async fn process_user_deletion_batch(
                     updated_at = now()
                 WHERE user_id = $1 AND lease_token = $4
             ",
-            &[&user_id, &next_phase, &affected, &lease_token],
-        )
-        .await?;
+        &[&user_id, &next_phase, &affected, &lease_token],
+    )
+    .await?;
     transaction.commit().await?;
     Ok(())
 }
@@ -2367,7 +2363,7 @@ fn next_user_deletion_phase(current: &str) -> Option<&'static str> {
 }
 
 async fn process_user_deletion_phase(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     user_id: &str,
     phase: &str,
 ) -> Result<u64, tokio_postgres::Error> {
@@ -2576,22 +2572,18 @@ async fn process_user_deletion_phase(
         _ => {
             let statement = user_deletion_statement(phase)
                 .unwrap_or("DELETE FROM users WHERE FALSE AND id IN (SELECT $1::text LIMIT $2)");
-            transaction
-                .execute(statement, &[&user_id, &batch_size])
-                .await
+            execute_cached(transaction, statement, &[&user_id, &batch_size]).await
         }
     }
 }
 
 async fn deletion_query_count(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     statement: &str,
     user_id: &str,
     batch_size: i64,
 ) -> Result<u64, tokio_postgres::Error> {
-    let row = transaction
-        .query_one(statement, &[&user_id, &batch_size])
-        .await?;
+    let row = query_one_cached(transaction, statement, &[&user_id, &batch_size]).await?;
     let affected: i64 = row.get("affected");
     Ok(u64::try_from(affected).unwrap_or_default())
 }
@@ -2683,8 +2675,7 @@ async fn claim_expired_uploads(
     let sweep_cutoff = if let Some((_, _, cutoff)) = next_cursor.as_ref() {
         *cutoff
     } else {
-        transaction
-            .query_one("SELECT clock_timestamp() AS cutoff", &[])
+        query_one_cached(&transaction, "SELECT clock_timestamp() AS cutoff", &[])
             .await?
             .get::<_, SystemTime>("cutoff")
     };
@@ -2697,17 +2688,17 @@ async fn claim_expired_uploads(
         // Page the raw due index before ancestry checks or lock attempts. Keep
         // the position across worker ticks so a fenced prefix cannot repeatedly
         // consume the entire turn and starve healthy uploads later in the queue.
-        let candidates = transaction
-            .query(
-                candidate_query,
-                &[
-                    &remaining,
-                    &next_cursor.as_ref().map(|(expires_at, _, _)| *expires_at),
-                    &next_cursor.as_ref().map(|(_, id, _)| id.as_str()),
-                    &sweep_cutoff,
-                ],
-            )
-            .await?;
+        let candidates = query_cached(
+            &transaction,
+            candidate_query,
+            &[
+                &remaining,
+                &next_cursor.as_ref().map(|(expires_at, _, _)| *expires_at),
+                &next_cursor.as_ref().map(|(_, id, _)| id.as_str()),
+                &sweep_cutoff,
+            ],
+        )
+        .await?;
         if candidates.is_empty() {
             next_cursor = None;
             break;
@@ -2731,9 +2722,7 @@ async fn claim_expired_uploads(
         // held until both the lease and cleanup queue insertion commit.
         if !admitted_owners.is_empty() {
             uploads.extend(
-                transaction
-                    .query(claim_query, &[&upload_ids, &admitted_owners])
-                    .await?,
+                query_cached(&transaction, claim_query, &[&upload_ids, &admitted_owners]).await?,
             );
         }
         if end_of_queue {
@@ -2810,9 +2799,7 @@ async fn expire_abandoned_vault_uploads(
                 let admitted_owners =
                     lock_upload_claim_owners(&transaction, &[owner_id]).await?;
                 if !admitted_owners.is_empty() {
-                    transaction
-                        .execute(
-                            "WITH ready AS (
+                    execute_cached(&transaction, "WITH ready AS (
                               SELECT id FROM vault_uploads AS uploads
                               WHERE id = $1 AND owner_id = ANY($2::text[]) AND status = 'aborting'
                                 AND NOT EXISTS (
@@ -3218,9 +3205,7 @@ async fn finish_storage_deletion_job(
         Ok(()) => {
             let mut client = db.get().await?;
             let transaction = client.transaction().await?;
-            let current = transaction
-                .query_opt(
-                    "SELECT multipart_upload_id FROM storage_deletion_jobs WHERE id = $1 AND lease_token = $2 FOR UPDATE",
+            let current = query_opt_cached(&transaction, "SELECT multipart_upload_id FROM storage_deletion_jobs WHERE id = $1 AND lease_token = $2 FOR UPDATE",
                     &[&id, &lease_token],
                 )
                 .await?;
@@ -3229,36 +3214,33 @@ async fn finish_storage_deletion_job(
             };
             let current_multipart_upload_id: Option<String> = current.get("multipart_upload_id");
             if current_multipart_upload_id != multipart_upload_id {
-                transaction
-                    .execute(
-                        "UPDATE storage_deletion_jobs SET available_at = now(), locked_until = NULL, lease_token = NULL WHERE id = $1 AND lease_token = $2",
+                execute_cached(&transaction, "UPDATE storage_deletion_jobs SET available_at = now(), locked_until = NULL, lease_token = NULL WHERE id = $1 AND lease_token = $2",
                         &[&id, &lease_token],
                     )
                     .await?;
                 transaction.commit().await?;
                 return Ok(());
             }
-            transaction
-                .execute(
-                    "UPDATE file_uploads SET status = 'aborted' WHERE object_key = $1 AND status = 'aborting'",
+            execute_cached(&transaction, "UPDATE file_uploads SET status = 'aborted' WHERE object_key = $1 AND status = 'aborting'",
                     &[&object_key],
                 )
                 .await?;
-            transaction
-                .execute(
-                    "UPDATE vault_uploads SET status = 'aborted' WHERE object_key = $1 AND status = 'aborting'",
+            execute_cached(&transaction, "UPDATE vault_uploads SET status = 'aborted' WHERE object_key = $1 AND status = 'aborting'",
                     &[&object_key],
                 )
                 .await?;
-            transaction
-                .execute(COMPLETE_MIGRATION_CLEANUP_QUERY, &[&object_key])
-                .await?;
-            transaction
-                .execute(
-                    "DELETE FROM storage_deletion_jobs WHERE id = $1 AND lease_token = $2",
-                    &[&id, &lease_token],
-                )
-                .await?;
+            execute_cached(
+                &transaction,
+                COMPLETE_MIGRATION_CLEANUP_QUERY,
+                &[&object_key],
+            )
+            .await?;
+            execute_cached(
+                &transaction,
+                "DELETE FROM storage_deletion_jobs WHERE id = $1 AND lease_token = $2",
+                &[&id, &lease_token],
+            )
+            .await?;
             transaction.commit().await?;
         }
         Err(error) => {
@@ -3602,13 +3584,13 @@ async fn reconcile_counters(
 ) -> Result<bool, Box<dyn StdError + Send + Sync>> {
     let mut client = db.get().await?;
     let transaction = client.transaction().await?;
-    let lock_acquired: bool = transaction
-        .query_one(
-            "SELECT pg_try_advisory_xact_lock($1)",
-            &[&COUNTER_RECONCILIATION_LOCK_ID],
-        )
-        .await?
-        .get(0);
+    let lock_acquired: bool = query_one_cached(
+        &transaction,
+        "SELECT pg_try_advisory_xact_lock($1)",
+        &[&COUNTER_RECONCILIATION_LOCK_ID],
+    )
+    .await?
+    .get(0);
     if !lock_acquired {
         transaction.rollback().await?;
         return Ok(false);
@@ -3617,12 +3599,12 @@ async fn reconcile_counters(
     let mut rows_scanned = 0_u64;
     let mut rows_updated = 0_u64;
     loop {
-        let row = transaction
-            .query_one(
-                RECONCILE_USER_COUNTERS_PAGE_QUERY,
-                &[&last_owner_id, &COUNTER_RECONCILIATION_BATCH_SIZE],
-            )
-            .await?;
+        let row = query_one_cached(
+            &transaction,
+            RECONCILE_USER_COUNTERS_PAGE_QUERY,
+            &[&last_owner_id, &COUNTER_RECONCILIATION_BATCH_SIZE],
+        )
+        .await?;
         let scanned: i64 = row.get("scanned");
         let updated: i64 = row.get("updated");
         rows_scanned = rows_scanned.saturating_add(u64::try_from(scanned).unwrap_or_default());
@@ -3642,9 +3624,7 @@ async fn reconcile_counters(
         }
         last_owner_id = next_owner_id;
     }
-    let admin_updated = transaction
-        .execute(RECONCILE_ADMIN_COUNTERS_QUERY, &[])
-        .await?;
+    let admin_updated = execute_cached(&transaction, RECONCILE_ADMIN_COUNTERS_QUERY, &[]).await?;
     rows_scanned = rows_scanned.saturating_add(1);
     rows_updated = rows_updated.saturating_add(admin_updated);
     transaction.commit().await?;
@@ -4069,7 +4049,7 @@ mod tests {
         let source = include_str!("storage.rs");
         let reconciliation = source_between(source, "async fn reconcile_counters(", "fn required(");
         assert!(reconciliation.contains("pg_try_advisory_xact_lock"));
-        assert!(reconciliation.contains("transaction\n            .query_one("));
+        assert!(reconciliation.contains("query_one_cached(\n            &transaction,"));
         assert!(reconciliation.contains("RECONCILE_USER_COUNTERS_PAGE_QUERY"));
         assert!(reconciliation.contains("RECONCILE_ADMIN_COUNTERS_QUERY"));
         assert!(reconciliation.contains("record_counter_reconciliation"));

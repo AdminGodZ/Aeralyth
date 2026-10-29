@@ -1,6 +1,7 @@
 //! Bound metadata identities and bytes before loading encrypted records.
 use super::*;
 use std::io::Write;
+use std::sync::LazyLock;
 
 const IDENTITY_QUERY: &str = r#"
     SELECT files.id, files.parent_id, files.state, files.current_generation_number,
@@ -236,7 +237,7 @@ pub(super) async fn load_page(
 }
 
 pub(super) async fn load_transaction_page(
-    transaction: &tokio_postgres::Transaction<'_>,
+    transaction: &deadpool_postgres::Transaction<'_>,
     user_id: &str,
     body: &MetadataPlansRequest,
 ) -> Result<Page> {
@@ -254,13 +255,13 @@ pub(super) async fn load_transaction_page(
             break;
         }
         let limit = (MAX_METADATA_PLAN_EXPANDED_NODES - nodes.len() + 1) as i64;
-        let rows = transaction
-            .query(
-                IDENTITY_QUERY,
-                &[&frontier, &user_id, &limit, &!share_preparation],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?;
+        let rows = query_cached(
+            transaction,
+            IDENTITY_QUERY,
+            &[&frontier, &user_id, &limit, &!share_preparation],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?;
         if nodes.len() + rows.len() > MAX_METADATA_PLAN_EXPANDED_NODES {
             return Err(error::ErrorPayloadTooLarge(
                 "metadata plan ancestry exceeds the bounded batch limit",
@@ -304,8 +305,7 @@ pub(super) async fn load_transaction_page(
     }
     let owned_ids: Vec<_> = nodes.keys().cloned().collect();
     if !owned_ids.is_empty() {
-        let rows = transaction
-            .query(OWNED_SIZES_QUERY, &[&owned_ids])
+        let rows = query_cached(transaction, OWNED_SIZES_QUERY, &[&owned_ids])
             .await
             .map_err(error::ErrorInternalServerError)?;
         if rows.len() != owned_ids.len() {
@@ -335,10 +335,13 @@ pub(super) async fn load_transaction_page(
         let rows = if shared_ids.is_empty() {
             Vec::new()
         } else {
-            transaction
-                .query(&shared_identity_batch_query(), &[&shared_ids, &user_id])
-                .await
-                .map_err(error::ErrorInternalServerError)?
+            query_cached(
+                transaction,
+                &SHARED_IDENTITY_BATCH_QUERY,
+                &[&shared_ids, &user_id],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?
         };
         for row in rows {
             let id: String = row.get("id");
@@ -395,25 +398,28 @@ pub(super) async fn load_transaction_page(
     let owned_rows = if selected_owned.is_empty() {
         Vec::new()
     } else {
-        transaction
-            .query(
-                if share_preparation {
-                    OWNED_SHARE_PREPARATION_PLANS_QUERY
-                } else {
-                    OWNED_METADATA_PLANS_QUERY
-                },
-                &[&selected_owned, &user_id],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?
+        query_cached(
+            transaction,
+            if share_preparation {
+                OWNED_SHARE_PREPARATION_PLANS_QUERY
+            } else {
+                OWNED_METADATA_PLANS_QUERY
+            },
+            &[&selected_owned, &user_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?
     };
     let wrapper_rows = if selected_owned.is_empty() {
         Vec::new()
     } else {
-        transaction
-            .query(OWNED_METADATA_WRAPPERS_QUERY, &[&selected_owned])
-            .await
-            .map_err(error::ErrorInternalServerError)?
+        query_cached(
+            transaction,
+            OWNED_METADATA_WRAPPERS_QUERY,
+            &[&selected_owned],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?
     };
     let selected_shared: Vec<_> = selected
         .iter()
@@ -423,13 +429,16 @@ pub(super) async fn load_transaction_page(
     let shared_rows = if selected_shared.is_empty() {
         Vec::new()
     } else {
-        transaction
-            .query(&shared_payload_batch_query(), &[&selected_shared, &user_id])
-            .await
-            .map_err(error::ErrorInternalServerError)?
-            .into_iter()
-            .map(|row| (row.get::<_, String>("requested_node_id"), row))
-            .collect::<Vec<_>>()
+        query_cached(
+            transaction,
+            &SHARED_PAYLOAD_BATCH_QUERY,
+            &[&selected_shared, &user_id],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?
+        .into_iter()
+        .map(|row| (row.get::<_, String>("requested_node_id"), row))
+        .collect::<Vec<_>>()
     };
     if shared_rows.len() != selected_shared.len() || owned_rows.len() != selected_owned.len() {
         return Err(conflict());
@@ -444,19 +453,20 @@ pub(super) async fn load_transaction_page(
     })
 }
 
-fn shared_identity_batch_query() -> String {
+// Built once so every page reuses the same SQL text and its cached prepared statement.
+static SHARED_IDENTITY_BATCH_QUERY: LazyLock<String> = LazyLock::new(|| {
     let query = SHARED_IDENTITY_QUERY.replace("$1", "requested.node_id");
     format!(
         "SELECT snapshot.* FROM unnest($1::text[]) WITH ORDINALITY AS requested(node_id,ordinal) CROSS JOIN LATERAL ({query}) snapshot ORDER BY requested.ordinal"
     )
-}
+});
 
-fn shared_payload_batch_query() -> String {
+static SHARED_PAYLOAD_BATCH_QUERY: LazyLock<String> = LazyLock::new(|| {
     let query = SHARED_DOWNLOAD_SNAPSHOT_QUERY.replace("$1", "requested.node_id");
     format!(
         "SELECT requested.node_id AS requested_node_id, snapshot.* FROM unnest($1::text[]) WITH ORDINALITY AS requested(node_id,ordinal) CROSS JOIN LATERAL ({query}) snapshot ORDER BY requested.ordinal"
     )
-}
+});
 
 struct CappedWriter {
     bytes: Vec<u8>,
@@ -819,15 +829,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
     async fn metadata_database_pages_load_only_selected_payloads_and_reject_changed_snapshot() {
-        let (mut client, connection) = tokio_postgres::connect(
-            &std::env::var("DATABASE_URL").unwrap(),
-            tokio_postgres::NoTls,
-        )
-        .await
-        .unwrap();
-        tokio::spawn(async move {
-            connection.await.unwrap();
-        });
+        let mut client = crate::db::test_client(&std::env::var("DATABASE_URL").unwrap()).await;
         let transaction = client.transaction().await.unwrap();
         fixture(&transaction).await;
         transaction.batch_execute(r#"
@@ -888,15 +890,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
     async fn metadata_database_rejects_missing_requests_and_owned_ancestors() {
-        let (mut client, connection) = tokio_postgres::connect(
-            &std::env::var("DATABASE_URL").unwrap(),
-            tokio_postgres::NoTls,
-        )
-        .await
-        .unwrap();
-        tokio::spawn(async move {
-            connection.await.unwrap();
-        });
+        let mut client = crate::db::test_client(&std::env::var("DATABASE_URL").unwrap()).await;
         let transaction = client.transaction().await.unwrap();
         fixture(&transaction).await;
         transaction
@@ -950,15 +944,7 @@ mod tests {
     #[tokio::test]
     #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
     async fn metadata_database_rejects_disjoint_ancestry_before_reading_record_contents() {
-        let (mut client, connection) = tokio_postgres::connect(
-            &std::env::var("DATABASE_URL").unwrap(),
-            tokio_postgres::NoTls,
-        )
-        .await
-        .unwrap();
-        tokio::spawn(async move {
-            connection.await.unwrap();
-        });
+        let mut client = crate::db::test_client(&std::env::var("DATABASE_URL").unwrap()).await;
         let transaction = client.transaction().await.unwrap();
         fixture(&transaction).await;
         transaction

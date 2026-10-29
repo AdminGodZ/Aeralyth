@@ -479,6 +479,30 @@ where
     client.execute(&statement, params).await
 }
 
+/// A one-connection pooled client for DB-backed tests that exercise helpers taking
+/// a deadpool transaction, whose statement cache raw tokio-postgres clients lack.
+#[cfg(test)]
+pub(crate) async fn test_client(database_url: &str) -> deadpool_postgres::Client {
+    let postgres_config = database_url
+        .parse::<tokio_postgres::Config>()
+        .expect("database URL should parse");
+    let manager = Manager::from_config(
+        postgres_config,
+        NoTls,
+        ManagerConfig {
+            recycling_method: RecyclingMethod::Fast,
+        },
+    );
+    Pool::builder(manager)
+        .max_size(1)
+        .runtime(Runtime::Tokio1)
+        .build()
+        .expect("test pool should build")
+        .get()
+        .await
+        .expect("test database should connect")
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
@@ -729,6 +753,45 @@ mod tests {
             Duration::from_secs(30 * 60),
             Duration::from_secs(10 * 60),
         ));
+    }
+
+    #[test]
+    fn hot_transaction_paths_prepare_statements_through_the_cache() {
+        // `db` is the `Database` wrapper, whose query methods already use
+        // `prepare_cached`. Any other receiver re-prepares a `&str` statement
+        // on every call, so it must go through the `*_cached` helpers instead.
+        const CACHED_RECEIVERS: &[&str] = &["db"];
+        // Deliberately uncached statements as (source, receiver, method), e.g.
+        // genuinely dynamic one-off SQL that would only bloat the cache.
+        const UNCACHED_EXCEPTIONS: &[(&str, &str, &str)] = &[];
+        let tests_module = ["\n#[cfg(test)]\n", "mod tests {"].concat();
+        for (name, source) in [
+            ("vault", include_str!("routes/vault.rs")),
+            (
+                "vault metadata paging",
+                include_str!("routes/vault_metadata_paging.rs"),
+            ),
+            ("tree jobs", include_str!("routes/tree_jobs.rs")),
+        ] {
+            let production = source
+                .split(&tests_module)
+                .next()
+                .expect("split always yields the leading source");
+            for method in ["query", "query_one", "query_opt", "query_raw", "execute"] {
+                let call = format!(".{method}(");
+                for (offset, _) in production.match_indices(&call) {
+                    let before = production[..offset].trim_end();
+                    let receiver = &before[before
+                        .rfind(|character: char| !(character.is_alphanumeric() || character == '_'))
+                        .map_or(0, |index| index + 1)..];
+                    assert!(
+                        CACHED_RECEIVERS.contains(&receiver)
+                            || UNCACHED_EXCEPTIONS.contains(&(name, receiver, method)),
+                        "{name} calls `{receiver}.{method}` without the statement cache; use `{method}_cached`"
+                    );
+                }
+            }
+        }
     }
 
     #[test]
