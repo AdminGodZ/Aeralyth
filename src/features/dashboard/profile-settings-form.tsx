@@ -332,7 +332,10 @@ export function ProfileSettingsForm({
       body: createProfileSettingsFormData(csrfToken, update),
       credentials: "same-origin",
     });
-    const result = new URL(response.url).searchParams.get("profile");
+    const result =
+      response.status === 413
+        ? "image-too-large"
+        : new URL(response.url).searchParams.get("profile");
 
     if (!response.ok || result !== "updated") {
       throw new Error(getProfileSaveError(result));
