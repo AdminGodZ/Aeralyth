@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use actix_web::http::header::{ACCEPT, CACHE_CONTROL, CONTENT_LENGTH, LOCATION};
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
@@ -90,6 +90,7 @@ pub(crate) const DELETE_TREE_BATCH_QUERY: &str = "
 const MAX_FOLDER_MANIFEST_PATHS: usize = 1_000;
 const MAX_FOLDER_MANIFEST_FOLDERS: usize = MAX_FOLDER_MANIFEST_PATHS * 63;
 const FOLDER_MANIFEST_JSON_LIMIT: usize = 2 * 1024 * 1024;
+const TREE_MUTATION_BATCH_JSON_LIMIT: usize = 64 * 1024;
 const UPLOAD_CONTROL_JSON_LIMIT: usize = 64 * 1024;
 const UPLOAD_COMPLETION_JSON_LIMIT: usize = 4 * 1024 * 1024;
 
@@ -241,6 +242,21 @@ struct FavoriteResponse {
 #[serde(rename_all = "camelCase")]
 struct ShareResponse {
     recipient_username: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct TreeMutationBatchRequest {
+    action: String,
+    ids: Vec<String>,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TreeMutationBatchResponse {
+    completed: Vec<String>,
+    missing: Vec<String>,
+    deferred: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -2371,6 +2387,48 @@ pub async fn delete(
     }
 
     Ok(redirect("/trash?file=deleted"))
+}
+
+/// Applies trash, restore or delete to a multi-selection in one request and,
+/// when the selection fits the synchronous budget, one transaction. Deferred
+/// ids go through the per-item endpoint, which owns durable job progress.
+pub async fn mutate_batch(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    body: web::Payload,
+) -> Result<HttpResponse> {
+    let user = require_principal(&state, &request).await?;
+    require_header_csrf(&state, &request).await?;
+    let body =
+        parse_json_body::<TreeMutationBatchRequest>(&request, body, TREE_MUTATION_BATCH_JSON_LIMIT)
+            .await?;
+    let action = match body.action.as_str() {
+        "trash" => Action::Trash,
+        "restore" => Action::Restore,
+        "delete" => Action::Delete,
+        _ => return Err(error::ErrorBadRequest("unknown file operation")),
+    };
+    let mut seen = HashSet::new();
+    let ids = body
+        .ids
+        .into_iter()
+        .filter(|id| seen.insert(id.clone()))
+        .collect::<Vec<_>>();
+    if ids.is_empty()
+        || ids.len() > tree_jobs::BATCH_ROOT_LIMIT
+        || ids.iter().any(|id| id.is_empty() || id.len() > 128)
+    {
+        return Err(error::ErrorBadRequest("invalid file selection"));
+    }
+    let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
+    let batch = tree_jobs::mutate_many(&state.db, &user.id, &ids, action).await?;
+    Ok(HttpResponse::Ok()
+        .insert_header((CACHE_CONTROL, "private, no-store"))
+        .json(TreeMutationBatchResponse {
+            completed: batch.completed,
+            missing: batch.missing,
+            deferred: batch.deferred,
+        }))
 }
 
 async fn validate_folder(

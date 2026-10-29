@@ -8,11 +8,16 @@ describe("vault file-list bulk actions", () => {
     "utf8",
   );
 
-  it("runs recursive file mutations through the shared serialized lane", () => {
-    expect(source).toContain("for (const entry of targets)");
-    expect(source).toContain(
+  it("sends one batch, then finishes deferred trees through the serialized lane", () => {
+    const batch = source.indexOf("await mutateFileTrees(");
+    const deferred = source.indexOf("for (const entryId of batch.deferred)");
+    const perItem = source.indexOf(
       "await mutateFileTree(entry.id, mutation, csrfToken)",
     );
+    expect(batch).toBeGreaterThan(-1);
+    expect(deferred).toBeGreaterThan(batch);
+    expect(perItem).toBeGreaterThan(deferred);
+    expect(source).not.toContain("for (const entry of targets) {");
     expect(source).not.toContain("Promise.allSettled(");
   });
 

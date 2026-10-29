@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { mutateFileTree } from "@/features/vault/vault-api";
+import { mutateFileTree, mutateFileTrees } from "@/features/vault/vault-api";
 
 describe("durable tree operation API", () => {
   afterEach(() => {
@@ -87,5 +87,89 @@ describe("durable tree operation API", () => {
     controller.abort("closed");
     await rejection;
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies a selection with one batch request", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(
+        Response.json({ completed: ["a", "c"], missing: ["b"], deferred: [] }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      mutateFileTrees(["a", "b", "c"], "trash", "csrf"),
+    ).resolves.toEqual({ completed: ["a", "c"], missing: ["b"], deferred: [] });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("/api/files/operations");
+    expect(init.method).toBe("POST");
+    expect(init.headers["X-CSRF-Token"]).toBe("csrf");
+    expect(JSON.parse(init.body)).toEqual({
+      action: "trash",
+      ids: ["a", "b", "c"],
+    });
+  });
+
+  it("splits large selections into 256-id requests", async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const { ids } = JSON.parse(String(init.body)) as { ids: string[] };
+      return Response.json({ completed: ids, missing: [], deferred: [] });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const ids = Array.from({ length: 600 }, (_, index) => `id-${index}`);
+    const result = await mutateFileTrees(ids, "delete", "csrf");
+    expect(result.completed).toEqual(ids);
+    expect(
+      fetchMock.mock.calls.map(
+        ([, init]) =>
+          (JSON.parse(String(init.body)) as { ids: string[] }).ids.length,
+      ),
+    ).toEqual([256, 256, 88]);
+  });
+
+  it("defers everything to the per-item path on an API without the batch route", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValue(new Response("not found", { status: 404 }));
+    vi.stubGlobal("fetch", fetchMock);
+    await expect(
+      mutateFileTrees(["a", "b"], "restore", "csrf"),
+    ).resolves.toEqual({ completed: [], missing: [], deferred: ["a", "b"] });
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not trust a batch response that names other ids", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi
+        .fn()
+        .mockResolvedValue(
+          Response.json({ completed: ["a", "x"], missing: [], deferred: [] }),
+        ),
+    );
+    await expect(mutateFileTrees(["a", "b"], "trash", "csrf")).resolves.toEqual(
+      { completed: [], missing: [], deferred: ["a", "b"] },
+    );
+  });
+
+  it("retries a busy batch before falling back", async () => {
+    vi.useFakeTimers();
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(
+        new Response("busy", { status: 503, headers: { "Retry-After": "1" } }),
+      )
+      .mockResolvedValueOnce(
+        Response.json({ completed: ["a"], missing: [], deferred: [] }),
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    const operation = mutateFileTrees(["a"], "trash", "csrf");
+    await vi.runAllTimersAsync();
+    await expect(operation).resolves.toEqual({
+      completed: ["a"],
+      missing: [],
+      deferred: [],
+    });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
   });
 });

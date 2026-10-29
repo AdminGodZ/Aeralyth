@@ -42,6 +42,7 @@ import {
   type FileTreeMutation,
   getVaultDownloadPlan,
   mutateFileTree,
+  mutateFileTrees,
 } from "@/features/vault/vault-api";
 import { removeEncryptedSelections } from "@/features/vault/vault-list-selection";
 import {
@@ -548,7 +549,21 @@ function useVaultFileListController({
 
     const failed: ResolvedEntry[] = [];
     try {
-      for (const entry of targets) {
+      // One request applies every small selected tree in one transaction.
+      const entriesById = new Map(targets.map((entry) => [entry.id, entry]));
+      const batch = await mutateFileTrees(
+        targets.map((entry) => entry.id),
+        mutation,
+        csrfToken,
+      );
+      for (const entryId of batch.missing) {
+        const entry = entriesById.get(entryId);
+        if (entry) failed.push(entry);
+      }
+      // Large trees keep their durable job and its progress polling.
+      for (const entryId of batch.deferred) {
+        const entry = entriesById.get(entryId);
+        if (!entry) continue;
         try {
           // Recursive metadata mutations share one backend lane per user.
           // react-doctor-disable-next-line react-doctor/async-await-in-loop
