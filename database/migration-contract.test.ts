@@ -26,6 +26,10 @@ describe.each([
     "027-flexible-retention-and-vault-lock",
   ],
   ["037_bounded_hierarchy_updates.sql", "037-bounded-hierarchy-updates"],
+  [
+    "038_quiet_maintenance_notifications.sql",
+    "038-quiet-maintenance-notifications",
+  ],
 ])("%s", (fileName, version) => {
   const migration = readFileSync(resolve(migrationRoot, fileName), "utf8");
 

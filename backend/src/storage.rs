@@ -1859,18 +1859,15 @@ async fn run_maintenance_worker(
                     .await;
                 let success = outcome.is_ok();
                 let iteration = match outcome {
-                    Ok(true) => MaintenanceIteration::worked(),
+                    Ok(true) => MaintenanceIteration::Worked,
                     Ok(false) => match schedule.worker.next_due_delay(&db).await {
-                        Ok(next_due) => MaintenanceIteration {
-                            did_work: false,
-                            next_due,
-                        },
+                        Ok(next_due) => MaintenanceIteration::Idle { next_due },
                         Err(error) => {
                             log::error!(
                                 "{} maintenance next-due query failed: {error}",
                                 schedule.worker.label()
                             );
-                            MaintenanceIteration::worked()
+                            MaintenanceIteration::Failed
                         }
                     },
                     Err(error) => {
@@ -1878,7 +1875,7 @@ async fn run_maintenance_worker(
                             "{} maintenance worker failed: {error}",
                             schedule.worker.label()
                         );
-                        MaintenanceIteration::worked()
+                        MaintenanceIteration::Failed
                     }
                 };
                 metrics.record_maintenance(schedule.worker.label(), started.elapsed(), success);
@@ -1890,18 +1887,12 @@ async fn run_maintenance_worker(
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-struct MaintenanceIteration {
-    did_work: bool,
-    next_due: Option<Duration>,
-}
-
-impl MaintenanceIteration {
-    const fn worked() -> Self {
-        Self {
-            did_work: true,
-            next_due: None,
-        }
-    }
+enum MaintenanceIteration {
+    Worked,
+    // Failures retry at the base interval instead of immediately, so an
+    // unavailable database or provider cannot turn a worker into a hot loop.
+    Failed,
+    Idle { next_due: Option<Duration> },
 }
 
 async fn run_adaptive_task<Operation, OperationFuture>(
@@ -1923,7 +1914,7 @@ async fn run_adaptive_task<Operation, OperationFuture>(
     let mut idle_interval = base_interval;
     let mut next_delay = initial_delay;
     loop {
-        let wake = select(
+        let notified = match select(
             Box::pin(wait_for_shutdown(shutdown.clone())),
             Box::pin(select(
                 Box::pin(sleep(next_delay)),
@@ -1933,11 +1924,15 @@ async fn run_adaptive_task<Operation, OperationFuture>(
                 )),
             )),
         )
-        .await;
-        let Either::Right((wake_source, _)) = wake else {
-            break;
+        .await
+        {
+            Either::Left(_) => break,
+            Either::Right((Either::Left(_), _)) => false,
+            Either::Right((Either::Right(_), _)) => true,
         };
-        if matches!(wake_source, Either::Right(_)) {
+        // Every queued notification was committed before this run starts, so
+        // the run already observes its change. A burst therefore costs one run.
+        if drain_maintenance_notifications(&mut notifications, worker) || notified {
             idle_interval = base_interval;
         }
 
@@ -1950,29 +1945,42 @@ async fn run_adaptive_task<Operation, OperationFuture>(
             Either::Left(_) => break,
             Either::Right((iteration, _)) => iteration,
         };
-        (idle_interval, next_delay) =
-            adaptive_maintenance_delay(idle_interval, base_interval, maximum_interval, iteration);
+        (idle_interval, next_delay) = adaptive_maintenance_delay(
+            worker,
+            idle_interval,
+            base_interval,
+            maximum_interval,
+            iteration,
+        );
     }
 }
 
 fn adaptive_maintenance_delay(
+    worker: MaintenanceWorker,
     idle_interval: Duration,
     base_interval: Duration,
     maximum_interval: Duration,
     iteration: MaintenanceIteration,
 ) -> (Duration, Duration) {
-    let idle_interval = if iteration.did_work {
-        base_interval
-    } else {
-        idle_interval
-            .checked_mul(2)
-            .unwrap_or(maximum_interval)
-            .min(maximum_interval)
-    };
-    let next_delay = iteration.next_due.map_or(idle_interval, |due| {
-        idle_interval.min(due.max(base_interval))
-    });
-    (idle_interval, next_delay)
+    match iteration {
+        // Queue workers claim bounded batches, so more of a backlog may already
+        // be due. Rerun now instead of relying on the claim to notify this
+        // worker again; draining folds such self-notifications into one run.
+        MaintenanceIteration::Worked if worker.drains_backlog() => (base_interval, Duration::ZERO),
+        MaintenanceIteration::Worked | MaintenanceIteration::Failed => {
+            (base_interval, base_interval)
+        }
+        MaintenanceIteration::Idle { next_due } => {
+            let idle_interval = idle_interval
+                .checked_mul(2)
+                .unwrap_or(maximum_interval)
+                .min(maximum_interval);
+            let next_delay = next_due.map_or(idle_interval, |due| {
+                idle_interval.min(due.max(base_interval))
+            });
+            (idle_interval, next_delay)
+        }
+    }
 }
 
 async fn wait_for_maintenance_notification(
@@ -1986,6 +1994,24 @@ async fn wait_for_maintenance_notification(
             Err(broadcast::error::RecvError::Lagged(_)) => return,
             Err(broadcast::error::RecvError::Closed) => {
                 std::future::pending::<()>().await;
+            }
+        }
+    }
+}
+
+/// Discards every queued notification and reports whether one concerned this
+/// worker. A lagged receiver lost messages, so it counts as concerning it.
+fn drain_maintenance_notifications(
+    notifications: &mut broadcast::Receiver<String>,
+    worker: MaintenanceWorker,
+) -> bool {
+    let mut notified = false;
+    loop {
+        match notifications.try_recv() {
+            Ok(payload) => notified |= worker.accepts_notification(&payload),
+            Err(broadcast::error::TryRecvError::Lagged(_)) => notified = true,
+            Err(broadcast::error::TryRecvError::Empty | broadcast::error::TryRecvError::Closed) => {
+                return notified;
             }
         }
     }
@@ -2054,6 +2080,15 @@ impl MaintenanceWorker {
             Self::MultipartReconciliation => "multipart reconciliation",
             Self::CounterReconciliation => "counter reconciliation",
         }
+    }
+
+    /// Reconciliation sweeps pace their provider listings and full-table
+    /// scans by their interval, even after a run that found something to fix.
+    const fn drains_backlog(self) -> bool {
+        !matches!(
+            self,
+            Self::MultipartReconciliation | Self::CounterReconciliation
+        )
     }
 
     fn accepts_notification(self, table: &str) -> bool {
@@ -3854,13 +3889,11 @@ mod tests {
         let mut delay = base;
         for _ in 0..8 {
             (idle, delay) = adaptive_maintenance_delay(
+                MaintenanceWorker::StorageDeletion,
                 idle,
                 base,
                 maximum,
-                MaintenanceIteration {
-                    did_work: false,
-                    next_due: None,
-                },
+                MaintenanceIteration::Idle { next_due: None },
             );
         }
         assert_eq!(delay, maximum);
@@ -3869,15 +3902,53 @@ mod tests {
         assert!(fixed_queries_per_day >= adaptive_queries_per_day * 10);
 
         let (_, due_delay) = adaptive_maintenance_delay(
+            MaintenanceWorker::StorageDeletion,
             maximum,
             base,
             maximum,
-            MaintenanceIteration {
-                did_work: false,
+            MaintenanceIteration::Idle {
                 next_due: Some(Duration::ZERO),
             },
         );
         assert_eq!(due_delay, base);
+    }
+
+    #[test]
+    fn busy_maintenance_queues_rerun_at_once_but_failures_wait() {
+        let base = Duration::from_secs(10);
+        let maximum = Duration::from_secs(5 * 60);
+        let delay = |worker, iteration| {
+            adaptive_maintenance_delay(worker, maximum, base, maximum, iteration)
+        };
+        assert_eq!(
+            delay(
+                MaintenanceWorker::StorageDeletion,
+                MaintenanceIteration::Worked
+            ),
+            (base, Duration::ZERO)
+        );
+        assert_eq!(
+            delay(
+                MaintenanceWorker::StorageDeletion,
+                MaintenanceIteration::Failed
+            ),
+            (base, base)
+        );
+        // Reconciliation sweeps pace their provider and full-table scans.
+        assert_eq!(
+            delay(
+                MaintenanceWorker::MultipartReconciliation,
+                MaintenanceIteration::Worked
+            ),
+            (base, base)
+        );
+        assert_eq!(
+            delay(
+                MaintenanceWorker::CounterReconciliation,
+                MaintenanceIteration::Worked
+            ),
+            (base, base)
+        );
     }
 
     #[actix_web::test]
@@ -3899,7 +3970,7 @@ mod tests {
                 async move {
                     runs.fetch_add(1, Ordering::SeqCst);
                     let _ = shutdown_tx.send(true);
-                    MaintenanceIteration::worked()
+                    MaintenanceIteration::Worked
                 }
             },
         ));
@@ -3912,6 +3983,101 @@ mod tests {
             .expect("the notification should bypass the idle delay")
             .expect("the adaptive worker should not panic");
         assert_eq!(runs.load(Ordering::SeqCst), 1);
+    }
+
+    #[actix_web::test]
+    async fn maintenance_notification_bursts_coalesce_into_one_run() {
+        const BURST: usize = 64;
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (notification_tx, notification_rx) = broadcast::channel(256);
+        let runs = Arc::new(AtomicUsize::new(0));
+        let runs_for_task = Arc::clone(&runs);
+        let notification_tx_for_task = notification_tx.clone();
+        // Commits that land before the first run, interleaved with other tables.
+        for _ in 0..BURST {
+            notification_tx
+                .send("vault_uploads".to_owned())
+                .expect("the adaptive worker should be subscribed");
+            notification_tx
+                .send("sessions".to_owned())
+                .expect("the adaptive worker should be subscribed");
+        }
+        let task = tokio::spawn(run_adaptive_task(
+            MaintenanceWorker::VaultUploadExpiry,
+            Duration::from_secs(60),
+            Duration::from_secs(10),
+            Duration::from_secs(300),
+            shutdown_rx,
+            notification_rx,
+            move || {
+                let runs = Arc::clone(&runs_for_task);
+                let notification_tx = notification_tx_for_task.clone();
+                async move {
+                    if runs.fetch_add(1, Ordering::SeqCst) == 0 {
+                        // Commits that land while the first run is in progress.
+                        for _ in 0..BURST {
+                            let _ = notification_tx.send("vault_uploads".to_owned());
+                        }
+                    }
+                    MaintenanceIteration::Idle { next_due: None }
+                }
+            },
+        ));
+
+        tokio::time::timeout(Duration::from_millis(250), async {
+            while runs.load(Ordering::SeqCst) < 2 {
+                sleep(Duration::from_millis(1)).await;
+            }
+        })
+        .await
+        .expect("notifications during a run should trigger one follow-up run");
+        sleep(Duration::from_millis(50)).await;
+        assert_eq!(
+            runs.load(Ordering::SeqCst),
+            2,
+            "each burst of {BURST} notifications should cost exactly one run"
+        );
+
+        shutdown_tx
+            .send(true)
+            .expect("maintenance shutdown receiver should remain active");
+        tokio::time::timeout(Duration::from_millis(250), task)
+            .await
+            .expect("the adaptive worker should stop on shutdown")
+            .expect("the adaptive worker should not panic");
+    }
+
+    #[actix_web::test]
+    async fn busy_maintenance_queues_keep_draining_without_notifications() {
+        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (_notification_tx, notification_rx) = broadcast::channel(4);
+        let runs = Arc::new(AtomicUsize::new(0));
+        let runs_for_task = Arc::clone(&runs);
+        let task = tokio::spawn(run_adaptive_task(
+            MaintenanceWorker::StorageDeletion,
+            Duration::ZERO,
+            Duration::from_secs(10),
+            Duration::from_secs(300),
+            shutdown_rx,
+            notification_rx,
+            move || {
+                let runs = Arc::clone(&runs_for_task);
+                let shutdown_tx = shutdown_tx.clone();
+                async move {
+                    if runs.fetch_add(1, Ordering::SeqCst) < 3 {
+                        return MaintenanceIteration::Worked;
+                    }
+                    let _ = shutdown_tx.send(true);
+                    MaintenanceIteration::Idle { next_due: None }
+                }
+            },
+        ));
+
+        tokio::time::timeout(Duration::from_millis(250), task)
+            .await
+            .expect("a run that did work should not wait out the base interval")
+            .expect("the adaptive worker should not panic");
+        assert_eq!(runs.load(Ordering::SeqCst), 4);
     }
 
     #[test]
