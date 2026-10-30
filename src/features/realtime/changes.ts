@@ -152,6 +152,9 @@ export class RefreshCoordinator {
   private timer: ReturnType<typeof setTimeout> | undefined;
   private timerDeadline = 0;
   private disposed = false;
+  private urgent = false;
+  private waiters: (() => void)[] = [];
+  private settling: (() => void)[] = [];
 
   constructor(
     private readonly refresh: (
@@ -165,6 +168,20 @@ export class RefreshCoordinator {
     this.reset ||= reset;
     if (this.reset || this.changes.length) this.pendingSince ??= Date.now();
     this.schedule();
+  }
+
+  /**
+   * Skip batching for a mutation this client has confirmed committed. Any
+   * refresh started afterwards observes it; one already in flight may not, so
+   * this trails it. Settles when the resulting route refresh finishes, or at
+   * once when the current route is unaffected.
+   */
+  requestNow(changes: RealtimeChange[]): Promise<void> {
+    if (this.disposed || changes.length === 0) return Promise.resolve();
+    const settled = new Promise<void>((resolve) => this.waiters.push(resolve));
+    this.urgent = true;
+    this.request(changes);
+    return settled;
   }
 
   beginMutation(): () => void {
@@ -186,11 +203,14 @@ export class RefreshCoordinator {
   }
   setRefreshing(refreshing: boolean): void {
     this.refreshing = refreshing;
+    if (!refreshing) settle(this.settling.splice(0));
     this.schedule();
   }
   dispose(): void {
     this.disposed = true;
     clearTimeout(this.timer);
+    settle(this.waiters.splice(0));
+    settle(this.settling.splice(0));
   }
 
   private schedule(): void {
@@ -201,12 +221,14 @@ export class RefreshCoordinator {
       (!this.reset && this.changes.length === 0)
     )
       return;
-    const delay = Math.max(
-      200,
-      this.mutations
-        ? 1_000 - (Date.now() - (this.pendingSince ?? Date.now()))
-        : 0,
-    );
+    const delay = this.urgent
+      ? 0
+      : Math.max(
+          200,
+          this.mutations
+            ? 1_000 - (Date.now() - (this.pendingSince ?? Date.now()))
+            : 0,
+        );
     const deadline = Date.now() + delay;
     // Completion may bring a refresh forward, but must never postpone one.
     if (this.timer && this.timerDeadline <= deadline) return;
@@ -216,6 +238,7 @@ export class RefreshCoordinator {
       this.timer = undefined;
       if (!this.visible || this.refreshing || this.disposed) return;
       if (
+        !this.urgent &&
         this.mutations &&
         Date.now() - (this.pendingSince ?? Date.now()) < 1_000
       ) {
@@ -224,10 +247,19 @@ export class RefreshCoordinator {
       }
       const changes = this.changes;
       const reset = this.reset;
+      const waiters = this.waiters.splice(0);
       this.changes = [];
       this.reset = false;
+      this.urgent = false;
       this.pendingSince = undefined;
       this.refresh(changes, reset);
+      // The callback marks a started route refresh synchronously.
+      if (this.refreshing) this.settling.push(...waiters);
+      else settle(waiters);
     }, delay);
   }
+}
+
+function settle(waiters: (() => void)[]): void {
+  for (const resolve of waiters) resolve();
 }
