@@ -32,6 +32,9 @@ import { type FileSummary, SummaryResource } from "./summary-resource";
 
 const noopEnd = () => {};
 const MutationContext = createContext<() => () => void>(() => noopEnd);
+const RefreshContext = createContext<
+  ((changes: RealtimeChange[]) => Promise<void>) | null
+>(null);
 const SummaryContext = createContext<SummaryResource | null>(null);
 const FolderScopeContext = createContext<
   (folders: readonly string[]) => () => void
@@ -88,6 +91,25 @@ export function RealtimeFolderScope({
 
 export function useRealtimeMutation(): () => () => void {
   return useContext(MutationContext);
+}
+
+/**
+ * Refresh the route after a mutation the caller has confirmed committed,
+ * serialized with realtime refreshes but without their batching delay.
+ * Outside the dashboard there is no coordinator, so this refreshes directly.
+ */
+export function useRealtimeRefresh(): (
+  changes: RealtimeChange[],
+) => Promise<void> {
+  const router = useRouter();
+  const refresh = useContext(RefreshContext);
+  return (
+    refresh ??
+    (() => {
+      router.refresh();
+      return Promise.resolve();
+    })
+  );
 }
 
 export function useRealtimeActivity(active: boolean): void {
@@ -184,6 +206,15 @@ export function RealtimeProvider({
     () => coordinatorRef.current?.beginMutation() ?? noopEnd,
     [],
   );
+  const refreshNow = useCallback(
+    (changes: RealtimeChange[]) => {
+      const coordinator = coordinatorRef.current;
+      if (coordinator) return coordinator.requestNow(changes);
+      startTransition(() => router.refresh());
+      return Promise.resolve();
+    },
+    [router],
+  );
 
   useEffect(() => {
     coordinatorRef.current?.setRefreshing(isRefreshing);
@@ -253,13 +284,15 @@ export function RealtimeProvider({
   // gaps still reset metadata; unlocking alone does not change the snapshot.
   return (
     <MutationContext value={beginMutation}>
-      <SummaryContext value={summaryResource}>
-        <FolderScopeContext value={registerScope}>
-          <SnapshotContext value={reconcileSnapshot}>
-            {children}
-          </SnapshotContext>
-        </FolderScopeContext>
-      </SummaryContext>
+      <RefreshContext value={refreshNow}>
+        <SummaryContext value={summaryResource}>
+          <FolderScopeContext value={registerScope}>
+            <SnapshotContext value={reconcileSnapshot}>
+              {children}
+            </SnapshotContext>
+          </FolderScopeContext>
+        </SummaryContext>
+      </RefreshContext>
     </MutationContext>
   );
 }

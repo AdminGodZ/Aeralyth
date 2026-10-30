@@ -76,6 +76,54 @@ describe("realtime refresh coordination", () => {
     coordinator.dispose();
   });
 
+  it("refreshes a confirmed local mutation at once and settles after its refresh", async () => {
+    vi.useFakeTimers();
+    let coordinator: RefreshCoordinator;
+    const refresh = vi.fn((changes: unknown[]) => {
+      if (changes.length) coordinator.setRefreshing(true);
+    });
+    coordinator = new RefreshCoordinator(refresh);
+    const endUpload = coordinator.beginMutation();
+    coordinator.request([{ scope: "paths", folderIds: [] }]);
+    let settled = false;
+    const done = coordinator
+      .requestNow([{ scope: "files", folderIds: [""] }])
+      .then(() => {
+        settled = true;
+      });
+    vi.advanceTimersByTime(0);
+    expect(refresh).toHaveBeenCalledExactlyOnceWith(
+      [
+        { scope: "paths", folderIds: [] },
+        { scope: "files", folderIds: [""] },
+      ],
+      false,
+    );
+    await Promise.resolve();
+    expect(settled).toBe(false);
+    // The event for the same upload trails the in-flight refresh, batched.
+    coordinator.request([{ scope: "files", folderIds: [""] }]);
+    coordinator.setRefreshing(false);
+    await done;
+    vi.advanceTimersByTime(500);
+    expect(refresh).toHaveBeenCalledOnce();
+    endUpload();
+    vi.advanceTimersByTime(500);
+    expect(refresh).toHaveBeenCalledTimes(2);
+    coordinator.dispose();
+  });
+
+  it("settles a confirmed mutation at once when the route is unaffected", async () => {
+    vi.useFakeTimers();
+    const refresh = vi.fn();
+    const coordinator = new RefreshCoordinator(refresh);
+    const done = coordinator.requestNow([{ scope: "files", folderIds: ["A"] }]);
+    vi.advanceTimersByTime(0);
+    await done;
+    expect(refresh).toHaveBeenCalledOnce();
+    coordinator.dispose();
+  });
+
   it("does not turn a completed mutation in A into a reset after navigating to B", () => {
     vi.useFakeTimers();
     const refresh = vi.fn();

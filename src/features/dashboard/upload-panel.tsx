@@ -58,7 +58,10 @@ import {
   type PreparedFolderUploadSelection,
   prepareFolderUploadSelection,
 } from "@/features/dashboard/upload-selection-policy";
-import { useRealtimeActivity } from "@/features/realtime/realtime-provider";
+import {
+  useRealtimeActivity,
+  useRealtimeRefresh,
+} from "@/features/realtime/realtime-provider";
 import { createAnimationFrameProgressCoalescer } from "@/features/uploads/progress-coalescer";
 import {
   getUploadFailureMessage,
@@ -193,6 +196,7 @@ const MULTIPART_CONCURRENCY = 4;
 const MULTIPART_PRESIGN_BATCH_SIZE = 8;
 const LOCAL_UPLOAD_CHUNK_BYTES = 8 * 1024 * 1024;
 const UPLOAD_FINALIZATION_TIMEOUT_MS = 45_000;
+const UPLOAD_LIST_REFRESH_WAIT_MS = 10_000;
 const UPLOAD_TREE_PAGE_SIZE = 100;
 const UPLOAD_TREE_DECRYPT_CONCURRENCY = 8;
 
@@ -211,6 +215,7 @@ function useUploadPanelController({
   surface = "shared",
 }: UploadPanelProps) {
   const router = useRouter();
+  const refreshRoute = useRealtimeRefresh();
   const vault = useVault();
   const fileInputRef = useRef<HTMLInputElement>(null);
   const folderInputRef = useRef<HTMLInputElement>(null);
@@ -594,13 +599,19 @@ function useUploadPanelController({
       repositoryId = repository.id;
     }
 
+    if (!repositoryId) {
+      // The upload is committed, so this refresh will include it. Keep the
+      // finalizing panel up until the list shows it instead of leaving a gap.
+      await waitForListRefresh(
+        refreshRoute([{ scope: "files", folderIds: [parentFolderId ?? ""] }]),
+        signal,
+      );
+    }
     setIsUploading(false);
     setUploadSession(null);
     uploadAbortRef.current = null;
     if (repositoryId) {
       router.push(`/repositories/${encodeURIComponent(repositoryId)}`);
-    } else {
-      router.refresh();
     }
   }
 
@@ -1860,6 +1871,31 @@ async function requestUploadCompletion(
 
 function completionRetryDelay(retryAfterSeconds: number) {
   return Math.min(5_000, Math.max(500, retryAfterSeconds * 1_000));
+}
+
+/** A hidden tab or slow route must not hold the finished upload panel open. */
+function waitForListRefresh(
+  refresh: Promise<void>,
+  signal: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    if (signal.aborted) {
+      reject(new DOMException("Upload canceled", "AbortError"));
+      return;
+    }
+    const finish = () => {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", abort);
+      resolve();
+    };
+    const abort = () => {
+      clearTimeout(timeout);
+      reject(new DOMException("Upload canceled", "AbortError"));
+    };
+    const timeout = setTimeout(finish, UPLOAD_LIST_REFRESH_WAIT_MS);
+    signal.addEventListener("abort", abort, { once: true });
+    void refresh.then(finish);
+  });
 }
 
 async function putBlobWithRetry(
