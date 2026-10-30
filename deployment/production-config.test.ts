@@ -74,6 +74,20 @@ describe("Railway production deployment", () => {
     expect(caddyfile).not.toContain("reverse_proxy 127.0.0.1:8080");
   });
 
+  it("forwards only the client address Caddy resolved through trusted proxies", () => {
+    const caddyfile = read("deployment/Caddyfile");
+    const globalOptions = caddyfile.split(":{$PORT:8080}")[0];
+    expect(globalOptions).toContain(
+      "trusted_proxies static {$AERALYTH_TRUSTED_PROXY_RANGES:100.64.0.0/10}",
+    );
+    expect(globalOptions).toContain("client_ip_headers X-Forwarded-For");
+    expect(globalOptions).not.toContain("0.0.0.0/0");
+    const apiProxy = caddyfile
+      .split("reverse_proxy 127.0.0.1:{$AERALYTH_API_PORT:8081} {")[1]
+      ?.split("\n\t\t}")[0];
+    expect(apiProxy).toContain("header_up X-Forwarded-For {client_ip}");
+  });
+
   it("bounds public HTTP lifetimes without imposing a short large-body deadline", () => {
     const caddyfile = read("deployment/Caddyfile");
     expect(caddyfile).toContain("read_header 10s");

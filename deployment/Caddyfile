@@ -3,6 +3,11 @@
 	auto_https off
 	grace_period 30s
 	servers {
+		# Railway's edge reaches the container from its private ingress range
+		# and records the client in X-Forwarded-For. Only that hop is trusted to
+		# supply {client_ip}; any other peer is the client itself.
+		trusted_proxies static {$AERALYTH_TRUSTED_PROXY_RANGES:100.64.0.0/10}
+		client_ip_headers X-Forwarded-For
 		max_header_size 64KB
 		timeouts {
 			read_header 10s
@@ -50,7 +55,11 @@
 
 	@api path /api/* /health /health/* /metrics
 	handle @api {
-		reverse_proxy 127.0.0.1:{$AERALYTH_API_PORT:8081}
+		reverse_proxy 127.0.0.1:{$AERALYTH_API_PORT:8081} {
+			# The API trusts X-Forwarded-For only from this loopback hop and keys
+			# login rate limits on it, so pass exactly the resolved client.
+			header_up X-Forwarded-For {client_ip}
+		}
 	}
 
 	handle {

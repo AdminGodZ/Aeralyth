@@ -1,5 +1,5 @@
 use actix_web::cookie::{Cookie, SameSite, time::Duration};
-use actix_web::http::header::LOCATION;
+use actix_web::http::header::{HeaderMap, LOCATION};
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, KeyInit, Mac};
@@ -127,10 +127,7 @@ pub async fn login(
         return Ok(redirect(login_error_location(form.next.as_deref())));
     }
 
-    let address = request
-        .peer_addr()
-        .map(|address| address.ip())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let address = login_client_address(&request);
     if !state.login_rate_limiter.allow(address, username) {
         return Err(LoadShedError::too_many_requests("login rate limit exceeded").into());
     }
@@ -202,10 +199,7 @@ pub async fn login_json(
     if username.is_empty() || (legacy_password.is_empty() && credential.is_none()) {
         return Ok(HttpResponse::Unauthorized().body("invalid username or password"));
     }
-    let address = request
-        .peer_addr()
-        .map(|address| address.ip())
-        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let address = login_client_address(&request);
     if !state.login_rate_limiter.allow(address, username) {
         return Err(LoadShedError::too_many_requests("login rate limit exceeded").into());
     }
@@ -398,6 +392,43 @@ pub async fn me(state: web::Data<AppState>, request: HttpRequest) -> Result<Http
     Ok(status.json(MeResponse { user }))
 }
 
+/// The address the login limiter keys on. In production the API listens on
+/// loopback behind Caddy, so every connection's peer is 127.0.0.1. Caddy
+/// overwrites X-Forwarded-For with the client address it resolved through its
+/// own trusted_proxies setting, and only that loopback hop is trusted here: a
+/// header on a direct connection from any other address is ignored.
+fn login_client_address(request: &HttpRequest) -> IpAddr {
+    let peer = request
+        .peer_addr()
+        .map(|address| address.ip())
+        .unwrap_or(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    client_address(peer, request.headers())
+}
+
+fn client_address(peer: IpAddr, headers: &HeaderMap) -> IpAddr {
+    if !peer.to_canonical().is_loopback() {
+        return peer;
+    }
+    forwarded_client_address(headers).unwrap_or(peer)
+}
+
+/// The rightmost X-Forwarded-For entry is the one the trusted proxy wrote;
+/// anything to its left came from further away and is not trusted.
+fn forwarded_client_address(headers: &HeaderMap) -> Option<IpAddr> {
+    let last_entry = headers
+        .get_all("x-forwarded-for")
+        .last()?
+        .to_str()
+        .ok()?
+        .rsplit(',')
+        .next()?
+        .trim();
+    last_entry
+        .parse::<IpAddr>()
+        .ok()
+        .map(|address| address.to_canonical())
+}
+
 pub(super) fn create_session_token() -> Result<String> {
     let mut bytes = [0_u8; 32];
     getrandom::fill(&mut bytes).map_err(error::ErrorInternalServerError)?;
@@ -482,7 +513,74 @@ fn encode_query_component(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_query_component, login_error_location, safe_next_path};
+    use actix_web::http::header::{HeaderMap, HeaderName, HeaderValue};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+    use super::{client_address, encode_query_component, login_error_location, safe_next_path};
+
+    const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+    fn forwarded(values: &[&'static str]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for value in values {
+            headers.append(
+                HeaderName::from_static("x-forwarded-for"),
+                HeaderValue::from_static(value),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn keys_login_attempts_on_the_forwarded_client_behind_the_loopback_proxy() {
+        assert_eq!(
+            client_address(LOOPBACK, &forwarded(&["203.0.113.7"])),
+            "203.0.113.7".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            client_address(
+                IpAddr::V6(Ipv6Addr::LOCALHOST),
+                &forwarded(&["2001:db8::1"])
+            ),
+            "2001:db8::1".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            client_address(LOOPBACK, &forwarded(&["::ffff:198.51.100.4"])),
+            "198.51.100.4".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn trusts_only_the_entry_the_loopback_proxy_wrote() {
+        assert_eq!(
+            client_address(LOOPBACK, &forwarded(&["192.0.2.1, 203.0.113.7"])),
+            "203.0.113.7".parse::<IpAddr>().unwrap()
+        );
+        assert_eq!(
+            client_address(LOOPBACK, &forwarded(&["192.0.2.1", "203.0.113.7"])),
+            "203.0.113.7".parse::<IpAddr>().unwrap()
+        );
+    }
+
+    #[test]
+    fn ignores_forwarded_addresses_from_untrusted_peers() {
+        let peer = "198.51.100.9".parse::<IpAddr>().unwrap();
+        assert_eq!(client_address(peer, &forwarded(&["203.0.113.7"])), peer);
+    }
+
+    #[test]
+    fn falls_back_to_the_peer_without_a_usable_forwarded_address() {
+        assert_eq!(client_address(LOOPBACK, &HeaderMap::new()), LOOPBACK);
+        assert_eq!(client_address(LOOPBACK, &forwarded(&["unknown"])), LOOPBACK);
+        assert_eq!(
+            client_address(LOOPBACK, &forwarded(&["203.0.113.7, "])),
+            LOOPBACK
+        );
+        assert_eq!(
+            client_address(LOOPBACK, &forwarded(&["203.0.113.7:443"])),
+            LOOPBACK
+        );
+    }
 
     #[test]
     fn accepts_only_local_share_return_paths() {
