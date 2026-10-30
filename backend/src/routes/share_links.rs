@@ -11,6 +11,7 @@ use tokio::fs::File as AsyncFile;
 use crate::auth::{
     parse_json_body, require_header_csrf, require_principal, session_principal, sha256_hex,
 };
+use crate::db::query_opt_cached;
 use crate::routes::local_file_stream::local_file_stream;
 use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
 use crate::routes::tree_jobs::{self, Action, MutationResult};
@@ -630,10 +631,13 @@ pub async fn rotate(
         .transaction()
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let current = transaction
-        .query_opt(SHARE_TOKEN_VERSION_LOCK_QUERY, &[&link_id, &owner.id])
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let current = query_opt_cached(
+        &transaction,
+        SHARE_TOKEN_VERSION_LOCK_QUERY,
+        &[&link_id, &owner.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     let Some(current) = current else {
         transaction
             .rollback()
@@ -646,13 +650,13 @@ pub async fn rotate(
         .checked_add(1)
         .ok_or_else(|| error::ErrorInternalServerError("share token version exhausted"))?;
     let token = token_for_link(&state.config.share_link_secret, &link_id, next_version)?;
-    let updated = transaction
-        .query_opt(
-            SHARE_TOKEN_ROTATE_QUERY,
-            &[&token, &next_version, &link_id, &owner.id, &current_version],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let updated = query_opt_cached(
+        &transaction,
+        SHARE_TOKEN_ROTATE_QUERY,
+        &[&token, &next_version, &link_id, &owner.id, &current_version],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     if updated.is_none() {
         transaction
             .rollback()

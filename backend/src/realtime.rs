@@ -8,8 +8,10 @@ use futures_util::{StreamExt, stream};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use tokio::time::Instant;
 
+use crate::db::{query_dedicated_cached, query_one_dedicated_cached};
 use crate::observability::Metrics;
 use crate::routes::events::ReplayCache;
+use deadpool_postgres::ClientWrapper;
 use tokio_postgres::{AsyncMessage, NoTls};
 
 const MAX_CONNECTIONS: usize = 2048;
@@ -228,7 +230,7 @@ async fn authorize_sessions(
 ) {
     let mut tick = tokio::time::interval(AUTHORIZATION_INTERVAL);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-    let mut connected: Option<(tokio_postgres::Client, ConnectionTask)> = None;
+    let mut connected: Option<ClientWrapper> = None;
     loop {
         tokio::select! {
             _ = shutdown.changed() => return,
@@ -260,11 +262,11 @@ async fn authorize_sessions(
             config.options("-c statement_timeout=1000");
             match tokio::time::timeout(AUTHORIZATION_TIMEOUT, config.connect(NoTls)).await {
                 Ok(Ok((client, connection))) => {
-                    connected = Some((
+                    connected = Some(ClientWrapper::new(
                         client,
-                        ConnectionTask(tokio::spawn(async move {
+                        tokio::spawn(async move {
                             let _ = connection.await;
-                        })),
+                        }),
                     ));
                 }
                 _ => continue,
@@ -287,7 +289,8 @@ async fn authorize_sessions(
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let result = tokio::time::timeout(
             AUTHORIZATION_TIMEOUT,
-            connected.as_ref().expect("connected").0.query(
+            query_dedicated_cached(
+                connected.as_ref().expect("connected"),
                 AUTHORIZATION_QUERY,
                 &[&user_ids, &session_ids, &token_hashes],
             ),
@@ -337,7 +340,7 @@ async fn connect_maintenance(
     database_url: &str,
     application_name: &str,
     shutdown: &mut watch::Receiver<bool>,
-) -> Option<Result<(tokio_postgres::Client, ConnectionTask), tokio_postgres::Error>> {
+) -> Option<Result<ClientWrapper, tokio_postgres::Error>> {
     let mut config = database_url.parse::<tokio_postgres::Config>().ok()?;
     config.application_name(application_name);
     config.connect_timeout(Duration::from_secs(5));
@@ -349,13 +352,13 @@ async fn connect_maintenance(
         connection = config.connect(NoTls) => connection,
     };
     Some(connection.map(|(client, connection)| {
-        (
+        ClientWrapper::new(
             client,
-            ConnectionTask(tokio::spawn(async move {
+            tokio::spawn(async move {
                 if let Err(error) = connection.await {
                     tracing::warn!(%error, "collection maintenance connection closed");
                 }
-            })),
+            }),
         )
     }))
 }
@@ -363,7 +366,7 @@ async fn connect_maintenance(
 /// Timestamp propagation and repository count deltas. Each pass is bounded and
 /// never walks a whole repository; full recounts run in their own task.
 async fn maintain_collections(database_url: String, mut shutdown: watch::Receiver<bool>) {
-    let mut connected: Option<(tokio_postgres::Client, ConnectionTask)> = None;
+    let mut connected: Option<ClientWrapper> = None;
     let mut backoff = Duration::from_secs(1);
     let mut delay = Duration::ZERO;
     loop {
@@ -392,7 +395,7 @@ async fn maintain_collections(database_url: String, mut shutdown: watch::Receive
                 }
             }
         }
-        let client = &connected.as_ref().expect("connected").0;
+        let client = connected.as_ref().expect("connected");
         match collection_batch(
             client,
             &mut shutdown,
@@ -425,7 +428,7 @@ async fn maintain_collections(database_url: String, mut shutdown: watch::Receive
 /// a backoff before the walk starts, so a recount that times out is retried
 /// later while other repositories go first.
 async fn maintain_repository_counts(database_url: String, mut shutdown: watch::Receiver<bool>) {
-    let mut connected: Option<(tokio_postgres::Client, ConnectionTask)> = None;
+    let mut connected: Option<ClientWrapper> = None;
     let mut backoff = Duration::from_secs(1);
     let mut delay = Duration::ZERO;
     loop {
@@ -436,10 +439,7 @@ async fn maintain_repository_counts(database_url: String, mut shutdown: watch::R
             _ = shutdown.changed() => return,
             _ = tokio::time::sleep(delay) => {},
         }
-        if connected
-            .as_ref()
-            .is_some_and(|(client, _)| client.is_closed())
-        {
+        if connected.as_ref().is_some_and(|client| client.is_closed()) {
             connected = None;
         }
         if connected.is_none() {
@@ -456,7 +456,7 @@ async fn maintain_repository_counts(database_url: String, mut shutdown: watch::R
                 }
             }
         }
-        let client = &connected.as_ref().expect("connected").0;
+        let client = connected.as_ref().expect("connected");
         let claimed = match collection_batch(
             client,
             &mut shutdown,
@@ -499,7 +499,7 @@ async fn maintain_repository_counts(database_url: String, mut shutdown: watch::R
 }
 
 async fn collection_batch(
-    client: &tokio_postgres::Client,
+    client: &ClientWrapper,
     shutdown: &mut watch::Receiver<bool>,
     query: &str,
     params: &[&(dyn tokio_postgres::types::ToSql + Sync)],
@@ -509,7 +509,7 @@ async fn collection_batch(
             let _ = tokio::time::timeout(Duration::from_secs(1), client.cancel_token().cancel_query(NoTls)).await;
             Ok(None)
         }
-        result = client.query_one(query, params) => result.map(Some),
+        result = query_one_dedicated_cached(client, query, params) => result.map(Some),
     }
 }
 
@@ -525,7 +525,7 @@ async fn listen(
     let (client, connection) = config.connect(NoTls).await?;
     let (pending, mut pending_wake) = watch::channel(0_u64);
     let listener_hub = hub.clone();
-    let _connection = ConnectionTask(tokio::spawn(async move {
+    let connection = tokio::spawn(async move {
         let mut connection = Box::pin(connection);
         let mut messages =
             stream::poll_fn(move |context| connection.as_mut().poll_message(context));
@@ -545,7 +545,8 @@ async fn listen(
                 }
             }
         }
-    }));
+    });
+    let client = ClientWrapper::new(client, connection);
     client.batch_execute("LISTEN aeralyth_changes").await?;
     hub.notify_all();
     let mut tick = tokio::time::interval(Duration::from_secs(1));
@@ -571,8 +572,7 @@ async fn listen(
         let dispatch_deadline = Instant::now() + Duration::from_millis(200);
         work_pending = false;
         loop {
-            let count: i32 = client
-                .query_one("SELECT realtime_dispatch()", &[])
+            let count: i32 = query_one_dedicated_cached(&client, "SELECT realtime_dispatch()", &[])
                 .await?
                 .get(0);
             if count < 512 {
@@ -588,17 +588,18 @@ async fn listen(
             let prune_deadline = Instant::now() + Duration::from_millis(250);
             let mut deleted = 0_u64;
             loop {
-                let count: i32 = client
-                    .query_one("SELECT realtime_prune()", &[])
-                    .await?
-                    .get(0);
+                let count: i32 =
+                    query_one_dedicated_cached(&client, "SELECT realtime_prune()", &[])
+                        .await?
+                        .get(0);
                 deleted += count as u64;
                 if count < 2048 || Instant::now() >= prune_deadline {
                     break;
                 }
                 tokio::task::yield_now().await;
             }
-            let retention = client.query_one(
+            let retention = query_one_dedicated_cached(
+                &client,
                 "SELECT COALESCE(EXTRACT(EPOCH FROM now() - (SELECT min(created_at) FROM realtime_events)), 0)::float8 AS oldest_age,
                   EXISTS (SELECT 1 FROM realtime_events WHERE created_at < now() - interval '24 hours'
                     OR id <= (SELECT head - 100000 FROM realtime_stream_state WHERE singleton)) AS backlog", &[]
@@ -658,9 +659,12 @@ mod tests {
         }
         let url = std::env::var("DATABASE_URL").unwrap();
         let (collection, connection) = tokio_postgres::connect(&url, NoTls).await.unwrap();
-        let _collection_driver = ConnectionTask(tokio::spawn(async move {
-            let _ = connection.await;
-        }));
+        let collection = ClientWrapper::new(
+            collection,
+            tokio::spawn(async move {
+                let _ = connection.await;
+            }),
+        );
         let (dispatch, connection) = tokio_postgres::connect(&url, NoTls).await.unwrap();
         let _dispatch_driver = ConnectionTask(tokio::spawn(async move {
             let _ = connection.await;

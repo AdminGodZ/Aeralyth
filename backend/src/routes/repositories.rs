@@ -5,6 +5,7 @@ use serde::{Deserialize, Serialize};
 use tokio_postgres::{IsolationLevel, Row};
 
 use crate::auth::{SessionPrincipal, parse_json_body, require_header_csrf, require_principal};
+use crate::db::{execute_cached, query_cached, query_one_cached, query_opt_cached};
 use crate::routes::pagination::{decode_cursor, encode_cursor, row_limit};
 use crate::state::AppState;
 use crate::timestamps;
@@ -786,16 +787,16 @@ pub async fn create_empty(
         .await
         .map_err(error::ErrorInternalServerError)?;
 
-    transaction
-        .query_one(
-            "SELECT pg_advisory_xact_lock(hashtextextended('aeralyth:legacy-folder-tree:' || $1, 0))",
-            &[&owner.id],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
-    let existing_folder = transaction
-        .query_opt(
-            "
+    query_one_cached(
+        &transaction,
+        "SELECT pg_advisory_xact_lock(hashtextextended('aeralyth:legacy-folder-tree:' || $1, 0))",
+        &[&owner.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
+    let existing_folder = query_opt_cached(
+        &transaction,
+        "
                 SELECT id
                 FROM visible_files AS files
                 WHERE owner_id = $1
@@ -805,10 +806,10 @@ pub async fn create_empty(
                   AND lower(original_name) = lower($2)
                 LIMIT 1
             ",
-            &[&owner.id, &name],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+        &[&owner.id, &name],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     if existing_folder.is_some() {
         transaction
             .rollback()
@@ -818,13 +819,13 @@ pub async fn create_empty(
             .body("A top-level folder with this name already exists. Import it instead."));
     }
 
-    let repository = transaction
-        .query_one(
-            CREATE_EMPTY_REPOSITORY_QUERY,
-            &[&owner.id, &name, &description],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let repository = query_one_cached(
+        &transaction,
+        CREATE_EMPTY_REPOSITORY_QUERY,
+        &[&owner.id, &name, &description],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     let repository = repository_summary_from_row(&repository);
     transaction
         .commit()
@@ -970,10 +971,13 @@ pub async fn archive_manifest(
         .start()
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let Some(repository_row) = transaction
-        .query_opt(REPOSITORY_SUMMARY_QUERY, &[&repository_id, &owner.id])
-        .await
-        .map_err(error::ErrorInternalServerError)?
+    let Some(repository_row) = query_opt_cached(
+        &transaction,
+        REPOSITORY_SUMMARY_QUERY,
+        &[&repository_id, &owner.id],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?
     else {
         return Ok(HttpResponse::NotFound().finish());
     };
@@ -987,21 +991,20 @@ pub async fn archive_manifest(
             .body("The repository changed while its archive manifest was being read."));
     }
     let snapshot = if let Some(cursor) = &cursor {
-        transaction
-            .query_opt(
-                REPOSITORY_ARCHIVE_SNAPSHOT_QUERY,
-                &[
-                    &cursor.manifest_id,
-                    &repository_id,
-                    &owner.id,
-                    &snapshot_version,
-                ],
-            )
-            .await
-            .map_err(error::ErrorInternalServerError)?
+        query_opt_cached(
+            &transaction,
+            REPOSITORY_ARCHIVE_SNAPSHOT_QUERY,
+            &[
+                &cursor.manifest_id,
+                &repository_id,
+                &owner.id,
+                &snapshot_version,
+            ],
+        )
+        .await
+        .map_err(error::ErrorInternalServerError)?
     } else {
-        let existing = transaction.query_opt(
-            "SELECT id::text AS manifest_id,total_entries,total_files,total_bytes,total_encrypted_entries
+        let existing = query_opt_cached(&transaction, "SELECT id::text AS manifest_id,total_entries,total_files,total_bytes,total_encrypted_entries
              FROM repository_archive_manifests WHERE repository_id=$1 AND owner_id=$2
                AND content_version=$3 AND expires_at>now()
              ORDER BY expires_at DESC LIMIT 1",
@@ -1012,16 +1015,14 @@ pub async fn archive_manifest(
         } else {
             // Try-lock prevents simultaneous cold requests from copying the
             // same tree. A competing request retries after preparation commits.
-            let locked: bool = transaction.query_one(
-                "SELECT pg_try_advisory_xact_lock(hashtextextended('aeralyth:archive-manifest:' || $1,0))",
+            let locked: bool = query_one_cached(&transaction, "SELECT pg_try_advisory_xact_lock(hashtextextended('aeralyth:archive-manifest:' || $1,0))",
                 &[&repository_id],
             ).await.map_err(error::ErrorInternalServerError)?.get(0);
             if !locked {
                 return Ok(HttpResponse::Conflict()
                     .body("The repository archive is being prepared. Please retry."));
             }
-            if let Err(failure) = transaction.execute(
-                "DELETE FROM repository_archive_manifests WHERE repository_id=$1 AND owner_id=$2 AND content_version=$3 AND expires_at<=now()",
+            if let Err(failure) = execute_cached(&transaction, "DELETE FROM repository_archive_manifests WHERE repository_id=$1 AND owner_id=$2 AND content_version=$3 AND expires_at<=now()",
                 &[&repository_id,&owner.id,&snapshot_version],
             ).await {
                 if failure.code() == Some(&tokio_postgres::error::SqlState::T_R_SERIALIZATION_FAILURE) {
@@ -1029,17 +1030,17 @@ pub async fn archive_manifest(
                 }
                 return Err(error::ErrorInternalServerError(failure));
             }
-            let prepared = transaction
-                .query_one(
-                    PREPARE_REPOSITORY_ARCHIVE_QUERY,
-                    &[
-                        &repository_id,
-                        &owner.id,
-                        &repository.root.id,
-                        &snapshot_version,
-                    ],
-                )
-                .await;
+            let prepared = query_one_cached(
+                &transaction,
+                PREPARE_REPOSITORY_ARCHIVE_QUERY,
+                &[
+                    &repository_id,
+                    &owner.id,
+                    &repository.root.id,
+                    &snapshot_version,
+                ],
+            )
+            .await;
             let row = match prepared {
                 Ok(row) => row,
                 Err(failure)
@@ -1055,8 +1056,7 @@ pub async fn archive_manifest(
                 return Ok(HttpResponse::Conflict()
                     .body("The repository archive is being prepared. Please retry."));
             };
-            transaction.execute(
-                "UPDATE repository_archive_manifests SET total_entries=$2,total_files=$3,total_bytes=$4,total_encrypted_entries=$5 WHERE id=$1::text::uuid",
+            execute_cached(&transaction, "UPDATE repository_archive_manifests SET total_entries=$2,total_files=$3,total_bytes=$4,total_encrypted_entries=$5 WHERE id=$1::text::uuid",
                 &[&manifest_id,&row.get::<_,i64>("total_entries"),&row.get::<_,i64>("total_files"),&row.get::<_,i64>("total_bytes"),&row.get::<_,i64>("total_encrypted_entries")],
             ).await.map_err(error::ErrorInternalServerError)?;
             Some(row)
@@ -1077,13 +1077,13 @@ pub async fn archive_manifest(
         return Err(error::ErrorBadRequest("archive cursor is invalid"));
     }
     let limit = row_limit(REPOSITORY_ARCHIVE_PAGE_SIZE)?;
-    let mut rows = transaction
-        .query(
-            REPOSITORY_ARCHIVE_PAGE_QUERY,
-            &[&manifest_id, &ordinal, &limit],
-        )
-        .await
-        .map_err(error::ErrorInternalServerError)?;
+    let mut rows = query_cached(
+        &transaction,
+        REPOSITORY_ARCHIVE_PAGE_QUERY,
+        &[&manifest_id, &ordinal, &limit],
+    )
+    .await
+    .map_err(error::ErrorInternalServerError)?;
     if total_entries < 0
         || total_files < 0
         || total_files > total_entries

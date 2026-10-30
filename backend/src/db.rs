@@ -7,7 +7,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use deadpool_postgres::{
-    GenericClient, Hook, HookError, Manager, ManagerConfig, Pool, RecyclingMethod, Runtime,
+    ClientWrapper, GenericClient, Hook, HookError, Manager, ManagerConfig, Pool, RecyclingMethod,
+    Runtime,
 };
 use futures_util::future::try_join_all;
 use tokio::sync::Semaphore;
@@ -479,6 +480,28 @@ where
     client.execute(&statement, params).await
 }
 
+/// `query_cached` for a dedicated connection outside the pool. deadpool's
+/// `ClientWrapper` gives such a connection the same per-connection statement
+/// cache and aborts its connection task when dropped.
+pub async fn query_dedicated_cached(
+    client: &ClientWrapper,
+    sql: &str,
+    params: &[&(dyn ToSql + Sync)],
+) -> Result<Vec<Row>, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.query(&statement, params).await
+}
+
+/// `query_one_cached` for a dedicated connection outside the pool.
+pub async fn query_one_dedicated_cached(
+    client: &ClientWrapper,
+    sql: &str,
+    params: &[&(dyn ToSql + Sync)],
+) -> Result<Row, tokio_postgres::Error> {
+    let statement = client.prepare_cached(sql).await?;
+    client.query_one(&statement, params).await
+}
+
 /// A one-connection pooled client for DB-backed tests that exercise helpers taking
 /// a deadpool transaction, whose statement cache raw tokio-postgres clients lack.
 #[cfg(test)]
@@ -759,7 +782,8 @@ mod tests {
     fn hot_transaction_paths_prepare_statements_through_the_cache() {
         // `db` is the `Database` wrapper, whose query methods already use
         // `prepare_cached`. Any other receiver re-prepares a `&str` statement
-        // on every call, so it must go through the `*_cached` helpers instead.
+        // on every call, so it must go through the `*_cached` helpers instead
+        // (`*_dedicated_cached` for connections outside the pool).
         const CACHED_RECEIVERS: &[&str] = &["db"];
         // Deliberately uncached statements as (source, receiver, method), e.g.
         // genuinely dynamic one-off SQL that would only bloat the cache.
@@ -772,6 +796,9 @@ mod tests {
                 include_str!("routes/vault_metadata_paging.rs"),
             ),
             ("tree jobs", include_str!("routes/tree_jobs.rs")),
+            ("repositories", include_str!("routes/repositories.rs")),
+            ("share links", include_str!("routes/share_links.rs")),
+            ("realtime", include_str!("realtime.rs")),
         ] {
             let production = source
                 .split(&tests_module)
