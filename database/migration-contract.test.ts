@@ -35,6 +35,11 @@ describe.each([
     "041_incremental_repository_counts.sql",
     "041-incremental-repository-counts",
   ],
+  ["042_trash_listing_order_index.sql", "042-trash-listing-order-index"],
+  [
+    "043_inline_tree_operation_visibility.sql",
+    "043-inline-tree-operation-visibility",
+  ],
 ])("%s", (fileName, version) => {
   const migration = readFileSync(resolve(migrationRoot, fileName), "utf8");
 

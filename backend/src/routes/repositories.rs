@@ -374,7 +374,37 @@ const REPOSITORY_DETAIL_CONTEXT_QUERY: &str = r#"
     ORDER BY ancestors.depth DESC
 "#;
 
-const REPOSITORY_CHILDREN_QUERY: &str = r#"
+// First pages and cursor pages are separate statements so neither generic plan
+// carries a `$3 IS NULL OR ...` keyset: the cursor page is one row comparison
+// over the browse index columns, so a page starts at the cursor instead of
+// filtering every earlier child of the folder.
+const REPOSITORY_CHILDREN_FIRST_PAGE_QUERY: &str = r#"
+    SELECT
+      files.id,
+      files.original_name,
+      files.mime_type,
+      files.entry_type,
+      files.parent_id,
+      files.size_bytes,
+      files.e2ee_state,
+      files.updated_at,
+      files.current_generation_id AS vault_generation_id,
+      heads.record_version AS vault_record_version,
+      heads.record_hash AS vault_record_hash,
+      CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END AS cursor_rank,
+      lower(files.original_name) AS cursor_name
+    FROM visible_files AS files
+    LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
+    WHERE files.owner_id = $1
+      AND files.parent_id = $2
+      AND files.state = 'active'
+    ORDER BY CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END,
+             lower(files.original_name),
+             files.id
+    LIMIT $3
+"#;
+
+const REPOSITORY_CHILDREN_CURSOR_PAGE_QUERY: &str = r#"
     SELECT
       files.id,
       files.original_name,
@@ -395,16 +425,10 @@ const REPOSITORY_CHILDREN_QUERY: &str = r#"
       AND files.parent_id = $2
       AND files.state = 'active'
       AND (
-        $3::integer IS NULL
-        OR CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END > $3
-        OR (
-          CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END = $3
-          AND (
-            lower(files.original_name) > $4
-            OR (lower(files.original_name) = $4 AND files.id > $5)
-          )
-        )
-      )
+        CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END,
+        lower(files.original_name),
+        files.id
+      ) > ($3::integer, $4::text, $5::text)
     ORDER BY CASE WHEN files.entry_type = 'folder' THEN 0 ELSE 1 END,
              lower(files.original_name),
              files.id
@@ -1281,25 +1305,35 @@ async fn list_repository_children(
     folder_id: &str,
     cursor: Option<&RepositoryEntryCursor>,
 ) -> Result<RepositoryEntryPage> {
-    let cursor_rank = cursor.map(|cursor| cursor.rank);
-    let cursor_name = cursor.map(|cursor| cursor.name.clone());
-    let cursor_id = cursor.map(|cursor| cursor.id.clone());
     let limit = row_limit(MAX_REPOSITORY_ENTRIES as usize)?;
-    let mut rows = state
-        .db
-        .query(
-            REPOSITORY_CHILDREN_QUERY,
-            &[
-                &owner_id,
-                &folder_id,
-                &cursor_rank,
-                &cursor_name,
-                &cursor_id,
-                &limit,
-            ],
-        )
-        .await
-        .map_err(crate::db::http_error)?;
+    let mut rows = match cursor {
+        Some(cursor) => {
+            state
+                .db
+                .query(
+                    REPOSITORY_CHILDREN_CURSOR_PAGE_QUERY,
+                    &[
+                        &owner_id,
+                        &folder_id,
+                        &cursor.rank,
+                        &cursor.name,
+                        &cursor.id,
+                        &limit,
+                    ],
+                )
+                .await
+        }
+        None => {
+            state
+                .db
+                .query(
+                    REPOSITORY_CHILDREN_FIRST_PAGE_QUERY,
+                    &[&owner_id, &folder_id, &limit],
+                )
+                .await
+        }
+    }
+    .map_err(crate::db::http_error)?;
     let has_more = rows.len() > MAX_REPOSITORY_ENTRIES as usize;
     rows.truncate(MAX_REPOSITORY_ENTRIES as usize);
     let next_cursor = if has_more {
@@ -1546,7 +1580,8 @@ mod tests {
             CREATE_REPOSITORY_QUERY,
             CREATE_EMPTY_REPOSITORY_QUERY,
             UPDATE_REPOSITORY_QUERY,
-            super::REPOSITORY_CHILDREN_QUERY,
+            super::REPOSITORY_CHILDREN_FIRST_PAGE_QUERY,
+            super::REPOSITORY_CHILDREN_CURSOR_PAGE_QUERY,
         ] {
             client
                 .prepare(query)
@@ -1759,6 +1794,129 @@ mod tests {
         expected_nodes.sort();
         expected_nodes.insert(0, (id("secret"), None, 0));
         assert_eq!(nodes, expected_nodes);
+        transaction.rollback().await.expect("discard fixture");
+    }
+
+    #[test]
+    fn repository_children_pages_keep_the_keyset_sargable() {
+        use super::{REPOSITORY_CHILDREN_CURSOR_PAGE_QUERY, REPOSITORY_CHILDREN_FIRST_PAGE_QUERY};
+
+        for query in [
+            REPOSITORY_CHILDREN_FIRST_PAGE_QUERY,
+            REPOSITORY_CHILDREN_CURSOR_PAGE_QUERY,
+        ] {
+            assert!(!query.contains("IS NULL"));
+            assert!(!query.contains(" OR "));
+            assert!(query.contains("files.parent_id = $2"));
+        }
+        assert!(REPOSITORY_CHILDREN_FIRST_PAGE_QUERY.contains("LIMIT $3"));
+        assert!(!REPOSITORY_CHILDREN_FIRST_PAGE_QUERY.contains("$4"));
+        assert!(REPOSITORY_CHILDREN_CURSOR_PAGE_QUERY.contains(
+            "files.id
+      ) > ($3::integer, $4::text, $5::text)"
+        ));
+        assert!(REPOSITORY_CHILDREN_CURSOR_PAGE_QUERY.contains("LIMIT $6"));
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn database_repository_children_pages_match_the_unpaged_order() {
+        use super::{REPOSITORY_CHILDREN_CURSOR_PAGE_QUERY, REPOSITORY_CHILDREN_FIRST_PAGE_QUERY};
+
+        let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
+        let (mut client, connection) =
+            tokio_postgres::connect(&database_url, tokio_postgres::NoTls)
+                .await
+                .expect("connect to PostgreSQL");
+        actix_web::rt::spawn(async move {
+            connection
+                .await
+                .expect("PostgreSQL connection stays healthy");
+        });
+        let transaction = client.transaction().await.expect("begin fixture");
+        // Case-folded name ties make the id tiebreak matter within each rank.
+        transaction
+            .batch_execute(
+                "INSERT INTO users (id, username, password_hash, role, status)
+                   VALUES ('usr_repo_keyset', 'repo_keyset', 'not-a-login-hash', 'user', 'active');
+                 INSERT INTO files (id, owner_id, original_name, storage_name, size_bytes, entry_type, parent_id)
+                 VALUES ('fil_rk_root', 'usr_repo_keyset', 'repo', 'tests/rk-root', 0, 'folder', NULL);
+                 INSERT INTO files (id, owner_id, original_name, storage_name, size_bytes, entry_type, parent_id, state, trashed_at)
+                 VALUES
+                   ('fil_rk_f1', 'usr_repo_keyset', 'src', 'tests/rk-f1', 0, 'folder', 'fil_rk_root', 'active', NULL),
+                   ('fil_rk_f2', 'usr_repo_keyset', 'Docs', 'tests/rk-f2', 0, 'folder', 'fil_rk_root', 'active', NULL),
+                   ('fil_rk_f3', 'usr_repo_keyset', 'assets', 'tests/rk-f3', 0, 'folder', 'fil_rk_root', 'active', NULL),
+                   ('fil_rk_a2', 'usr_repo_keyset', 'readme.md', 'tests/rk-a2', 1, 'file', 'fil_rk_root', 'active', NULL),
+                   ('fil_rk_a1', 'usr_repo_keyset', 'README.md', 'tests/rk-a1', 1, 'file', 'fil_rk_root', 'active', NULL),
+                   ('fil_rk_a3', 'usr_repo_keyset', 'LICENSE', 'tests/rk-a3', 1, 'file', 'fil_rk_root', 'active', NULL),
+                   ('fil_rk_a4', 'usr_repo_keyset', 'main.rs', 'tests/rk-a4', 1, 'file', 'fil_rk_root', 'active', NULL),
+                   ('fil_rk_t1', 'usr_repo_keyset', 'gone.rs', 'tests/rk-t1', 1, 'file', 'fil_rk_root', 'trashed', now());",
+            )
+            .await
+            .expect("repository children fixtures should insert");
+
+        let owner = "usr_repo_keyset".to_owned();
+        let folder = "fil_rk_root".to_owned();
+        let unpaged = transaction
+            .query(
+                REPOSITORY_CHILDREN_FIRST_PAGE_QUERY,
+                &[&owner, &folder, &1_000_i64],
+            )
+            .await
+            .expect("unpaged children should list")
+            .into_iter()
+            .map(|row| row.get::<_, String>("id"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            unpaged,
+            [
+                "fil_rk_f3",
+                "fil_rk_f2",
+                "fil_rk_f1",
+                "fil_rk_a3",
+                "fil_rk_a4",
+                "fil_rk_a1",
+                "fil_rk_a2",
+            ]
+        );
+
+        // Two rows per page, fetching one extra to detect the next page.
+        let mut paged = Vec::new();
+        let mut cursor: Option<(i32, String, String)> = None;
+        loop {
+            let mut rows = match &cursor {
+                Some((rank, name, id)) => {
+                    transaction
+                        .query(
+                            REPOSITORY_CHILDREN_CURSOR_PAGE_QUERY,
+                            &[&owner, &folder, rank, name, id, &3_i64],
+                        )
+                        .await
+                }
+                None => {
+                    transaction
+                        .query(
+                            REPOSITORY_CHILDREN_FIRST_PAGE_QUERY,
+                            &[&owner, &folder, &3_i64],
+                        )
+                        .await
+                }
+            }
+            .expect("children page should list");
+            let has_more = rows.len() > 2;
+            rows.truncate(2);
+            paged.extend(rows.iter().map(|row| row.get::<_, String>("id")));
+            if !has_more {
+                break;
+            }
+            let last = rows.last().expect("a full page has a last row");
+            cursor = Some((
+                last.get("cursor_rank"),
+                last.get("cursor_name"),
+                last.get("id"),
+            ));
+        }
+        assert_eq!(paged, unpaged);
         transaction.rollback().await.expect("discard fixture");
     }
 
