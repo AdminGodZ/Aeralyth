@@ -100,6 +100,7 @@ export type AdminUsersState =
   | {
       status: "ready";
       data: AdminUsersData;
+      realtimeCursor?: string;
     }
   | {
       status: "unauthorized";
@@ -242,6 +243,7 @@ export type FilesState =
   | {
       status: "ready";
       data: FilesData;
+      realtimeCursor?: string;
     }
   | {
       status: "unauthorized";
@@ -280,7 +282,7 @@ export type RepositoriesData = {
 };
 
 export type RepositoriesState =
-  | { status: "ready"; data: RepositoriesData }
+  | { status: "ready"; data: RepositoriesData; realtimeCursor?: string }
   | { status: "unauthorized" }
   | { status: "not-found" }
   | { status: "unavailable"; retryable?: boolean };
@@ -351,7 +353,7 @@ export type FolderArchiveManifest = {
 };
 
 export type RepositoryDetailState =
-  | { status: "ready"; data: RepositoryDetailData }
+  | { status: "ready"; data: RepositoryDetailData; realtimeCursor?: string }
   | { status: "unauthorized" }
   | { status: "not-found" }
   | { status: "unavailable"; retryable?: boolean };
@@ -407,6 +409,24 @@ function requestApi<T>(
   });
 }
 
+function isRealtimeCursor(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    /^(0|[1-9][0-9]{0,18})$/.test(value) &&
+    BigInt(value) <= 9223372036854775807n
+  );
+}
+
+/**
+ * Dashboard snapshot endpoints report the realtime head they read before their
+ * snapshot, so a page can request bootstrap and data together and still replay
+ * every change made while it renders.
+ */
+function snapshotCursor(response: Response): { realtimeCursor?: string } {
+  const value = response.headers.get("x-aeralyth-realtime-cursor");
+  return isRealtimeCursor(value) ? { realtimeCursor: value } : {};
+}
+
 export async function getSessionBootstrapState(): Promise<SessionBootstrapState> {
   const requestHeaders = await headers();
 
@@ -439,9 +459,7 @@ export async function getSessionBootstrapState(): Promise<SessionBootstrapState>
           data.user.status !== "active" ||
           typeof data.csrfToken !== "string" ||
           !data.csrfToken ||
-          typeof data.realtimeCursor !== "string" ||
-          !/^(0|[1-9][0-9]{0,18})$/.test(data.realtimeCursor) ||
-          BigInt(data.realtimeCursor) > 9223372036854775807n
+          !isRealtimeCursor(data.realtimeCursor)
         ) {
           return { status: "unavailable" };
         }
@@ -541,6 +559,7 @@ export async function getAdminUsersState(options?: {
         return {
           status: "ready",
           data: (await response.json()) as AdminUsersData,
+          ...snapshotCursor(response),
         };
       },
     );
@@ -687,7 +706,7 @@ export async function getStorageOverviewState(): Promise<StorageOverviewState> {
         if (!response.ok) return snapshotFailureState(response.status);
         const data: unknown = await response.json();
         return isStorageOverview(data)
-          ? { status: "ready", data }
+          ? { status: "ready", data, ...snapshotCursor(response) }
           : { status: "unavailable" };
       },
     );
@@ -737,6 +756,7 @@ export async function getFilesState(
         return {
           status: "ready",
           data,
+          ...snapshotCursor(response),
         };
       },
     );
@@ -772,7 +792,7 @@ export async function getRepositoriesState(
           return { status: "unavailable" };
         }
 
-        return { status: "ready", data };
+        return { status: "ready", data, ...snapshotCursor(response) };
       },
     );
   } catch {
@@ -818,7 +838,7 @@ export async function getRepositoryDetailState(
           return { status: "unavailable" };
         }
 
-        return { status: "ready", data };
+        return { status: "ready", data, ...snapshotCursor(response) };
       },
     );
   } catch {

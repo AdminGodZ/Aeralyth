@@ -1,4 +1,7 @@
-use actix_web::http::header::CACHE_CONTROL;
+use actix_web::body::MessageBody;
+use actix_web::dev::{ServiceRequest, ServiceResponse};
+use actix_web::http::header::{CACHE_CONTROL, HeaderName, HeaderValue};
+use actix_web::middleware::Next;
 use actix_web::{HttpRequest, HttpResponse, Result, web};
 use serde::Serialize;
 
@@ -101,6 +104,38 @@ fn unauthorized() -> HttpResponse {
     HttpResponse::Unauthorized()
         .insert_header((CACHE_CONTROL, "private, no-store"))
         .finish()
+}
+
+pub const REALTIME_CURSOR_HEADER: &str = "x-aeralyth-realtime-cursor";
+const REALTIME_HEAD_QUERY: &str =
+    "SELECT COALESCE((SELECT head FROM realtime_stream_state WHERE singleton), 0::bigint)";
+
+/// Stamps a dashboard snapshot response with the realtime head read before the
+/// handler runs, the same ordering bootstrap guarantees. The web server can
+/// then request bootstrap and the snapshot together instead of in sequence.
+pub async fn stamp_realtime_cursor<B: MessageBody + 'static>(
+    request: ServiceRequest,
+    next: Next<B>,
+) -> Result<ServiceResponse<B>, actix_web::Error> {
+    let cursor = match request.app_data::<web::Data<AppState>>() {
+        Some(state) => state
+            .db
+            .query_one(REALTIME_HEAD_QUERY, &[])
+            .await
+            .ok()
+            .map(|row| row.get::<_, i64>(0)),
+        None => None,
+    };
+    let mut response = next.call(request).await?;
+    if let Some(cursor) = cursor
+        && response.status().is_success()
+    {
+        response.headers_mut().insert(
+            HeaderName::from_static(REALTIME_CURSOR_HEADER),
+            HeaderValue::from(cursor),
+        );
+    }
+    Ok(response)
 }
 
 #[cfg(test)]

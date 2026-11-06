@@ -7,7 +7,7 @@ import { getRepositoryDetailState } from "@/lib/api";
 
 type RepositoryPageProps = {
   params: Promise<{ repositoryId: string }>;
-  searchParams: Promise<{ cursor?: string; file?: string; folder?: string }>;
+  searchParams: Promise<{ cursor?: string; folder?: string }>;
 };
 
 export const dynamic = "force-dynamic";
@@ -21,17 +21,25 @@ export default async function RepositoryPage({
   params,
   searchParams,
 }: RepositoryPageProps) {
-  const [{ repositoryId }, { cursor, file, folder }] = await Promise.all([
+  const [{ repositoryId }, { cursor, folder }] = await Promise.all([
     params,
     searchParams,
   ]);
-  const { csrfToken, currentUser, realtimeCursor } =
-    await getDashboardSession();
-  const repositoryDetailState = await getRepositoryDetailState(
-    repositoryId,
-    folder?.trim() || undefined,
-    cursor?.trim() || undefined,
-  );
+  // The detail response reports the replay cursor it read before its
+  // snapshot, so bootstrap and the snapshot can be requested together.
+  const [session, repositoryDetailState] = await Promise.all([
+    getDashboardSession(),
+    getRepositoryDetailState(
+      repositoryId,
+      folder?.trim() || undefined,
+      cursor?.trim() || undefined,
+    ),
+  ]);
+  const { csrfToken, currentUser } = session;
+  const realtimeCursor =
+    (repositoryDetailState.status === "ready"
+      ? repositoryDetailState.realtimeCursor
+      : undefined) ?? session.realtimeCursor;
 
   if (repositoryDetailState.status === "unauthorized") {
     redirect("/login");
@@ -49,7 +57,6 @@ export default async function RepositoryPage({
       realtimeCursor={realtimeCursor}
       filesState={{ status: "unavailable" }}
       repositoryDetailState={repositoryDetailState}
-      repositoryFileId={file?.trim() || undefined}
     />
   );
 }
