@@ -12,6 +12,8 @@ export const VAULT_SUITE_ID = 1;
 export const VAULT_AAD_SCHEMA_ID = 1;
 export const VAULT_CRYPTO_CHUNK_BYTES = 4 * 1024 * 1024;
 export const VAULT_MAX_CIPHERTEXT_BYTES = 2_415_919_104;
+/** Mirrors backend `UPLOAD_PART_BYTES`: larger ciphertexts upload as multipart. */
+export const VAULT_SINGLE_UPLOAD_MAX_CIPHERTEXT_BYTES = 32 * 1024 * 1024;
 
 const PROTOCOL_HASH_CONCURRENCY = detectedCryptoConcurrency(16);
 

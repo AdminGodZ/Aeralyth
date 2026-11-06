@@ -11,6 +11,10 @@ import {
   triggerBlobDownload,
 } from "@/features/archive/browser-archive";
 import { archiveCompressionLevel } from "@/features/archive/compression-policy";
+import {
+  type OpenedEncryptedEntry,
+  prefetchEncryptedEntries,
+} from "@/features/archive/encrypted-entry-prefetch";
 import { createAnimationFrameProgressCoalescer } from "@/features/uploads/progress-coalescer";
 import type {
   VaultDownloadPlan,
@@ -131,17 +135,25 @@ export async function downloadFolderArchive({
       lastModDate: new Date(parseArchiveTimestamp(folder.updatedAt)),
       signal,
     });
-    for (const entry of archiveManifest.entries) {
+    // Parent keys can be required to open children, so entries are opened in
+    // the bounded parent-first order returned by the server, a few ahead of
+    // the entry currently being archived.
+    const openEncryptedEntry = prefetchEncryptedEntries(
+      archiveManifest.entries,
+      {
+        getPlan: getVaultDownloadPlan,
+        openNode: (nodeId, plan, openSignal) =>
+          vault.openNode(nodeId, plan, openSignal),
+        signal,
+      },
+    );
+    for (const [index, entry] of archiveManifest.entries.entries()) {
       throwIfAborted(signal, ABORT_MESSAGE);
-      let encrypted:
-        | { manifest: VaultManifest; plan: VaultDownloadPlan }
-        | undefined;
-      if (entry.e2eeState === "encrypted") {
-        // Parent keys can be required to open children, so archive entries stay
-        // in the bounded parent-first order returned by the server.
+      let encrypted: OpenedEncryptedEntry | undefined;
+      const opening = openEncryptedEntry(index);
+      if (opening) {
         // react-doctor-disable-next-line react-doctor/async-await-in-loop
-        const plan = await getVaultDownloadPlan(entry.id, signal);
-        const manifest = await vault.openNode(entry.id, plan, signal);
+        const { manifest, plan } = await opening;
         throwIfAborted(signal, ABORT_MESSAGE);
         if (
           manifest.entryType !== entry.entryType ||

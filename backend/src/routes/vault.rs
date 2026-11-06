@@ -517,6 +517,10 @@ pub(crate) struct VaultUploadInitRequest {
     chunk_count: u32,
     #[serde(default)]
     migration: bool,
+    /// Single-object uploads are fully encrypted before init, so the client can
+    /// send their checksum here and receive the signed PUT URL in the plan.
+    #[serde(default)]
+    checksum_sha256: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -526,6 +530,8 @@ struct VaultUploadPlanResponse {
     node_id: String,
     mode: String,
     part_size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content_url: Option<UploadUrlResponse>,
 }
 
 #[derive(Deserialize)]
@@ -1863,6 +1869,11 @@ pub async fn init_upload(
         body.ciphertext_length,
         u64::from(body.chunk_count),
     )?;
+    let content_checksum = body
+        .checksum_sha256
+        .as_deref()
+        .map(validate_sha256_checksum)
+        .transpose()?;
     let parent_id = validate_encrypted_parent(&state, &user, body.parent_id.as_deref()).await?;
     let migration_expected_size = if body.migration {
         if state.config.e2ee_mode != E2eeMode::Migrate || generation_number != 1 {
@@ -1924,8 +1935,16 @@ pub async fn init_upload(
         let upload = get_upload(&state, &user.id, &upload_id)
             .await?
             .ok_or_else(|| error::ErrorConflict("upload disappeared"))?;
+        let plan = upload_plan_with_content_url(
+            &state,
+            &request,
+            &user,
+            &upload,
+            content_checksum.as_deref(),
+        )
+        .await?;
         state.db.release_request_connection().await;
-        return Ok(HttpResponse::Ok().json(upload_plan(&upload)));
+        return Ok(HttpResponse::Ok().json(plan));
     }
 
     let upload_id = format!("vup_{}", random_id()?);
@@ -2010,8 +2029,16 @@ pub async fn init_upload(
         let upload = get_upload(&state, &user.id, &existing_upload_id)
             .await?
             .ok_or_else(|| error::ErrorConflict("upload disappeared"))?;
+        let plan = upload_plan_with_content_url(
+            &state,
+            &request,
+            &user,
+            &upload,
+            content_checksum.as_deref(),
+        )
+        .await?;
         state.db.release_request_connection().await;
-        return Ok(HttpResponse::Ok().json(upload_plan(&upload)));
+        return Ok(HttpResponse::Ok().json(plan));
     }
     let competing_upload = query_opt_cached(
         &transaction,
@@ -2181,8 +2208,16 @@ pub async fn init_upload(
     let upload = get_upload(&state, &user.id, &upload_id)
         .await?
         .ok_or_else(|| error::ErrorInternalServerError("upload was not persisted"))?;
+    let plan = upload_plan_with_content_url(
+        &state,
+        &request,
+        &user,
+        &upload,
+        content_checksum.as_deref(),
+    )
+    .await?;
 
-    Ok(HttpResponse::Created().json(upload_plan(&upload)))
+    Ok(HttpResponse::Created().json(plan))
 }
 
 pub async fn presign_content(
@@ -2206,6 +2241,21 @@ pub async fn presign_content(
     }
     let body = parse_json_body::<ChecksumRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT).await?;
     let checksum = validate_sha256_checksum(&body.checksum_sha256)?;
+    match sign_single_upload_content(&state, &request, &user, &upload, &checksum).await? {
+        Some(signed) => Ok(HttpResponse::Ok().json(signed)),
+        None => Ok(HttpResponse::Conflict().body("upload checksum changed")),
+    }
+}
+
+/// Binds a pending single-object upload to its checksum and signs the PUT.
+/// `None` means the upload is already bound to a different checksum.
+async fn sign_single_upload_content(
+    state: &AppState,
+    request: &HttpRequest,
+    user: &SessionPrincipal,
+    upload: &VaultUpload,
+    checksum: &str,
+) -> Result<Option<UploadUrlResponse>> {
     let reserved = state
         .db
         .execute(
@@ -2223,7 +2273,7 @@ pub async fn presign_content(
         .await
         .map_err(crate::db::http_error)?;
     if reserved != 1 {
-        return Ok(HttpResponse::Conflict().body("upload checksum changed"));
+        return Ok(None);
     }
     let object_key = upload
         .object_key
@@ -2234,8 +2284,8 @@ pub async fn presign_content(
     let url = state
         .storage_operations
         .run(&user.id, async {
-            crate::auth::revalidate_principal(&state, &request).await?;
-            if !renew_vault_upload_idle_lease(&state, &user.id, &upload.id).await? {
+            crate::auth::revalidate_principal(state, request).await?;
+            if !renew_vault_upload_idle_lease(state, &user.id, &upload.id).await? {
                 return Err(error::ErrorConflict("upload lease changed"));
             }
             state.db.release_request_connection().await;
@@ -2244,7 +2294,7 @@ pub async fn presign_content(
                 .presign_single_upload(
                     object_key,
                     "application/octet-stream",
-                    &checksum,
+                    checksum,
                     content_length,
                 )
                 .await
@@ -2252,10 +2302,30 @@ pub async fn presign_content(
         })
         .await??;
 
-    Ok(HttpResponse::Ok().json(UploadUrlResponse {
+    Ok(Some(UploadUrlResponse {
         url,
         content_length,
     }))
+}
+
+/// The upload plan, carrying the signed single-object PUT when the client
+/// already sent the ciphertext checksum with init.
+async fn upload_plan_with_content_url(
+    state: &AppState,
+    request: &HttpRequest,
+    user: &SessionPrincipal,
+    upload: &VaultUpload,
+    checksum: Option<&str>,
+) -> Result<VaultUploadPlanResponse> {
+    let mut plan = upload_plan(upload);
+    if let Some(checksum) = checksum
+        && upload.mode == "single"
+        && upload.status == "pending"
+    {
+        plan.content_url =
+            sign_single_upload_content(state, request, user, upload, checksum).await?;
+    }
+    Ok(plan)
 }
 
 pub async fn presign_part(
@@ -7412,6 +7482,7 @@ fn upload_plan(upload: &VaultUpload) -> VaultUploadPlanResponse {
         part_size_bytes: upload
             .part_size_bytes
             .and_then(|value| u64::try_from(value).ok()),
+        content_url: None,
     }
 }
 

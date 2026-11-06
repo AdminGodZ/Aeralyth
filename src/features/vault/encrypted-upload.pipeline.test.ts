@@ -18,6 +18,14 @@ vi.mock("@/features/vault/vault-api", async (importOriginal) => ({
   ...vaultApi,
 }));
 
+// These scenarios drive the streaming init-first pipeline with tiny files and
+// server-chosen plans, so the client never pre-encrypts a single object here.
+// encrypted-upload.single.test.ts covers the pre-encrypted single-object path.
+vi.mock("@/features/vault/protocol", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/features/vault/protocol")>()),
+  VAULT_SINGLE_UPLOAD_MAX_CIPHERTEXT_BYTES: 0,
+}));
+
 import { uploadEncryptedSelections } from "@/features/vault/encrypted-upload";
 
 const emptyRecord = {

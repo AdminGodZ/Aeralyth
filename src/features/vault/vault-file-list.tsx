@@ -19,6 +19,7 @@ import {
   Trash2,
   X,
 } from "lucide-react";
+import dynamic from "next/dynamic";
 import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
@@ -36,7 +37,6 @@ import type { FolderArchiveProgress } from "@/features/files/folder-archive";
 import { FolderDownloadProgressPanel } from "@/features/files/folder-download-progress-panel";
 import { applyFileListOverlay } from "@/features/realtime/file-list-overlay";
 import { useRealtimeMutation } from "@/features/realtime/realtime-provider";
-import { ShareLinkDialog } from "@/features/sharing/share-link-dialog";
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
 import {
   type FileTreeMutation,
@@ -56,10 +56,36 @@ import {
   type VaultNameResolution,
 } from "@/features/vault/vault-name-presentation";
 import { useVault, VAULT_LOCKING_EVENT } from "@/features/vault/vault-provider";
-import { VaultShareDialog } from "@/features/vault/vault-share-dialog";
 import { isAbortError } from "@/lib/abort";
 import type { FileEntry, FileSort, FileSortDirection } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
+
+// Both share dialogs only mount once a share action is chosen, so their code
+// (react-day-picker, date-fns and the vault sharing flow) stays out of the file
+// list chunk. Hover or focus on a share action warms the matching chunk.
+const ShareLinkDialog = dynamic(
+  () =>
+    import("@/features/sharing/share-link-dialog").then(
+      (module) => module.ShareLinkDialog,
+    ),
+  { ssr: false },
+);
+const VaultShareDialog = dynamic(
+  () =>
+    import("@/features/vault/vault-share-dialog").then(
+      (module) => module.VaultShareDialog,
+    ),
+  { ssr: false },
+);
+
+function preloadShareDialog(entry: FileEntry) {
+  // A failed warm-up is not surfaced; opening the dialog retries the chunk.
+  const preload =
+    entry.e2eeState === "encrypted"
+      ? import("@/features/vault/vault-share-dialog")
+      : import("@/features/sharing/share-link-dialog");
+  preload.catch(() => undefined);
+}
 
 type ResolvedEntry = FileEntry & {
   resolved: boolean;
@@ -881,6 +907,8 @@ function VaultFileListView({
                   !singleSelectedEntry.resolved
                 }
                 onClick={() => onShareEntryChange(singleSelectedEntry)}
+                onFocus={() => preloadShareDialog(singleSelectedEntry)}
+                onPointerEnter={() => preloadShareDialog(singleSelectedEntry)}
               >
                 {hasManagedSharing(singleSelectedEntry) ? (
                   <Link2 className="size-4" aria-hidden="true" />
@@ -1269,6 +1297,8 @@ function VaultFileRow({
                         entry.e2eeState === "encrypted" && !entry.resolved
                       }
                       onSelect={onShare}
+                      onFocus={() => preloadShareDialog(entry)}
+                      onPointerEnter={() => preloadShareDialog(entry)}
                     >
                       {hasManagedSharing(entry) ? (
                         <Link2 className="size-4" aria-hidden="true" />

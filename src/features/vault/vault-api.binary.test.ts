@@ -2,6 +2,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createVaultShare,
+  getVaultDownloadPlan,
+  getVaultSharePlan,
   publishShareDirectory,
   publishVaultEpochRotation,
   publishVaultUpload,
@@ -80,7 +82,7 @@ describe("vault publication API", () => {
     expect(kinds).toEqual([1, 2, 3, 4]);
   });
 
-  it("serializes upload publications on the recursive-operation boundary", async () => {
+  it("bounds concurrent upload publications to the publish lane", async () => {
     let activeRequests = 0;
     let peakRequests = 0;
     let releaseRequest: (() => void) | undefined;
@@ -111,12 +113,12 @@ describe("vault publication API", () => {
       ),
     );
 
-    await vi.waitFor(() => expect(activeRequests).toBe(1));
-    expect(fetchMock).toHaveBeenCalledTimes(1);
+    await vi.waitFor(() => expect(activeRequests).toBe(2));
+    expect(fetchMock).toHaveBeenCalledTimes(2);
     releaseRequest?.();
     await publications;
 
-    expect(peakRequests).toBe(1);
+    expect(peakRequests).toBe(2);
     expect(fetchMock).toHaveBeenCalledTimes(3);
   });
 
@@ -143,6 +145,57 @@ describe("vault publication API", () => {
       encryptedManifest: new Uint8Array(16),
       wrappers: [],
     });
+
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("releases the recursive lane while a capacity shed backs off", async () => {
+    const calls: string[] = [];
+    let shed = true;
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input);
+      calls.push(url.includes("first") ? "first" : "second");
+      if (url.includes("first") && shed) {
+        shed = false;
+        return new Response("recursive operation capacity is full", {
+          status: 503,
+          headers: { "Retry-After": "0.2" },
+        });
+      }
+      return new Response(JSON.stringify({ nodes: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    await Promise.all([
+      getVaultSharePlan("first"),
+      getVaultSharePlan("second"),
+    ]);
+
+    expect(calls).toEqual(["first", "second", "first"]);
+  });
+
+  it("does not queue download plans behind recursive work", async () => {
+    let releaseShare: (() => void) | undefined;
+    const shareGate = new Promise<void>((resolve) => {
+      releaseShare = resolve;
+    });
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      if (String(input).includes("share-plan")) await shareGate;
+      return new Response(JSON.stringify({ nodes: [] }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const sharePlan = getVaultSharePlan("busy");
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(1));
+    await getVaultDownloadPlan("preview");
+    releaseShare?.();
+    await sharePlan;
 
     expect(fetchMock).toHaveBeenCalledTimes(2);
   });
