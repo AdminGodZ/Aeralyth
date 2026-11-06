@@ -948,13 +948,13 @@ function AppearanceSettingsSection({
             value={themePreference}
             onValueChange={onThemePreferenceChange}
             aria-labelledby={themeLabelId}
-            className="w-full rounded-full border bg-muted/40 p-1 sm:w-auto"
+            className="w-full rounded-[12px] border bg-muted/40 p-1 sm:w-auto"
           >
             <ToggleGroupItem
               type="button"
               value="system"
               aria-label="Use system theme"
-              className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
+              className="flex-1 rounded-md px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
             >
               <Monitor className="size-4" aria-hidden="true" />
               System
@@ -963,7 +963,7 @@ function AppearanceSettingsSection({
               type="button"
               value="light"
               aria-label="Use light theme"
-              className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
+              className="flex-1 rounded-md px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
             >
               <Sun className="size-4" aria-hidden="true" />
               Light
@@ -972,7 +972,7 @@ function AppearanceSettingsSection({
               type="button"
               value="dark"
               aria-label="Use dark theme"
-              className="flex-1 rounded-full px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
+              className="flex-1 rounded-md px-3 data-[state=on]:bg-background data-[state=on]:shadow-none dark:data-[state=on]:shadow-sm sm:flex-none"
             >
               <Moon className="size-4" aria-hidden="true" />
               Dark

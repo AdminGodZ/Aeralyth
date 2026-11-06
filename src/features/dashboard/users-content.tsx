@@ -224,7 +224,7 @@ export function UsersContent({
                     ? "Search accounts"
                     : "Search invitations"
                 }
-                className="h-9 rounded-full pl-9"
+                className="h-9 rounded-[12px] pl-9"
               />
             </div>
             <div className="flex gap-2">
@@ -755,7 +755,6 @@ function UserActions({
             type="button"
             variant="secondary"
             size="icon"
-            className="rounded-md"
             aria-label={`Manage ${user.username}`}
             title={`Manage ${user.username}`}
           >
@@ -1026,7 +1025,6 @@ function InvitationActions({
             type="button"
             variant="secondary"
             size="icon"
-            className="rounded-md"
             aria-label={`Manage invitation for ${invitation.invitedUsername}`}
           >
             <Ellipsis className="size-4" aria-hidden="true" />

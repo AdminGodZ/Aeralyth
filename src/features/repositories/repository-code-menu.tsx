@@ -145,7 +145,7 @@ export function RepositoryCodeMenu({
   return (
     <Popover open={open} onOpenChange={changeOpen}>
       <PopoverTrigger asChild>
-        <Button type="button" className="rounded-md">
+        <Button type="button">
           <Code2 className="size-4" aria-hidden="true" />
           Code
           <ChevronDown className="size-4 opacity-75" aria-hidden="true" />
@@ -172,14 +172,14 @@ export function RepositoryCodeMenu({
               readOnly
               value={repositoryUrl}
               aria-label="Repository HTTPS URL"
-              className="h-10 rounded-md border bg-background px-3 font-mono text-xs"
+              className="h-10 border bg-background px-3 font-mono text-xs"
               onFocus={(event) => event.currentTarget.select()}
             />
             <Button
               type="button"
               variant="outline"
               size="icon"
-              className="size-10 shrink-0 rounded-md"
+              className="size-10 shrink-0"
               aria-label={
                 copied ? "Repository URL copied" : "Copy repository URL"
               }

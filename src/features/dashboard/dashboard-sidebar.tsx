@@ -120,7 +120,7 @@ export function DashboardSidebar({
       <span
         aria-hidden="true"
         className={cn(
-          "pointer-events-none absolute left-4 top-0 z-0 h-9 rounded-full motion-reduce:transition-none",
+          "pointer-events-none absolute left-4 top-0 z-0 h-9 rounded-[12px] motion-reduce:transition-none",
           navigationIndicator.animate &&
             "transition-[transform,width,opacity] duration-[220ms] ease-[cubic-bezier(0.22,1,0.36,1)]",
           "bg-primary/[0.12]",
@@ -274,7 +274,7 @@ function SidebarLink({
       title={collapsed ? section.label : undefined}
       data-sidebar-active={active ? "true" : "false"}
       className={cn(
-        "relative z-10 flex h-9 items-center gap-2 rounded-full px-3 text-left text-sm transition-colors",
+        "relative z-10 flex h-9 items-center gap-2 rounded-[12px] px-3 text-left text-sm transition-colors",
         collapsed ? "w-10" : "w-full",
         active
           ? "font-medium text-foreground [&_svg]:text-primary"

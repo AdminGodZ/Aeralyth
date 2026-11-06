@@ -269,7 +269,7 @@ function NewRepositoryDialogView({
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
       <DialogTrigger asChild>
-        <Button type="button" className="rounded-full">
+        <Button type="button">
           <Plus className="size-4" aria-hidden="true" />
           New repository
         </Button>

@@ -287,7 +287,7 @@ function ObjectColorInput({
   }
 
   return (
-    <div className="flex h-8 overflow-hidden rounded-2xl bg-input/50">
+    <div className="flex h-8 overflow-hidden rounded-[12px] bg-input/50">
       <div className="relative min-w-0 flex-1 border-r border-border/50">
         <Input
           className={inputClassName}
