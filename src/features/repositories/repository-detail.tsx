@@ -12,13 +12,15 @@ import {
   LockKeyhole,
 } from "lucide-react";
 import Link from "next/link";
-import { useMemo } from "react";
+import { useSearchParams } from "next/navigation";
+import { type MouseEvent, useMemo, useRef } from "react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
 import { RepositoryCodeMenu } from "@/features/repositories/repository-code-menu";
 import { formatRepositoryDate } from "@/features/repositories/repository-dates";
+import { RepositoryDeleteDialog } from "@/features/repositories/repository-delete-dialog";
 import { RepositoryDescription } from "@/features/repositories/repository-description";
 import { getRepositoryFilePresentation } from "@/features/repositories/repository-file-types";
 import { RepositoryFileViewer } from "@/features/repositories/repository-file-viewer";
@@ -37,11 +39,9 @@ import type {
 export function RepositoryDetail({
   csrfToken,
   repositoryState,
-  selectedFileId,
 }: {
   csrfToken: string;
   repositoryState: RepositoryDetailState;
-  selectedFileId?: string;
 }) {
   if (repositoryState.status !== "ready") {
     return (
@@ -57,23 +57,51 @@ export function RepositoryDetail({
   }
 
   return (
-    <ReadyRepositoryDetail
-      csrfToken={csrfToken}
-      data={repositoryState.data}
-      selectedFileId={selectedFileId}
-    />
+    <ReadyRepositoryDetail csrfToken={csrfToken} data={repositoryState.data} />
   );
+}
+
+/**
+ * Opening or closing a file only changes `?file=`, and the folder listing
+ * already holds every entry, so these links update the URL in place instead of
+ * re-fetching the folder from the server. Modified clicks keep link behavior.
+ */
+function navigateInPlace(event: MouseEvent<HTMLAnchorElement>): boolean {
+  if (
+    event.defaultPrevented ||
+    event.button !== 0 ||
+    event.metaKey ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    event.altKey
+  ) {
+    return false;
+  }
+  event.preventDefault();
+  window.history.pushState(null, "", event.currentTarget.href);
+  return true;
 }
 
 function ReadyRepositoryDetail({
   csrfToken,
   data,
-  selectedFileId,
 }: {
   csrfToken: string;
   data: RepositoryDetailData;
-  selectedFileId?: string;
 }) {
+  const searchParams = useSearchParams();
+  const selectedFileId = searchParams.get("file") ?? undefined;
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const fileHref = (fileId: string | null) => {
+    const params = new URLSearchParams(searchParams.toString());
+    if (fileId) params.set("file", fileId);
+    else params.delete("file");
+    const query = params.toString();
+    return `/repositories/${encodeURIComponent(data.repository.id)}${query ? `?${query}` : ""}`;
+  };
+  const openFile = (event: MouseEvent<HTMLAnchorElement>) => {
+    if (navigateInPlace(event)) scrollRef.current?.scrollTo({ top: 0 });
+  };
   const nodes = useMemo(
     () => [
       data.repository.root,
@@ -103,7 +131,7 @@ function ReadyRepositoryDetail({
   );
 
   return (
-    <div className="flex min-h-0 flex-1 flex-col overflow-auto">
+    <div ref={scrollRef} className="flex min-h-0 flex-1 flex-col overflow-auto">
       <div className="border-b px-4 pt-5 sm:px-6">
         <div className="mx-auto w-full max-w-7xl">
           <div className="flex flex-wrap items-center gap-2 pb-4">
@@ -183,7 +211,7 @@ function ReadyRepositoryDetail({
                 Created {formatRepositoryDate(data.repository.createdAt)}
               </span>
               {repositoryNamePresentation.status === "pending" ? (
-                <Button type="button" disabled className="rounded-md">
+                <Button type="button" disabled>
                   <Code2 className="size-4" aria-hidden="true" />
                   Code
                 </Button>
@@ -193,6 +221,12 @@ function ReadyRepositoryDetail({
                   repositoryName={repositoryName || "Repository"}
                 />
               )}
+              <RepositoryDeleteDialog
+                rootFolderId={data.repository.root.id}
+                repositoryName={repositoryName || "this repository"}
+                csrfToken={csrfToken}
+                disabled={repositoryNamePresentation.status === "pending"}
+              />
             </div>
           </div>
 
@@ -204,6 +238,7 @@ function ReadyRepositoryDetail({
                   repositoryName={repositoryNamePresentation}
                   presentationFor={names.presentationFor}
                   selectedFileName={selectedFile.namePresentation}
+                  closeFileHref={fileHref(null)}
                 />
               </div>
               <RepositoryFileViewer
@@ -260,7 +295,8 @@ function ReadyRepositoryDetail({
                         key={entry.id}
                         entry={entry}
                         repositoryId={data.repository.id}
-                        currentFolderId={data.currentFolderId}
+                        fileHref={fileHref(entry.id)}
+                        onOpenFile={openFile}
                       />
                     ))
                   ) : (
@@ -344,15 +380,20 @@ function RepositoryPath({
   repositoryName,
   presentationFor,
   selectedFileName,
+  closeFileHref,
 }: {
   data: RepositoryDetailData;
   repositoryName: VaultNamePresentation;
   presentationFor(node: RepositoryNamedNode): VaultNamePresentation;
   selectedFileName?: VaultNamePresentation;
+  closeFileHref?: string;
 }) {
   if (data.breadcrumbs.length === 0 && !selectedFileName) {
     return null;
   }
+  // The current folder's crumb closes the open file without a server round trip.
+  const closesFile = (index: number) =>
+    closeFileHref !== undefined && index === data.breadcrumbs.length - 1;
 
   return (
     <nav
@@ -367,6 +408,18 @@ function RepositoryPath({
             loadingLabel="Decrypting repository name"
           />
         </div>
+      ) : closesFile(-1) ? (
+        <a
+          href={closeFileHref}
+          onClick={navigateInPlace}
+          className="shrink-0 font-semibold text-primary hover:underline"
+        >
+          <VaultNameLabel
+            presentation={repositoryName}
+            skeletonClassName="h-4 w-28"
+            loadingLabel="Decrypting repository name"
+          />
+        </a>
       ) : (
         <Link
           href={`/repositories/${encodeURIComponent(data.repository.id)}`}
@@ -404,6 +457,18 @@ function RepositoryPath({
                   loadingLabel="Decrypting folder name"
                 />
               </div>
+            ) : closesFile(index) ? (
+              <a
+                href={closeFileHref}
+                onClick={navigateInPlace}
+                className="max-w-52 truncate text-primary hover:underline"
+              >
+                <VaultNameLabel
+                  presentation={presentation}
+                  skeletonClassName="h-4 w-24"
+                  loadingLabel="Decrypting folder name"
+                />
+              </a>
             ) : (
               <Link
                 href={{
@@ -444,14 +509,16 @@ function RepositoryPath({
 function RepositoryEntryRow({
   entry,
   repositoryId,
-  currentFolderId,
+  fileHref,
+  onOpenFile,
 }: {
   entry: RepositoryEntry & {
     resolvedName: string;
     namePresentation: VaultNamePresentation;
   };
   repositoryId: string;
-  currentFolderId: string;
+  fileHref: string;
+  onOpenFile(event: MouseEvent<HTMLAnchorElement>): void;
 }) {
   const presentation = getRepositoryFilePresentation(
     entry.resolvedName,
@@ -502,15 +569,13 @@ function RepositoryEntryRow({
             {content}
           </Link>
         ) : (
-          <Link
-            href={{
-              pathname: `/repositories/${repositoryId}`,
-              query: { file: entry.id, folder: currentFolderId },
-            }}
+          <a
+            href={fileHref}
+            onClick={onOpenFile}
             className="font-medium text-primary hover:underline"
           >
             {content}
-          </Link>
+          </a>
         )}
       </td>
       <td className="hidden w-32 px-4 py-2 text-right text-xs text-muted-foreground sm:table-cell">

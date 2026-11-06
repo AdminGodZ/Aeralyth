@@ -67,7 +67,6 @@ type DashboardPageProps = {
   fileSortDirection?: FileSortDirection;
   repositoriesState?: RepositoriesState;
   repositoryDetailState?: RepositoryDetailState;
-  repositoryFileId?: string;
   storageState?: StorageOverviewState;
 };
 
@@ -130,7 +129,6 @@ export function DashboardPage({
   fileSortDirection,
   repositoriesState,
   repositoryDetailState,
-  repositoryFileId,
   storageState,
 }: DashboardPageProps) {
   const section =
@@ -166,7 +164,6 @@ export function DashboardPage({
         fileSortDirection={fileSortDirection}
         repositoriesState={repositoriesState}
         repositoryDetailState={repositoryDetailState}
-        repositoryFileId={repositoryFileId}
         storageState={storageState}
       />
     </RealtimeSnapshotFence>
@@ -211,12 +208,7 @@ function TopBar({
 
       <div className="col-start-2 row-start-1 flex min-w-0 flex-wrap items-center justify-end gap-2 self-center lg:col-start-3">
         {section.actions?.map((action) => (
-          <Button
-            key={action.label}
-            type="button"
-            variant={action.variant}
-            className="rounded-full"
-          >
+          <Button key={action.label} type="button" variant={action.variant}>
             <action.icon className="size-4" aria-hidden="true" />
             {action.label}
           </Button>
@@ -282,7 +274,7 @@ function SearchInput({
         type="search"
         aria-label={placeholder}
         placeholder={placeholder}
-        className="h-10 w-full rounded-full border bg-background pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-primary"
+        className="h-10 w-full rounded-[12px] border bg-background pl-9 pr-3 text-sm outline-none transition-colors placeholder:text-muted-foreground focus-visible:border-primary"
       />
     </div>
   );
@@ -300,7 +292,6 @@ function DashboardContent({
   fileSortDirection,
   repositoriesState,
   repositoryDetailState,
-  repositoryFileId,
   storageState,
 }: {
   section: DashboardSection;
@@ -314,7 +305,6 @@ function DashboardContent({
   fileSortDirection?: FileSortDirection;
   repositoriesState?: RepositoriesState;
   repositoryDetailState?: RepositoryDetailState;
-  repositoryFileId?: string;
   storageState?: StorageOverviewState;
 }) {
   if (section.key === "settings") {
@@ -347,7 +337,6 @@ function DashboardContent({
         <RepositoryDetail
           csrfToken={csrfToken}
           repositoryState={repositoryDetailState}
-          selectedFileId={repositoryFileId}
         />
       );
     }
