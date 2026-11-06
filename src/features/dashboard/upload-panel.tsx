@@ -1412,7 +1412,6 @@ function UploadPanelView({
         <Button
           type="button"
           disabled={isBusy}
-          className="rounded-full"
           onClick={() => fileInputRef.current?.click()}
         >
           <FileUp className="size-4" aria-hidden="true" />
@@ -1423,7 +1422,6 @@ function UploadPanelView({
           type="button"
           variant="outline"
           disabled={isBusy}
-          className="rounded-full"
           onClick={() => folderInputRef.current?.click()}
         >
           <FolderGit2 className="size-4" aria-hidden="true" />
@@ -1432,7 +1430,7 @@ function UploadPanelView({
       ) : (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
-            <Button type="button" disabled={isBusy} className="rounded-full">
+            <Button type="button" disabled={isBusy}>
               <UploadCloud className="size-4" aria-hidden="true" />
               Upload
               <ChevronDown className="size-4 opacity-70" aria-hidden="true" />
@@ -1570,15 +1568,10 @@ function FolderReplacementDialog({
         </DialogHeader>
 
         <DialogFooter>
-          <Button
-            type="button"
-            variant="secondary"
-            className="rounded-md"
-            onClick={onClose}
-          >
+          <Button type="button" variant="secondary" onClick={onClose}>
             Cancel
           </Button>
-          <Button type="button" className="rounded-md" onClick={onReplace}>
+          <Button type="button" onClick={onReplace}>
             Replace and upload
           </Button>
         </DialogFooter>
@@ -1684,7 +1677,6 @@ function FolderUploadDecisionDialog({
               <Button
                 type="button"
                 variant="secondary"
-                className="rounded-md"
                 onClick={onCancelCompression}
               >
                 <X className="size-4" aria-hidden="true" />
@@ -1742,12 +1734,7 @@ function FolderUploadDecisionDialog({
             </div>
 
             <DialogFooter>
-              <Button
-                type="button"
-                variant="secondary"
-                className="rounded-md"
-                onClick={onClose}
-              >
+              <Button type="button" variant="secondary" onClick={onClose}>
                 Cancel
               </Button>
             </DialogFooter>

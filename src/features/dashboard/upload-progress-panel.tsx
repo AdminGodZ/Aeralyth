@@ -176,7 +176,7 @@ export function UploadProgressPanel({
             </div>
             <span
               className={cn(
-                "rounded-full px-2 py-1 text-xs font-medium tabular-nums",
+                "rounded-[12px] px-2 py-1 text-xs font-medium tabular-nums",
                 failed
                   ? "bg-destructive/10 text-destructive"
                   : "bg-primary/10 text-primary",

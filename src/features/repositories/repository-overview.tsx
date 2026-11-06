@@ -110,7 +110,7 @@ export function RepositoryOverview({
                   onChange={(event) => setQuery(event.currentTarget.value)}
                   placeholder="Find a repository…"
                   aria-label="Find a repository"
-                  className="h-9 rounded-md border bg-background pl-9"
+                  className="h-9 rounded-[12px] border bg-background pl-9"
                 />
               </div>
             </div>

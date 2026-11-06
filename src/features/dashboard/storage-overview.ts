@@ -18,7 +18,7 @@ export type StorageOverview = {
 };
 
 export type StorageOverviewState =
-  | { status: "ready"; data: StorageOverview }
+  | { status: "ready"; data: StorageOverview; realtimeCursor?: string }
   | { status: "unauthorized" | "forbidden" }
   | { status: "unavailable"; retryable?: boolean };
 

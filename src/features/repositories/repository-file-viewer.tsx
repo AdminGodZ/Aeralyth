@@ -19,7 +19,13 @@ import {
   Video,
   WrapText,
 } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  type ReactNode,
+  useEffect,
+  useEffectEvent,
+  useRef,
+  useState,
+} from "react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
@@ -56,9 +62,21 @@ type RepositoryFileViewerProps = {
 
 export function RepositoryFileViewer({ entry }: RepositoryFileViewerProps) {
   const [attempt, setAttempt] = useState(0);
+  // The parent rebuilds `entry` and the vault context on unrelated renders
+  // (name decryption, realtime refreshes). The request restarts only when the
+  // file's content or request name changes, not on every new object identity.
+  const requestKey = [
+    entry.id,
+    entry.updatedAt,
+    entry.e2eeState,
+    entry.vaultGenerationId,
+    entry.vaultRecordHash,
+    entry.e2eeState === "encrypted" ? entry.name : entry.resolvedName,
+    attempt,
+  ].join(":");
   return (
     <RepositoryFileViewerRequest
-      key={`${entry.id}:${attempt}`}
+      key={requestKey}
       entry={entry}
       onRetry={() => setAttempt((current) => current + 1)}
     />
@@ -78,24 +96,31 @@ function RepositoryFileViewerRequest({
     entry.e2eeState === "encrypted" && vault.state !== "unlocked";
   const requestName =
     entry.e2eeState === "encrypted" ? entry.name : entry.resolvedName;
+  // Effect events read the latest entry and vault without restarting the load;
+  // RepositoryFileViewer remounts this request when the file itself changes.
+  const requestUnlock = useEffectEvent(() => vault.requestUnlock());
+  const startLoad = useEffectEvent(
+    (signal: AbortSignal, onProgress: (percentage: number | null) => void) =>
+      loadRepositoryFile({
+        entry,
+        resolvedName: requestName,
+        vault,
+        signal,
+        onProgress,
+      }),
+  );
 
   useEffect(() => {
     if (encryptedLocked) {
-      vault.requestUnlock();
+      requestUnlock();
       return;
     }
     const controller = new AbortController();
     let objectUrl: string | null = null;
     let rawObjectUrl: string | null = null;
     let canceled = false;
-    void loadRepositoryFile({
-      entry,
-      resolvedName: requestName,
-      vault,
-      signal: controller.signal,
-      onProgress(percentage) {
-        if (!canceled) setState({ progress: percentage, status: "loading" });
-      },
+    void startLoad(controller.signal, (percentage) => {
+      if (!canceled) setState({ progress: percentage, status: "loading" });
     })
       .then(async (loaded) => {
         const prepared = await prepareRepositoryFile(loaded);
@@ -132,7 +157,7 @@ function RepositoryFileViewerRequest({
       }
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
-  }, [encryptedLocked, entry, requestName, vault]);
+  }, [encryptedLocked]);
 
   if (encryptedLocked) {
     return <RepositoryFileLocked onUnlock={vault.requestUnlock} />;
@@ -293,13 +318,13 @@ function MarkdownViewToggle({
   onModeChange(mode: "preview" | "source"): void;
 }) {
   return (
-    <fieldset className="inline-flex rounded-md border p-0.5">
+    <fieldset className="inline-flex rounded-[12px] border p-0.5">
       <legend className="sr-only">Markdown view</legend>
       <Button
         type="button"
         size="sm"
         variant={mode === "preview" ? "secondary" : "ghost"}
-        className="h-7 px-2.5"
+        className="h-7 rounded-lg px-2.5"
         onClick={() => onModeChange("preview")}
       >
         Preview
@@ -308,7 +333,7 @@ function MarkdownViewToggle({
         type="button"
         size="sm"
         variant={mode === "source" ? "secondary" : "ghost"}
-        className="h-7 px-2.5"
+        className="h-7 rounded-lg px-2.5"
         onClick={() => onModeChange("source")}
       >
         Source

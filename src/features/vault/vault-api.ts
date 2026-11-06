@@ -56,6 +56,8 @@ export type VaultUploadPlan = {
   nodeId: string;
   mode: "none" | "single" | "multipart";
   partSizeBytes: number | null;
+  /** Present when init received the single-object ciphertext checksum. */
+  contentUrl?: VaultUploadUrl;
 };
 
 export type VaultUploadUrl = {
@@ -170,42 +172,46 @@ const VAULT_RECURSIVE_OPERATION_ATTEMPTS = 4;
 const VAULT_RECURSIVE_OPERATION_RETRY_BASE_MS = 250;
 const vaultRecursiveOperationSlots = new WeightedSemaphore(1);
 const vaultInteractiveOperationSlots = new WeightedSemaphore(1);
+// Publishes are admitted by the server's per-user upload-control limit (3 by
+// default) and only take the recursive permit for their final transaction, so
+// they get their own lane instead of queueing behind tree and share work.
+// Two leaves headroom for the upload inits that share that server limit.
+const vaultPublishSlots = new WeightedSemaphore(2);
 
 async function runVaultRecursiveOperation<T>(
   operation: () => Promise<T>,
   signal?: AbortSignal,
-  slots = vaultRecursiveOperationSlots,
+  slots: WeightedSemaphore | null = vaultRecursiveOperationSlots,
 ): Promise<T> {
-  const release = await slots.acquire(1, signal);
-  try {
-    let lastError: unknown;
-    for (
-      let attempt = 0;
-      attempt < VAULT_RECURSIVE_OPERATION_ATTEMPTS;
-      attempt += 1
-    ) {
-      try {
-        return await operation();
-      } catch (error) {
-        lastError = error;
-        if (
-          signal?.aborted ||
-          !(error instanceof VaultApiError) ||
-          ![429, 503].includes(error.status) ||
-          attempt + 1 >= VAULT_RECURSIVE_OPERATION_ATTEMPTS
-        ) {
-          throw error;
-        }
-        await waitForVaultCapacity(
-          vaultCapacityRetryDelay(error, attempt),
-          signal,
-        );
+  let lastError: unknown;
+  for (
+    let attempt = 0;
+    attempt < VAULT_RECURSIVE_OPERATION_ATTEMPTS;
+    attempt += 1
+  ) {
+    const release = slots ? await slots.acquire(1, signal) : null;
+    try {
+      return await operation();
+    } catch (error) {
+      lastError = error;
+      if (
+        signal?.aborted ||
+        !(error instanceof VaultApiError) ||
+        ![429, 503].includes(error.status) ||
+        attempt + 1 >= VAULT_RECURSIVE_OPERATION_ATTEMPTS
+      ) {
+        throw error;
       }
+    } finally {
+      // A capacity backoff must not hold the lane other operations wait on.
+      release?.();
     }
-    throw lastError;
-  } finally {
-    release();
+    await waitForVaultCapacity(
+      vaultCapacityRetryDelay(lastError as VaultApiError, attempt),
+      signal,
+    );
   }
+  throw lastError;
 }
 
 function vaultCapacityRetryDelay(error: VaultApiError, attempt: number) {
@@ -510,6 +516,7 @@ export function initVaultUpload(
     ciphertextLength: number;
     chunkCount: number;
     migration?: boolean;
+    checksumSha256?: string;
   },
   signal?: AbortSignal,
 ): Promise<VaultUploadPlan> {
@@ -583,6 +590,7 @@ export function publishVaultUpload(
         signal,
       ),
     signal,
+    vaultPublishSlots,
   );
 }
 
@@ -659,6 +667,8 @@ export function getVaultDownloadPlan(
   nodeId: string,
   signal?: AbortSignal,
 ): Promise<VaultDownloadPlan> {
+  // Download plans take no server admission permit, so previews and downloads
+  // never wait behind uploads or tree work; capacity responses still back off.
   return runVaultRecursiveOperation(
     () =>
       vaultRequest(
@@ -666,6 +676,7 @@ export function getVaultDownloadPlan(
         { signal },
       ),
     signal,
+    null,
   );
 }
 

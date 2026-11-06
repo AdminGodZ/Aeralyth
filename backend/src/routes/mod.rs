@@ -22,6 +22,14 @@ mod vault;
 
 use actix_web::web;
 
+/// A dashboard snapshot route: its response carries the realtime cursor read
+/// before the snapshot, so the web server needn't wait for bootstrap first.
+fn snapshot(route: actix_web::Route) -> actix_web::Route {
+    route.wrap(actix_web::middleware::from_fn(
+        session_bootstrap::stamp_realtime_cursor,
+    ))
+}
+
 pub fn configure(config: &mut web::ServiceConfig) {
     config
         .route("/health", web::get().to(health::live))
@@ -59,8 +67,8 @@ pub fn configure(config: &mut web::ServiceConfig) {
                 .service(
                     web::scope("/admin")
                         .route("/me", web::get().to(admin::me))
-                        .route("/users", web::get().to(admin::users))
-                        .route("/storage", web::get().to(files::storage_overview))
+                        .route("/users", snapshot(web::get().to(admin::users)))
+                        .route("/storage", snapshot(web::get().to(files::storage_overview)))
                         .route(
                             "/users/one-password",
                             web::post().to(admin::create_one_password_user),
@@ -107,7 +115,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
                     "/share-links/access/{token}/files/{file_id}",
                     web::delete().to(share_links::remove_entry),
                 )
-                .route("/repositories", web::get().to(repositories::list))
+                .route("/repositories", snapshot(web::get().to(repositories::list)))
                 .route("/repositories", web::post().to(repositories::create))
                 .route(
                     "/repositories/empty",
@@ -122,11 +130,14 @@ pub fn configure(config: &mut web::ServiceConfig) {
                     "/repositories/{id}/language-stats",
                     web::get().to(repositories::language_stats),
                 )
-                .route("/repositories/{id}", web::get().to(repositories::detail))
+                .route(
+                    "/repositories/{id}",
+                    snapshot(web::get().to(repositories::detail)),
+                )
                 .route("/files/summary", web::get().to(files::summary))
                 .route("/files/operations", web::post().to(files::mutate_batch))
                 .route("/files/operations/{id}", web::get().to(tree_jobs::status))
-                .route("/files", web::get().to(files::list_files))
+                .route("/files", snapshot(web::get().to(files::list_files)))
                 .route(
                     "/files/folder-manifests",
                     web::post().to(files::create_folder_manifest),
@@ -248,6 +259,37 @@ pub fn configure(config: &mut web::ServiceConfig) {
                         ),
                 ),
         );
+}
+
+#[cfg(test)]
+mod snapshot_route_tests {
+    #[test]
+    fn dashboard_snapshot_reads_report_their_replay_cursor() {
+        let compact = |text: &str| {
+            text.chars()
+                .filter(|character| !character.is_whitespace() && *character != ',')
+                .collect::<String>()
+        };
+        let source = include_str!("mod.rs");
+        let configure = source
+            .split_once("pub fn configure(")
+            .and_then(|(_, tail)| tail.split_once("mod snapshot_route_tests"))
+            .map(|(configure, _)| configure)
+            .expect("route configuration source should remain inspectable");
+        let production = compact(configure);
+        for route in [
+            r#".route("/users", snapshot(web::get().to(admin::users)))"#,
+            r#".route("/storage", snapshot(web::get().to(files::storage_overview)))"#,
+            r#".route("/repositories", snapshot(web::get().to(repositories::list)))"#,
+            r#".route("/repositories/{id}", snapshot(web::get().to(repositories::detail)))"#,
+            r#".route("/files", snapshot(web::get().to(files::list_files)))"#,
+        ] {
+            assert!(
+                production.contains(&compact(route)),
+                "the web server requests {route} alongside bootstrap"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

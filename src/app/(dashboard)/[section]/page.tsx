@@ -76,13 +76,12 @@ export default async function SectionPage({
     requestedFileSort ? direction : undefined,
     fileSort,
   );
-  // The bootstrap cursor must precede every data snapshot so changes during
-  // server rendering can be replayed when the browser connects.
-  const { csrfToken, currentUser, realtimeCursor } =
-    await getDashboardSession();
-  if (section.group === "system" && currentUser.role !== "admin") {
-    notFound();
-  }
+  // The replay cursor must precede the data snapshot so changes during server
+  // rendering are replayed when the browser connects. Snapshot endpoints
+  // report the cursor they read first, so bootstrap no longer has to finish
+  // before the data request starts. Admin-only endpoints enforce their own
+  // role check, and the section check below still runs before rendering.
+  const sessionPromise = getDashboardSession();
   const adminUsersPromise =
     section.key === "users"
       ? getAdminUsersState({
@@ -110,13 +109,31 @@ export default async function SectionPage({
     section.key === "storage"
       ? getStorageOverviewState()
       : Promise.resolve(undefined);
-  const [adminUsersState, filesState, repositoriesState, storageState] =
-    await Promise.all([
-      adminUsersPromise,
-      filesPromise,
-      repositoriesPromise,
-      storagePromise,
-    ]);
+  const [
+    session,
+    adminUsersState,
+    filesState,
+    repositoriesState,
+    storageState,
+  ] = await Promise.all([
+    sessionPromise,
+    adminUsersPromise,
+    filesPromise,
+    repositoriesPromise,
+    storagePromise,
+  ]);
+  const { csrfToken, currentUser } = session;
+  if (section.group === "system" && currentUser.role !== "admin") {
+    notFound();
+  }
+  // Each section reads at most one snapshot; without one (settings) or from
+  // an API that predates the header, the bootstrap cursor still applies.
+  const realtimeCursor =
+    readyCursor(adminUsersState) ??
+    readyCursor(filesState) ??
+    readyCursor(repositoriesState) ??
+    readyCursor(storageState) ??
+    session.realtimeCursor;
 
   if (adminUsersState?.status === "unauthorized") {
     redirect("/login");
@@ -156,6 +173,12 @@ export default async function SectionPage({
       storageState={storageState}
     />
   );
+}
+
+function readyCursor(
+  state: { status: string; realtimeCursor?: string } | undefined,
+): string | undefined {
+  return state?.status === "ready" ? state.realtimeCursor : undefined;
 }
 
 function getFileView(sectionKey: string): FileView | null {

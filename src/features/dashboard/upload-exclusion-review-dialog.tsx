@@ -114,7 +114,6 @@ export function UploadExclusionReviewDialog({
             type="button"
             variant="outline"
             size="sm"
-            className="rounded-md"
             onClick={() => setIncludedItemIndexes(new Set(items.keys()))}
           >
             Include all
@@ -123,7 +122,6 @@ export function UploadExclusionReviewDialog({
             type="button"
             variant="secondary"
             size="sm"
-            className="rounded-md"
             onClick={() => setIncludedItemIndexes(new Set())}
           >
             Exclude all
@@ -262,17 +260,11 @@ export function UploadExclusionReviewDialog({
         </div>
 
         <DialogFooter>
-          <Button
-            type="button"
-            variant="secondary"
-            className="rounded-md"
-            onClick={onClose}
-          >
+          <Button type="button" variant="secondary" onClick={onClose}>
             Cancel
           </Button>
           <Button
             type="button"
-            className="rounded-md"
             disabled={Boolean(selectionError)}
             onClick={() => onContinue(selectedFiles)}
           >

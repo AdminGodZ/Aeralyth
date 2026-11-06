@@ -11,6 +11,10 @@ import {
   triggerBlobDownload,
 } from "@/features/archive/browser-archive";
 import { archiveCompressionLevel } from "@/features/archive/compression-policy";
+import {
+  type OpenedEncryptedEntry,
+  prefetchEncryptedEntries,
+} from "@/features/archive/encrypted-entry-prefetch";
 import { createAnimationFrameProgressCoalescer } from "@/features/uploads/progress-coalescer";
 import type {
   VaultDownloadPlan,
@@ -111,7 +115,19 @@ export async function downloadRepositoryArchive({
       signal,
     });
     while (true) {
-      for (const entry of manifestPage.entries) {
+      // Parent keys can be required to open children, so pages and entries
+      // are opened in the stable parent-first order returned by the server,
+      // a few ahead of the entry currently being archived.
+      const openEncryptedEntry = prefetchEncryptedEntries(
+        manifestPage.entries,
+        {
+          getPlan: getVaultDownloadPlan,
+          openNode: (nodeId, plan, openSignal) =>
+            vault.openNode(nodeId, plan, openSignal),
+          signal,
+        },
+      );
+      for (const [index, entry] of manifestPage.entries.entries()) {
         throwIfAborted(signal, ABORT_MESSAGE);
         if (seenEntryIds.has(entry.id)) {
           throw new Error(
@@ -123,15 +139,11 @@ export async function downloadRepositoryArchive({
         if (entry.e2eeState !== "encrypted") {
           namesById.set(entry.id, entry.name);
         }
-        let encrypted:
-          | { manifest: VaultManifest; plan: VaultDownloadPlan }
-          | undefined;
-        if (entry.e2eeState === "encrypted") {
-          // Parent keys can be required to open children, so pages and entries
-          // remain in the stable parent-first order returned by the server.
+        let encrypted: OpenedEncryptedEntry | undefined;
+        const opening = openEncryptedEntry(index);
+        if (opening) {
           // react-doctor-disable-next-line react-doctor/async-await-in-loop
-          const plan = await getVaultDownloadPlan(entry.id, signal);
-          const vaultManifest = await vault.openNode(entry.id, plan, signal);
+          const { manifest: vaultManifest, plan } = await opening;
           throwIfAborted(signal, ABORT_MESSAGE);
           if (
             vaultManifest.entryType !== entry.entryType ||

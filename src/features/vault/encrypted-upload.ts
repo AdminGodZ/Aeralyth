@@ -21,6 +21,7 @@ import {
   toArrayBuffer,
   VAULT_CRYPTO_CHUNK_BYTES,
   VAULT_MAX_CIPHERTEXT_BYTES,
+  VAULT_SINGLE_UPLOAD_MAX_CIPHERTEXT_BYTES,
 } from "@/features/vault/protocol";
 import {
   beginShareDirectorySyncBatch,
@@ -37,6 +38,7 @@ import {
   type VaultCompletedPart,
   type VaultMigrationNode,
   type VaultUploadPlan,
+  type VaultUploadUrl,
 } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
 import { baseName, parentDirectory } from "@/lib/paths";
@@ -405,8 +407,27 @@ async function uploadEncryptedEntry({
       .catch(() => undefined);
     throw new Error(`${name} exceeds the encrypted upload limit.`);
   }
+  // A single-object upload is buffered whole either way, so it is encrypted
+  // before init: init then carries the checksum and returns the signed PUT,
+  // saving the separate content-URL round trip for every small file.
+  const singleObject =
+    file !== null &&
+    started.ciphertextLength <= VAULT_SINGLE_UPLOAD_MAX_CIPHERTEXT_BYTES;
+  let releaseSingleContent: (() => void) | undefined;
+  let singleContent: { bytes: Uint8Array; checksum: string } | null = null;
   let plan: VaultUploadPlan;
   try {
+    if (file && singleObject) {
+      releaseSingleContent = await acquireContentPermit?.();
+      assertNotAborted(signal);
+      const bytes = await encryptSingleObject({
+        file,
+        started,
+        client,
+        signal,
+      });
+      singleContent = { bytes, checksum: await sha256Base64(bytes) };
+    }
     plan = await initVaultUpload(
       csrfToken,
       {
@@ -417,10 +438,13 @@ async function uploadEncryptedEntry({
         generationId: started.generationId,
         ciphertextLength: started.ciphertextLength,
         chunkCount: started.chunkCount,
+        ...(singleContent ? { checksumSha256: singleContent.checksum } : {}),
       },
       signal,
     );
   } catch (error) {
+    singleContent?.bytes.fill(0);
+    releaseSingleContent?.();
     await client
       .abortEncryption(started.sessionId, started.nodeId)
       .catch(() => undefined);
@@ -429,7 +453,24 @@ async function uploadEncryptedEntry({
 
   try {
     let parts: VaultCompletedPart[] = [];
-    if (file) {
+    if (file && singleContent) {
+      try {
+        if (plan.mode !== "single") {
+          throw new Error("The storage plan does not match the upload size.");
+        }
+        await uploadSingle(
+          csrfToken,
+          plan.uploadId,
+          singleContent.bytes,
+          signal,
+          { checksum: singleContent.checksum, signed: plan.contentUrl },
+        );
+        onChunk(file.size);
+      } finally {
+        singleContent.bytes.fill(0);
+        releaseSingleContent?.();
+      }
+    } else if (file) {
       const releaseContent = await acquireContentPermit?.();
       try {
         assertNotAborted(signal);
@@ -887,20 +928,63 @@ async function queueMultipartBuffers(
   return nextPartNumber;
 }
 
+async function encryptSingleObject({
+  file,
+  started,
+  client,
+  signal,
+}: {
+  file: File;
+  started: Awaited<ReturnType<VaultCryptoClient["startEncryption"]>>;
+  client: VaultCryptoClient;
+  signal: AbortSignal;
+}): Promise<Uint8Array> {
+  const content = new Uint8Array(started.ciphertextLength);
+  let offset = 0;
+  try {
+    for (let chunkIndex = 0; chunkIndex < started.chunkCount; chunkIndex += 1) {
+      assertNotAborted(signal);
+      const sourceStart = chunkIndex * VAULT_CRYPTO_CHUNK_BYTES;
+      const sourceEnd = Math.min(
+        file.size,
+        sourceStart + VAULT_CRYPTO_CHUNK_BYTES,
+      );
+      const plaintext = await file.slice(sourceStart, sourceEnd).arrayBuffer();
+      const encrypted = await client.encryptChunk(
+        started.sessionId,
+        chunkIndex,
+        plaintext,
+      );
+      const ciphertext = new Uint8Array(encrypted.ciphertext);
+      if (offset + ciphertext.byteLength > content.byteLength) {
+        throw new Error("The encrypted upload length is inconsistent.");
+      }
+      content.set(ciphertext, offset);
+      offset += ciphertext.byteLength;
+      ciphertext.fill(0);
+    }
+    if (offset !== started.ciphertextLength) {
+      throw new Error("The encrypted upload length is inconsistent.");
+    }
+    return content;
+  } catch (error) {
+    content.fill(0);
+    throw error;
+  }
+}
+
 async function uploadSingle(
   csrfToken: string,
   uploadId: string,
   content: Uint8Array,
   signal: AbortSignal,
+  prepared?: { checksum: string; signed?: VaultUploadUrl },
 ): Promise<void> {
   try {
-    const checksum = await sha256Base64(content);
-    const signed = await getVaultContentUrl(
-      csrfToken,
-      uploadId,
-      checksum,
-      signal,
-    );
+    const checksum = prepared?.checksum ?? (await sha256Base64(content));
+    const signed =
+      prepared?.signed ??
+      (await getVaultContentUrl(csrfToken, uploadId, checksum, signal));
     if (signed.contentLength !== content.length) {
       throw new Error("The signed upload length is invalid.");
     }

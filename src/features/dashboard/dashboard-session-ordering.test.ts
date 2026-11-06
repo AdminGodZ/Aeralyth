@@ -1,3 +1,4 @@
+import { isValidElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import SectionPage from "@/app/(dashboard)/[section]/page";
@@ -34,37 +35,63 @@ const dataReads = [
   mocks.storage,
 ];
 
+const SECTIONS = [
+  "files",
+  "recent",
+  "favorites",
+  "shared",
+  "trash",
+  "repositories",
+  "users",
+  "storage",
+  "repository-detail",
+] as const;
+
+function render(section: (typeof SECTIONS)[number]) {
+  return section === "repository-detail"
+    ? RepositoryPage({
+        params: Promise.resolve({ repositoryId: "repo-1" }),
+        searchParams: Promise.resolve({}),
+      })
+    : SectionPage({
+        params: Promise.resolve({ section }),
+        searchParams: Promise.resolve({}),
+      });
+}
+
+async function renderedCursor(rendering: ReturnType<typeof render>) {
+  const element = await rendering;
+  if (!isValidElement<{ realtimeCursor: string }>(element)) {
+    throw new Error("The page did not render the dashboard.");
+  }
+  return element.props.realtimeCursor;
+}
+
 describe("dashboard replay snapshot ordering", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mocks.bootstrap.mockResolvedValue({
+      currentUser: { id: "user-1", role: "admin" },
+      csrfToken: "csrf-token",
+      realtimeCursor: "100",
+    });
     for (const read of dataReads) {
-      read.mockResolvedValue({ status: "unavailable" });
+      read.mockResolvedValue({
+        status: "ready",
+        data: {},
+        realtimeCursor: "90",
+      });
     }
   });
 
-  it.each([
-    "files",
-    "recent",
-    "favorites",
-    "shared",
-    "trash",
-    "repositories",
-    "users",
-    "storage",
-    "repository-detail",
-  ])(
-    "captures the bootstrap cursor before fetching %s data",
+  it.each(SECTIONS)(
+    "requests %s data without waiting for bootstrap",
     async (section) => {
       let releaseBootstrap = () => {};
       const gate = new Promise<void>((resolve) => {
         releaseBootstrap = resolve;
       });
-      let startedBootstrap = () => {};
-      const started = new Promise<void>((resolve) => {
-        startedBootstrap = resolve;
-      });
       mocks.bootstrap.mockImplementation(async () => {
-        startedBootstrap();
         await gate;
         return {
           currentUser: { id: "user-1", role: "admin" },
@@ -73,28 +100,28 @@ describe("dashboard replay snapshot ordering", () => {
         };
       });
 
-      const rendering =
-        section === "repository-detail"
-          ? RepositoryPage({
-              params: Promise.resolve({ repositoryId: "repo-1" }),
-              searchParams: Promise.resolve({}),
-            })
-          : SectionPage({
-              params: Promise.resolve({ section }),
-              searchParams: Promise.resolve({}),
-            });
-      await started;
-      // Allow any erroneously parallel fetch to execute while the bootstrap
-      // snapshot is still pending.
-      await Promise.resolve();
-      for (const read of dataReads) {
-        expect(read).not.toHaveBeenCalled();
-      }
+      const rendering = render(section);
+      await vi.waitFor(() =>
+        expect(
+          dataReads.reduce((count, read) => count + read.mock.calls.length, 0),
+        ).toBe(1),
+      );
       releaseBootstrap();
-      await rendering;
-      expect(
-        dataReads.reduce((count, read) => count + read.mock.calls.length, 0),
-      ).toBe(1);
+
+      // The snapshot's own cursor was read before its data, so it is the
+      // replay fence even though bootstrap finished later.
+      await expect(renderedCursor(rendering)).resolves.toBe("90");
+    },
+  );
+
+  it.each(SECTIONS)(
+    "falls back to the bootstrap cursor when %s data has none",
+    async (section) => {
+      for (const read of dataReads) {
+        read.mockResolvedValue({ status: "unavailable" });
+      }
+
+      await expect(renderedCursor(render(section))).resolves.toBe("100");
     },
   );
 });

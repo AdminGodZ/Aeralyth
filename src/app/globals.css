@@ -164,7 +164,9 @@ h3 {
   position: absolute;
   inset: 0;
   z-index: -1;
-  overflow: hidden;
+  /* Spill sideways into the gap above the main panel; the panel paints over the rest. */
+  overflow-x: visible;
+  overflow-y: clip;
   pointer-events: none;
 }
 
