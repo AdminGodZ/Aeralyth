@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   finalizeFolderUploadSelection,
@@ -6,6 +6,7 @@ import {
   getUploadSelectionError,
   MAX_SELECTION_FILES,
   MAX_UPLOAD_BYTES,
+  measureUploadExclusionReviewItems,
   prepareFolderUploadSelection,
 } from "@/features/dashboard/upload-selection-policy";
 
@@ -184,7 +185,6 @@ describe("upload selection policy", () => {
         kind: "folder",
         path: ".git",
         files: [selections[1]],
-        sizeBytes: selections[1]?.file.size,
         reason: "hidden-folder",
       },
     ]);
@@ -245,6 +245,102 @@ describe("upload selection policy", () => {
         reason: "gitignore",
       },
     ]);
+  });
+
+  it("leaves excluded file sizes unread until the review measures them", async () => {
+    let sizeReads = 0;
+    const excluded = (relativePath: string, content: string) => {
+      const file = new File([content], relativePath.split("/").at(-1) ?? "");
+      Object.defineProperty(file, "size", {
+        get: () => {
+          sizeReads += 1;
+          return content.length;
+        },
+      });
+      return { file, relativePath };
+    };
+    const selections = [
+      {
+        file: new File(["node_modules/\n*.log\n"], ".gitignore"),
+        relativePath: "demo/.gitignore",
+      },
+      excluded("demo/node_modules/pkg/index.js", "dependency"),
+      excluded("demo/node_modules/pkg/package.json", "{}"),
+      excluded("demo/debug.log", "log"),
+      excluded("demo/.git/HEAD", "ref: refs/heads/main"),
+    ];
+
+    const prepared = await prepareFolderUploadSelection(selections);
+
+    expect(prepared.reviewItems.map(({ path }) => path)).toEqual([
+      ".git",
+      "debug.log",
+      "node_modules",
+    ]);
+    expect(sizeReads).toBe(0);
+
+    const reports: Map<string, number>[] = [];
+    await measureUploadExclusionReviewItems(
+      prepared.reviewItems,
+      (sizes) => {
+        reports.push(
+          new Map(Array.from(sizes, ([item, bytes]) => [item.path, bytes])),
+        );
+      },
+      new AbortController().signal,
+    );
+
+    expect(reports.at(-1)).toEqual(
+      new Map([
+        [".git", 20],
+        ["debug.log", 3],
+        ["node_modules", 12],
+      ]),
+    );
+    expect(sizeReads).toBe(4);
+  });
+
+  it("measures review sizes in slices and stops once the review is closed", async () => {
+    let sizeReads = 0;
+    const prepared = await prepareFolderUploadSelection(
+      Array.from({ length: 50 }, (_, index) => {
+        const file = new File(["object"], `object-${String(index)}`);
+        Object.defineProperty(file, "size", {
+          get: () => {
+            sizeReads += 1;
+            return 6;
+          },
+        });
+        return { file, relativePath: `demo/.git/object-${String(index)}` };
+      }),
+    );
+    const controller = new AbortController();
+    let reported = false;
+    let now = 0;
+    const clock = vi.spyOn(performance, "now").mockImplementation(() => {
+      now += 5;
+      return now;
+    });
+
+    try {
+      const measurement = measureUploadExclusionReviewItems(
+        prepared.reviewItems,
+        () => {
+          reported = true;
+        },
+        controller.signal,
+      );
+      const readsInFirstSlice = sizeReads;
+      controller.abort();
+      await measurement;
+
+      expect(readsInFirstSlice).toBeGreaterThan(0);
+      expect(readsInFirstSlice).toBeLessThan(50);
+      expect(sizeReads).toBe(readsInFirstSlice);
+      expect(reported).toBe(false);
+    } finally {
+      clock.mockRestore();
+    }
   });
 
   it("validates the files chosen in the .gitignore review", async () => {
