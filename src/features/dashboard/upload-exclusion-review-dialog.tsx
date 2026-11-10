@@ -1,7 +1,7 @@
 "use client";
 
 import { File as FileIcon, Folder, Search, ShieldAlert } from "lucide-react";
-import { useDeferredValue, useId, useMemo, useState } from "react";
+import { useDeferredValue, useEffect, useId, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -16,6 +16,7 @@ import {
 import { Input } from "@/components/ui/input";
 import {
   getUploadSelectionError,
+  measureUploadExclusionReviewItems,
   type UploadExclusionReviewItem,
 } from "@/features/dashboard/upload-selection-policy";
 
@@ -45,6 +46,7 @@ export function UploadExclusionReviewDialog({
   );
   const [query, setQuery] = useState("");
   const [visibleLimit, setVisibleLimit] = useState(INITIAL_VISIBLE_ITEMS);
+  const itemSizes = useReviewItemSizes(items);
   const deferredQuery = useDeferredValue(query);
   const normalizedQuery = deferredQuery.trim().toLocaleLowerCase();
   const matchingItems = useMemo(
@@ -158,6 +160,7 @@ export function UploadExclusionReviewDialog({
               <ul className="divide-y" aria-label="Excluded upload items">
                 {visibleItems.map(({ item, index }) => {
                   const included = includedItemIndexes.has(index);
+                  const sizeBytes = itemSizes.get(item);
                   const checkboxId = `${idPrefix}-excluded-item-${String(index)}`;
                   const Icon = item.kind === "folder" ? Folder : FileIcon;
 
@@ -190,7 +193,10 @@ export function UploadExclusionReviewDialog({
                             {item.kind === "folder"
                               ? `${formatCount(item.files.length, "file", "files")} · `
                               : ""}
-                            {formatFileBytes(item.sizeBytes)} ·{" "}
+                            {sizeBytes === undefined
+                              ? "calculating size…"
+                              : formatFileBytes(sizeBytes)}{" "}
+                            ·{" "}
                             {item.reason === "hidden-folder"
                               ? "hidden folder"
                               : "ignored by .gitignore"}
@@ -275,6 +281,22 @@ export function UploadExclusionReviewDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+function useReviewItemSizes(
+  items: UploadExclusionReviewItem<UploadExclusionReviewFile>[],
+) {
+  const [sizes, setSizes] = useState<
+    ReadonlyMap<UploadExclusionReviewItem<UploadExclusionReviewFile>, number>
+  >(() => new Map());
+
+  useEffect(() => {
+    const controller = new AbortController();
+    void measureUploadExclusionReviewItems(items, setSizes, controller.signal);
+    return () => controller.abort();
+  }, [items]);
+
+  return sizes;
 }
 
 function formatExclusionDescription(

@@ -1,14 +1,13 @@
 import ignore, { type Ignore } from "ignore";
-import { baseName, parentDirectory } from "@/lib/paths";
+import {
+  baseName,
+  parentDirectory,
+  shallowestDirectoryLookup,
+} from "@/lib/paths";
 
 export type GitIgnoreSelection = {
   file: File;
   relativePath: string;
-};
-
-type NormalizedSelection<T extends GitIgnoreSelection> = {
-  selection: T;
-  path: string;
 };
 
 type IgnoreMatcher = {
@@ -21,7 +20,12 @@ export type GitIgnoreSelectionPartition<T extends GitIgnoreSelection> = {
   ignoredSelections: T[];
   hiddenDirectorySelections: T[];
   gitIgnoreFileCount: number;
+  /** Every selection's normalized path below the selected folder. */
+  rootRelativePaths: Map<T, string>;
 };
+
+// An empty, ".", or ".." segment anywhere in a path.
+const UNNORMALIZED_SEGMENT = /(?:^|\/)\.{0,2}(?:\/|$)/;
 
 export async function filterGitIgnoredSelections<T extends GitIgnoreSelection>(
   selections: readonly T[],
@@ -33,46 +37,34 @@ export async function filterGitIgnoredSelections<T extends GitIgnoreSelection>(
 export async function partitionGitIgnoredSelections<
   T extends GitIgnoreSelection,
 >(selections: readonly T[]): Promise<GitIgnoreSelectionPartition<T>> {
-  if (selections.length === 0) {
-    return {
-      includedSelections: [],
-      ignoredSelections: [],
-      hiddenDirectorySelections: [],
-      gitIgnoreFileCount: 0,
-    };
+  const rootRelativePaths = normalizeSelections(selections);
+  const hiddenDirectory = shallowestDirectoryLookup((directory) =>
+    baseName(directory).startsWith("."),
+  );
+
+  const ignoreFiles: { selection: T; directory: string }[] = [];
+  for (const [selection, path] of rootRelativePaths) {
+    if (baseName(path) !== ".gitignore") {
+      continue;
+    }
+    const directory = parentDirectory(path);
+    if (hiddenDirectory(directory) === null) {
+      ignoreFiles.push({ selection, directory });
+    }
   }
-
-  const normalizedSelections = normalizeSelections(selections);
-  const hiddenDirectoryCandidates = normalizedSelections.flatMap(
-    ({ selection, path }) => (isHiddenDirectoryPath(path) ? [selection] : []),
-  );
-  const nonHiddenSelections = normalizedSelections.filter(
-    ({ path }) => !isHiddenDirectoryPath(path),
-  );
-  const ignoreFiles = nonHiddenSelections.filter(
-    ({ path }) => baseName(path) === ".gitignore",
-  );
-
-  if (ignoreFiles.length === 0) {
-    return {
-      includedSelections: nonHiddenSelections.map(({ selection }) => selection),
-      ignoredSelections: [],
-      hiddenDirectorySelections: hiddenDirectoryCandidates,
-      gitIgnoreFileCount: 0,
-    };
-  }
-
   ignoreFiles.sort((left, right) => {
-    const leftDirectory = parentDirectory(left.path);
-    const rightDirectory = parentDirectory(right.path);
-    const depth = pathDepth(leftDirectory) - pathDepth(rightDirectory);
-    return depth || leftDirectory.localeCompare(rightDirectory);
+    const depth = pathDepth(left.directory) - pathDepth(right.directory);
+    return depth || left.directory.localeCompare(right.directory);
   });
 
-  const activeMatchers: IgnoreMatcher[] = [];
-  for (const { selection, path } of ignoreFiles) {
-    const directory = parentDirectory(path);
-    if (directory && isIgnored(directory, true, activeMatchers)) {
+  const matchers: IgnoreMatcher[] = [];
+  // Rules only apply below their own directory and are read shallowest first,
+  // so a directory decided while loading is never changed by rules read later.
+  const ignoredDirectory = shallowestDirectoryLookup((directory) =>
+    testPath(directory, true, matchers),
+  );
+  for (const { selection, directory } of ignoreFiles) {
+    if (ignoredDirectory(directory) !== null) {
       continue;
     }
 
@@ -86,17 +78,20 @@ export async function partitionGitIgnoredSelections<
         `Aeralyth could not read ${selection.relativePath}; the folder was not uploaded.`,
       );
     }
-    activeMatchers.push({ directory, matcher: ignore().add(patterns) });
+    matchers.push({ directory, matcher: ignore().add(patterns) });
   }
 
   const includedSelections: T[] = [];
   const ignoredSelections: T[] = [];
   const hiddenDirectorySelections: T[] = [];
-  const hiddenDirectoryCandidateSet = new Set(hiddenDirectoryCandidates);
-  for (const { selection, path } of normalizedSelections) {
-    if (isIgnored(path, false, activeMatchers)) {
+  for (const [selection, path] of rootRelativePaths) {
+    const directory = parentDirectory(path);
+    if (
+      ignoredDirectory(directory) !== null ||
+      testPath(path, false, matchers)
+    ) {
       ignoredSelections.push(selection);
-    } else if (hiddenDirectoryCandidateSet.has(selection)) {
+    } else if (hiddenDirectory(directory) !== null) {
       hiddenDirectorySelections.push(selection);
     } else {
       includedSelections.push(selection);
@@ -108,45 +103,50 @@ export async function partitionGitIgnoredSelections<
     ignoredSelections,
     hiddenDirectorySelections,
     gitIgnoreFileCount: ignoreFiles.length,
+    rootRelativePaths,
   };
-}
-
-function isHiddenDirectoryPath(path: string): boolean {
-  const segments = path.split("/");
-  return segments.slice(0, -1).some((segment) => segment.startsWith("."));
 }
 
 function normalizeSelections<T extends GitIgnoreSelection>(
   selections: readonly T[],
-): NormalizedSelection<T>[] {
+): Map<T, string> {
   const paths = selections.map(({ relativePath, file }) =>
     normalizePath(relativePath || file.name),
   );
   const selectionRoot = getSelectionRoot(paths);
+  const prefixLength = selectionRoot === null ? 0 : selectionRoot.length + 1;
 
-  return selections.map((selection, index) => {
-    const path = paths[index];
-    if (!path) {
-      throw new Error("The selected folder contains an invalid path.");
-    }
-
-    return {
+  return new Map(
+    selections.map((selection, index) => [
       selection,
-      path: selectionRoot ? path.slice(selectionRoot.length + 1) : path,
-    };
-  });
+      paths[index].slice(prefixLength),
+    ]),
+  );
 }
 
 function getSelectionRoot(paths: string[]): string | null {
-  const roots = new Set(paths.map((path) => path.split("/", 1)[0]));
-  if (roots.size !== 1 || paths.some((path) => !path.includes("/"))) {
+  const firstPath = paths[0];
+  const separator = firstPath?.indexOf("/") ?? -1;
+  if (firstPath === undefined || separator < 0) {
     return null;
   }
 
-  return Array.from(roots)[0] ?? null;
+  const prefix = firstPath.slice(0, separator + 1);
+  return paths.every((path) => path.startsWith(prefix))
+    ? prefix.slice(0, -1)
+    : null;
 }
 
 function normalizePath(path: string): string {
+  // Browser folder picks are already normalized, so most paths skip the rebuild.
+  if (
+    !path.includes("\\") &&
+    !path.includes("\0") &&
+    !UNNORMALIZED_SEGMENT.test(path)
+  ) {
+    return path;
+  }
+
   const segments = path.replaceAll("\\", "/").split("/").filter(Boolean);
   if (
     segments.length === 0 ||
@@ -159,22 +159,6 @@ function normalizePath(path: string): string {
   }
 
   return segments.join("/");
-}
-
-function isIgnored(
-  path: string,
-  isDirectory: boolean,
-  matchers: IgnoreMatcher[],
-): boolean {
-  const segments = path.split("/");
-  for (let index = 1; index < segments.length; index += 1) {
-    const directory = segments.slice(0, index).join("/");
-    if (testPath(directory, true, matchers)) {
-      return true;
-    }
-  }
-
-  return testPath(path, isDirectory, matchers);
 }
 
 function testPath(
