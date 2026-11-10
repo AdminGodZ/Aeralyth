@@ -74,7 +74,11 @@ import {
   WeightedSemaphore,
 } from "@/features/vault/bounded-async";
 import { uploadEncryptedSelections } from "@/features/vault/encrypted-upload";
-import { getVaultDownloadPlan } from "@/features/vault/vault-api";
+import type { VaultMetadataReference } from "@/features/vault/protocol";
+import {
+  getVaultDownloadPlan,
+  getVaultMetadataPlans,
+} from "@/features/vault/vault-api";
 import { useVault } from "@/features/vault/vault-provider";
 import { FOLDER_ZIP_WORKER_URL } from "@/generated/worker-assets";
 import { isAbortError } from "@/lib/abort";
@@ -187,6 +191,10 @@ type UploadChildrenPage = {
     name: string;
     entryType: "file" | "folder";
     e2eeState: "legacy" | "staged" | "encrypted";
+    parentId?: string | null;
+    vaultRecordVersion?: number | null;
+    vaultRecordHash?: string | null;
+    vaultGenerationId?: string | null;
   }>;
   nextCursor: string | null;
   hasMore: boolean;
@@ -199,6 +207,7 @@ const UPLOAD_FINALIZATION_TIMEOUT_MS = 45_000;
 const UPLOAD_LIST_REFRESH_WAIT_MS = 10_000;
 const UPLOAD_TREE_PAGE_SIZE = 100;
 const UPLOAD_TREE_DECRYPT_CONCURRENCY = 8;
+const UPLOAD_REPLACEMENT_PLAN_BATCH_SIZE = 100;
 
 export function UploadPanel(props: UploadPanelProps) {
   const controller = useUploadPanelController(props);
@@ -364,16 +373,21 @@ function useUploadPanelController({
     let activeFileIndex: number | null = null;
     let failedFileIndex: number | null = null;
 
+    // Snapshots are taken when a frame is delivered, not for every transition
+    // it replaces: copying the file-index sets is linear in the selection.
     const progressPublisher = createAnimationFrameProgressCoalescer(
-      (snapshot: {
-        activeFileIndex: number | null;
-        activeFileUploadedBytes: number;
-        completedFiles: number;
-        completedFileIndexes: number[];
-        activeFileIndexes: number[];
-        totalBytes?: number;
-        uploadedBytes: number;
-      }) => {
+      (
+        takeSnapshot: () => {
+          activeFileIndex: number | null;
+          activeFileUploadedBytes: number;
+          completedFiles: number;
+          completedFileIndexes: number[];
+          activeFileIndexes: number[];
+          totalBytes?: number;
+          uploadedBytes: number;
+        },
+      ) => {
+        const snapshot = takeSnapshot();
         setUploadSession((current) =>
           current?.status === "uploading"
             ? {
@@ -396,35 +410,39 @@ function useUploadPanelController({
         );
       },
     );
-    const publishProgress = (immediate = false, totalBytes?: number) => {
+    let publishedTotalBytes: number | undefined;
+    const takeProgressSnapshot = () => {
       const fileBytes =
         activeFileIndex === null
           ? 0
           : (uploadedByFile.get(activeFileIndex) ?? 0);
-      progressPublisher.publish(
-        {
-          activeFileIndex,
-          activeFileUploadedBytes:
-            activeFileIndex === null
-              ? 0
-              : Math.min(
-                  files[activeFileIndex]?.file.size ?? fileBytes,
-                  fileBytes,
-                ),
-          completedFiles: completedFileIndexes.size,
-          completedFileIndexes: Array.from(completedFileIndexes),
-          activeFileIndexes: Array.from(activeFileIndexes),
-          totalBytes,
-          uploadedBytes,
-        },
-        immediate,
-      );
+      return {
+        activeFileIndex,
+        activeFileUploadedBytes:
+          activeFileIndex === null
+            ? 0
+            : Math.min(
+                files[activeFileIndex]?.file.size ?? fileBytes,
+                fileBytes,
+              ),
+        completedFiles: completedFileIndexes.size,
+        completedFileIndexes: Array.from(completedFileIndexes),
+        activeFileIndexes: Array.from(activeFileIndexes),
+        totalBytes: publishedTotalBytes,
+        uploadedBytes,
+      };
+    };
+    const publishProgress = (immediate = false, totalBytes?: number) => {
+      publishedTotalBytes = totalBytes ?? publishedTotalBytes;
+      progressPublisher.publish(takeProgressSnapshot, immediate);
     };
 
+    // File transitions arrive far faster than frames once small files publish
+    // in batches, so they share the coalesced progress frame.
     const startFile = (fileIndex: number) => {
       activeFileIndexes.add(fileIndex);
       activeFileIndex = fileIndex;
-      publishProgress(true);
+      publishProgress();
     };
     const reportProgress = (fileIndex: number, key: string, loaded: number) => {
       activeFileIndex = fileIndex;
@@ -447,7 +465,7 @@ function useUploadPanelController({
       if (activeFileIndex === fileIndex) {
         activeFileIndex = Array.from(activeFileIndexes).at(-1) ?? null;
       }
-      publishProgress(true);
+      publishProgress();
     };
 
     try {
@@ -485,6 +503,7 @@ function useUploadPanelController({
             publishProgress(false, encryptedTotalBytes);
           },
         });
+        progressPublisher.flush();
         await finishSuccessfulUpload(
           encryptedUpload.rootFolderId,
           createRepository,
@@ -544,6 +563,7 @@ function useUploadPanelController({
           (candidate): candidate is string => candidate !== null,
         ) ?? null;
 
+      progressPublisher.flush();
       await finishSuccessfulUpload(
         rootFolderId,
         createRepository,
@@ -1046,6 +1066,9 @@ function useUploadPanelController({
           loadUploadTreeChildren(folderId, controller.signal),
       });
       assertEncryptedResolutionReady(resolution);
+      if (e2eeMode !== "off") {
+        await loadReplacementGenerations(resolution, controller.signal);
+      }
 
       if (resolution.conflictPaths.length > 0 && !replacementConfirmed) {
         setPendingReplacementUpload({
@@ -1112,6 +1135,22 @@ function useUploadPanelController({
       }
     } while (cursor);
 
+    if (!vault.client && listed.some(isEncryptedListing)) {
+      throw new Error("Unlock the vault before checking existing files.");
+    }
+    // Names come from the signed records the listing already identifies, one
+    // batched metadata request per hundred entries and none for cached ones.
+    const references = listed.flatMap((entry) => {
+      const reference = uploadTreeMetadataReference(entry);
+      return reference ? [reference] : [];
+    });
+    const manifests = new Map(
+      (references.length > 0
+        ? await vault.resolveMetadata(references, { signal })
+        : []
+      ).map((result) => [result.nodeId, result]),
+    );
+
     return mapWithConcurrency(
       listed,
       UPLOAD_TREE_DECRYPT_CONCURRENCY,
@@ -1119,6 +1158,26 @@ function useUploadPanelController({
         if (entry.e2eeState !== "encrypted") {
           return entry;
         }
+        const resolved = manifests.get(entry.id);
+        if (resolved) {
+          if (resolved.status !== "ready") {
+            throw new Error(
+              "An existing encrypted item could not be read. Refresh the page, then upload the folder again.",
+            );
+          }
+          if (resolved.manifest.entryType !== entry.entryType) {
+            throw new Error("An encrypted file record has an invalid type.");
+          }
+          return {
+            id: entry.id,
+            entryType: entry.entryType,
+            e2eeState: entry.e2eeState,
+            name: resolved.manifest.name,
+            recordVersion: entry.vaultRecordVersion as number,
+            recordHash: resolved.recordHash,
+          };
+        }
+        // A listing without record identifiers still resolves entry by entry.
         if (!vault.client) {
           throw new Error("Unlock the vault before checking existing files.");
         }
@@ -1136,6 +1195,68 @@ function useUploadPanelController({
         };
       },
     );
+  }
+
+  /**
+   * A replacement continues the generation of the file it replaces. Only the
+   * matched files need that number, so it is read for them in batches after
+   * the conflicts are known instead of once per listed entry.
+   */
+  async function loadReplacementGenerations(
+    resolution: FolderUploadResolution,
+    signal: AbortSignal,
+  ) {
+    const pending = Array.from(resolution.replacementFiles.values()).filter(
+      (file) =>
+        file.e2eeState === "encrypted" && file.generationNumber === undefined,
+    );
+    if (pending.length === 0) return;
+    if (!csrfToken) {
+      throw new Error("The encrypted upload session is unavailable.");
+    }
+    const byId = new Map(pending.map((file) => [file.id, file]));
+    for (
+      let offset = 0;
+      offset < pending.length;
+      offset += UPLOAD_REPLACEMENT_PLAN_BATCH_SIZE
+    ) {
+      const nodeIds = pending
+        .slice(offset, offset + UPLOAD_REPLACEMENT_PLAN_BATCH_SIZE)
+        .map((file) => file.id);
+      let continuation: number | undefined;
+      do {
+        // Each continuation is issued by the previous page of the same batch.
+        // react-doctor-disable-next-line react-doctor/async-await-in-loop
+        const page = await getVaultMetadataPlans(
+          csrfToken,
+          nodeIds,
+          continuation,
+          signal,
+        );
+        for (const plan of page.plans) {
+          const file = byId.get(plan.nodeId);
+          if (!file) continue;
+          if (
+            plan.recordHash !== file.recordHash ||
+            plan.recordVersion !== file.recordVersion
+          ) {
+            throw new Error(
+              `“${file.name}” changed while the upload was being prepared. Upload the folder again.`,
+            );
+          }
+          file.generationNumber = plan.generationNumber;
+        }
+        if (
+          page.continuation !== undefined &&
+          (!Number.isSafeInteger(page.continuation) ||
+            page.continuation <= (continuation ?? -1))
+        ) {
+          throw new Error("The existing file listing could not be continued.");
+        }
+        continuation = page.continuation;
+      } while (continuation !== undefined);
+    }
+    // getEncryptedReplacementVersion rejects any file still left without one.
   }
 
   function assertEncryptedResolutionReady(resolution: FolderUploadResolution) {
@@ -2015,6 +2136,31 @@ function putBlobOnce(
     signal.addEventListener("abort", abortRequest, { once: true });
     request.send(blob);
   });
+}
+
+function isEncryptedListing(entry: UploadChildrenPage["entries"][number]) {
+  return entry.e2eeState === "encrypted";
+}
+
+function uploadTreeMetadataReference(
+  entry: UploadChildrenPage["entries"][number],
+): VaultMetadataReference | null {
+  if (
+    entry.e2eeState !== "encrypted" ||
+    !(typeof entry.parentId === "string" || entry.parentId === null) ||
+    typeof entry.vaultRecordVersion !== "number" ||
+    typeof entry.vaultRecordHash !== "string" ||
+    typeof entry.vaultGenerationId !== "string"
+  ) {
+    return null;
+  }
+  return {
+    nodeId: entry.id,
+    parentId: entry.parentId,
+    recordVersion: entry.vaultRecordVersion,
+    recordHash: entry.vaultRecordHash,
+    generationId: entry.vaultGenerationId,
+  };
 }
 
 function requestLegacySignedUploadUrl(

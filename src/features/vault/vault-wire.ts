@@ -8,6 +8,9 @@ const SHARE_DIRECTORY = 2;
 const CREATE_SHARE = 3;
 const PUBLISH_EPOCH = 4;
 const FOLDER_BATCH = 5;
+const INLINE_UPLOAD_BATCH = 6;
+export const VAULT_INLINE_UPLOAD_MAX_FILES = 64;
+export const VAULT_INLINE_UPLOAD_MAX_BYTES = 2 * 1024 * 1024;
 const NULL_LENGTH = 0xffff_ffff;
 const HEADER_BYTES = 8;
 const encoder = new TextEncoder();
@@ -84,6 +87,55 @@ export function encodeFolderBatchPublication(
   );
   writer.count(records.length);
   for (const record of records) writer.nodeRecord(record);
+  return writer.finish();
+}
+
+export type InlineUploadEntry = {
+  parentId: string | null;
+  chunkCount: number;
+  record: NodeRecord;
+  content: Uint8Array;
+};
+
+/** Small files carry their ciphertext with the signed record that commits to it. */
+export function encodeInlineUploadBatch(
+  uploads: InlineUploadEntry[],
+): Uint8Array {
+  if (uploads.length < 1 || uploads.length > VAULT_INLINE_UPLOAD_MAX_FILES) {
+    throw new Error(
+      `Inline upload batch must contain 1 to ${VAULT_INLINE_UPLOAD_MAX_FILES} files.`,
+    );
+  }
+  const encoded = uploads.map((upload) => {
+    if (upload.content.length > VAULT_INLINE_UPLOAD_MAX_BYTES) {
+      throw new Error("Inline upload content is too large.");
+    }
+    return {
+      ...upload,
+      parentId: upload.parentId === null ? null : encodeText(upload.parentId),
+    };
+  });
+  const writer = new Writer(
+    HEADER_BYTES +
+      4 +
+      encoded.reduce(
+        (total, upload) =>
+          total +
+          sizedOptionalBytes(upload.parentId) +
+          4 +
+          sizedNodeRecord(upload.record) +
+          sizedBytes(upload.content),
+        0,
+      ),
+    INLINE_UPLOAD_BATCH,
+  );
+  writer.count(encoded.length);
+  for (const upload of encoded) {
+    writer.optionalBytes(upload.parentId);
+    writer.u32(upload.chunkCount);
+    writer.nodeRecord(upload.record);
+    writer.bytes(upload.content);
+  }
   return writer.finish();
 }
 

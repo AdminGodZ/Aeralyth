@@ -18,6 +18,11 @@ export type FolderZipWorkerRequest =
       sources: FolderZipSource[];
       compressionMode?: FolderZipCompressionMode;
       maxOutputBytes?: number;
+      /**
+       * Upper bound of the helper workers that compress in parallel. Defaults
+       * to the number of logical processors.
+       */
+      maxWorkers?: number;
     }
   | {
       type: "cancel";

@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   encodeCreateSharePublication,
   encodeFolderBatchPublication,
+  encodeInlineUploadBatch,
   encodeNodePublication,
   encodePublishEpochPublication,
   encodeShareDirectoryPublication,
@@ -25,6 +26,63 @@ describe("vault binary publication wire", () => {
       "03".repeat(64) +
       "0000000304050600000001000000020708";
     expect(Buffer.from(encoded).toString("hex")).toBe(expectedHex);
+  });
+
+  it("matches the backend's inline upload batch fixture", () => {
+    const record = (marker: number) => ({
+      bootstrapCbor: new Uint8Array([marker, marker + 1]),
+      bootstrapSignature: new Uint8Array(64).fill(marker + 2),
+      encryptedManifest: new Uint8Array(16).fill(marker + 3),
+      wrappers: [new Uint8Array([marker + 4, marker + 5])],
+    });
+    const encoded = encodeInlineUploadBatch([
+      {
+        parentId: "fil_parent",
+        chunkCount: 1,
+        record: record(1),
+        content: new Uint8Array(3).fill(7),
+      },
+      {
+        parentId: null,
+        chunkCount: 1,
+        record: record(2),
+        content: new Uint8Array(3).fill(8),
+      },
+    ]);
+
+    const item = (parent: string, marker: number) =>
+      `${parent}0000000100000002${hex(marker)}${hex(marker + 1)}00000040` +
+      hex(marker + 2).repeat(64) +
+      `00000010${hex(marker + 3).repeat(16)}0000000100000002` +
+      `${hex(marker + 4)}${hex(marker + 5)}00000003${hex(marker + 6).repeat(3)}`;
+    expect(Buffer.from(encoded).toString("hex")).toBe(
+      "41564c540106000000000002" +
+        item(`0000000a${Buffer.from("fil_parent").toString("hex")}`, 1) +
+        item("ffffffff", 2),
+    );
+  });
+
+  it("bounds inline upload batches like the backend decoder", () => {
+    const upload = {
+      parentId: null,
+      chunkCount: 1,
+      record: {
+        bootstrapCbor: new Uint8Array(1),
+        bootstrapSignature: new Uint8Array(64),
+        encryptedManifest: new Uint8Array(1),
+        wrappers: [new Uint8Array(1)],
+      },
+      content: new Uint8Array(1),
+    };
+    expect(() => encodeInlineUploadBatch([])).toThrow();
+    expect(() =>
+      encodeInlineUploadBatch(Array.from({ length: 65 }, () => upload)),
+    ).toThrow();
+    expect(() =>
+      encodeInlineUploadBatch([
+        { ...upload, content: new Uint8Array(2 * 1024 * 1024 + 1) },
+      ]),
+    ).toThrow();
   });
 
   it("uses raw byte strings without base64 expansion", () => {
@@ -136,3 +194,7 @@ describe("vault binary publication wire", () => {
     ).toThrow(/1 to 100/);
   });
 });
+
+function hex(value: number): string {
+  return value.toString(16).padStart(2, "0");
+}

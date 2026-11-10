@@ -91,6 +91,7 @@
     "db:test:expired-upload-claim-fences": "python3 database/tests/expired_upload_claim_fences.py",
     "perf:mixed": "node performance/mixed-load.mjs",
     "perf:mixed:fault": "node performance/mixed-load-self-test.mjs",
+    "perf:inline-upload": "node performance/profile-inline-upload.mjs",
     "test:performance:arrival": "node --test performance/arrival-load.node-test.mjs",
     "db:migrate:bounded-hierarchy-updates": "docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/037_bounded_hierarchy_updates.sql",
     "db:migrate:quiet-maintenance-notifications": "docker compose exec -T postgres psql -v ON_ERROR_STOP=1 -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/038_quiet_maintenance_notifications.sql",

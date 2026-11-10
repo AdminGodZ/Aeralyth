@@ -11,6 +11,9 @@ const SHARE_DIRECTORY: u8 = 2;
 const CREATE_SHARE: u8 = 3;
 const PUBLISH_EPOCH: u8 = 4;
 const FOLDER_BATCH: u8 = 5;
+const INLINE_UPLOAD_BATCH: u8 = 6;
+pub const MAX_INLINE_UPLOADS: usize = 64;
+pub const MAX_INLINE_UPLOAD_BYTES: usize = 2 * 1024 * 1024;
 const NULL_LENGTH: u32 = u32::MAX;
 
 #[derive(Debug)]
@@ -40,6 +43,17 @@ pub struct NodePublication {
 
 pub struct FolderBatchPublication {
     pub records: Vec<NodePublication>,
+}
+
+pub struct InlineUpload {
+    pub parent_id: Option<String>,
+    pub chunk_count: u32,
+    pub record: NodePublication,
+    pub content: Bytes,
+}
+
+pub struct InlineUploadBatch {
+    pub uploads: Vec<InlineUpload>,
 }
 
 pub struct ShareDirectoryPublication {
@@ -104,6 +118,34 @@ pub fn decode_folder_batch(input: Bytes) -> Result<FolderBatchPublication, WireE
         .collect::<Result<Vec<_>, _>>()?;
     reader.finish()?;
     Ok(FolderBatchPublication { records })
+}
+
+pub fn decode_inline_upload_batch(input: Bytes) -> Result<InlineUploadBatch, WireError> {
+    let mut reader = Reader::new(input, INLINE_UPLOAD_BATCH)?;
+    let count = reader.count(MAX_INLINE_UPLOADS)?;
+    if count == 0 {
+        return Err(WireError("inline upload batch is empty"));
+    }
+    let uploads = (0..count)
+        .map(|_| {
+            let parent_id = reader
+                .optional_bytes(128)?
+                .map(|value| {
+                    std::str::from_utf8(&value)
+                        .map(str::to_owned)
+                        .map_err(|_| WireError("vault binary text is not UTF-8"))
+                })
+                .transpose()?;
+            Ok(InlineUpload {
+                parent_id,
+                chunk_count: reader.u32()?,
+                record: reader.node_publication(Vec::new())?,
+                content: reader.bytes(MAX_INLINE_UPLOAD_BYTES)?,
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    reader.finish()?;
+    Ok(InlineUploadBatch { uploads })
 }
 
 pub fn decode_share_directory(input: Bytes) -> Result<ShareDirectoryPublication, WireError> {
@@ -362,6 +404,66 @@ mod tests {
         assert_eq!(batch.records[0].bootstrap_cbor.as_ref(), &[1, 2]);
         assert_eq!(batch.records[1].bootstrap_cbor.as_ref(), &[2, 3]);
         assert_eq!(batch.records[1].wrappers[0].as_ref(), &[6, 7]);
+    }
+
+    #[test]
+    fn decodes_browser_inline_upload_batch_fixture() {
+        let mut fixture = header(INLINE_UPLOAD_BATCH);
+        push_u32(&mut fixture, 2);
+        for (marker, parent) in [(1_u8, Some(b"fil_parent".as_slice())), (2_u8, None)] {
+            match parent {
+                Some(parent) => push_bytes(&mut fixture, parent),
+                None => push_u32(&mut fixture, NULL_LENGTH),
+            }
+            push_u32(&mut fixture, 1);
+            push_bytes(&mut fixture, &[marker, marker + 1]);
+            push_bytes(&mut fixture, &[marker + 2; 64]);
+            push_bytes(&mut fixture, &[marker + 3; 16]);
+            push_u32(&mut fixture, 1);
+            push_bytes(&mut fixture, &[marker + 4, marker + 5]);
+            push_bytes(&mut fixture, &[marker + 6; 3]);
+        }
+        let fixture = Bytes::from(fixture);
+        let original_pointer = fixture.as_ptr() as usize;
+
+        let batch = decode_inline_upload_batch(fixture.clone()).unwrap();
+
+        assert_eq!(batch.uploads.len(), 2);
+        assert_eq!(batch.uploads[0].parent_id.as_deref(), Some("fil_parent"));
+        assert_eq!(batch.uploads[1].parent_id, None);
+        assert_eq!(batch.uploads[1].chunk_count, 1);
+        assert_eq!(batch.uploads[1].record.bootstrap_cbor.as_ref(), &[2, 3]);
+        assert_eq!(batch.uploads[0].content.as_ref(), &[7; 3]);
+        // Ciphertext is sliced out of the request allocation, never copied.
+        let content_pointer = batch.uploads[1].content.as_ptr() as usize;
+        assert!(content_pointer >= original_pointer);
+        assert!(content_pointer < original_pointer + fixture.len());
+    }
+
+    #[test]
+    fn inline_upload_batches_are_bounded() {
+        let mut empty = header(INLINE_UPLOAD_BATCH);
+        push_u32(&mut empty, 0);
+        assert!(decode_inline_upload_batch(Bytes::from(empty)).is_err());
+
+        let mut oversized_count = header(INLINE_UPLOAD_BATCH);
+        push_u32(&mut oversized_count, MAX_INLINE_UPLOADS as u32 + 1);
+        assert!(decode_inline_upload_batch(Bytes::from(oversized_count)).is_err());
+
+        let mut oversized_content = header(INLINE_UPLOAD_BATCH);
+        push_u32(&mut oversized_content, 1);
+        push_u32(&mut oversized_content, NULL_LENGTH);
+        push_u32(&mut oversized_content, 1);
+        push_bytes(&mut oversized_content, &[1]);
+        push_bytes(&mut oversized_content, &[2; 64]);
+        push_bytes(&mut oversized_content, &[3]);
+        push_u32(&mut oversized_content, 1);
+        push_bytes(&mut oversized_content, &[4]);
+        push_bytes(
+            &mut oversized_content,
+            &vec![5; MAX_INLINE_UPLOAD_BYTES + 1],
+        );
+        assert!(decode_inline_upload_batch(Bytes::from(oversized_content)).is_err());
     }
 
     #[test]

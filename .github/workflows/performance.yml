@@ -275,6 +275,10 @@ jobs:
           node performance/mixed-load.mjs
           AERALYTH_PERF_FAULT_OUTPUT=performance-results/release-database-stall.json \
             node performance/mixed-load-self-test.mjs
+          # Inline small-file batches: retries, bad-item isolation, quota
+          # bookkeeping and every stored object, against real S3 and PostgreSQL.
+          node performance/profile-inline-upload.mjs \
+            > performance-results/release-inline-upload.json
       - name: Compare the debug artifact with the same workload
         if: github.event_name == 'workflow_dispatch' && inputs.compare-debug
         env:

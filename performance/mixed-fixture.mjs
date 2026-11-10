@@ -14,13 +14,13 @@ import { setTimeout as delay } from "node:timers/promises";
 import { isolatedOrigin } from "./arrival-load.mjs";
 import { createFixtureStream } from "./fixture-stream.mjs";
 
-const hash = (...values) => {
+export const hash = (...values) => {
   const digest = createHash("sha256");
   for (const value of values) digest.update(value);
   return digest.digest();
 };
-const bytes = (value) => `decode('${value.toString("hex")}', 'hex')`;
-const quote = (value) => `'${String(value).replaceAll("'", "''")}'`;
+export const bytes = (value) => `decode('${value.toString("hex")}', 'hex')`;
+export const quote = (value) => `'${String(value).replaceAll("'", "''")}'`;
 const nullable = (value) => (value === null ? "NULL" : quote(value));
 const loopback = (host) => ["localhost", "127.0.0.1", "[::1]"].includes(host);
 const integer = (env, name, fallback, minimum, maximum) => {
@@ -118,7 +118,7 @@ function aesDecrypt(key, aad, ciphertext) {
 const derive = (key, salt, info) =>
   Buffer.from(hkdfSync("sha256", key, salt, info, 32));
 
-function encryptedNode({
+export function encryptedNode({
   id,
   parent,
   parentKey,
@@ -261,7 +261,7 @@ function encryptedNode({
   };
 }
 
-function sqlClient(env, timeoutMs) {
+export function sqlClient(env, timeoutMs) {
   const container =
     env.AERALYTH_PERF_DATABASE_CONTAINER ??
     env.AERALYTH_PERF_POSTGRES_CONTAINER;

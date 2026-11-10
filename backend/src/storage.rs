@@ -1185,6 +1185,47 @@ impl Storage {
         Ok(request.uri().to_string())
     }
 
+    /// Stores one small encrypted object straight from memory. S3 verifies the
+    /// supplied SHA-256, so the stored bytes are the ones the caller hashed.
+    pub async fn put_vault_object(
+        &self,
+        object_key: &str,
+        content: bytes::Bytes,
+        checksum_sha256: &str,
+    ) -> Result<ObjectMetadata, StorageError> {
+        let Self::S3 { client, bucket, .. } = self else {
+            return Err(storage_message(
+                "encrypted vault uploads require S3 storage",
+            ));
+        };
+        let size_bytes = u64::try_from(content.len())
+            .map_err(|_| storage_message("upload content length is invalid"))?;
+        let content_length = i64::try_from(content.len())
+            .map_err(|_| storage_message("upload content length is invalid"))?;
+        let output = client
+            .put_object()
+            .bucket(bucket)
+            .key(object_key)
+            .content_type("application/octet-stream")
+            .checksum_sha256(checksum_sha256)
+            .content_length(content_length)
+            .body(aws_sdk_s3::primitives::ByteStream::from(content))
+            .send()
+            .await
+            .map_err(storage_error)?;
+
+        Ok(ObjectMetadata {
+            size_bytes,
+            checksum_sha256: Some(
+                output
+                    .checksum_sha256()
+                    .unwrap_or(checksum_sha256)
+                    .to_owned(),
+            ),
+            etag: output.e_tag().map(str::to_owned),
+        })
+    }
+
     pub async fn presign_upload_part(
         &self,
         object_key: &str,

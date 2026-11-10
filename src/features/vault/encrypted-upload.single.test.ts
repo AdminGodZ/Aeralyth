@@ -8,6 +8,7 @@ const vaultApi = vi.hoisted(() => ({
   getVaultContentUrl: vi.fn(),
   initVaultUpload: vi.fn(),
   publishVaultFoldersBatch: vi.fn(),
+  publishVaultInlineUploads: vi.fn(),
   publishVaultUpload: vi.fn(),
 }));
 
@@ -17,6 +18,7 @@ vi.mock("@/features/vault/vault-api", async (importOriginal) => ({
 }));
 
 import { uploadEncryptedSelections } from "@/features/vault/encrypted-upload";
+import { VaultApiError } from "@/features/vault/vault-api";
 
 const CIPHERTEXT_LENGTH = 24;
 
@@ -25,9 +27,14 @@ async function sha256Base64(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
   return btoa(String.fromCharCode(...new Uint8Array(digest)));
 }
 
+// An API without the inline route sends every small file through the
+// client-driven path; encrypted-upload.inline.test.ts covers inline batches.
 describe("pre-encrypted single-object uploads", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vaultApi.publishVaultInlineUploads.mockRejectedValue(
+      new VaultApiError("not found", 404),
+    );
     vaultApi.abortVaultUpload.mockResolvedValue(undefined);
     vaultApi.publishVaultFoldersBatch.mockResolvedValue({ folders: [] });
     vaultApi.publishVaultUpload.mockResolvedValue({

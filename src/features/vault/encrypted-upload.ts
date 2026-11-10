@@ -17,6 +17,10 @@ import {
 } from "@/features/vault/buffered-bytes";
 import { publishEncryptedFolderTree } from "@/features/vault/encrypted-folder-upload";
 import {
+  InlineUploadLane,
+  InlineUploadsUnavailableError,
+} from "@/features/vault/inline-upload-lane";
+import {
   asBufferSource,
   toArrayBuffer,
   VAULT_CRYPTO_CHUNK_BYTES,
@@ -35,19 +39,38 @@ import {
   getVaultPartUrls,
   initVaultUpload,
   publishVaultUpload,
+  VAULT_UPLOAD_CONTROL_REQUESTS,
   type VaultCompletedPart,
   type VaultMigrationNode,
+  type VaultPublishResponse,
   type VaultUploadPlan,
   type VaultUploadUrl,
 } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
+import { VAULT_INLINE_UPLOAD_MAX_BYTES } from "@/features/vault/vault-wire";
 import { baseName, parentDirectory } from "@/lib/paths";
 
 const VAULT_PRESIGN_BATCH_SIZE = 4;
 const VAULT_UPLOAD_CONCURRENCY = 4;
 const VAULT_PRESIGN_FLUSH_MS = 4;
-const VAULT_SMALL_FILE_CONCURRENCY_MAX = 3;
-const VAULT_CONCURRENT_FILE_MAX_BYTES = 8 * 1024 * 1024;
+// Every storage PUT of this tab shares the multipart ceiling, so concurrent
+// files never take the connections previews and downloads need.
+const vaultStoragePutSlots = new WeightedSemaphore(VAULT_UPLOAD_CONCURRENCY);
+const VAULT_DIRECT_FILE_CONCURRENCY_MAX = 4;
+const MEBIBYTE = 1024 * 1024;
+const VAULT_BUFFER_PART_BYTES = 32 * MEBIBYTE;
+// Ciphertext the client-driven files in flight may hold together: the four
+// uploading parts and the producer's next part that one multipart file
+// needs. Smaller files share that ceiling instead of taking turns.
+const VAULT_DIRECT_BUFFER_MEBIBYTES =
+  ((VAULT_UPLOAD_CONCURRENCY + 1) * VAULT_BUFFER_PART_BYTES) / MEBIBYTE;
+// Files this small cost more in round trips than in bytes, so they publish
+// through inline batches instead of one init, storage PUT and publish each.
+const VAULT_INLINE_FILE_MAX_BYTES = 1024 * 1024;
+// Enough files in flight to fill every batch request, bounded by the
+// ciphertext they keep in memory.
+const VAULT_INLINE_ACTIVE_FILES = 128;
+const VAULT_INLINE_ACTIVE_BYTES = 16 * 1024 * 1024;
 
 type PendingVaultPart = {
   partNumber: number;
@@ -103,9 +126,9 @@ export async function uploadEncryptedSelections({
   const shareSyncBatchId = beginShareDirectorySyncBatch();
 
   const fileConcurrency = detectedCryptoConcurrency(
-    VAULT_SMALL_FILE_CONCURRENCY_MAX,
+    VAULT_DIRECT_FILE_CONCURRENCY_MAX,
   );
-  const fileBudget = new WeightedSemaphore(fileConcurrency);
+  const fileBudget = new WeightedSemaphore(VAULT_DIRECT_BUFFER_MEBIBYTES);
   const operation = linkedAbortController(signal);
   const filesByParent = new Map<string, number[]>();
   const paths = selections.map((selection, index) => {
@@ -118,15 +141,35 @@ export async function uploadEncryptedSelections({
     filesByParent.set(parentPath, children);
     return path;
   });
+  // Inline files and client-driven files are admitted separately, so a large
+  // file never holds back the small ones and neither starves the other.
+  const inlineSupported =
+    VAULT_SINGLE_UPLOAD_MAX_CIPHERTEXT_BYTES >= VAULT_INLINE_UPLOAD_MAX_BYTES;
   const ready: number[] = [];
+  const inlineReady: number[] = [];
   let nextReady = 0;
+  let nextInlineReady = 0;
+  let directActive = 0;
+  let inlineActive = 0;
+  let inlineActiveBytes = 0;
+  let foldersPublishing = true;
   const active = new Set<Promise<void>>();
   let failure: { error: unknown } | undefined;
   const fail = (error: unknown) => {
     failure ??= { error };
     if (!operation.signal.aborted) operation.abort(error);
   };
-  const uploadFile = async (fileIndex: number) => {
+  const inlineLane = new InlineUploadLane({
+    csrfToken,
+    signal: operation.signal,
+    // Folder batches and client-driven files need brief control requests of
+    // their own; keep one of the server's slots free while they are running.
+    maxRequests: () =>
+      foldersPublishing || directActive > 0 || nextReady < ready.length
+        ? VAULT_UPLOAD_CONTROL_REQUESTS - 1
+        : VAULT_UPLOAD_CONTROL_REQUESTS,
+  });
+  const uploadFile = async (fileIndex: number, inline: boolean) => {
     assertNotAborted(operation.signal);
     onFileStart(fileIndex);
     const selection = selections[fileIndex];
@@ -136,7 +179,7 @@ export async function uploadEncryptedSelections({
       throw new Error("The selected file hierarchy is invalid.");
     }
     let fileProcessedBytes = 0;
-    await uploadEncryptedEntry({
+    const entry = {
       file: selection.file,
       name: baseName(path),
       parentId: parentId || null,
@@ -145,47 +188,96 @@ export async function uploadEncryptedSelections({
       signal: operation.signal,
       replacement: resolution?.replacementFiles.get(path),
       shareSyncBatchId,
-      // Keep large-file data exclusive until device profiling supports raising
-      // its buffer budget. Small init/finalization requests need no data permit.
-      acquireContentPermit: () =>
-        fileBudget.acquire(
-          selection.file.size <= VAULT_CONCURRENT_FILE_MAX_BYTES
-            ? 1
-            : fileConcurrency,
-          operation.signal,
-        ),
-      onChunk: (sourceBytes) => {
+      onChunk: (sourceBytes: number) => {
         processedBytes += sourceBytes;
         fileProcessedBytes += sourceBytes;
         onProgress(processedBytes, totalBytes, fileIndex, fileProcessedBytes);
       },
+    };
+    if (inline) {
+      try {
+        await uploadInlineEntry({ ...entry, lane: inlineLane });
+        onFileComplete(fileIndex);
+      } catch (error) {
+        if (!(error instanceof InlineUploadsUnavailableError)) throw error;
+        // An API without inline uploads still takes every file the usual
+        // way, at the client-driven lane's own concurrency: each of those
+        // files holds one of the owner's pending-upload slots.
+        ready.push(fileIndex);
+      }
+      return;
+    }
+    await uploadEncryptedEntry({
+      ...entry,
+      // Files hold the budget only while their ciphertext is buffered; the
+      // small init and publication requests around it need no data permit.
+      acquireContentPermit: (ciphertextLength) =>
+        fileBudget.acquire(
+          directBufferMebibytes(ciphertextLength),
+          operation.signal,
+        ),
     });
     onFileComplete(fileIndex);
   };
+  const start = (fileIndex: number, inline: boolean) => {
+    const bytes = selections[fileIndex].file.size;
+    if (inline) {
+      inlineActive += 1;
+      inlineActiveBytes += bytes;
+    } else {
+      directActive += 1;
+    }
+    const work = uploadFile(fileIndex, inline)
+      .catch((error) => {
+        if (!failure) onFileError?.(fileIndex);
+        fail(error);
+      })
+      .finally(() => {
+        active.delete(work);
+        if (inline) {
+          inlineActive -= 1;
+          inlineActiveBytes -= bytes;
+        } else {
+          directActive -= 1;
+        }
+        pump();
+        inlineLane.poke();
+      });
+    active.add(work);
+  };
   const pump = () => {
-    while (
-      !operation.signal.aborted &&
-      active.size < fileConcurrency &&
-      nextReady < ready.length
-    ) {
-      const fileIndex = ready[nextReady++];
-      const work = uploadFile(fileIndex)
-        .catch((error) => {
-          if (!failure) onFileError?.(fileIndex);
-          fail(error);
-        })
-        .finally(() => {
-          active.delete(work);
-          pump();
-        });
-      active.add(work);
+    while (!operation.signal.aborted) {
+      const inlineWaiting = nextInlineReady < inlineReady.length;
+      if (
+        inlineWaiting &&
+        inlineLane.available &&
+        inlineActive < VAULT_INLINE_ACTIVE_FILES &&
+        inlineActiveBytes < VAULT_INLINE_ACTIVE_BYTES
+      ) {
+        start(inlineReady[nextInlineReady++], true);
+      } else if (directActive < fileConcurrency && nextReady < ready.length) {
+        start(ready[nextReady++], false);
+      } else if (
+        directActive < fileConcurrency &&
+        inlineWaiting &&
+        !inlineLane.available
+      ) {
+        start(inlineReady[nextInlineReady++], false);
+      } else {
+        return;
+      }
     }
   };
   const onPublished = (path: string) => {
     const indices = filesByParent.get(path);
     if (!indices) return;
     filesByParent.delete(path);
-    for (const index of indices) ready.push(index);
+    for (const index of indices) {
+      const inline =
+        inlineSupported &&
+        selections[index].file.size <= VAULT_INLINE_FILE_MAX_BYTES;
+      (inline ? inlineReady : ready).push(index);
+    }
     pump();
   };
 
@@ -206,6 +298,8 @@ export async function uploadEncryptedSelections({
     } catch (error) {
       fail(error);
     }
+    foldersPublishing = false;
+    inlineLane.poke();
     // Completion may schedule the next ready file; drain all started work before
     // finishing the share-sync batch or propagating an operation failure.
     while (active.size > 0) await Promise.all(active);
@@ -361,6 +455,136 @@ export async function migrateEncryptedNode({
   }
 }
 
+/**
+ * Encrypts a small file completely and hands its ciphertext and signed record
+ * to the inline lane, which publishes it together with its neighbours.
+ */
+async function uploadInlineEntry({
+  file,
+  name,
+  parentId,
+  csrfToken,
+  client,
+  signal,
+  replacement,
+  shareSyncBatchId,
+  lane,
+  onChunk,
+}: {
+  file: File;
+  name: string;
+  parentId: string | null;
+  csrfToken: string;
+  client: VaultCryptoClient;
+  signal: AbortSignal;
+  replacement?: ExistingUploadNode;
+  shareSyncBatchId?: string;
+  lane: InlineUploadLane;
+  onChunk(bytes: number): void;
+}): Promise<void> {
+  const replacementVersion = getEncryptedReplacementVersion(replacement);
+  const started = await client.startEncryption({
+    ...(replacementVersion
+      ? {
+          nodeId: replacementVersion.nodeId,
+          generationNumber: replacementVersion.generationNumber + 1,
+          recordVersion: replacementVersion.recordVersion + 1,
+          previousRecordHash: replacementVersion.recordHash,
+        }
+      : {}),
+    parentId,
+    entryType: "file",
+    name,
+    mimeType: file.type || null,
+    plaintextBytes: file.size,
+    lastModified: file.lastModified,
+  });
+  try {
+    if (started.ciphertextLength > VAULT_INLINE_UPLOAD_MAX_BYTES) {
+      throw new InlineUploadsUnavailableError();
+    }
+    assertNotAborted(signal);
+    const content = await encryptSingleObject({
+      file,
+      started,
+      client,
+      signal,
+    });
+    let completed: Awaited<ReturnType<VaultCryptoClient["finalizeEncryption"]>>;
+    try {
+      completed = await client.finalizeEncryption(started.sessionId);
+    } catch (error) {
+      content.fill(0);
+      throw error;
+    }
+    const published = await lane.submit({
+      parentId,
+      chunkCount: started.chunkCount,
+      record: completed.record,
+      content,
+    });
+    if (
+      published.nodeId !== completed.nodeId ||
+      published.generationNumber !== completed.generationNumber ||
+      published.generationId !== completed.generationId ||
+      published.recordVersion !== completed.recordVersion
+    ) {
+      throw new Error("The encrypted upload publication response is invalid.");
+    }
+    onChunk(file.size);
+    syncPublishedShares({
+      published,
+      csrfToken,
+      client,
+      shareSyncBatchId,
+      replacement,
+      parentId,
+      entryType: "file",
+    });
+  } catch (error) {
+    await client
+      .abortEncryption(started.sessionId, started.nodeId)
+      .catch(() => undefined);
+    throw error;
+  }
+}
+
+function syncPublishedShares({
+  published,
+  csrfToken,
+  client,
+  shareSyncBatchId,
+  replacement,
+  parentId,
+  entryType,
+}: {
+  published: VaultPublishResponse;
+  csrfToken: string;
+  client: VaultCryptoClient;
+  shareSyncBatchId?: string;
+  replacement?: ExistingUploadNode;
+  parentId: string | null;
+  entryType: "file" | "folder";
+}): void {
+  if (!published.shareSyncRequired) return;
+  enqueueShareDirectorySync({
+    csrfToken,
+    client,
+    batchId: shareSyncBatchId,
+    job: {
+      ...published,
+      ...(shareSyncBatchId
+        ? {
+            contextCacheKey: replacement
+              ? published.nodeId
+              : (parentId ?? published.nodeId),
+          }
+        : {}),
+      entryType,
+    },
+  });
+}
+
 async function uploadEncryptedEntry({
   file,
   name,
@@ -381,7 +605,7 @@ async function uploadEncryptedEntry({
   signal: AbortSignal;
   replacement?: ExistingUploadNode;
   shareSyncBatchId?: string;
-  acquireContentPermit?(): Promise<() => void>;
+  acquireContentPermit?(ciphertextLength: number): Promise<() => void>;
   onChunk(bytes: number): void;
 }): Promise<{ nodeId: string }> {
   const replacementVersion = getEncryptedReplacementVersion(replacement);
@@ -418,7 +642,9 @@ async function uploadEncryptedEntry({
   let plan: VaultUploadPlan;
   try {
     if (file && singleObject) {
-      releaseSingleContent = await acquireContentPermit?.();
+      releaseSingleContent = await acquireContentPermit?.(
+        started.ciphertextLength,
+      );
       assertNotAborted(signal);
       const bytes = await encryptSingleObject({
         file,
@@ -471,7 +697,9 @@ async function uploadEncryptedEntry({
         releaseSingleContent?.();
       }
     } else if (file) {
-      const releaseContent = await acquireContentPermit?.();
+      const releaseContent = await acquireContentPermit?.(
+        started.ciphertextLength,
+      );
       try {
         assertNotAborted(signal);
         parts = await encryptAndUploadFile({
@@ -495,24 +723,15 @@ async function uploadEncryptedEntry({
       completed.record,
       signal,
     );
-    if (published.shareSyncRequired) {
-      enqueueShareDirectorySync({
-        csrfToken,
-        client,
-        batchId: shareSyncBatchId,
-        job: {
-          ...published,
-          ...(shareSyncBatchId
-            ? {
-                contextCacheKey: replacement
-                  ? published.nodeId
-                  : (parentId ?? published.nodeId),
-              }
-            : {}),
-          entryType: file ? "file" : "folder",
-        },
-      });
-    }
+    syncPublishedShares({
+      published,
+      csrfToken,
+      client,
+      shareSyncBatchId,
+      replacement,
+      parentId,
+      entryType: file ? "file" : "folder",
+    });
     return { nodeId: completed.nodeId };
   } catch (error) {
     await client
@@ -521,6 +740,20 @@ async function uploadEncryptedEntry({
     await abortVaultUpload(csrfToken, plan.uploadId).catch(() => undefined);
     throw error;
   }
+}
+
+/** The share of the direct buffer budget one file's ciphertext occupies. */
+function directBufferMebibytes(ciphertextLength: number): number {
+  if (ciphertextLength <= VAULT_BUFFER_PART_BYTES) {
+    return Math.max(1, Math.ceil(ciphertextLength / MEBIBYTE));
+  }
+  const parts = Math.ceil(ciphertextLength / VAULT_BUFFER_PART_BYTES);
+  return Math.min(
+    VAULT_DIRECT_BUFFER_MEBIBYTES,
+    ((Math.min(parts, VAULT_UPLOAD_CONCURRENCY) + 1) *
+      VAULT_BUFFER_PART_BYTES) /
+      MEBIBYTE,
+  );
 }
 
 export function getEncryptedReplacementVersion(
@@ -1012,26 +1245,31 @@ async function putEncryptedBytes(
   signal: AbortSignal,
   refreshUrl?: () => Promise<string>,
 ): Promise<Response> {
-  return runUploadWithRetry({
-    initialUrl: url,
-    refreshUrl,
-    request: async (candidateUrl) => {
-      const response = await fetch(candidateUrl, {
-        method: "PUT",
-        headers: {
-          "Content-Type": "application/octet-stream",
-          "x-amz-checksum-sha256": checksum,
-        },
-        body: asBufferSource(content),
-        signal,
-      });
-      if (!response.ok) {
-        throw await uploadRequestErrorFromResponse(response);
-      }
-      return response;
-    },
-    signal,
-  });
+  const release = await vaultStoragePutSlots.acquire(1, signal);
+  try {
+    return await runUploadWithRetry({
+      initialUrl: url,
+      refreshUrl,
+      request: async (candidateUrl) => {
+        const response = await fetch(candidateUrl, {
+          method: "PUT",
+          headers: {
+            "Content-Type": "application/octet-stream",
+            "x-amz-checksum-sha256": checksum,
+          },
+          body: asBufferSource(content),
+          signal,
+        });
+        if (!response.ok) {
+          throw await uploadRequestErrorFromResponse(response);
+        }
+        return response;
+      },
+      signal,
+    });
+  } finally {
+    release();
+  }
 }
 
 function collectFolders(selections: EncryptedUploadSelection[]): string[] {
