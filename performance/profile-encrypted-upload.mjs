@@ -112,13 +112,18 @@ async function bundle(label, source) {
                 "publishVaultFoldersBatch",
                 "publishVaultUpload",
               ];
+              // The profile measures the client-driven pipeline, so its API
+              // has no inline route and small files fall back to that path.
               return {
-                contents: names
-                  .map(
+                contents: [
+                  ...names.map(
                     (name) =>
                       `export const ${name} = (...args) => ${fixture}.${name}(...args);`,
-                  )
-                  .join("\n"),
+                  ),
+                  "export const VAULT_UPLOAD_CONTROL_REQUESTS = 3;",
+                  "export class VaultApiError extends Error { constructor(message, status) { super(message); this.status = status; } }",
+                  "export const publishVaultInlineUploads = async () => { throw new VaultApiError('not found', 404); };",
+                ].join("\n"),
               };
             }
             if (args.path === "share-directory-sync") {

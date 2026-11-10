@@ -16,6 +16,16 @@ const _: () = assert!(MAX_PENDING_UPLOADS_PER_SHARE_LINK <= MAX_PENDING_SHARE_LI
 const _: () = assert!(MAX_PENDING_SHARE_LINK_UPLOADS < MAX_PENDING_UPLOADS);
 const _: () = assert!(UNTOUCHED_SHARE_LINK_UPLOAD_SECONDS < PENDING_UPLOAD_SECONDS);
 
+const PENDING_UPLOADS_FULL: &str = "too many uploads are pending";
+const RESERVATION_CHANGED: &str = "storage reservation changed; retry the upload";
+
+/// True when a reservation lost only to the owner's other uploads in flight,
+/// so the same reservation can succeed as soon as one of them completes.
+pub fn is_reservation_contention(failure: &actix_web::Error) -> bool {
+    let message = failure.to_string();
+    message == PENDING_UPLOADS_FULL || message == RESERVATION_CHANGED
+}
+
 pub fn initial_pending_upload_seconds(share_link_id: Option<&str>) -> i64 {
     if share_link_id.is_some() {
         UNTOUCHED_SHARE_LINK_UPLOAD_SECONDS
@@ -94,7 +104,7 @@ where
     let pending_uploads: i64 = usage.get("pending_uploads");
 
     if pending_uploads >= MAX_PENDING_UPLOADS {
-        return Err(error::ErrorTooManyRequests("too many uploads are pending"));
+        return Err(error::ErrorTooManyRequests(PENDING_UPLOADS_FULL));
     }
     let quota_total =
         i128::from(used_bytes) + i128::from(reserved_bytes) + i128::from(amount.quota_delta);
@@ -102,9 +112,7 @@ where
         return Err(error::ErrorPayloadTooLarge("storage quota exceeded"));
     }
 
-    Err(error::ErrorConflict(
-        "storage reservation changed; retry the upload",
-    ))
+    Err(error::ErrorConflict(RESERVATION_CHANGED))
 }
 
 // Runs after the ledger UPDATE above, which row-locks the owner's usage. Concurrent
@@ -171,13 +179,31 @@ pub fn reservation_amount(
 mod tests {
     use super::{
         MAX_PENDING_SHARE_LINK_UPLOADS, MAX_PENDING_UPLOADS, MAX_PENDING_UPLOADS_PER_SHARE_LINK,
-        PENDING_UPLOAD_SECONDS, ReservationAmount, UNTOUCHED_SHARE_LINK_UPLOAD_SECONDS,
-        initial_pending_upload_seconds, reservation_amount, reserve_upload_capacity,
+        PENDING_UPLOAD_SECONDS, PENDING_UPLOADS_FULL, RESERVATION_CHANGED, ReservationAmount,
+        UNTOUCHED_SHARE_LINK_UPLOAD_SECONDS, initial_pending_upload_seconds,
+        is_reservation_contention, reservation_amount, reserve_upload_capacity,
         share_link_pending_limit_error,
     };
+    use actix_web::error;
     use actix_web::http::StatusCode;
     use deadpool_postgres::{Manager, ManagerConfig, Pool, RecyclingMethod, Runtime};
     use tokio_postgres::NoTls;
+
+    #[test]
+    fn only_reservation_races_count_as_contention() {
+        assert!(is_reservation_contention(&error::ErrorTooManyRequests(
+            PENDING_UPLOADS_FULL
+        )));
+        assert!(is_reservation_contention(&error::ErrorConflict(
+            RESERVATION_CHANGED
+        )));
+        assert!(!is_reservation_contention(&error::ErrorPayloadTooLarge(
+            "storage quota exceeded"
+        )));
+        assert!(!is_reservation_contention(&error::ErrorConflict(
+            "another encrypted generation is already uploading"
+        )));
+    }
 
     #[test]
     fn share_links_leave_pending_slots_for_the_owner() {

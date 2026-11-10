@@ -159,6 +159,17 @@ evenly between interactive work (folder browsing, downloads, public share-link
 views) and bulk tree work (trash, restore, delete, archive manifests), so a large
 delete never blocks browsing.
 
+Encrypted files of up to 1 MiB are published in batches through
+`POST /api/vault/uploads/inline`: the browser sends the ciphertext and signed
+records of many files in one request and the API writes each object to the
+bucket itself, instead of the browser spending an init request, a CORS
+preflight, a storage PUT and a publish request per file. That ciphertext
+therefore passes through the service on its way to the bucket. A batch holds
+one upload-control permit, carries at most 9 MiB, and keeps no more than four
+uploads pending at a time; each file still takes the same reservation, lease,
+and publication steps as a client-driven upload. Larger files continue to go
+from the browser straight to the bucket.
+
 `AERALYTH_COOKIE_SECURE` defaults to `false` for debug builds and `true` for
 release builds.
 

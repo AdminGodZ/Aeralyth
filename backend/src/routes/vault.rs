@@ -54,8 +54,11 @@ const MAX_METADATA_PLAN_EXPANDED_NODES: usize = 512;
 const MAX_METADATA_PLAN_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const SHARED_METADATA_PLAN_CONCURRENCY: usize = 8;
 const VAULT_PUBLICATION_CONTENT_TYPE: &str = "application/vnd.aeralyth.vault-publication";
+#[path = "vault_inline_uploads.rs"]
+mod inline_uploads;
 #[path = "vault_metadata_paging.rs"]
 mod metadata_paging;
+pub use inline_uploads::publish_inline_uploads;
 
 const OWNED_METADATA_PLANS_QUERY: &str = "
     WITH requested AS (
@@ -1854,6 +1857,35 @@ pub async fn init_upload(
     let body =
         parse_json_body::<VaultUploadInitRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT).await?;
     require_configured_vault(&state, &user).await?;
+    let content_checksum = body
+        .checksum_sha256
+        .as_deref()
+        .map(validate_sha256_checksum)
+        .transpose()?;
+    let (upload, created) = stage_vault_upload(&state, &user, &body).await?;
+    let plan = upload_plan_with_content_url(
+        &state,
+        &request,
+        &user,
+        &upload,
+        content_checksum.as_deref(),
+    )
+    .await?;
+    if created {
+        return Ok(HttpResponse::Created().json(plan));
+    }
+    state.db.release_request_connection().await;
+    Ok(HttpResponse::Ok().json(plan))
+}
+
+/// Reserves capacity for one encrypted generation and stages its storage
+/// target, or resumes the pending upload of that same generation. The flag is
+/// true when this call created the upload.
+async fn stage_vault_upload(
+    state: &AppState,
+    user: &SessionPrincipal,
+    body: &VaultUploadInitRequest,
+) -> Result<(VaultUpload, bool)> {
     validate_node_id(&body.node_id)?;
     let generation_id = decode_fixed::<16>(&body.generation_id, "generation id")?.to_vec();
     let generation_number = i64::try_from(body.generation_number)
@@ -1869,12 +1901,7 @@ pub async fn init_upload(
         body.ciphertext_length,
         u64::from(body.chunk_count),
     )?;
-    let content_checksum = body
-        .checksum_sha256
-        .as_deref()
-        .map(validate_sha256_checksum)
-        .transpose()?;
-    let parent_id = validate_encrypted_parent(&state, &user, body.parent_id.as_deref()).await?;
+    let parent_id = validate_encrypted_parent(state, user, body.parent_id.as_deref()).await?;
     let migration_expected_size = if body.migration {
         if state.config.e2ee_mode != E2eeMode::Migrate || generation_number != 1 {
             return Err(error::ErrorBadRequest(
@@ -1932,19 +1959,10 @@ pub async fn init_upload(
         .map_err(crate::db::http_error)?
     {
         let upload_id: String = row.get("id");
-        let upload = get_upload(&state, &user.id, &upload_id)
+        let upload = get_upload(state, &user.id, &upload_id)
             .await?
             .ok_or_else(|| error::ErrorConflict("upload disappeared"))?;
-        let plan = upload_plan_with_content_url(
-            &state,
-            &request,
-            &user,
-            &upload,
-            content_checksum.as_deref(),
-        )
-        .await?;
-        state.db.release_request_connection().await;
-        return Ok(HttpResponse::Ok().json(plan));
+        return Ok((upload, false));
     }
 
     let upload_id = format!("vup_{}", random_id()?);
@@ -2026,19 +2044,10 @@ pub async fn init_upload(
             .map_err(error::ErrorInternalServerError)?;
         drop(client);
         state.db.release_request_connection().await;
-        let upload = get_upload(&state, &user.id, &existing_upload_id)
+        let upload = get_upload(state, &user.id, &existing_upload_id)
             .await?
             .ok_or_else(|| error::ErrorConflict("upload disappeared"))?;
-        let plan = upload_plan_with_content_url(
-            &state,
-            &request,
-            &user,
-            &upload,
-            content_checksum.as_deref(),
-        )
-        .await?;
-        state.db.release_request_connection().await;
-        return Ok(HttpResponse::Ok().json(plan));
+        return Ok((upload, false));
     }
     let competing_upload = query_opt_cached(
         &transaction,
@@ -2205,19 +2214,11 @@ pub async fn init_upload(
             "upload was canceled during storage initialization",
         ));
     }
-    let upload = get_upload(&state, &user.id, &upload_id)
+    let upload = get_upload(state, &user.id, &upload_id)
         .await?
         .ok_or_else(|| error::ErrorInternalServerError("upload was not persisted"))?;
-    let plan = upload_plan_with_content_url(
-        &state,
-        &request,
-        &user,
-        &upload,
-        content_checksum.as_deref(),
-    )
-    .await?;
 
-    Ok(HttpResponse::Created().json(plan))
+    Ok((upload, true))
 }
 
 pub async fn presign_content(
@@ -2256,23 +2257,7 @@ async fn sign_single_upload_content(
     upload: &VaultUpload,
     checksum: &str,
 ) -> Result<Option<UploadUrlResponse>> {
-    let reserved = state
-        .db
-        .execute(
-            "
-                UPDATE vault_uploads
-                SET checksum_sha256 = $1,
-                    write_expires_at = now() + interval '1 hour',
-                    expires_at = now() + interval '1 hour'
-                WHERE id = $2 AND owner_id = $3 AND status = 'pending'
-                  AND expires_at > now()
-                  AND (checksum_sha256 IS NULL OR checksum_sha256 = $1)
-            ",
-            &[&checksum, &upload.id, &user.id],
-        )
-        .await
-        .map_err(crate::db::http_error)?;
-    if reserved != 1 {
+    if !bind_single_upload_checksum(state, &user.id, &upload.id, checksum).await? {
         return Ok(None);
     }
     let object_key = upload
@@ -2306,6 +2291,33 @@ async fn sign_single_upload_content(
         url,
         content_length,
     }))
+}
+
+/// Binds a pending single-object upload to the checksum its object must
+/// carry and opens its write lease. False means it is bound to another one.
+async fn bind_single_upload_checksum(
+    state: &AppState,
+    owner_id: &str,
+    upload_id: &str,
+    checksum: &str,
+) -> Result<bool> {
+    let reserved = state
+        .db
+        .execute(
+            "
+                UPDATE vault_uploads
+                SET checksum_sha256 = $1,
+                    write_expires_at = now() + interval '1 hour',
+                    expires_at = now() + interval '1 hour'
+                WHERE id = $2 AND owner_id = $3 AND status = 'pending'
+                  AND expires_at > now()
+                  AND (checksum_sha256 IS NULL OR checksum_sha256 = $1)
+            ",
+            &[&checksum, &upload_id, &owner_id],
+        )
+        .await
+        .map_err(crate::db::http_error)?;
+    Ok(reserved == 1)
 }
 
 /// The upload plan, carrying the signed single-object PUT when the client
@@ -2973,6 +2985,13 @@ pub async fn abort_upload(
     if upload.status == "published" {
         return Ok(HttpResponse::Conflict().body("published uploads cannot be aborted"));
     }
+    abort_vault_upload_row(&state, &user.id, &upload.id).await?;
+
+    Ok(HttpResponse::Accepted().finish())
+}
+
+/// Aborts an unpublished upload and schedules its staged object for deletion.
+async fn abort_vault_upload_row(state: &AppState, owner_id: &str, upload_id: &str) -> Result<()> {
     state
         .db
         .execute(
@@ -3010,12 +3029,11 @@ pub async fn abort_upload(
                     EXCLUDED.available_at
                   )
             ",
-            &[&upload.id, &user.id],
+            &[&upload_id, &owner_id],
         )
         .await
         .map_err(crate::db::http_error)?;
-
-    Ok(HttpResponse::Accepted().finish())
+    Ok(())
 }
 
 pub async fn share_plan(
@@ -6016,11 +6034,12 @@ async fn publish_record_transaction(
     })
 }
 
-async fn decode_and_verify_node_record(
+/// The caller's active signing keys, read before CPU validation so no
+/// database lease is held while records are verified.
+async fn active_signing_identities(
     state: &AppState,
     user: &SessionPrincipal,
-    body: NodePublication,
-) -> Result<DecodedNodeRecord> {
+) -> Result<Vec<(i64, Vec<u8>)>> {
     let identities = state
         .db
         .query(
@@ -6042,6 +6061,15 @@ async fn decode_and_verify_node_record(
         })
         .collect::<Vec<_>>();
     state.db.release_request_connection().await;
+    Ok(identities)
+}
+
+async fn decode_and_verify_node_record(
+    state: &AppState,
+    user: &SessionPrincipal,
+    body: NodePublication,
+) -> Result<DecodedNodeRecord> {
+    let identities = active_signing_identities(state, user).await?;
     state
         .vault_validation
         .run(&user.id, move || {
@@ -6063,27 +6091,7 @@ async fn decode_and_verify_folder_batch(
     user: &SessionPrincipal,
     records: Vec<NodePublication>,
 ) -> Result<Vec<DecodedNodeRecord>> {
-    let identities = state
-        .db
-        .query(
-            "
-                SELECT key_version, ed25519_public_key
-                FROM vault_identity_keys
-                WHERE user_id = $1 AND status = 'active'
-            ",
-            &[&user.id],
-        )
-        .await
-        .map_err(crate::db::http_error)?
-        .into_iter()
-        .map(|row| {
-            (
-                row.get::<_, i64>("key_version"),
-                row.get::<_, Vec<u8>>("ed25519_public_key"),
-            )
-        })
-        .collect::<Vec<_>>();
-    state.db.release_request_connection().await;
+    let identities = active_signing_identities(state, user).await?;
     state
         .vault_validation
         .run(&user.id, move || {
@@ -6866,6 +6874,19 @@ async fn current_publish_response(
     user: &SessionPrincipal,
     node_id: &str,
 ) -> Result<HttpResponse> {
+    Ok(
+        match current_publish_record(state, &user.id, node_id).await? {
+            Some(published) => HttpResponse::Ok().json(published),
+            None => HttpResponse::Conflict().body("published node is unavailable"),
+        },
+    )
+}
+
+async fn current_publish_record(
+    state: &AppState,
+    owner_id: &str,
+    node_id: &str,
+) -> Result<Option<PublishResponse>> {
     let row = state
         .db
         .query_opt(
@@ -6881,14 +6902,11 @@ async fn current_publish_response(
                 INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
                 WHERE files.id = $1 AND files.owner_id = $2
             ",
-            &[&node_id, &user.id],
+            &[&node_id, &owner_id],
         )
         .await
         .map_err(crate::db::http_error)?;
-    let Some(row) = row else {
-        return Ok(HttpResponse::Conflict().body("published node is unavailable"));
-    };
-    Ok(HttpResponse::Ok().json(PublishResponse {
+    Ok(row.map(|row| PublishResponse {
         node_id: node_id.to_owned(),
         generation_number: row.get("current_generation_number"),
         generation_id: encode_bytes(row.get::<_, Vec<u8>>("current_generation_id")),

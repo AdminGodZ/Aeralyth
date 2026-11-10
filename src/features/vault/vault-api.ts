@@ -18,9 +18,11 @@ import { fromBase64Url, toArrayBuffer } from "@/features/vault/protocol";
 import {
   encodeCreateSharePublication,
   encodeFolderBatchPublication,
+  encodeInlineUploadBatch,
   encodeNodePublication,
   encodePublishEpochPublication,
   encodeShareDirectoryPublication,
+  type InlineUploadEntry,
   VAULT_PUBLICATION_CONTENT_TYPE,
 } from "@/features/vault/vault-wire";
 
@@ -177,20 +179,34 @@ const vaultInteractiveOperationSlots = new WeightedSemaphore(1);
 // they get their own lane instead of queueing behind tree and share work.
 // Two leaves headroom for the upload inits that share that server limit.
 const vaultPublishSlots = new WeightedSemaphore(2);
+// Every request the server admits through that per-user upload-control limit
+// queues here instead of being shed: an inline batch holds its permit for a
+// whole batch, so unqueued inits and folder batches would exhaust their
+// retries against it.
+export const VAULT_UPLOAD_CONTROL_REQUESTS = 3;
+const VAULT_UPLOAD_CONTROL_ATTEMPTS = 6;
+const vaultUploadControlSlots = new WeightedSemaphore(
+  VAULT_UPLOAD_CONTROL_REQUESTS,
+);
 
 async function runVaultRecursiveOperation<T>(
   operation: () => Promise<T>,
   signal?: AbortSignal,
   slots: WeightedSemaphore | null = vaultRecursiveOperationSlots,
+  uploadControl = false,
 ): Promise<T> {
+  const attempts = uploadControl
+    ? VAULT_UPLOAD_CONTROL_ATTEMPTS
+    : VAULT_RECURSIVE_OPERATION_ATTEMPTS;
   let lastError: unknown;
-  for (
-    let attempt = 0;
-    attempt < VAULT_RECURSIVE_OPERATION_ATTEMPTS;
-    attempt += 1
-  ) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     const release = slots ? await slots.acquire(1, signal) : null;
+    let releaseControl: (() => void) | null = null;
     try {
+      // Always the innermost lane, so the lanes cannot wait on one another.
+      releaseControl = uploadControl
+        ? await vaultUploadControlSlots.acquire(1, signal)
+        : null;
       return await operation();
     } catch (error) {
       lastError = error;
@@ -198,12 +214,13 @@ async function runVaultRecursiveOperation<T>(
         signal?.aborted ||
         !(error instanceof VaultApiError) ||
         ![429, 503].includes(error.status) ||
-        attempt + 1 >= VAULT_RECURSIVE_OPERATION_ATTEMPTS
+        attempt + 1 >= attempts
       ) {
         throw error;
       }
     } finally {
       // A capacity backoff must not hold the lane other operations wait on.
+      releaseControl?.();
       release?.();
     }
     await waitForVaultCapacity(
@@ -505,6 +522,14 @@ export function rewrapVaultPassword(
   );
 }
 
+function runVaultUploadControl<T>(
+  operation: () => Promise<T>,
+  signal?: AbortSignal,
+  slots: WeightedSemaphore | null = null,
+): Promise<T> {
+  return runVaultRecursiveOperation(operation, signal, slots, true);
+}
+
 export function initVaultUpload(
   csrfToken: string,
   payload: {
@@ -520,7 +545,10 @@ export function initVaultUpload(
   },
   signal?: AbortSignal,
 ): Promise<VaultUploadPlan> {
-  return vaultMutation("/api/vault/uploads", csrfToken, payload, signal);
+  return runVaultUploadControl(
+    () => vaultMutation("/api/vault/uploads", csrfToken, payload, signal),
+    signal,
+  );
 }
 
 export function claimVaultMigration(
@@ -536,10 +564,14 @@ export function getVaultContentUrl(
   checksumSha256: string,
   signal?: AbortSignal,
 ): Promise<VaultUploadUrl> {
-  return vaultMutation(
-    `/api/vault/uploads/${encodeURIComponent(uploadId)}/content-url`,
-    csrfToken,
-    { checksumSha256 },
+  return runVaultUploadControl(
+    () =>
+      vaultMutation(
+        `/api/vault/uploads/${encodeURIComponent(uploadId)}/content-url`,
+        csrfToken,
+        { checksumSha256 },
+        signal,
+      ),
     signal,
   );
 }
@@ -551,10 +583,14 @@ export function getVaultPartUrl(
   checksumSha256: string,
   signal?: AbortSignal,
 ): Promise<VaultUploadUrl> {
-  return vaultMutation(
-    `/api/vault/uploads/${encodeURIComponent(uploadId)}/parts/${partNumber}`,
-    csrfToken,
-    { checksumSha256 },
+  return runVaultUploadControl(
+    () =>
+      vaultMutation(
+        `/api/vault/uploads/${encodeURIComponent(uploadId)}/parts/${partNumber}`,
+        csrfToken,
+        { checksumSha256 },
+        signal,
+      ),
     signal,
   );
 }
@@ -565,10 +601,14 @@ export function getVaultPartUrls(
   parts: Array<{ partNumber: number; checksumSha256: string }>,
   signal?: AbortSignal,
 ): Promise<{ parts: VaultPartUploadUrl[] }> {
-  return vaultMutation(
-    `/api/vault/uploads/${encodeURIComponent(uploadId)}/parts`,
-    csrfToken,
-    { parts },
+  return runVaultUploadControl(
+    () =>
+      vaultMutation(
+        `/api/vault/uploads/${encodeURIComponent(uploadId)}/parts`,
+        csrfToken,
+        { parts },
+        signal,
+      ),
     signal,
   );
 }
@@ -581,7 +621,7 @@ export function publishVaultUpload(
   signal?: AbortSignal,
 ): Promise<VaultPublishResponse> {
   const payload = encodeNodePublication(parts, record);
-  return runVaultRecursiveOperation(
+  return runVaultUploadControl(
     () =>
       vaultBinaryMutation(
         `/api/vault/uploads/${encodeURIComponent(uploadId)}/publish`,
@@ -594,30 +634,66 @@ export function publishVaultUpload(
   );
 }
 
+export type VaultInlineUploadResult =
+  | { published: VaultPublishResponse; failed?: undefined }
+  | { published?: undefined; failed: { status: number; message: string } };
+
+/**
+ * Publishes small encrypted files with their ciphertext in one request. Each
+ * file succeeds or fails on its own; repeating a batch returns the records an
+ * earlier attempt already published.
+ */
+export function publishVaultInlineUploads(
+  csrfToken: string,
+  uploads: InlineUploadEntry[],
+  signal?: AbortSignal,
+): Promise<{ results: VaultInlineUploadResult[] }> {
+  const payload = encodeInlineUploadBatch(uploads);
+  const request = () =>
+    vaultBinaryMutation<{ results: VaultInlineUploadResult[] }>(
+      "/api/vault/uploads/inline",
+      csrfToken,
+      payload,
+      signal,
+    );
+  return runVaultUploadControl(async () => {
+    try {
+      return await request();
+    } catch (error) {
+      if (signal?.aborted || error instanceof VaultApiError) throw error;
+      return request();
+    }
+  }, signal);
+}
+
 export async function publishVaultFoldersBatch(
   csrfToken: string,
   records: VaultNodeRecord[],
   signal?: AbortSignal,
 ): Promise<{ folders: VaultPublishResponse[] }> {
   const payload = encodeFolderBatchPublication(records);
-  return runVaultRecursiveOperation(async () => {
-    try {
-      return await vaultBinaryMutation(
-        "/api/vault/folders/batch",
-        csrfToken,
-        payload,
-        signal,
-      );
-    } catch (error) {
-      if (signal?.aborted || error instanceof VaultApiError) throw error;
-      return vaultBinaryMutation(
-        "/api/vault/folders/batch",
-        csrfToken,
-        payload,
-        signal,
-      );
-    }
-  }, signal);
+  return runVaultUploadControl(
+    async () => {
+      try {
+        return await vaultBinaryMutation(
+          "/api/vault/folders/batch",
+          csrfToken,
+          payload,
+          signal,
+        );
+      } catch (error) {
+        if (signal?.aborted || error instanceof VaultApiError) throw error;
+        return vaultBinaryMutation(
+          "/api/vault/folders/batch",
+          csrfToken,
+          payload,
+          signal,
+        );
+      }
+    },
+    signal,
+    vaultRecursiveOperationSlots,
+  );
 }
 
 export function getShareSyncJobs(
@@ -637,7 +713,7 @@ export async function publishShareDirectory(
   signal?: AbortSignal,
 ): Promise<void> {
   const publication = encodeShareDirectoryPublication(payload);
-  await runVaultRecursiveOperation(
+  await runVaultUploadControl(
     () =>
       vaultBinaryMutation(
         `/api/vault/share-sync-jobs/${encodeURIComponent(job.nodeId)}`,
@@ -646,6 +722,7 @@ export async function publishShareDirectory(
         signal,
       ),
     signal,
+    vaultRecursiveOperationSlots,
   );
 }
 

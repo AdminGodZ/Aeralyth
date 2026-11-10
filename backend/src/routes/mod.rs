@@ -219,6 +219,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
                             "/folders/batch",
                             web::post().to(vault::publish_folders_batch),
                         )
+                        .route(
+                            "/uploads/inline",
+                            web::post().to(vault::publish_inline_uploads),
+                        )
                         .route("/uploads/{id}", web::delete().to(vault::abort_upload))
                         .route(
                             "/nodes/metadata-plans",
