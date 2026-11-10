@@ -1,7 +1,7 @@
 import { Writer } from "@/features/archive/zip";
+import { ZIP_ARCHIVE_SAFETY_LIMIT_ERROR } from "@/features/dashboard/zip-archive-limit";
 
-export const ZIP_ARCHIVE_SAFETY_LIMIT_ERROR =
-  "The ZIP archive exceeds the browser safety limit.";
+export { ZIP_ARCHIVE_SAFETY_LIMIT_ERROR };
 
 export class BoundedBlobWriter extends Writer<Blob> {
   private readonly chunks: ArrayBuffer[] = [];

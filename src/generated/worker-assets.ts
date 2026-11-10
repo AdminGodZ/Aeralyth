@@ -2,6 +2,6 @@
 export const VAULT_WORKER_URL =
   "/workers/vault.db496e717e070a75edd5435cdcdefc81beed1ca2efe230e999d5275f2af74a14.worker.js" as const;
 export const FOLDER_ZIP_WORKER_URL =
-  "/workers/folder-zip.6532b699798e0eff2b5a72db5a4189ba98e978cfbedee7a769711d7352c5982f.worker.js" as const;
+  "/workers/folder-zip.a1d5ae497c261506063c0ef2ba198de43e36df089634a56601e80643dee53dea.worker.js" as const;
 export const UPLOAD_CHECKSUM_WORKER_URL =
   "/workers/upload-checksum.2863e75a2cfc9cee4e1607c26d0ac16f45dac04306c8ff963eaaf11284d8dbad.worker.js" as const;
