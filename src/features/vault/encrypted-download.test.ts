@@ -360,6 +360,71 @@ describe("encrypted download buffering", () => {
     expect(await reader.read()).toEqual({ done: true, value: undefined });
   });
 
+  it("fetches nothing past the first chunk until a reader takes it", async () => {
+    const chunkBytes = VAULT_CRYPTO_CHUNK_BYTES + 16;
+    const ciphertextLength = 3 * chunkBytes;
+    const pieceBytes = 256 * 1024;
+    let deliveredBytes = 0;
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response(
+            new ReadableStream<Uint8Array>(
+              {
+                pull(controller) {
+                  const bytes = Math.min(
+                    pieceBytes,
+                    ciphertextLength - deliveredBytes,
+                  );
+                  deliveredBytes += bytes;
+                  controller.enqueue(new Uint8Array(bytes));
+                  if (deliveredBytes === ciphertextLength) controller.close();
+                },
+              },
+              { highWaterMark: 0 },
+            ),
+          ),
+      ),
+    );
+    const streamManifest: VaultManifest = {
+      ...manifest,
+      plaintextBytes: 3,
+      paddedBytes: 3,
+      chunkCount: 3,
+    };
+    const decryptChunk = vi.fn(
+      async (_sessionId: string, chunkIndex: number) => ({
+        plaintext: Uint8Array.of(chunkIndex + 10).buffer,
+        plaintextBytes: 1,
+      }),
+    );
+    const stream = readEncryptedFileStream({
+      plan: { ...testPlan(ciphertextLength), chunkCount: 3 },
+      manifest: streamManifest,
+      client: {
+        async startDecryption() {
+          return { sessionId: "stream-session", manifest: streamManifest };
+        },
+        decryptChunk,
+        async finalizeDecryption() {},
+        async abortDecryption() {},
+      } as unknown as VaultCryptoClient,
+    });
+
+    await vi.waitFor(() => expect(decryptChunk).toHaveBeenCalledOnce());
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(decryptChunk).toHaveBeenCalledOnce();
+    expect(deliveredBytes).toBeLessThan(chunkBytes + pieceBytes);
+
+    const reader = stream.getReader();
+    expect(await reader.read()).toMatchObject({ value: Uint8Array.of(10) });
+    await vi.waitFor(() => expect(decryptChunk).toHaveBeenCalledTimes(3));
+    expect(await reader.read()).toMatchObject({ value: Uint8Array.of(11) });
+    expect(await reader.read()).toMatchObject({ value: Uint8Array.of(12) });
+    expect(await reader.read()).toEqual({ done: true, value: undefined });
+  });
+
   it("fetches only complete authenticated chunks for a bounded preview and marks verification partial", async () => {
     const encryptedChunkBytes = VAULT_CRYPTO_CHUNK_BYTES + 16;
     const prefixPlan = { ...testPlan(encryptedChunkBytes * 3), chunkCount: 3 };
@@ -516,9 +581,7 @@ describe("encrypted download buffering", () => {
       client: client as unknown as VaultCryptoClient,
       signal: operation.signal,
     });
-    await vi.waitFor(() =>
-      expect(client.decryptChunk).toHaveBeenCalledTimes(2),
-    );
+    await vi.waitFor(() => expect(client.decryptChunk).toHaveBeenCalledOnce());
     operation.abort(new Error("stop"));
     await vi.waitFor(() =>
       expect(client.abortDecryption).toHaveBeenCalledOnce(),

@@ -1,4 +1,8 @@
 import {
+  type ArchiveEntryPrefetch,
+  prefetchArchiveEntries,
+} from "@/features/archive/archive-entry-prefetch";
+import {
   archivePercentage,
   readEncryptedArchiveFileStream,
   readLegacyArchiveFileStream,
@@ -11,10 +15,7 @@ import {
   triggerBlobDownload,
 } from "@/features/archive/browser-archive";
 import { archiveCompressionLevel } from "@/features/archive/compression-policy";
-import {
-  type OpenedEncryptedEntry,
-  prefetchEncryptedEntries,
-} from "@/features/archive/encrypted-entry-prefetch";
+import type { OpenedEncryptedEntry } from "@/features/archive/encrypted-entry-prefetch";
 import { createAnimationFrameProgressCoalescer } from "@/features/uploads/progress-coalescer";
 import type {
   VaultDownloadPlan,
@@ -107,6 +108,7 @@ export async function downloadRepositoryArchive({
   const destination = await createStreamingZipDestination({
     totalSourceBytes: manifestSummary.totalBytes,
   });
+  let archiveEntries: ArchiveEntryPrefetch | null = null;
 
   try {
     await destination.zipWriter.add(`${archiveRoot}/`, undefined, {
@@ -117,16 +119,24 @@ export async function downloadRepositoryArchive({
     while (true) {
       // Parent keys can be required to open children, so pages and entries
       // are opened in the stable parent-first order returned by the server,
-      // a few ahead of the entry currently being archived.
-      const openEncryptedEntry = prefetchEncryptedEntries(
-        manifestPage.entries,
-        {
-          getPlan: getVaultDownloadPlan,
-          openNode: (nodeId, plan, openSignal) =>
-            vault.openNode(nodeId, plan, openSignal),
-          signal,
-        },
-      );
+      // and file content is requested a few entries ahead of the one
+      // currently being archived.
+      archiveEntries = prefetchArchiveEntries(manifestPage.entries, {
+        getPlan: getVaultDownloadPlan,
+        openNode: (nodeId, plan, openSignal) =>
+          vault.openNode(nodeId, plan, openSignal),
+        openSource: (entry, encrypted, sourceSignal) =>
+          encrypted
+            ? readEncryptedArchiveFileStream({
+                entry,
+                ...encrypted,
+                client: vault.client,
+                signal: sourceSignal,
+                subject: "repository",
+              })
+            : readLegacyArchiveFileStream(entry, entry.name, sourceSignal),
+        signal,
+      });
       for (const [index, entry] of manifestPage.entries.entries()) {
         throwIfAborted(signal, ABORT_MESSAGE);
         if (seenEntryIds.has(entry.id)) {
@@ -140,7 +150,7 @@ export async function downloadRepositoryArchive({
           namesById.set(entry.id, entry.name);
         }
         let encrypted: OpenedEncryptedEntry | undefined;
-        const opening = openEncryptedEntry(index);
+        const { opening, source } = archiveEntries.take(index);
         if (opening) {
           // react-doctor-disable-next-line react-doctor/async-await-in-loop
           const { manifest: vaultManifest, plan } = await opening;
@@ -192,19 +202,12 @@ export async function downloadRepositoryArchive({
             manifestSummary.totalBytes,
           ),
         });
-        const source = encrypted
-          ? readEncryptedArchiveFileStream({
-              entry,
-              ...encrypted,
-              client: vault.client,
-              signal,
-              subject: "repository",
-            })
-          : await readLegacyArchiveFileStream(entry, resolvedName, signal);
+        // react-doctor-disable-next-line react-doctor/async-await-in-loop
+        const content = await source;
         // A ZIP writer has one ordered output stream, so entries are consumed
         // sequentially while each source remains backpressured.
         // react-doctor-disable-next-line react-doctor/async-await-in-loop
-        await destination.zipWriter.add(path, source, {
+        await destination.zipWriter.add(path, content ?? undefined, {
           level: archiveCompressionLevel({
             path,
             mimeType: encrypted?.manifest.mimeType ?? entry.mimeType,
@@ -232,6 +235,9 @@ export async function downloadRepositoryArchive({
         });
       }
 
+      // react-doctor-disable-next-line react-doctor/async-await-in-loop
+      await archiveEntries.close();
+      archiveEntries = null;
       if (!manifestPage.hasMore || !manifestPage.nextCursor) break;
       // Fetch only the next bounded page after the current page has been
       // consumed, avoiding a second whole-tree manifest allocation while the
@@ -266,6 +272,7 @@ export async function downloadRepositoryArchive({
     );
     reportProgress({ label: "ZIP download ready", percentage: 100 }, true);
   } catch (error) {
+    await archiveEntries?.close(error);
     await destination.discard(error);
     throw error;
   } finally {

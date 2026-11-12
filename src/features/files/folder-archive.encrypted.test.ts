@@ -171,6 +171,60 @@ describe("encrypted folder ZIP", () => {
     expect(mocks.triggerBlobDownload).toHaveBeenCalledOnce();
   });
 
+  it("requests later files while the current one is archived", async () => {
+    const files = ["file-a", "file-b", "file-c"].map((id) => ({
+      ...encryptedFile,
+      id,
+    }));
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () =>
+        Response.json({
+          rootId: "root",
+          entries: files,
+          totalBytes: files.length * encryptedFile.sizeBytes,
+        }),
+      ),
+    );
+    const zipAdd = mocks.zipAdd.getMockImplementation();
+    mocks.zipAdd.mockImplementation(
+      async (path: string, source?: ReadableStream<Uint8Array>) => {
+        if (path.endsWith("/file-a")) {
+          await vi.waitFor(() =>
+            expect(mocks.readEncryptedFileStream).toHaveBeenCalledTimes(3),
+          );
+        }
+        await zipAdd?.(path, source);
+      },
+    );
+
+    await downloadFolderArchive({
+      folder: {
+        id: "root",
+        name: "Encrypted folder",
+        entryType: "folder",
+        e2eeState: "encrypted",
+        updatedAt: "2026-08-17T00:00:00Z",
+      },
+      vault: {
+        state: "unlocked",
+        client: {} as VaultCryptoClient,
+        requestUnlock: vi.fn(),
+        openNode: async (nodeId) =>
+          nodeId === "root" ? rootManifest : { ...fileManifest, name: nodeId },
+        isUnlocked: () => true,
+      },
+    });
+
+    expect(mocks.zipAdd.mock.calls.map(([path]) => path)).toEqual([
+      "Private project/",
+      "Private project/file-a",
+      "Private project/file-b",
+      "Private project/file-c",
+    ]);
+    expect(mocks.triggerBlobDownload).toHaveBeenCalledOnce();
+  });
+
   it("rejects a plan that no longer matches the manifest snapshot", async () => {
     vi.stubGlobal(
       "fetch",
