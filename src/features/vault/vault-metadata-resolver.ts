@@ -27,6 +27,13 @@ import { abortReason } from "@/lib/abort";
 export type VaultMetadataResolutionOptions = {
   signal?: AbortSignal;
   requireServerValidation?: boolean;
+  /**
+   * Plans the server delivered in the same response as these references, such
+   * as a folder listing's embedded page. They replace a metadata-plans request
+   * for the references they match and are opened and verified by the worker
+   * exactly like fetched plans.
+   */
+  plans?: readonly VaultMetadataPlan[];
   onCached?(results: VaultCachedMetadataResult[]): void;
   onPriority?(results: VaultMetadataOpenResult[]): void;
 };
@@ -59,6 +66,10 @@ export class VaultMetadataResolver {
   private readonly metadata = new Map<string, VaultCachedMetadataResult>();
   private readonly plans = new Map<string, VaultMetadataPlan>();
   private readonly planFlights = new Map<string, PlanFlight>();
+  // Delivered plans that already validated a shared listing. A listing the
+  // router replays from its back/forward cache carries the same plan objects,
+  // so it asks the server again instead of trusting an old grant.
+  private readonly validatedSeeds = new WeakSet<VaultMetadataPlan>();
   private readonly folderFlights = new Map<string, Promise<void>>();
   private readonly prefetchedFolders = new Set<string>();
   private readonly folderReferences = new Map<
@@ -230,23 +241,25 @@ export class VaultMetadataResolver {
     }
 
     const batchRequestStartedAt = vaultPerformanceNow();
+    const seeded = this.selectSeededPlans(orderedReferences, misses, options);
     const cachedPlans = options.requireServerValidation
       ? []
       : misses.flatMap((reference) => {
-          const plan = this.getPlan(
-            revisionKey(reference.nodeId, reference.recordHash),
-          );
+          const key = revisionKey(reference.nodeId, reference.recordHash);
+          if (seeded.targets.has(key)) return [];
+          const plan = this.getPlan(key);
           return plan && metadataPlanMatchesReference(plan, reference)
             ? [plan]
             : [];
         });
+    const cachedKeys = new Set(
+      cachedPlans.map((plan) => revisionKey(plan.nodeId, plan.recordHash)),
+    );
     const uncachedReferences = misses.filter((reference) => {
-      if (options.requireServerValidation) return true;
-      const plan = this.getPlan(
-        revisionKey(reference.nodeId, reference.recordHash),
-      );
-      return !plan || !metadataPlanMatchesReference(plan, reference);
+      const key = revisionKey(reference.nodeId, reference.recordHash);
+      return !seeded.targets.has(key) && !cachedKeys.has(key);
     });
+    for (const plan of seeded.targets.values()) this.rememberPlan(plan);
     let fetched = { plans: [] as VaultMetadataPlan[], requestCount: 0 };
     if (uncachedReferences.length > 0) {
       const lease = this.loadPlans(
@@ -266,13 +279,18 @@ export class VaultMetadataResolver {
     recordVaultMetadataPerformance("batch_request", batchRequestStartedAt, {
       nodeCount: uncachedReferences.length,
       planCacheHits: cachedPlans.length,
+      seededPlans: seeded.targets.size,
       networkRequests: fetched.requestCount,
     });
 
     const expectedByNode = new Map(
       misses.map((reference) => [reference.nodeId, reference]),
     );
-    const compatiblePlans = [...fetchedPlans, ...cachedPlans].filter((plan) => {
+    const compatiblePlans = [
+      ...seeded.plans,
+      ...fetchedPlans,
+      ...cachedPlans,
+    ].filter((plan) => {
       const expected = expectedByNode.get(plan.nodeId);
       return !expected || metadataPlanMatchesReference(plan, expected);
     });
@@ -292,6 +310,13 @@ export class VaultMetadataResolver {
         revisionKey(reference.nodeId, reference.recordHash),
       ),
     );
+    // A delivered or cached plan that fails to open is fetched again once
+    // below, so its failure is not shown in the meantime.
+    const fetchedKeys = new Set(
+      fetchedPlans.map((plan) => revisionKey(plan.nodeId, plan.recordHash)),
+    );
+    const refetchable = (key: string) =>
+      !fetchedKeys.has(key) && (seeded.targets.has(key) || cachedKeys.has(key));
     let priorityCount = 0;
     let visiblePlans = 0;
     for (const plan of plans) {
@@ -310,9 +335,13 @@ export class VaultMetadataResolver {
       signal: options.signal,
       onPriority: (results) => {
         if (session !== this.session || options.signal?.aborted) return;
-        const visible = results.filter((result) =>
-          targetKeys.has(revisionKey(result.nodeId, result.recordHash)),
-        );
+        const visible = results.filter((result) => {
+          const key = revisionKey(result.nodeId, result.recordHash);
+          return (
+            targetKeys.has(key) &&
+            (result.status === "ready" || !refetchable(key))
+          );
+        });
         for (const result of results) {
           if (result.status === "ready") this.remember(result);
         }
@@ -372,19 +401,31 @@ export class VaultMetadataResolver {
           },
         );
         this.assertSession(session);
-        const retryByRevision = new Map(
-          retryResults.map((result) => [
-            revisionKey(result.nodeId, result.recordHash),
-            result,
-          ]),
-        );
-        opened = opened.map(
-          (result) =>
-            retryByRevision.get(
-              revisionKey(result.nodeId, result.recordHash),
-            ) ?? result,
-        );
+        opened = replaceMetadataResults(opened, retryResults);
       }
+    }
+
+    const readyKeys = new Set(
+      opened.flatMap((result) =>
+        result.status === "ready"
+          ? [revisionKey(result.nodeId, result.recordHash)]
+          : [],
+      ),
+    );
+    const refetchReferences = misses.filter((reference) => {
+      const key = revisionKey(reference.nodeId, reference.recordHash);
+      return refetchable(key) && !readyKeys.has(key);
+    });
+    if (refetchReferences.length > 0) {
+      opened = replaceMetadataResults(
+        opened,
+        await this.refetchFailedPlans(
+          refetchReferences,
+          context,
+          options,
+          session,
+        ),
+      );
     }
 
     for (const result of opened) {
@@ -431,6 +472,104 @@ export class VaultMetadataResolver {
     );
   }
 
+  // Picks the delivered plans that stand in for a metadata-plans request:
+  // one per missed reference whose revision it matches, plus the delivered
+  // plans for nodes outside this call (breadcrumbs and owned ancestors) so the
+  // worker can unwrap parent keys in the same batch, as with a fetched page.
+  private selectSeededPlans(
+    references: VaultMetadataReference[],
+    misses: VaultMetadataReference[],
+    options: VaultMetadataResolutionOptions,
+  ): { targets: Map<string, VaultMetadataPlan>; plans: VaultMetadataPlan[] } {
+    const targets = new Map<string, VaultMetadataPlan>();
+    if (!options.plans || options.plans.length === 0) {
+      return { targets, plans: [] };
+    }
+    const missesByNode = new Map(
+      misses.map((reference) => [reference.nodeId, reference]),
+    );
+    for (const plan of options.plans) {
+      const reference = missesByNode.get(plan.nodeId);
+      if (
+        !reference ||
+        !metadataPlanMatchesReference(plan, reference) ||
+        (options.requireServerValidation && this.validatedSeeds.has(plan))
+      ) {
+        continue;
+      }
+      targets.set(revisionKey(plan.nodeId, plan.recordHash), plan);
+    }
+    if (targets.size === 0) return { targets, plans: [] };
+    if (options.requireServerValidation) {
+      for (const plan of targets.values()) this.validatedSeeds.add(plan);
+    }
+    const referencedNodes = new Set(
+      references.map((reference) => reference.nodeId),
+    );
+    const selected = new Set(targets.values());
+    return {
+      targets,
+      plans: options.plans.filter(
+        (plan) => selected.has(plan) || !referencedNodes.has(plan.nodeId),
+      ),
+    };
+  }
+
+  // Fetches fresh plans for references whose delivered or cached plan did not
+  // open, and opens them once. A failed refetch leaves them unavailable.
+  private async refetchFailedPlans(
+    references: VaultMetadataReference[],
+    context: ResolverContext,
+    options: VaultMetadataResolutionOptions,
+    session: number,
+  ): Promise<VaultMetadataOpenResult[]> {
+    for (const reference of references) {
+      this.evictCacheValue(
+        "plan",
+        revisionKey(reference.nodeId, reference.recordHash),
+      );
+    }
+    try {
+      const lease = this.loadPlans(
+        context.csrfToken,
+        references,
+        session,
+        options.requireServerValidation === true,
+      );
+      let fetched: { plans: VaultMetadataPlan[]; requestCount: number };
+      try {
+        fetched = await waitForOperation(lease.promise, options.signal);
+      } finally {
+        lease.release();
+      }
+      this.assertSession(session);
+      const expectedByNode = new Map(
+        references.map((reference) => [reference.nodeId, reference]),
+      );
+      const plans = [
+        ...new Map(
+          fetched.plans
+            .filter((plan) => {
+              const expected = expectedByNode.get(plan.nodeId);
+              return !expected || metadataPlanMatchesReference(plan, expected);
+            })
+            .map((plan) => [revisionKey(plan.nodeId, plan.recordHash), plan]),
+        ).values(),
+      ];
+      const results = await context.client.openMetadataPlans(plans, {
+        concurrency: METADATA_DECRYPTION_CONCURRENCY,
+        priorityCount: plans.length,
+        signal: options.signal,
+      });
+      this.assertSession(session);
+      return results;
+    } catch (failure) {
+      if (options.signal?.aborted) throw failure;
+      this.assertSession(session);
+      return [];
+    }
+  }
+
   prefetchFolder(
     folderId: string,
     view: "files" | "shared",
@@ -447,9 +586,12 @@ export class VaultMetadataResolver {
       try {
         const listingStartedAt = vaultPerformanceNow();
         const cachedReferences = this.folderReferences.get(key);
-        const references =
-          cachedReferences ??
-          (await getVaultFolderMetadataReferences(folderId, view));
+        // One request returns the listing with its plans, so a cold folder
+        // warms in a single round trip.
+        const listing = cachedReferences
+          ? { references: cachedReferences, plans: undefined }
+          : await getVaultFolderMetadataReferences(folderId, view);
+        const references = listing.references;
         this.assertSession(session);
         if (folderRevision !== this.folderRevision) return;
         recordVaultMetadataPerformance("folder_listing", listingStartedAt, {
@@ -462,6 +604,7 @@ export class VaultMetadataResolver {
         if (references.length > 0) {
           await this.resolve(references, context, {
             requireServerValidation: view === "shared",
+            plans: listing.plans,
           });
         }
         this.assertSession(session);
@@ -690,6 +833,22 @@ export class VaultMetadataResolver {
       this.evictCacheValue(kind, oldestKey.slice(separator + 1));
     }
   }
+}
+
+function replaceMetadataResults(
+  results: VaultMetadataOpenResult[],
+  replacements: VaultMetadataOpenResult[],
+): VaultMetadataOpenResult[] {
+  const byRevision = new Map(
+    replacements.map((result) => [
+      revisionKey(result.nodeId, result.recordHash),
+      result,
+    ]),
+  );
+  return results.map(
+    (result) =>
+      byRevision.get(revisionKey(result.nodeId, result.recordHash)) ?? result,
+  );
 }
 
 function getRequiredMetadataParentId(

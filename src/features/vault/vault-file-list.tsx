@@ -38,7 +38,10 @@ import { FolderDownloadProgressPanel } from "@/features/files/folder-download-pr
 import { applyFileListOverlay } from "@/features/realtime/file-list-overlay";
 import { useRealtimeMutation } from "@/features/realtime/realtime-provider";
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
-import type { VaultMetadataReference } from "@/features/vault/protocol";
+import type {
+  VaultMetadataPlan,
+  VaultMetadataReference,
+} from "@/features/vault/protocol";
 import {
   type FileTreeMutation,
   getVaultDownloadPlan,
@@ -121,6 +124,8 @@ const fileDateFormatter = new Intl.DateTimeFormat("en", {
 
 type VaultFileListProps = {
   entries: FileEntry[];
+  /** Metadata plans delivered in the same response as `entries`. */
+  metadataPlans?: VaultMetadataPlan[];
   sectionKey: string;
   csrfToken: string;
   currentUserId: string;
@@ -153,6 +158,7 @@ export function VaultFileList(props: VaultFileListProps) {
 
 function useVaultFileListController({
   entries,
+  metadataPlans,
   sectionKey,
   csrfToken,
   currentUserId,
@@ -295,9 +301,12 @@ function useVaultFileListController({
         if (sectionKey === "files" || sectionKey === "shared") {
           vault.rememberFolderMetadata(currentFolderId, sectionKey, references);
         }
+        // Plans from the listing's own response stand in for a metadata-plans
+        // request, and for a shared listing they are its server validation.
         const results = await vault.resolveMetadata(references, {
           signal: controller.signal,
           requireServerValidation: sectionKey === "shared",
+          plans: metadataPlans,
           onCached(cached) {
             if (canceled) return;
             metadataCommitStartedAtRef.current ??= vaultPerformanceNow();
@@ -343,6 +352,7 @@ function useVaultFileListController({
   }, [
     currentFolderId,
     entries,
+    metadataPlans,
     sectionKey,
     vault.rememberFolderMetadata,
     vault.resolveMetadata,

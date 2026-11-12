@@ -135,6 +135,26 @@ describe("VaultFileList metadata loading", () => {
     expect(markup).not.toContain("Quarterly reports");
   });
 
+  it("does not show a shared name on first render even with delivered plans", () => {
+    vaultMock.resolver = resolverWithCachedFolder("Quarterly reports");
+
+    const markup = renderToStaticMarkup(
+      <VaultFileList
+        entries={[encryptedFolder]}
+        metadataPlans={[]}
+        sectionKey="shared"
+        csrfToken="test-csrf"
+        currentUserId="usr_test"
+        currentFolderId={null}
+      />,
+    );
+
+    // Delivered plans validate a shared listing only once the worker has
+    // opened them, never through the plaintext cache on first paint.
+    expect(markup).toContain('data-metadata-status="pending"');
+    expect(markup).not.toContain("Quarterly reports");
+  });
+
   it("drops encrypted selections when the vault locks", () => {
     const selectedIds = new Set([encryptedFolder.id, "legacy-file"]);
 

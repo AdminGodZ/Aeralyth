@@ -52,6 +52,10 @@ const _: () = assert!(MAX_SHARE_WRAPPERS >= MAX_SHARE_TREE_NODES * 2);
 const MAX_METADATA_PLAN_REQUEST_NODES: usize = 100;
 const MAX_METADATA_PLAN_EXPANDED_NODES: usize = 512;
 const MAX_METADATA_PLAN_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+// Listings embed their first metadata page in the dashboard's server render.
+// The estimate is conservative (16 KiB per record plus twice its raw bytes),
+// so a 100-entry owned folder still fits in one page.
+const MAX_LISTING_METADATA_PLAN_BYTES: usize = 2 * 1024 * 1024;
 const SHARED_METADATA_PLAN_CONCURRENCY: usize = 8;
 const MAX_DOWNLOAD_PLAN_REQUEST_NODES: usize = 100;
 const MAX_DOWNLOAD_PLAN_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
@@ -712,7 +716,7 @@ struct DownloadPlanResponse {
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
-struct MetadataPlanResponse {
+pub(crate) struct MetadataPlanResponse {
     node_id: String,
     entry_type: String,
     generation_number: i64,
@@ -2837,10 +2841,41 @@ pub async fn metadata_plans(
 
     let page = {
         let _interactive_permit = state.acquire_interactive_operation(&user.id).await?;
-        metadata_paging::load_page(&state, &user, &body).await?
+        metadata_paging::load_page(&state, &user, &body, MAX_METADATA_PLAN_RESPONSE_BYTES).await?
     };
-    let mut wrappers = HashMap::with_capacity(page.wrapper_rows.len());
-    for row in page.wrapper_rows {
+    let metadata_paging::Page {
+        owned_rows,
+        wrapper_rows,
+        shared_rows,
+        order,
+        continuation,
+        snapshot,
+    } = page;
+    let plans =
+        load_metadata_plan_payloads(&state, &user, owned_rows, wrapper_rows, shared_rows).await?;
+    let body = run_metadata_decode(&state, &user.id, move || {
+        // Payload queries may group owned/shared work; restore the selected
+        // parent-first identity order before the one-pass response writer.
+        metadata_paging::encode_page(plans, order, continuation, snapshot)
+    })
+    .await?;
+    Ok(HttpResponse::Ok()
+        .content_type("application/json")
+        .body(body))
+}
+
+/// Decodes the selected rows of a metadata page into plans. The
+/// metadata-plans route and folder listings share this path, so a plan
+/// delivered with a listing is built exactly like a fetched one.
+async fn load_metadata_plan_payloads(
+    state: &AppState,
+    user: &SessionPrincipal,
+    owned_rows: Vec<tokio_postgres::Row>,
+    wrapper_rows: Vec<tokio_postgres::Row>,
+    shared_rows: Vec<(String, tokio_postgres::Row)>,
+) -> Result<Vec<MetadataPlanResponse>> {
+    let mut wrappers = HashMap::with_capacity(wrapper_rows.len());
+    for row in wrapper_rows {
         wrappers.insert(
             (
                 row.get::<_, String>("node_id"),
@@ -2849,9 +2884,9 @@ pub async fn metadata_plans(
             row.get::<_, Vec<Vec<u8>>>("wrapper_cbors"),
         );
     }
-    let mut plans = run_metadata_decode(&state, &user.id, move || {
+    let mut plans = run_metadata_decode(state, &user.id, move || {
         Ok::<_, (u16, String)>(
-            page.owned_rows
+            owned_rows
                 .into_iter()
                 .map(|row| {
                     let key = (
@@ -2864,22 +2899,65 @@ pub async fn metadata_plans(
         )
     })
     .await?;
-    for chunk in page.shared_rows.chunks(SHARED_METADATA_PLAN_CONCURRENCY) {
+    for chunk in shared_rows.chunks(SHARED_METADATA_PLAN_CONCURRENCY) {
         let loaded = try_join_all(chunk.iter().map(|(node_id, row)| {
-            load_shared_metadata_plan_from_row(&state, &user, node_id.clone(), row.clone())
+            load_shared_metadata_plan_from_row(state, user, node_id.clone(), row.clone())
         }))
         .await?;
         plans.extend(loaded);
     }
-    let body = run_metadata_decode(&state, &user.id, move || {
-        // Payload queries may group owned/shared work; restore the selected
-        // parent-first identity order before the one-pass response writer.
-        metadata_paging::encode_page(plans, page.order, page.continuation, page.snapshot)
+    Ok(plans)
+}
+
+/// Builds the metadata-plans request a browser would send for a listing page:
+/// the listed encrypted nodes and their breadcrumbs, without a continuation.
+pub(crate) fn listing_metadata_plan_request(
+    node_ids: impl IntoIterator<Item = String>,
+) -> Option<MetadataPlansRequest> {
+    let mut seen = HashSet::new();
+    let node_ids: Vec<_> = node_ids
+        .into_iter()
+        .filter(|node_id| seen.insert(node_id.clone()))
+        .take(MAX_METADATA_PLAN_REQUEST_NODES)
+        .collect();
+    (!node_ids.is_empty()).then_some(MetadataPlansRequest {
+        node_ids,
+        continuation: None,
+        snapshot: None,
+        purpose: MetadataPlanPurpose::Listing,
     })
-    .await?;
-    Ok(HttpResponse::Ok()
-        .content_type("application/json")
-        .body(body))
+}
+
+/// Loads the first metadata page for a listing so the browser can decrypt its
+/// names without a metadata-plans round trip. Authorization is the
+/// metadata-plans route's: the same identity, share and trash rules select
+/// the rows. Plans are opportunistic, so any failure, such as a node revoked
+/// or changed since the listing was read, omits them and the browser fetches
+/// plans itself.
+pub(crate) async fn listing_metadata_plans(
+    state: &AppState,
+    user: &SessionPrincipal,
+    request: &MetadataPlansRequest,
+) -> Option<Vec<MetadataPlanResponse>> {
+    if !state.config.e2ee_mode.is_enabled() {
+        return None;
+    }
+    let plans: Result<Vec<MetadataPlanResponse>> = async {
+        require_configured_vault(state, user).await?;
+        let metadata_paging::Page {
+            owned_rows,
+            wrapper_rows,
+            shared_rows,
+            order,
+            ..
+        } = metadata_paging::load_page(state, user, request, MAX_LISTING_METADATA_PLAN_BYTES)
+            .await?;
+        let plans =
+            load_metadata_plan_payloads(state, user, owned_rows, wrapper_rows, shared_rows).await?;
+        metadata_paging::order_plans(plans, &order).map_err(publication_body_error)
+    }
+    .await;
+    plans.ok()
 }
 
 fn owned_metadata_plan_from_row(
@@ -10190,12 +10268,29 @@ mod tests {
             &metadata_transaction,
             "usr_perf_share_recipient",
             &metadata_request,
+            MAX_METADATA_PLAN_RESPONSE_BYTES,
         )
         .await
         .unwrap();
         assert_eq!(shared_page.shared_rows.len(), 1);
         assert!(shared_page.owned_rows.is_empty());
         assert_eq!(shared_page.order, vec!["fil_perf_share_root"]);
+        // A listing asks for the same identities under the same rules, so its
+        // embedded plans authorize exactly what the metadata-plans route would.
+        let listing_request =
+            listing_metadata_plan_request(vec!["fil_perf_share_root".to_owned()]).unwrap();
+        let listing_page = metadata_paging::load_transaction_page(
+            &metadata_transaction,
+            "usr_perf_share_recipient",
+            &listing_request,
+            MAX_LISTING_METADATA_PLAN_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(listing_page.snapshot, shared_page.snapshot);
+        assert_eq!(listing_page.order, shared_page.order);
+        assert_eq!(listing_page.shared_rows.len(), 1);
+        assert_eq!(listing_page.continuation, None);
         metadata_request.snapshot = Some(shared_page.snapshot);
         metadata_transaction.execute(
             "UPDATE vault_share_recipients SET status='revoked' WHERE share_id='shr_perf_snapshot' AND recipient_id='usr_perf_share_recipient'", &[],
@@ -10204,6 +10299,7 @@ mod tests {
             &metadata_transaction,
             "usr_perf_share_recipient",
             &metadata_request,
+            MAX_METADATA_PLAN_RESPONSE_BYTES,
         )
         .await
         .err()
@@ -10212,7 +10308,39 @@ mod tests {
             revoked.as_response_error().status_code(),
             actix_web::http::StatusCode::CONFLICT
         );
+        // A revoked recipient's listing gets no plans; the browser then asks
+        // the metadata-plans route, which refuses the node as well.
+        let revoked_listing = metadata_paging::load_transaction_page(
+            &metadata_transaction,
+            "usr_perf_share_recipient",
+            &listing_request,
+            MAX_LISTING_METADATA_PLAN_BYTES,
+        )
+        .await
+        .err()
+        .unwrap();
+        assert_eq!(
+            revoked_listing.as_response_error().status_code(),
+            actix_web::http::StatusCode::NOT_FOUND
+        );
         metadata_transaction.rollback().await.unwrap();
+
+        // Trash listings carry plans for trashed nodes, as the route does.
+        let trash_transaction = snapshot_client.transaction().await.unwrap();
+        let trash_listing = metadata_paging::load_transaction_page(
+            &trash_transaction,
+            "usr_perf_share_owner",
+            &listing_metadata_plan_request(vec!["fil_perf_trash_child".to_owned()]).unwrap(),
+            MAX_LISTING_METADATA_PLAN_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            trash_listing.order,
+            vec!["fil_perf_trash_parent", "fil_perf_trash_child"]
+        );
+        assert_eq!(trash_listing.owned_rows.len(), 2);
+        trash_transaction.rollback().await.unwrap();
 
         let trashed_node_ids = vec![
             "fil_perf_trash_parent".to_owned(),

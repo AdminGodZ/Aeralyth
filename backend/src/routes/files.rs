@@ -27,6 +27,7 @@ use crate::routes::upload_reservations::{
     PENDING_UPLOAD_SECONDS, UNTOUCHED_SHARE_LINK_UPLOAD_SECONDS, initial_pending_upload_seconds,
     reservation_amount, reserve_upload_capacity,
 };
+use crate::routes::vault;
 use crate::state::{AppState, LoadShedError};
 use crate::storage::UploadedPart;
 use crate::timestamps;
@@ -102,6 +103,8 @@ pub(crate) struct FilesQuery {
     direction: Option<String>,
     cursor: Option<String>,
     limit: Option<usize>,
+    #[serde(default, rename = "includePlans")]
+    include_plans: bool,
 }
 
 #[derive(Deserialize)]
@@ -277,6 +280,8 @@ pub struct FilesResponse {
     storage: StorageStats,
     next_cursor: Option<String>,
     has_more: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    metadata_plans: Option<Vec<vault::MetadataPlanResponse>>,
 }
 
 #[derive(Serialize)]
@@ -419,11 +424,15 @@ pub async fn list_files(
         "updated"
     }));
     let direction = normalize_sort_direction(query.direction.as_deref(), sort);
-    let _recursive_permit = if query
+    // Metadata plans read the vault tree like the metadata-plans route, so a
+    // listing that carries them is admitted as interactive browsing too.
+    let include_plans = query.include_plans && state.config.e2ee_mode.is_enabled();
+    let _recursive_permit = if (query
         .folder
         .as_deref()
         .is_some_and(|folder_id| !folder_id.trim().is_empty())
-        && matches!(view, "files" | "shared")
+        && matches!(view, "files" | "shared"))
+        || include_plans
     {
         Some(state.acquire_interactive_operation(&user.id).await?)
     } else {
@@ -463,6 +472,21 @@ pub async fn list_files(
         get_summary(&state, &user),
     )?;
     let storage = storage_stats(&state, summary.used_bytes);
+    // The first page of plans travels with the listing so the browser can
+    // decrypt names without a second round trip. They are read right after the
+    // listing in their own snapshot; the browser binds each plan to the
+    // listed record version, hash and generation and discards any mismatch.
+    let metadata_plans = if include_plans {
+        match vault::listing_metadata_plan_request(listing_metadata_node_ids(
+            &page.entries,
+            &breadcrumbs,
+        )) {
+            Some(request) => vault::listing_metadata_plans(&state, &user, &request).await,
+            None => None,
+        }
+    } else {
+        None
+    };
 
     Ok(HttpResponse::Ok().json(FilesResponse {
         view: view.to_owned(),
@@ -473,7 +497,30 @@ pub async fn list_files(
         storage,
         next_cursor: page.next_cursor,
         has_more: page.has_more,
+        metadata_plans,
     }))
+}
+
+/// Encrypted nodes whose names the listing shows: entries first, so a capped
+/// request keeps them, then breadcrumbs. Owned ancestors are added by the
+/// metadata page itself.
+fn listing_metadata_node_ids(
+    entries: &[FileEntry],
+    breadcrumbs: &[FolderBreadcrumb],
+) -> Vec<String> {
+    entries
+        .iter()
+        .filter(|entry| entry.e2ee_state == "encrypted" && entry.vault_record_hash.is_some())
+        .map(|entry| entry.id.clone())
+        .chain(
+            breadcrumbs
+                .iter()
+                .filter(|breadcrumb| {
+                    breadcrumb.e2ee_state == "encrypted" && breadcrumb.vault_record_hash.is_some()
+                })
+                .map(|breadcrumb| breadcrumb.id.clone()),
+        )
+        .collect()
 }
 
 pub async fn storage(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
