@@ -17,6 +17,12 @@ use tokio_postgres::{NoTls, Row};
 
 use crate::observability::Metrics;
 
+/// Fast recycling only rejects connections the driver has already seen close.
+/// A connection idle for longer is also probed at checkout, because a restart or
+/// failover that did not close its socket may not have surfaced yet.
+const IDLE_VERIFICATION_AFTER: Duration = Duration::from_secs(30);
+const RECYCLE_TIMEOUT: Duration = Duration::from_secs(3);
+
 tokio::task_local! {
     static REQUEST_CONNECTION: Arc<RequestConnectionSlot<deadpool_postgres::Client>>;
 }
@@ -179,8 +185,14 @@ impl Database {
         settings: DatabasePoolSettings,
         metrics: Metrics,
     ) -> Result<Self, Box<dyn StdError + Send + Sync>> {
-        Self::create_with_recycling(database_url, settings, metrics, RecyclingMethod::Verified)
-            .await
+        Self::create_with_recycling(
+            database_url,
+            settings,
+            metrics,
+            RecyclingMethod::Fast,
+            IDLE_VERIFICATION_AFTER,
+        )
+        .await
     }
 
     async fn create_with_recycling(
@@ -188,6 +200,7 @@ impl Database {
         settings: DatabasePoolSettings,
         metrics: Metrics,
         recycling_method: RecyclingMethod,
+        idle_verification_after: Duration,
     ) -> Result<Self, Box<dyn StdError + Send + Sync>> {
         assert!(
             settings.max_size > 0
@@ -200,6 +213,10 @@ impl Database {
         postgres_config.keepalives_idle(Duration::from_secs(60));
         postgres_config.keepalives_interval(Duration::from_secs(30));
         postgres_config.keepalives_retries(3);
+        // A recently used connection is handed out without a probe, so a peer that
+        // vanished without closing the socket must fail the next query promptly
+        // instead of leaving it waiting out TCP retransmission.
+        postgres_config.tcp_user_timeout(Duration::from_secs(20));
         postgres_config.options(
             "-c statement_timeout=10000 -c lock_timeout=3000 -c idle_in_transaction_session_timeout=15000",
         );
@@ -214,7 +231,7 @@ impl Database {
             .max_size(settings.max_size)
             .wait_timeout(Some(settings.wait_timeout))
             .create_timeout(Some(Duration::from_secs(5)))
-            .recycle_timeout(Some(Duration::from_secs(3)))
+            .recycle_timeout(Some(RECYCLE_TIMEOUT))
             .post_create(Hook::sync_fn(move |_, _| {
                 created_metrics.record_pool_connection_created(role.as_str());
                 Ok(())
@@ -231,6 +248,22 @@ impl Database {
                 }
 
                 Ok(())
+            }))
+            // `last_used` counts from the previous checkout, so time spent held by
+            // a request also counts as idle and errs towards probing.
+            .post_recycle(Hook::async_fn(move |client, object_metrics| {
+                Box::pin(async move {
+                    if object_metrics.last_used() <= idle_verification_after {
+                        return Ok(());
+                    }
+                    match tokio::time::timeout(RECYCLE_TIMEOUT, client.simple_query("")).await {
+                        Ok(Ok(_)) => Ok(()),
+                        Ok(Err(error)) => Err(HookError::Backend(error)),
+                        Err(_) => Err(HookError::message(
+                            "idle database connection verification timed out",
+                        )),
+                    }
+                })
             }))
             .runtime(Runtime::Tokio1)
             .build()?;
@@ -762,14 +795,10 @@ mod tests {
         assert_eq!(slot.take_owned().await, Some(42));
     }
 
+    // Idle time only triggers a probe; `long_idle_connections_are_verified_and_kept`
+    // checks that a healthy idle connection survives it.
     #[test]
     fn healthy_idle_connections_are_not_recycled() {
-        let source = include_str!("db.rs");
-        let forbidden_idle_check = ["last_", "used()"].concat();
-        assert!(
-            !source.contains(&forbidden_idle_check),
-            "idle time must not force a healthy reconnect"
-        );
         assert!(!connection_lifetime_expired(
             Duration::from_secs(10 * 60),
             42,
@@ -944,6 +973,83 @@ mod tests {
             task.await.unwrap().unwrap();
         }
     }
+
+    #[actix_web::test]
+    async fn long_idle_connections_are_verified_and_kept() {
+        use super::RecyclingMethod;
+        if std::env::var("AERALYTH_DATABASE_INTEGRATION_TESTS").as_deref() != Ok("1") {
+            return;
+        }
+
+        let config = Config::from_env().expect("database integration configuration should load");
+        let (admin, connection) =
+            tokio_postgres::connect(&config.database_url, tokio_postgres::NoTls)
+                .await
+                .unwrap();
+        actix_web::rt::spawn(async move {
+            let _ = connection.await;
+        });
+        let idle_verification_after = Duration::from_secs(1);
+        let db = Database::create_with_recycling(
+            &config.database_url,
+            DatabasePoolSettings {
+                role: PoolRole::Request,
+                max_size: 1,
+                min_size: 1,
+                checkout_queue_capacity: 1,
+                wait_timeout: Duration::from_millis(250),
+                max_lifetime: Duration::from_secs(30 * 60),
+                lifetime_jitter: Duration::from_secs(10 * 60),
+            },
+            Metrics::new(&config),
+            RecyclingMethod::Fast,
+            idle_verification_after,
+        )
+        .await
+        .expect("request pool should connect");
+        // The backend's last statement shows whether checkout sent the empty probe.
+        let last_statement = |pid: i32| {
+            let admin = &admin;
+            async move {
+                admin
+                    .query_one("SELECT query FROM pg_stat_activity WHERE pid=$1", &[&pid])
+                    .await
+                    .unwrap()
+                    .get::<_, String>(0)
+            }
+        };
+
+        let client = db.get().await.unwrap();
+        let pid: i32 = super::query_one_cached(&client, "SELECT pg_backend_pid()", &[])
+            .await
+            .unwrap()
+            .get(0);
+        drop(client);
+        let client = db.get().await.unwrap();
+        assert_eq!(
+            last_statement(pid).await,
+            "SELECT pg_backend_pid()",
+            "a recently used connection must not be probed"
+        );
+        drop(client);
+
+        tokio::time::sleep(idle_verification_after + Duration::from_millis(100)).await;
+        let client = db.get().await.unwrap();
+        assert_eq!(
+            last_statement(pid).await,
+            "",
+            "a long-idle connection must be probed"
+        );
+        let checked_out_pid: i32 = super::query_one_cached(&client, "SELECT pg_backend_pid()", &[])
+            .await
+            .unwrap()
+            .get(0);
+        assert_eq!(
+            checked_out_pid, pid,
+            "a healthy idle connection must be kept"
+        );
+    }
+
     struct SafeReadRecovery {
         failed_reads: usize,
         terminated_backend_reads: usize,
@@ -1046,6 +1152,7 @@ mod tests {
                 settings,
                 Metrics::new(&config),
                 recycling,
+                super::IDLE_VERIFICATION_AFTER,
             )
             .await
             .unwrap();
@@ -1290,6 +1397,7 @@ mod tests {
                 settings,
                 Metrics::new(&config),
                 policy,
+                super::IDLE_VERIFICATION_AFTER,
             )
             .await
             .unwrap();
