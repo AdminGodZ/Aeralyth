@@ -7477,7 +7477,7 @@ fn shared_download_plan_from_row(
     let authorization_version = encode_bytes(share_authorization_version(
         &share_id,
         active_epoch,
-        &user_id,
+        user_id,
         recipient_key_version,
         share_record_version,
         &envelope.envelope_hash,
@@ -10444,7 +10444,10 @@ mod tests {
         }
     }
 
-    fn encode_route_bootstrap_fixture(manifest_hash: [u8; 32], wrapper_hash: [u8; 32]) -> Vec<u8> {
+    pub(super) fn encode_route_bootstrap_fixture(
+        manifest_hash: [u8; 32],
+        wrapper_hash: [u8; 32],
+    ) -> Vec<u8> {
         let mut output = vec![0xaf];
         push_test_uint_pair(&mut output, 1, 1);
         push_test_uint_pair(&mut output, 2, 1);
@@ -11245,7 +11248,7 @@ mod account_cpu_tests {
         let shared = format!("fil_batch_shared_{suffix}");
         let share = format!("shr_batch_{suffix}");
         let manifest = b"encrypted-manifest";
-        let bootstrap = encode_route_bootstrap_fixture(sha256(manifest), [3_u8; 32]);
+        let bootstrap = super::tests::encode_route_bootstrap_fixture(sha256(manifest), [3_u8; 32]);
         for (user, token) in [(&owner, &owner_token), (&recipient, &recipient_token)] {
             let hash = crate::auth::hash_session_token(token);
             state.db.execute("INSERT INTO users(id,username,password_hash,role,status) VALUES($1,$1,'test','user','active')", &[user]).await.unwrap();
