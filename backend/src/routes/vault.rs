@@ -11273,18 +11273,18 @@ mod account_cpu_tests {
         let nodes = [owned.clone(), trashed.clone(), shared.clone()];
         assert_eq!(
             assert_parity(&state, &owner_token, &nodes).await,
-            [200, 404, 200]
+            [200_u16, 404, 200]
         );
         // A recipient reaches only the shared node, through the share path
         // (its fixture envelope is unsigned, so both routes reject it alike);
         // foreign and trashed nodes are not found.
         let statuses = assert_parity(&state, &recipient_token, &nodes).await;
-        assert_eq!(statuses[..2], [404, 404]);
+        assert_eq!(statuses[..2], [404_u16, 404]);
         assert_ne!(statuses[2], 404);
         state.db.execute("UPDATE vault_share_recipients SET status='revoked',revoked_at=now() WHERE share_id=$1", &[&share]).await.unwrap();
         assert_eq!(
             assert_parity(&state, &recipient_token, &nodes).await,
-            [404, 404, 404]
+            [404_u16, 404, 404]
         );
 
         for invalid in [
