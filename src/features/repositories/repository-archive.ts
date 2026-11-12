@@ -21,7 +21,6 @@ import type {
   VaultDownloadPlan,
   VaultManifest,
 } from "@/features/vault/protocol";
-import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
 import { throwIfAborted } from "@/lib/abort";
 import type {
@@ -52,6 +51,10 @@ type VaultArchiveAccess = {
     plan?: VaultDownloadPlan,
     signal?: AbortSignal,
   ): Promise<VaultManifest>;
+  getDownloadPlans(
+    nodeIds: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<Array<VaultDownloadPlan | Error>>;
   isUnlocked(): boolean;
 };
 
@@ -122,7 +125,8 @@ export async function downloadRepositoryArchive({
       // and file content is requested a few entries ahead of the one
       // currently being archived.
       archiveEntries = prefetchArchiveEntries(manifestPage.entries, {
-        getPlan: getVaultDownloadPlan,
+        getPlans: (nodeIds, planSignal) =>
+          vault.getDownloadPlans(nodeIds, planSignal),
         openNode: (nodeId, plan, openSignal) =>
           vault.openNode(nodeId, plan, openSignal),
         openSource: (entry, encrypted, sourceSignal) =>

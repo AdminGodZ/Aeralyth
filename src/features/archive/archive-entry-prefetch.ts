@@ -1,4 +1,8 @@
 import {
+  batchArchivePlans,
+  type GetDownloadPlans,
+} from "@/features/archive/archive-plan-batches";
+import {
   type OpenedEncryptedEntry,
   prefetchEncryptedEntries,
 } from "@/features/archive/encrypted-entry-prefetch";
@@ -21,7 +25,7 @@ export const MAX_ARCHIVE_CONTENT_REQUESTS = 5;
 export const MAX_ARCHIVE_LOOKAHEAD_BYTES = 64 * 1024 * 1024;
 /**
  * Entries prepared ahead of the one being archived. Download plans are
- * requested as entries enter this window, which also bounds plan requests.
+ * requested in batches just ahead of this window.
  */
 export const ARCHIVE_ENTRY_LOOKAHEAD = 8;
 /** Files up to one crypto chunk are read whole; larger ones keep one chunk. */
@@ -59,7 +63,7 @@ export type ArchiveEntryPrefetch = {
 export function prefetchArchiveEntries<T extends ArchiveEntry>(
   entries: readonly T[],
   {
-    getPlan,
+    getPlans,
     openNode,
     openSource,
     signal,
@@ -67,7 +71,7 @@ export function prefetchArchiveEntries<T extends ArchiveEntry>(
     maxRequests = MAX_ARCHIVE_CONTENT_REQUESTS,
     maxBufferedBytes = MAX_ARCHIVE_LOOKAHEAD_BYTES,
   }: {
-    getPlan(nodeId: string, signal?: AbortSignal): Promise<VaultDownloadPlan>;
+    getPlans: GetDownloadPlans;
     openNode(
       nodeId: string,
       plan: VaultDownloadPlan,
@@ -89,9 +93,12 @@ export function prefetchArchiveEntries<T extends ArchiveEntry>(
   if (signal?.aborted) abortFromParent();
   else signal?.addEventListener("abort", abortFromParent, { once: true });
 
-  // Plans are requested only as entries enter this window.
+  // Entries open as they enter this window, from plans batched just ahead.
   const openEncryptedEntry = prefetchEncryptedEntries(entries, {
-    getPlan,
+    getPlan: batchArchivePlans(entries, {
+      getPlans,
+      signal: operation.signal,
+    }),
     openNode,
     lookahead: 0,
     signal: operation.signal,

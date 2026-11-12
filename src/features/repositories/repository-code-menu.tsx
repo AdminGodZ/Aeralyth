@@ -119,6 +119,7 @@ export function RepositoryCodeMenu({
           client: vault.client,
           requestUnlock: vault.requestUnlock,
           openNode: vault.openNode,
+          getDownloadPlans: vault.getDownloadPlans,
           isUnlocked: () => vaultStateRef.current === "unlocked",
         },
         signal: controller.signal,
