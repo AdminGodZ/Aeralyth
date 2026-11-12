@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createFetchBackedXhr } from "@/features/vault/fake-storage-xhr";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
 import type { VaultEncryptionInput } from "@/features/vault/vault-messages";
 import type { InlineUploadEntry } from "@/features/vault/vault-wire";
@@ -41,6 +42,7 @@ function publishedFor(entry: InlineUploadEntry) {
 describe("inline small-file uploads", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal("XMLHttpRequest", createFetchBackedXhr().XMLHttpRequest);
     vaultApi.abortVaultUpload.mockResolvedValue(undefined);
     vaultApi.publishVaultFoldersBatch.mockResolvedValue({ folders: [] });
     vaultApi.publishVaultInlineUploads.mockImplementation(

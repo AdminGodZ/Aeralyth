@@ -151,18 +151,6 @@ export async function runUploadWithRetry<T>({
     : new Error("The object upload failed after multiple attempts.");
 }
 
-export async function uploadRequestErrorFromResponse(
-  response: Response,
-): Promise<UploadRequestError> {
-  const responseBody = await response.text().catch(() => "");
-  return new UploadRequestError({
-    message: `Storage upload failed with status ${response.status}.`,
-    responseBody,
-    retryAfter: response.headers.get("Retry-After"),
-    status: response.status,
-  });
-}
-
 export function waitForUploadRetry(
   milliseconds: number,
   signal: AbortSignal,
