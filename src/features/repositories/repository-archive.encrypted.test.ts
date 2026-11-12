@@ -35,6 +35,14 @@ vi.mock("@/features/vault/vault-api", () => ({
   getVaultDownloadPlan: mocks.getVaultDownloadPlan,
 }));
 
+// The vault's batched lookup, answered per node by the single-plan mock.
+const getDownloadPlans = (nodeIds: readonly string[], signal?: AbortSignal) =>
+  Promise.all(
+    nodeIds.map((nodeId) =>
+      mocks.getVaultDownloadPlan(nodeId, signal).catch((error: Error) => error),
+    ),
+  );
+
 const generationId = Uint8Array.from({ length: 16 }, (_, index) => index + 1);
 const generation = toBase64Url(generationId);
 const downloadPlan: VaultDownloadPlan = {
@@ -207,6 +215,7 @@ describe("encrypted repository ZIP", () => {
         client: {} as VaultCryptoClient,
         requestUnlock: vi.fn(),
         openNode: async () => encryptedManifest,
+        getDownloadPlans,
         isUnlocked: () => true,
       },
     });
@@ -235,6 +244,7 @@ describe("encrypted repository ZIP", () => {
         client: {} as VaultCryptoClient,
         requestUnlock: vi.fn(),
         openNode,
+        getDownloadPlans,
         isUnlocked: () => true,
       },
     });
@@ -266,6 +276,7 @@ describe("encrypted repository ZIP", () => {
           client: {} as VaultCryptoClient,
           requestUnlock: vi.fn(),
           openNode: async () => encryptedManifest,
+          getDownloadPlans,
           isUnlocked: () => unlocked,
         },
       }),
@@ -293,6 +304,7 @@ describe("encrypted repository ZIP", () => {
         client: {} as VaultCryptoClient,
         requestUnlock: vi.fn(),
         openNode: async () => encryptedManifest,
+        getDownloadPlans,
         isUnlocked: () => true,
       },
       signal: controller.signal,
@@ -329,6 +341,7 @@ describe("encrypted repository ZIP", () => {
         client: {} as VaultCryptoClient,
         requestUnlock: vi.fn(),
         openNode: async () => encryptedManifest,
+        getDownloadPlans,
         isUnlocked: () => true,
       },
       signal: controller.signal,
@@ -367,6 +380,7 @@ describe("encrypted repository ZIP", () => {
         client: {} as VaultCryptoClient,
         requestUnlock: vi.fn(),
         openNode: async () => encryptedManifest,
+        getDownloadPlans,
         isUnlocked: () => true,
       },
       signal: controller.signal,
@@ -415,6 +429,7 @@ describe("encrypted repository ZIP", () => {
         client: null,
         requestUnlock: vi.fn(),
         openNode: async () => encryptedManifest,
+        getDownloadPlans,
         isUnlocked: () => false,
       },
     });
@@ -422,7 +437,7 @@ describe("encrypted repository ZIP", () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       "/api/files/file/download?version=2026-08-17T12%3A34%3A56.123456Z",
-      { signal: undefined, cache: "no-store" },
+      { signal: expect.any(AbortSignal), cache: "no-store" },
     );
     expect(mocks.triggerBlobDownload).toHaveBeenCalledOnce();
   });

@@ -707,7 +707,7 @@ mod tests {
             ("share links", include_str!("routes/share_links.rs"), 1),
             ("profile", include_str!("routes/profile.rs"), 1),
             ("admin", include_str!("routes/admin.rs"), 1),
-            ("vault", include_str!("routes/vault.rs"), 11),
+            ("vault", include_str!("routes/vault.rs"), 12),
         ] {
             let source = source.split("#[cfg(test)]").next().unwrap();
             assert!(

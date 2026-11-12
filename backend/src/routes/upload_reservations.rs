@@ -99,20 +99,52 @@ where
     )
     .await
     .map_err(error::ErrorInternalServerError)?;
-    let used_bytes: i64 = usage.get("used_bytes");
-    let reserved_bytes: i64 = usage.get("reserved_bytes");
-    let pending_uploads: i64 = usage.get("pending_uploads");
-
-    if pending_uploads >= MAX_PENDING_UPLOADS {
-        return Err(error::ErrorTooManyRequests(PENDING_UPLOADS_FULL));
+    PendingUsage {
+        used_bytes: usage.get("used_bytes"),
+        reserved_bytes: usage.get("reserved_bytes"),
+        pending_uploads: usage.get("pending_uploads"),
     }
-    let quota_total =
-        i128::from(used_bytes) + i128::from(reserved_bytes) + i128::from(amount.quota_delta);
-    if quota_total > i128::from(quota_bytes) {
-        return Err(error::ErrorPayloadTooLarge("storage quota exceeded"));
-    }
+    .reserve(amount, storage_quota_bytes)?;
 
     Err(error::ErrorConflict(RESERVATION_CHANGED))
+}
+
+/// An owner's reservation ledger, read under its row lock so several
+/// reservations can be admitted in order and written back at once.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PendingUsage {
+    pub used_bytes: i64,
+    pub reserved_bytes: i64,
+    pub pending_uploads: i64,
+}
+
+impl PendingUsage {
+    /// Admits one reservation under the conditions `reserve_upload_capacity`
+    /// writes with, or returns the error it reports for the same ledger.
+    pub fn reserve(&mut self, amount: ReservationAmount, storage_quota_bytes: u64) -> Result<()> {
+        if amount.ledger_bytes < 0 {
+            return Err(error::ErrorInternalServerError(
+                "upload reservation cannot be negative",
+            ));
+        }
+        let quota_bytes = i64::try_from(storage_quota_bytes)
+            .map_err(|_| error::ErrorInternalServerError("storage quota is too large"))?;
+        if self.pending_uploads >= MAX_PENDING_UPLOADS {
+            return Err(error::ErrorTooManyRequests(PENDING_UPLOADS_FULL));
+        }
+        let quota_total = i128::from(self.used_bytes)
+            + i128::from(self.reserved_bytes)
+            + i128::from(amount.quota_delta);
+        if quota_total > i128::from(quota_bytes) {
+            return Err(error::ErrorPayloadTooLarge("storage quota exceeded"));
+        }
+        self.reserved_bytes = self
+            .reserved_bytes
+            .checked_add(amount.ledger_bytes)
+            .ok_or_else(|| error::ErrorInternalServerError("upload reservation overflowed"))?;
+        self.pending_uploads += 1;
+        Ok(())
+    }
 }
 
 // Runs after the ledger UPDATE above, which row-locks the owner's usage. Concurrent
@@ -179,8 +211,8 @@ pub fn reservation_amount(
 mod tests {
     use super::{
         MAX_PENDING_SHARE_LINK_UPLOADS, MAX_PENDING_UPLOADS, MAX_PENDING_UPLOADS_PER_SHARE_LINK,
-        PENDING_UPLOAD_SECONDS, PENDING_UPLOADS_FULL, RESERVATION_CHANGED, ReservationAmount,
-        UNTOUCHED_SHARE_LINK_UPLOAD_SECONDS, initial_pending_upload_seconds,
+        PENDING_UPLOAD_SECONDS, PENDING_UPLOADS_FULL, PendingUsage, RESERVATION_CHANGED,
+        ReservationAmount, UNTOUCHED_SHARE_LINK_UPLOAD_SECONDS, initial_pending_upload_seconds,
         is_reservation_contention, reservation_amount, reserve_upload_capacity,
         share_link_pending_limit_error,
     };
@@ -203,6 +235,57 @@ mod tests {
         assert!(!is_reservation_contention(&error::ErrorConflict(
             "another encrypted generation is already uploading"
         )));
+    }
+
+    #[test]
+    fn ledger_admission_matches_the_reservation_update() {
+        let mut usage = PendingUsage {
+            used_bytes: 60,
+            reserved_bytes: 20,
+            pending_uploads: MAX_PENDING_UPLOADS - 2,
+        };
+        usage
+            .reserve(reservation_amount(10, 0).unwrap(), 100)
+            .unwrap();
+        // A replacement that shrinks its node needs no ledger bytes but
+        // still holds a slot.
+        usage
+            .reserve(reservation_amount(5, 15).unwrap(), 100)
+            .unwrap();
+        assert_eq!(
+            usage,
+            PendingUsage {
+                used_bytes: 60,
+                reserved_bytes: 30,
+                pending_uploads: MAX_PENDING_UPLOADS,
+            }
+        );
+        let full = usage
+            .reserve(reservation_amount(1, 0).unwrap(), 100)
+            .unwrap_err();
+        assert_eq!(
+            full.as_response_error().status_code(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert!(is_reservation_contention(&full));
+
+        let mut usage = PendingUsage {
+            used_bytes: 60,
+            reserved_bytes: 30,
+            pending_uploads: 0,
+        };
+        let quota = usage
+            .reserve(reservation_amount(11, 0).unwrap(), 100)
+            .unwrap_err();
+        assert_eq!(
+            quota.as_response_error().status_code(),
+            StatusCode::PAYLOAD_TOO_LARGE
+        );
+        assert!(!is_reservation_contention(&quota));
+        usage
+            .reserve(reservation_amount(10, 0).unwrap(), 100)
+            .unwrap();
+        assert_eq!(usage.reserved_bytes, 40);
     }
 
     #[test]

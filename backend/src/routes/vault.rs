@@ -57,7 +57,11 @@ const MAX_METADATA_PLAN_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 // so a 100-entry owned folder still fits in one page.
 const MAX_LISTING_METADATA_PLAN_BYTES: usize = 2 * 1024 * 1024;
 const SHARED_METADATA_PLAN_CONCURRENCY: usize = 8;
+const MAX_DOWNLOAD_PLAN_REQUEST_NODES: usize = 100;
+const MAX_DOWNLOAD_PLAN_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const VAULT_PUBLICATION_CONTENT_TYPE: &str = "application/vnd.aeralyth.vault-publication";
+#[path = "vault_inline_batches.rs"]
+mod inline_batches;
 #[path = "vault_inline_uploads.rs"]
 mod inline_uploads;
 #[path = "vault_metadata_paging.rs"]
@@ -141,6 +145,46 @@ const OWNED_METADATA_WRAPPERS_QUERY: &str = "
      AND heads.record_version = wrappers.record_version
     WHERE wrappers.node_id = ANY($1)
     GROUP BY wrappers.node_id, wrappers.record_version
+";
+// Single and batched download plans share these queries, so both apply the
+// same ownership and state checks before a URL is signed.
+const OWNED_DOWNLOAD_PLANS_QUERY: &str = "
+    SELECT files.id, files.owner_id, files.entry_type,
+           files.current_generation_number,
+           files.current_generation_id,
+           records.bootstrap_cbor, records.bootstrap_signature,
+           records.encrypted_manifest, records.signer_key_version,
+           heads.record_version, heads.record_hash,
+           identity.ed25519_public_key,
+           generations.object_key, generations.ciphertext_length,
+           generations.crypto_chunk_bytes, generations.chunk_count,
+           generations.ciphertext_merkle_root
+    FROM unnest($1::text[]) WITH ORDINALITY AS requested(node_id, ordinal)
+    INNER JOIN visible_files AS files ON files.id = requested.node_id
+    INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
+    INNER JOIN vault_node_records AS records
+      ON records.node_id = heads.node_id
+     AND records.record_version = heads.record_version
+    INNER JOIN vault_identity_keys AS identity
+      ON identity.user_id = records.owner_id
+     AND identity.key_version = records.signer_key_version
+    LEFT JOIN vault_object_generations AS generations
+      ON generations.node_id = files.id
+     AND generations.generation_number = files.current_generation_number
+     AND generations.status = 'published'
+    WHERE files.owner_id = $2
+      AND files.e2ee_state = 'encrypted'
+      AND files.state = 'active'
+    ORDER BY requested.ordinal
+";
+const OWNED_DOWNLOAD_WRAPPERS_QUERY: &str = "
+    SELECT wrappers.node_id,
+           array_agg(wrappers.canonical_cbor ORDER BY wrappers.wrapper_id) AS wrapper_cbors
+    FROM unnest($1::text[], $2::bigint[]) AS requested(node_id, record_version)
+    INNER JOIN vault_wrappers AS wrappers
+      ON wrappers.node_id = requested.node_id
+     AND wrappers.record_version = requested.record_version
+    GROUP BY wrappers.node_id
 ";
 const SHARED_DOWNLOAD_SNAPSHOT_QUERY: &str = "
     WITH RECURSIVE ancestors AS (
@@ -597,7 +641,7 @@ pub(crate) struct PublishUploadRequest {
     wrappers: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PublishResponse {
     node_id: String,
@@ -726,6 +770,25 @@ pub(crate) struct MetadataPlansRequest {
     snapshot: Option<String>,
     #[serde(default)]
     purpose: MetadataPlanPurpose,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct DownloadPlansRequest {
+    node_ids: Vec<String>,
+}
+
+/// One node of a batched download-plan response. `status` is the HTTP status
+/// the single download-plan route would have answered for this node.
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct DownloadPlanResult {
+    node_id: String,
+    status: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plan: Option<DownloadPlanResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<String>,
 }
 
 #[derive(Default, Deserialize, Eq, PartialEq)]
@@ -1971,12 +2034,7 @@ async fn stage_vault_upload(
 
     let upload_id = format!("vup_{}", random_id()?);
     let object_key = if body.entry_type == "file" {
-        Some(format!(
-            "users/{}/vault/{}/{}",
-            user.id,
-            body.node_id,
-            random_id()?
-        ))
+        Some(vault_object_key(&user.id, &body.node_id)?)
     } else {
         None
     };
@@ -2223,6 +2281,11 @@ async fn stage_vault_upload(
         .ok_or_else(|| error::ErrorInternalServerError("upload was not persisted"))?;
 
     Ok((upload, true))
+}
+
+/// A fresh bucket key for one generation of an owner's encrypted file.
+fn vault_object_key(owner_id: &str, node_id: &str) -> Result<String> {
+    Ok(format!("users/{owner_id}/vault/{node_id}/{}", random_id()?))
 }
 
 pub async fn presign_content(
@@ -2935,107 +2998,20 @@ pub async fn download_plan(
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     let node_id = path.into_inner();
-    let row = state
-        .db
-        .query_opt(
-            "
-                SELECT files.owner_id, files.entry_type,
-                       files.current_generation_number,
-                       files.current_generation_id,
-                       records.bootstrap_cbor, records.bootstrap_signature,
-                       records.encrypted_manifest, records.signer_key_version,
-                       heads.record_version, heads.record_hash,
-                       identity.ed25519_public_key,
-                       generations.object_key, generations.ciphertext_length,
-                       generations.crypto_chunk_bytes, generations.chunk_count,
-                       generations.ciphertext_merkle_root
-                FROM visible_files AS files
-                INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
-                INNER JOIN vault_node_records AS records
-                  ON records.node_id = heads.node_id
-                 AND records.record_version = heads.record_version
-                INNER JOIN vault_identity_keys AS identity
-                  ON identity.user_id = records.owner_id
-                 AND identity.key_version = records.signer_key_version
-                LEFT JOIN vault_object_generations AS generations
-                  ON generations.node_id = files.id
-                 AND generations.generation_number = files.current_generation_number
-                 AND generations.status = 'published'
-                WHERE files.id = $1 AND files.owner_id = $2
-                  AND files.e2ee_state = 'encrypted'
-                  AND files.state = 'active'
-                LIMIT 1
-            ",
-            &[&node_id, &user.id],
-        )
-        .await
-        .map_err(crate::db::http_error)?;
-    let Some(row) = row else {
+    let mut owned =
+        load_owned_download_rows(&state, &user.id, std::slice::from_ref(&node_id)).await?;
+    let Some((row, wrapper_cbors)) = owned.remove(&node_id) else {
         return shared_download_plan(&state, &user, &node_id).await;
     };
-    let record_version: i64 = row.get("record_version");
-    let wrapper_rows = state
-        .db
-        .query(
-            "SELECT canonical_cbor FROM vault_wrappers WHERE node_id = $1 AND record_version = $2 ORDER BY wrapper_id",
-            &[&node_id, &record_version],
-        )
-        .await
-        .map_err(crate::db::http_error)?;
-    let object_key: Option<String> = row.get("object_key");
     state.db.release_request_connection().await;
-    let download_url = if let Some(object_key) = object_key.as_deref() {
-        state
-            .storage_operations
-            .run(
-                &user.id,
-                state
-                    .storage
-                    .download_url(object_key, "aeralyth-ciphertext.bin"),
-            )
-            .await?
-            .map_err(error::ErrorBadGateway)?
-    } else {
-        None
-    };
+    let download_url = sign_download_urls(&state, &user.id, vec![row.get("object_key")])
+        .await?
+        .pop()
+        .unwrap_or(Ok(None))
+        .map_err(error::ErrorBadGateway)?;
     let response = run_metadata_decode(&state, &user.id, move || {
-        let response: Result<DownloadPlanResponse> = (|| {
-            let wrappers = wrapper_rows
-                .into_iter()
-                .map(|row| encode_bytes(row.get::<_, Vec<u8>>("canonical_cbor")))
-                .collect::<Vec<_>>();
-            let bootstrap_cbor: Vec<u8> = row.get("bootstrap_cbor");
-            let bootstrap =
-                decode_bootstrap(&bootstrap_cbor).map_err(error::ErrorInternalServerError)?;
-            Ok(DownloadPlanResponse {
-                node_id,
-                entry_type: row.get("entry_type"),
-                generation_number: row.get("current_generation_number"),
-                generation_id: encode_bytes(row.get::<_, Vec<u8>>("current_generation_id")),
-                ciphertext_length: row.get::<_, Option<i64>>("ciphertext_length").unwrap_or(0),
-                crypto_chunk_bytes: row
-                    .get::<_, Option<i32>>("crypto_chunk_bytes")
-                    .unwrap_or(CRYPTO_CHUNK_BYTES as i32),
-                chunk_count: row.get::<_, Option<i32>>("chunk_count").unwrap_or(0),
-                ciphertext_merkle_root: encode_bytes(
-                    row.get::<_, Option<Vec<u8>>>("ciphertext_merkle_root")
-                        .unwrap_or_else(|| bootstrap.ciphertext_merkle_root.to_vec()),
-                ),
-                download_url,
-                bootstrap_cbor: encode_bytes(bootstrap_cbor),
-                bootstrap_signature: encode_bytes(row.get::<_, Vec<u8>>("bootstrap_signature")),
-                encrypted_manifest: encode_bytes(row.get::<_, Vec<u8>>("encrypted_manifest")),
-                wrappers,
-                signer_key_version: row.get("signer_key_version"),
-                signer_ed25519_public_key: encode_bytes(
-                    row.get::<_, Vec<u8>>("ed25519_public_key"),
-                ),
-                record_version,
-                record_hash: encode_bytes(row.get::<_, Vec<u8>>("record_hash")),
-                share: None,
-            })
-        })();
-        let response = response.map_err(portable_publication_error)?;
+        let response = owned_download_plan_from_row(node_id, row, wrapper_cbors, download_url)
+            .map_err(portable_publication_error)?;
         encode_json_response(&response)
     })
     .await?;
@@ -3043,6 +3019,299 @@ pub async fn download_plan(
     Ok(HttpResponse::Ok()
         .content_type("application/json")
         .body(response))
+}
+
+/// Download plans for up to `MAX_DOWNLOAD_PLAN_REQUEST_NODES` nodes, each with
+/// exactly the checks, status and body the single route would answer, so one
+/// inaccessible node fails only its own entry. The batch takes one admission
+/// permit, one storage operation for all URL signatures, and one decode job.
+pub async fn download_plans(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    body: web::Payload,
+) -> Result<HttpResponse> {
+    require_vault_enabled(&state)?;
+    let user = require_principal(&state, &request).await?;
+    require_configured_vault(&state, &user).await?;
+    require_header_csrf(&state, &request).await?;
+    let body =
+        parse_json_body::<DownloadPlansRequest>(&request, body, VAULT_CONTROL_JSON_LIMIT).await?;
+    if body.node_ids.is_empty() || body.node_ids.len() > MAX_DOWNLOAD_PLAN_REQUEST_NODES {
+        return Err(error::ErrorBadRequest(
+            "download plan request must contain between 1 and 100 node ids",
+        ));
+    }
+    let mut unique_ids = HashSet::with_capacity(body.node_ids.len());
+    for node_id in &body.node_ids {
+        validate_node_id(node_id)?;
+        if !unique_ids.insert(node_id.as_str()) {
+            return Err(error::ErrorBadRequest(
+                "download plan request contains duplicate node ids",
+            ));
+        }
+    }
+
+    let (mut owned, mut shared) = {
+        let _interactive_permit = state.acquire_interactive_operation(&user.id).await?;
+        let owned = load_owned_download_rows(&state, &user.id, &body.node_ids).await?;
+        let unowned = body
+            .node_ids
+            .iter()
+            .filter(|node_id| !owned.contains_key(*node_id))
+            .cloned()
+            .collect::<Vec<_>>();
+        state.db.release_request_connection().await;
+        let shared = if unowned.is_empty() {
+            HashMap::new()
+        } else {
+            let mut client = state.db.get().await.map_err(crate::db::http_error)?;
+            let transaction = client
+                .transaction()
+                .await
+                .map_err(error::ErrorInternalServerError)?;
+            let rows = query_cached(
+                &transaction,
+                &metadata_paging::SHARED_PAYLOAD_BATCH_QUERY,
+                &[&unowned, &user.id],
+            )
+            .await
+            .map_err(error::ErrorInternalServerError)?;
+            // As for a single shared plan, the rows own the consistent snapshot;
+            // share locks end before any decoding or URL signing.
+            transaction
+                .commit()
+                .await
+                .map_err(error::ErrorInternalServerError)?;
+            drop(client);
+            rows.into_iter()
+                .map(|row| (row.get::<_, String>("requested_node_id"), row))
+                .collect::<HashMap<_, _>>()
+        };
+        (owned, shared)
+    };
+    let sources = body
+        .node_ids
+        .into_iter()
+        .map(|node_id| {
+            let source = if let Some((row, wrapper_cbors)) = owned.remove(&node_id) {
+                DownloadPlanSource::Owned(row, wrapper_cbors)
+            } else if let Some(row) = shared.remove(&node_id) {
+                DownloadPlanSource::Shared(row)
+            } else {
+                DownloadPlanSource::NotFound
+            };
+            (node_id, source)
+        })
+        .collect::<Vec<_>>();
+    let object_keys = sources
+        .iter()
+        .map(|(_, source)| match source {
+            DownloadPlanSource::Owned(row, _) | DownloadPlanSource::Shared(row) => {
+                row.get("object_key")
+            }
+            DownloadPlanSource::NotFound => None,
+        })
+        .collect();
+    let download_urls = sign_download_urls(&state, &user.id, object_keys)
+        .await?
+        .into_iter()
+        .map(|url| {
+            url.map_err(|failure| portable_publication_error(error::ErrorBadGateway(failure)))
+        })
+        .collect::<Vec<_>>();
+    let user_id = user.id.clone();
+    let response = run_metadata_decode(&state, &user.id, move || {
+        encode_download_plan_results(sources, download_urls, &user_id)
+    })
+    .await?;
+
+    Ok(HttpResponse::Ok()
+        .content_type("application/json")
+        .body(response))
+}
+
+enum DownloadPlanSource {
+    Owned(tokio_postgres::Row, Vec<Vec<u8>>),
+    Shared(tokio_postgres::Row),
+    NotFound,
+}
+
+fn encode_download_plan_results(
+    sources: Vec<(String, DownloadPlanSource)>,
+    download_urls: Vec<std::result::Result<Option<String>, (u16, String)>>,
+    user_id: &str,
+) -> std::result::Result<Bytes, (u16, String)> {
+    let mut body = br#"{"results":["#.to_vec();
+    for (index, ((node_id, source), download_url)) in
+        sources.into_iter().zip(download_urls).enumerate()
+    {
+        let plan = download_url.and_then(|download_url| match source {
+            DownloadPlanSource::Owned(row, wrapper_cbors) => {
+                owned_download_plan_from_row(node_id.clone(), row, wrapper_cbors, download_url)
+                    .map(Some)
+                    .map_err(portable_publication_error)
+            }
+            DownloadPlanSource::Shared(row) => {
+                match shared_download_plan_from_row(row, user_id, &node_id, download_url)
+                    .map_err(portable_publication_error)?
+                {
+                    Some(plan) => Ok(Some(plan)),
+                    None => Err((409, "share material is still synchronizing".to_owned())),
+                }
+            }
+            DownloadPlanSource::NotFound => Ok(None),
+        });
+        let result = match plan {
+            Ok(Some(plan)) => DownloadPlanResult {
+                node_id: node_id.clone(),
+                status: 200,
+                plan: Some(plan),
+                error: None,
+            },
+            Ok(None) => DownloadPlanResult {
+                node_id: node_id.clone(),
+                status: 404,
+                plan: None,
+                error: None,
+            },
+            Err((status, message)) => DownloadPlanResult {
+                node_id: node_id.clone(),
+                status,
+                plan: None,
+                error: Some(message),
+            },
+        };
+        let mut encoded =
+            serde_json::to_vec(&result).map_err(|failure| (500, failure.to_string()))?;
+        // Leave room for the closing bytes; an oversized plan is answered on
+        // its own by the single route instead.
+        if body.len() + encoded.len() + 3 > MAX_DOWNLOAD_PLAN_RESPONSE_BYTES {
+            encoded = serde_json::to_vec(&DownloadPlanResult {
+                node_id,
+                status: 413,
+                plan: None,
+                error: Some("download plan batch is too large; request this node alone".into()),
+            })
+            .map_err(|failure| (500, failure.to_string()))?;
+        }
+        if index > 0 {
+            body.push(b',');
+        }
+        body.extend_from_slice(&encoded);
+    }
+    body.extend_from_slice(b"]}");
+    Ok(Bytes::from(body))
+}
+
+/// Loads the owned, active, encrypted nodes among `node_ids` with the wrappers
+/// of their current record, keyed by node id.
+async fn load_owned_download_rows(
+    state: &AppState,
+    owner_id: &str,
+    node_ids: &[String],
+) -> Result<HashMap<String, (tokio_postgres::Row, Vec<Vec<u8>>)>> {
+    let rows = state
+        .db
+        .query(OWNED_DOWNLOAD_PLANS_QUERY, &[&node_ids, &owner_id])
+        .await
+        .map_err(crate::db::http_error)?;
+    if rows.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let ids = rows
+        .iter()
+        .map(|row| row.get::<_, String>("id"))
+        .collect::<Vec<_>>();
+    let record_versions = rows
+        .iter()
+        .map(|row| row.get::<_, i64>("record_version"))
+        .collect::<Vec<_>>();
+    let mut wrappers = state
+        .db
+        .query(OWNED_DOWNLOAD_WRAPPERS_QUERY, &[&ids, &record_versions])
+        .await
+        .map_err(crate::db::http_error)?
+        .into_iter()
+        .map(|row| {
+            (
+                row.get::<_, String>("node_id"),
+                row.get::<_, Vec<Vec<u8>>>("wrapper_cbors"),
+            )
+        })
+        .collect::<HashMap<_, _>>();
+    Ok(ids
+        .into_iter()
+        .zip(rows)
+        .map(|(id, row)| {
+            let wrapper_cbors = wrappers.remove(&id).unwrap_or_default();
+            (id, (row, wrapper_cbors))
+        })
+        .collect())
+}
+
+/// Signs every object of a request inside one storage operation. Presigning is
+/// local work, so a batch must not take one per-user queue slot per node.
+async fn sign_download_urls(
+    state: &AppState,
+    user_id: &str,
+    object_keys: Vec<Option<String>>,
+) -> Result<Vec<std::result::Result<Option<String>, crate::storage::StorageError>>> {
+    if object_keys.iter().all(Option::is_none) {
+        return Ok(object_keys.into_iter().map(|_| Ok(None)).collect());
+    }
+    let storage = &state.storage;
+    Ok(state
+        .storage_operations
+        .run(user_id, async move {
+            let mut urls = Vec::with_capacity(object_keys.len());
+            for object_key in object_keys {
+                urls.push(match object_key {
+                    Some(object_key) => {
+                        storage
+                            .download_url(&object_key, "aeralyth-ciphertext.bin")
+                            .await
+                    }
+                    None => Ok(None),
+                });
+            }
+            urls
+        })
+        .await?)
+}
+
+fn owned_download_plan_from_row(
+    node_id: String,
+    row: tokio_postgres::Row,
+    wrapper_cbors: Vec<Vec<u8>>,
+    download_url: Option<String>,
+) -> Result<DownloadPlanResponse> {
+    let bootstrap_cbor: Vec<u8> = row.get("bootstrap_cbor");
+    let bootstrap = decode_bootstrap(&bootstrap_cbor).map_err(error::ErrorInternalServerError)?;
+    Ok(DownloadPlanResponse {
+        node_id,
+        entry_type: row.get("entry_type"),
+        generation_number: row.get("current_generation_number"),
+        generation_id: encode_bytes(row.get::<_, Vec<u8>>("current_generation_id")),
+        ciphertext_length: row.get::<_, Option<i64>>("ciphertext_length").unwrap_or(0),
+        crypto_chunk_bytes: row
+            .get::<_, Option<i32>>("crypto_chunk_bytes")
+            .unwrap_or(CRYPTO_CHUNK_BYTES as i32),
+        chunk_count: row.get::<_, Option<i32>>("chunk_count").unwrap_or(0),
+        ciphertext_merkle_root: encode_bytes(
+            row.get::<_, Option<Vec<u8>>>("ciphertext_merkle_root")
+                .unwrap_or_else(|| bootstrap.ciphertext_merkle_root.to_vec()),
+        ),
+        download_url,
+        bootstrap_cbor: encode_bytes(bootstrap_cbor),
+        bootstrap_signature: encode_bytes(row.get::<_, Vec<u8>>("bootstrap_signature")),
+        encrypted_manifest: encode_bytes(row.get::<_, Vec<u8>>("encrypted_manifest")),
+        wrappers: wrapper_cbors.into_iter().map(encode_bytes).collect(),
+        signer_key_version: row.get("signer_key_version"),
+        signer_ed25519_public_key: encode_bytes(row.get::<_, Vec<u8>>("ed25519_public_key")),
+        record_version: row.get("record_version"),
+        record_hash: encode_bytes(row.get::<_, Vec<u8>>("record_hash")),
+        share: None,
+    })
 }
 
 pub async fn abort_upload(
@@ -5825,8 +6094,26 @@ async fn publish_record_transaction(
         .await
         .map_err(error::ErrorInternalServerError)?;
     lock_share_topology(&transaction, &user.id).await?;
+    let published =
+        publish_record_in_transaction(&transaction, user, upload, decoded, metadata).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    Ok(published)
+}
+
+/// Publishes one staged upload inside a transaction that already holds the
+/// owner's share-topology lock.
+async fn publish_record_in_transaction(
+    transaction: &deadpool_postgres::Transaction<'_>,
+    user: &SessionPrincipal,
+    upload: &VaultUpload,
+    decoded: &DecodedNodeRecord,
+    metadata: Option<&ObjectMetadata>,
+) -> Result<PublishResponse> {
     let upload_status = query_opt_cached(
-        &transaction,
+        transaction,
         "
                 SELECT status
                 FROM vault_uploads
@@ -5842,7 +6129,7 @@ async fn publish_record_transaction(
         return Err(error::ErrorConflict("upload state changed; retry"));
     }
     let existing = query_opt_cached(
-        &transaction,
+        transaction,
         "
                 SELECT owner_id, parent_id, entry_type, e2ee_state,
                        current_generation_number, current_generation_id,
@@ -5866,7 +6153,7 @@ async fn publish_record_transaction(
             "encrypted" => {}
             "staged" => {
                 let migration = query_opt_cached(
-                    &transaction,
+                    transaction,
                     "
                             SELECT state FROM vault_migrations
                             WHERE node_id = $1 AND owner_id = $2
@@ -5897,7 +6184,7 @@ async fn publish_record_transaction(
     }
 
     let head = query_opt_cached(
-        &transaction,
+        transaction,
         "SELECT record_version, record_hash FROM vault_node_heads WHERE node_id = $1 FOR UPDATE",
         &[&upload.node_id],
     )
@@ -5928,7 +6215,7 @@ async fn publish_record_transaction(
         }
     }
     reject_fenced_share_write(
-        &transaction,
+        transaction,
         &upload.node_id,
         upload.parent_id.as_deref(),
         &user.id,
@@ -5936,7 +6223,7 @@ async fn publish_record_transaction(
     .await?;
     validate_owner_wrappers(decoded, upload.parent_id.as_deref())?;
     let (committed_share_wrappers, share_sync_required) = publication_share_wrappers(
-        &transaction,
+        transaction,
         decoded,
         &upload.node_id,
         upload.parent_id.as_deref(),
@@ -5953,7 +6240,7 @@ async fn publish_record_transaction(
     let object_checksum = metadata.and_then(|value| value.checksum_sha256.clone());
     let object_etag = metadata.and_then(|value| value.etag.clone());
     if existing.is_none() {
-        execute_cached(&transaction, "
+        execute_cached(transaction, "
                     INSERT INTO files (
                       id, owner_id, original_name, storage_name, mime_type,
                       size_bytes, entry_type, parent_id, checksum_sha256,
@@ -5981,7 +6268,7 @@ async fn publish_record_transaction(
     } else if let Some(existing) = existing.as_ref() {
         let old_storage_name: String = existing.get("storage_name");
         execute_cached(
-            &transaction,
+            transaction,
             "
                     UPDATE files
                     SET original_name = $1,
@@ -6009,12 +6296,12 @@ async fn publish_record_transaction(
         .await
         .map_err(error::ErrorInternalServerError)?;
         if upload.entry_type == "file" && old_storage_name != storage_name {
-            execute_cached(&transaction, "UPDATE vault_object_generations SET status = 'retired', retired_at = now() WHERE node_id = $1 AND status = 'published'",
+            execute_cached(transaction, "UPDATE vault_object_generations SET status = 'retired', retired_at = now() WHERE node_id = $1 AND status = 'published'",
                     &[&upload.node_id],
                 )
                 .await
                 .map_err(error::ErrorInternalServerError)?;
-            execute_cached(&transaction, "INSERT INTO storage_deletion_jobs (object_key) VALUES ($1) ON CONFLICT (object_key) DO NOTHING",
+            execute_cached(transaction, "INSERT INTO storage_deletion_jobs (object_key) VALUES ($1) ON CONFLICT (object_key) DO NOTHING",
                     &[&old_storage_name],
                 )
                 .await
@@ -6027,7 +6314,7 @@ async fn publish_record_transaction(
                 "complete"
             };
             execute_cached(
-                &transaction,
+                transaction,
                 "
                         UPDATE vault_migrations
                         SET staged_object_key = $1, state = $2,
@@ -6046,9 +6333,9 @@ async fn publish_record_transaction(
         }
     }
 
-    insert_node_record(&transaction, &user.id, decoded).await?;
+    insert_node_record(transaction, &user.id, decoded).await?;
     update_share_sync_job(
-        &transaction,
+        transaction,
         &upload.node_id,
         &user.id,
         i64::try_from(decoded.verified.bootstrap.record_version)
@@ -6056,12 +6343,12 @@ async fn publish_record_transaction(
         share_sync_required,
     )
     .await?;
-    replace_owner_wrappers(&transaction, &user.id, decoded).await?;
-    insert_share_wrappers(&transaction, committed_share_wrappers.iter().copied(), None).await?;
-    update_node_head(&transaction, &user.id, decoded).await?;
+    replace_owner_wrappers(transaction, &user.id, decoded).await?;
+    insert_share_wrappers(transaction, committed_share_wrappers.iter().copied(), None).await?;
+    update_node_head(transaction, &user.id, decoded).await?;
     if upload.entry_type == "file" {
         execute_cached(
-            &transaction,
+            transaction,
             "
                     INSERT INTO vault_object_generations (
                       node_id, owner_id, generation_number, generation_id,
@@ -6085,11 +6372,11 @@ async fn publish_record_transaction(
         .map_err(error::ErrorInternalServerError)?;
     }
     if upload.entry_type == "file" && !is_migration {
-        touch_ancestor_collections(&transaction, upload.parent_id.as_deref(), &user.id)
+        touch_ancestor_collections(transaction, upload.parent_id.as_deref(), &user.id)
             .await
             .map_err(error::ErrorInternalServerError)?;
     }
-    let published = execute_cached(&transaction, "UPDATE vault_uploads SET status = 'published', published_at = now() WHERE id = $1 AND owner_id = $2 AND status IN ('pending', 'completing')",
+    let published = execute_cached(transaction, "UPDATE vault_uploads SET status = 'published', published_at = now() WHERE id = $1 AND owner_id = $2 AND status IN ('pending', 'completing')",
             &[&upload.id, &user.id],
         )
         .await
@@ -6097,10 +6384,6 @@ async fn publish_record_transaction(
     if published != 1 {
         return Err(error::ErrorConflict("upload state changed; retry"));
     }
-    transaction
-        .commit()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
 
     Ok(PublishResponse {
         node_id: upload.node_id.clone(),
@@ -6965,11 +7248,25 @@ async fn current_publish_record(
     owner_id: &str,
     node_id: &str,
 ) -> Result<Option<PublishResponse>> {
-    let row = state
+    Ok(
+        current_publish_records(state, owner_id, std::slice::from_ref(&node_id.to_owned()))
+            .await?
+            .remove(node_id),
+    )
+}
+
+/// The current publication of each of the owner's nodes that has one.
+async fn current_publish_records(
+    state: &AppState,
+    owner_id: &str,
+    node_ids: &[String],
+) -> Result<HashMap<String, PublishResponse>> {
+    let rows = state
         .db
-        .query_opt(
+        .query(
             "
-                SELECT files.current_generation_number, files.current_generation_id,
+                SELECT files.id, files.current_generation_number,
+                       files.current_generation_id,
                        heads.record_version, heads.record_hash,
                        EXISTS (
                          SELECT 1 FROM vault_share_sync_jobs AS jobs
@@ -6978,20 +7275,27 @@ async fn current_publish_record(
                        ) AS share_sync_required
                 FROM visible_files AS files
                 INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
-                WHERE files.id = $1 AND files.owner_id = $2
+                WHERE files.id = ANY($1::text[]) AND files.owner_id = $2
             ",
-            &[&node_id, &owner_id],
+            &[&node_ids, &owner_id],
         )
         .await
         .map_err(crate::db::http_error)?;
-    Ok(row.map(|row| PublishResponse {
-        node_id: node_id.to_owned(),
-        generation_number: row.get("current_generation_number"),
-        generation_id: encode_bytes(row.get::<_, Vec<u8>>("current_generation_id")),
-        record_version: row.get("record_version"),
-        record_hash: encode_bytes(row.get::<_, Vec<u8>>("record_hash")),
-        share_sync_required: row.get("share_sync_required"),
-    }))
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let node_id = row.get::<_, String>("id");
+            let published = PublishResponse {
+                node_id: node_id.clone(),
+                generation_number: row.get("current_generation_number"),
+                generation_id: encode_bytes(row.get::<_, Vec<u8>>("current_generation_id")),
+                record_version: row.get("record_version"),
+                record_hash: encode_bytes(row.get::<_, Vec<u8>>("record_hash")),
+                share_sync_required: row.get("share_sync_required"),
+            };
+            (node_id, published)
+        })
+        .collect())
 }
 
 async fn load_shared_plan(
@@ -7047,296 +7351,19 @@ async fn prepare_shared_plan(
     include_download_url: bool,
     encode_response: bool,
 ) -> Result<SharedDownloadCpuResponse> {
-    let object_key: Option<String> = row.get("object_key");
     let download_url = if include_download_url {
-        if let Some(object_key) = object_key.as_deref() {
-            state
-                .storage_operations
-                .run(
-                    &user.id,
-                    state
-                        .storage
-                        .download_url(object_key, "aeralyth-ciphertext.bin"),
-                )
-                .await?
-                .map_err(error::ErrorBadGateway)?
-        } else {
-            None
-        }
+        sign_download_urls(state, &user.id, vec![row.get("object_key")])
+            .await?
+            .pop()
+            .unwrap_or(Ok(None))
+            .map_err(error::ErrorBadGateway)?
     } else {
         None
     };
     let user_id = user.id.clone();
     let node_id = node_id.to_owned();
     let response = run_metadata_decode(state, &user.id, move || {
-        let prepared: Result<Option<DownloadPlanResponse>> = (|| {
-            let SharedDownloadSnapshot {
-                share_id,
-                owner_id,
-                root_node_id,
-                active_epoch,
-                share_record_version,
-                share_previous_record_hash,
-                recipient_key_version,
-                epoch_protocol_version,
-                epoch_wrapper_set_root,
-                epoch_wrapper_count,
-                entry_type,
-                current_generation_number,
-                current_generation_id: generation_id,
-                bootstrap_cbor,
-                bootstrap_signature,
-                encrypted_manifest,
-                signer_key_version,
-                node_record_version,
-                record_hash,
-                node_signer_ed25519_public_key,
-                ciphertext_length,
-                crypto_chunk_bytes,
-                chunk_count,
-                ciphertext_merkle_root,
-                wrappers: wrapper_snapshots,
-                envelope,
-                directory: directory_snapshot,
-            } = shared_download_snapshot_from_row(row)?;
-
-            let expected_wrapper_count = if entry_type == "file" { 2 } else { 1 };
-            if wrapper_snapshots.len() != expected_wrapper_count {
-                return Ok(None);
-            }
-            let envelope_cbor = Bytes::from(envelope.canonical_cbor);
-            let (decoded_envelope, verified_envelope_hash) = verify_share_envelope_material(
-                envelope_cbor.clone(),
-                &envelope.signature,
-                &envelope.sender_ed25519_public_key,
-            )
-            .map_err(error::ErrorInternalServerError)?;
-            if envelope.sender_id != owner_id
-                || envelope.recipient_id != user_id
-                || envelope.node_id != root_node_id
-                || envelope.record_version != share_record_version
-                || envelope.previous_record_hash != share_previous_record_hash
-                || envelope.recipient_key_version != recipient_key_version
-                || decoded_envelope.share_id.as_ref() != share_id.as_bytes()
-                || i64::try_from(decoded_envelope.epoch).ok() != Some(active_epoch)
-                || decoded_envelope.sender_id.as_ref() != owner_id.as_bytes()
-                || decoded_envelope.recipient_id.as_ref() != user_id.as_bytes()
-                || decoded_envelope.node_id.as_ref() != root_node_id.as_bytes()
-                || i64::try_from(decoded_envelope.recipient_key_version).ok()
-                    != Some(recipient_key_version)
-                || i64::try_from(decoded_envelope.record_version).ok() != Some(share_record_version)
-                || decoded_envelope
-                    .previous_record_hash
-                    .as_ref()
-                    .map(|value| value.as_slice())
-                    != share_previous_record_hash.as_deref()
-                || verified_envelope_hash.as_slice() != envelope.envelope_hash
-                || i16::try_from(decoded_envelope.format_version).ok()
-                    != Some(epoch_protocol_version)
-                || (epoch_protocol_version == SHARE_ENVELOPE_VERSION as i16
-                    && (decoded_envelope
-                        .wrapper_set_root
-                        .as_ref()
-                        .map(|value| value.as_slice())
-                        != epoch_wrapper_set_root.as_deref()
-                        || i32::try_from(decoded_envelope.wrapper_count).ok()
-                            != epoch_wrapper_count))
-            {
-                return Err(error::ErrorInternalServerError(
-                    "published share envelope is inconsistent with its active epoch",
-                ));
-            }
-            let commitment_sources = wrapper_snapshots
-                .iter()
-                .map(|wrapper| wrapper.commitment_source.as_str())
-                .collect::<HashSet<_>>();
-            if commitment_sources.len() != 1 {
-                return Err(error::ErrorInternalServerError(
-                    "share wrappers use inconsistent commitments",
-                ));
-            }
-            let uses_directory = commitment_sources.contains("directory");
-            if uses_directory && directory_snapshot.is_none() {
-                return Err(error::ErrorInternalServerError(
-                    "share-wrapper directory is missing",
-                ));
-            }
-            let bootstrap =
-                decode_bootstrap(&bootstrap_cbor).map_err(error::ErrorInternalServerError)?;
-            let epoch_root = epoch_wrapper_set_root
-                .as_deref()
-                .map(<[u8; 32]>::try_from)
-                .transpose()
-                .map_err(|_| error::ErrorInternalServerError("stored wrapper root is invalid"))?;
-            let directory_material = directory_snapshot
-                .map(|directory| -> Result<_> {
-                    let root = <[u8; 32]>::try_from(directory.wrapper_set_root.as_slice())
-                        .map_err(|_| {
-                            error::ErrorInternalServerError("stored directory root is invalid")
-                        })?;
-                    let decoded = decode_share_directory(&directory.canonical_cbor)
-                        .map_err(error::ErrorInternalServerError)?;
-                    if decoded.node_id != node_id
-                        || i64::try_from(decoded.record_version).ok() != Some(node_record_version)
-                        || decoded.record_hash.as_slice() != record_hash
-                        || decoded.generation_id.as_slice() != generation_id
-                        || i64::try_from(decoded.generation_number).ok()
-                            != Some(current_generation_number)
-                        || i64::try_from(decoded.signer_key_version).ok()
-                            != Some(directory.signer_key_version)
-                        || decoded.wrapper_set_root != root
-                        || i32::try_from(decoded.wrapper_count).ok()
-                            != Some(directory.wrapper_count)
-                    {
-                        return Err(error::ErrorInternalServerError(
-                            "stored share-wrapper directory is inconsistent",
-                        ));
-                    }
-                    verify_ed25519_signature(
-                        &directory.canonical_cbor,
-                        &directory.signature,
-                        &node_signer_ed25519_public_key,
-                    )
-                    .map_err(error::ErrorInternalServerError)?;
-                    Ok((
-                        directory.canonical_cbor,
-                        directory.signature,
-                        root,
-                        directory.wrapper_count,
-                    ))
-                })
-                .transpose()?;
-            let mut wrappers = Vec::with_capacity(wrapper_snapshots.len());
-            let mut wrapper_proofs = Vec::with_capacity(wrapper_snapshots.len());
-            let mut directory_proofs = Vec::with_capacity(wrapper_snapshots.len());
-            for wrapper in wrapper_snapshots {
-                let canonical = wrapper.canonical_cbor;
-                let wrapper_hash = sha256(&canonical);
-                wrappers.push(encode_bytes(canonical));
-                let leaf_index = wrapper.merkle_leaf_index;
-                let proof = wrapper.merkle_proof;
-                let commitment_source = wrapper.commitment_source;
-                let response_proof = match (commitment_source.as_str(), leaf_index, proof) {
-                    ("bootstrap" | "epoch", None, None) => None,
-                    (_, Some(leaf_index), Some(proof)) if proof.len() % 32 == 0 => {
-                        match commitment_source.as_str() {
-                            "epoch" => {
-                                if epoch_protocol_version != SHARE_ENVELOPE_VERSION as i16
-                                    || !verify_wrapper_set_proof(
-                                        wrapper_hash,
-                                        leaf_index,
-                                        &proof,
-                                        epoch_wrapper_count.unwrap_or_default(),
-                                        epoch_root.unwrap_or_default(),
-                                    )
-                                {
-                                    return Err(error::ErrorInternalServerError(
-                                        "stored share wrapper proof does not match its epoch",
-                                    ));
-                                }
-                                Some(ShareWrapperProofResponse {
-                                    leaf_index,
-                                    proof: encode_bytes(proof),
-                                })
-                            }
-                            "directory" => {
-                                let Some((_, _, root, count)) = directory_material.as_ref() else {
-                                    return Err(error::ErrorInternalServerError(
-                                        "stored share directory proof is missing its directory",
-                                    ));
-                                };
-                                if !verify_wrapper_set_proof(
-                                    wrapper_hash,
-                                    leaf_index,
-                                    &proof,
-                                    *count,
-                                    *root,
-                                ) {
-                                    return Err(error::ErrorInternalServerError(
-                                        "stored share wrapper proof does not match its directory",
-                                    ));
-                                }
-                                directory_proofs.push(ShareWrapperProofResponse {
-                                    leaf_index,
-                                    proof: encode_bytes(proof),
-                                });
-                                None
-                            }
-                            _ => {
-                                return Err(error::ErrorInternalServerError(
-                                    "stored share wrapper commitment source is invalid",
-                                ));
-                            }
-                        }
-                    }
-                    _ => {
-                        return Err(error::ErrorInternalServerError(
-                            "stored share wrapper proof is invalid",
-                        ));
-                    }
-                };
-                wrapper_proofs.push(response_proof);
-            }
-            let directory = directory_material.map(|(canonical_cbor, signature, _, _)| {
-                ShareDirectoryResponse {
-                    canonical_cbor: encode_bytes(canonical_cbor),
-                    signature: encode_bytes(signature),
-                    wrapper_proofs: directory_proofs,
-                }
-            });
-            let authorization_version = encode_bytes(share_authorization_version(
-                &share_id,
-                active_epoch,
-                &user_id,
-                recipient_key_version,
-                share_record_version,
-                &envelope.envelope_hash,
-            ));
-            let response = DownloadPlanResponse {
-                node_id: node_id.to_owned(),
-                entry_type,
-                generation_number: current_generation_number,
-                generation_id: encode_bytes(generation_id),
-                ciphertext_length: ciphertext_length.unwrap_or(0),
-                crypto_chunk_bytes: crypto_chunk_bytes.unwrap_or(CRYPTO_CHUNK_BYTES as i32),
-                chunk_count: chunk_count.unwrap_or(0),
-                ciphertext_merkle_root: encode_bytes(
-                    ciphertext_merkle_root
-                        .unwrap_or_else(|| bootstrap.ciphertext_merkle_root.to_vec()),
-                ),
-                download_url,
-                bootstrap_cbor: encode_bytes(bootstrap_cbor),
-                bootstrap_signature: encode_bytes(bootstrap_signature),
-                encrypted_manifest: encode_bytes(encrypted_manifest),
-                wrappers,
-                signer_key_version,
-                signer_ed25519_public_key: encode_bytes(node_signer_ed25519_public_key),
-                record_version: node_record_version,
-                record_hash: encode_bytes(record_hash),
-                share: Some(ShareDownloadMaterial {
-                    share_id,
-                    epoch: active_epoch,
-                    root_node_id,
-                    sender_id: owner_id,
-                    recipient_id: user_id,
-                    record_version: share_record_version,
-                    previous_record_hash: share_previous_record_hash.map(encode_bytes),
-                    envelope_cbor: encode_bytes(envelope_cbor),
-                    envelope_signature: encode_bytes(envelope.signature),
-                    envelope_hash: encode_bytes(envelope.envelope_hash),
-                    sender_key_version: envelope.sender_key_version,
-                    sender_x25519_public_key: encode_bytes(envelope.sender_x25519_public_key),
-                    sender_ed25519_public_key: encode_bytes(envelope.sender_ed25519_public_key),
-                    sender_fingerprint_sha256: encode_bytes(envelope.sender_fingerprint_sha256),
-                    recipient_key_version,
-                    authorization_version,
-                    wrapper_proofs,
-                    directory,
-                }),
-            };
-
-            Ok(Some(response))
-        })();
+        let prepared = shared_download_plan_from_row(row, &user_id, &node_id, download_url);
         match prepared.map_err(portable_publication_error)? {
             Some(response) if encode_response => {
                 encode_json_response(&response).map(SharedDownloadCpuResponse::Json)
@@ -7347,6 +7374,272 @@ async fn prepare_shared_plan(
     })
     .await?;
     Ok(response)
+}
+
+/// Verifies a recipient's shared-node snapshot and builds its download plan;
+/// `None` while the share material for the node is still synchronizing.
+fn shared_download_plan_from_row(
+    row: tokio_postgres::Row,
+    user_id: &str,
+    node_id: &str,
+    download_url: Option<String>,
+) -> Result<Option<DownloadPlanResponse>> {
+    let SharedDownloadSnapshot {
+        share_id,
+        owner_id,
+        root_node_id,
+        active_epoch,
+        share_record_version,
+        share_previous_record_hash,
+        recipient_key_version,
+        epoch_protocol_version,
+        epoch_wrapper_set_root,
+        epoch_wrapper_count,
+        entry_type,
+        current_generation_number,
+        current_generation_id: generation_id,
+        bootstrap_cbor,
+        bootstrap_signature,
+        encrypted_manifest,
+        signer_key_version,
+        node_record_version,
+        record_hash,
+        node_signer_ed25519_public_key,
+        ciphertext_length,
+        crypto_chunk_bytes,
+        chunk_count,
+        ciphertext_merkle_root,
+        wrappers: wrapper_snapshots,
+        envelope,
+        directory: directory_snapshot,
+    } = shared_download_snapshot_from_row(row)?;
+
+    let expected_wrapper_count = if entry_type == "file" { 2 } else { 1 };
+    if wrapper_snapshots.len() != expected_wrapper_count {
+        return Ok(None);
+    }
+    let envelope_cbor = Bytes::from(envelope.canonical_cbor);
+    let (decoded_envelope, verified_envelope_hash) = verify_share_envelope_material(
+        envelope_cbor.clone(),
+        &envelope.signature,
+        &envelope.sender_ed25519_public_key,
+    )
+    .map_err(error::ErrorInternalServerError)?;
+    if envelope.sender_id != owner_id
+        || envelope.recipient_id != user_id
+        || envelope.node_id != root_node_id
+        || envelope.record_version != share_record_version
+        || envelope.previous_record_hash != share_previous_record_hash
+        || envelope.recipient_key_version != recipient_key_version
+        || decoded_envelope.share_id.as_ref() != share_id.as_bytes()
+        || i64::try_from(decoded_envelope.epoch).ok() != Some(active_epoch)
+        || decoded_envelope.sender_id.as_ref() != owner_id.as_bytes()
+        || decoded_envelope.recipient_id.as_ref() != user_id.as_bytes()
+        || decoded_envelope.node_id.as_ref() != root_node_id.as_bytes()
+        || i64::try_from(decoded_envelope.recipient_key_version).ok() != Some(recipient_key_version)
+        || i64::try_from(decoded_envelope.record_version).ok() != Some(share_record_version)
+        || decoded_envelope
+            .previous_record_hash
+            .as_ref()
+            .map(|value| value.as_slice())
+            != share_previous_record_hash.as_deref()
+        || verified_envelope_hash.as_slice() != envelope.envelope_hash
+        || i16::try_from(decoded_envelope.format_version).ok() != Some(epoch_protocol_version)
+        || (epoch_protocol_version == SHARE_ENVELOPE_VERSION as i16
+            && (decoded_envelope
+                .wrapper_set_root
+                .as_ref()
+                .map(|value| value.as_slice())
+                != epoch_wrapper_set_root.as_deref()
+                || i32::try_from(decoded_envelope.wrapper_count).ok() != epoch_wrapper_count))
+    {
+        return Err(error::ErrorInternalServerError(
+            "published share envelope is inconsistent with its active epoch",
+        ));
+    }
+    let commitment_sources = wrapper_snapshots
+        .iter()
+        .map(|wrapper| wrapper.commitment_source.as_str())
+        .collect::<HashSet<_>>();
+    if commitment_sources.len() != 1 {
+        return Err(error::ErrorInternalServerError(
+            "share wrappers use inconsistent commitments",
+        ));
+    }
+    let uses_directory = commitment_sources.contains("directory");
+    if uses_directory && directory_snapshot.is_none() {
+        return Err(error::ErrorInternalServerError(
+            "share-wrapper directory is missing",
+        ));
+    }
+    let bootstrap = decode_bootstrap(&bootstrap_cbor).map_err(error::ErrorInternalServerError)?;
+    let epoch_root = epoch_wrapper_set_root
+        .as_deref()
+        .map(<[u8; 32]>::try_from)
+        .transpose()
+        .map_err(|_| error::ErrorInternalServerError("stored wrapper root is invalid"))?;
+    let directory_material = directory_snapshot
+        .map(|directory| -> Result<_> {
+            let root = <[u8; 32]>::try_from(directory.wrapper_set_root.as_slice())
+                .map_err(|_| error::ErrorInternalServerError("stored directory root is invalid"))?;
+            let decoded = decode_share_directory(&directory.canonical_cbor)
+                .map_err(error::ErrorInternalServerError)?;
+            if decoded.node_id != node_id
+                || i64::try_from(decoded.record_version).ok() != Some(node_record_version)
+                || decoded.record_hash.as_slice() != record_hash
+                || decoded.generation_id.as_slice() != generation_id
+                || i64::try_from(decoded.generation_number).ok() != Some(current_generation_number)
+                || i64::try_from(decoded.signer_key_version).ok()
+                    != Some(directory.signer_key_version)
+                || decoded.wrapper_set_root != root
+                || i32::try_from(decoded.wrapper_count).ok() != Some(directory.wrapper_count)
+            {
+                return Err(error::ErrorInternalServerError(
+                    "stored share-wrapper directory is inconsistent",
+                ));
+            }
+            verify_ed25519_signature(
+                &directory.canonical_cbor,
+                &directory.signature,
+                &node_signer_ed25519_public_key,
+            )
+            .map_err(error::ErrorInternalServerError)?;
+            Ok((
+                directory.canonical_cbor,
+                directory.signature,
+                root,
+                directory.wrapper_count,
+            ))
+        })
+        .transpose()?;
+    let mut wrappers = Vec::with_capacity(wrapper_snapshots.len());
+    let mut wrapper_proofs = Vec::with_capacity(wrapper_snapshots.len());
+    let mut directory_proofs = Vec::with_capacity(wrapper_snapshots.len());
+    for wrapper in wrapper_snapshots {
+        let canonical = wrapper.canonical_cbor;
+        let wrapper_hash = sha256(&canonical);
+        wrappers.push(encode_bytes(canonical));
+        let leaf_index = wrapper.merkle_leaf_index;
+        let proof = wrapper.merkle_proof;
+        let commitment_source = wrapper.commitment_source;
+        let response_proof = match (commitment_source.as_str(), leaf_index, proof) {
+            ("bootstrap" | "epoch", None, None) => None,
+            (_, Some(leaf_index), Some(proof)) if proof.len() % 32 == 0 => {
+                match commitment_source.as_str() {
+                    "epoch" => {
+                        if epoch_protocol_version != SHARE_ENVELOPE_VERSION as i16
+                            || !verify_wrapper_set_proof(
+                                wrapper_hash,
+                                leaf_index,
+                                &proof,
+                                epoch_wrapper_count.unwrap_or_default(),
+                                epoch_root.unwrap_or_default(),
+                            )
+                        {
+                            return Err(error::ErrorInternalServerError(
+                                "stored share wrapper proof does not match its epoch",
+                            ));
+                        }
+                        Some(ShareWrapperProofResponse {
+                            leaf_index,
+                            proof: encode_bytes(proof),
+                        })
+                    }
+                    "directory" => {
+                        let Some((_, _, root, count)) = directory_material.as_ref() else {
+                            return Err(error::ErrorInternalServerError(
+                                "stored share directory proof is missing its directory",
+                            ));
+                        };
+                        if !verify_wrapper_set_proof(
+                            wrapper_hash,
+                            leaf_index,
+                            &proof,
+                            *count,
+                            *root,
+                        ) {
+                            return Err(error::ErrorInternalServerError(
+                                "stored share wrapper proof does not match its directory",
+                            ));
+                        }
+                        directory_proofs.push(ShareWrapperProofResponse {
+                            leaf_index,
+                            proof: encode_bytes(proof),
+                        });
+                        None
+                    }
+                    _ => {
+                        return Err(error::ErrorInternalServerError(
+                            "stored share wrapper commitment source is invalid",
+                        ));
+                    }
+                }
+            }
+            _ => {
+                return Err(error::ErrorInternalServerError(
+                    "stored share wrapper proof is invalid",
+                ));
+            }
+        };
+        wrapper_proofs.push(response_proof);
+    }
+    let directory =
+        directory_material.map(|(canonical_cbor, signature, _, _)| ShareDirectoryResponse {
+            canonical_cbor: encode_bytes(canonical_cbor),
+            signature: encode_bytes(signature),
+            wrapper_proofs: directory_proofs,
+        });
+    let authorization_version = encode_bytes(share_authorization_version(
+        &share_id,
+        active_epoch,
+        user_id,
+        recipient_key_version,
+        share_record_version,
+        &envelope.envelope_hash,
+    ));
+    let response = DownloadPlanResponse {
+        node_id: node_id.to_owned(),
+        entry_type,
+        generation_number: current_generation_number,
+        generation_id: encode_bytes(generation_id),
+        ciphertext_length: ciphertext_length.unwrap_or(0),
+        crypto_chunk_bytes: crypto_chunk_bytes.unwrap_or(CRYPTO_CHUNK_BYTES as i32),
+        chunk_count: chunk_count.unwrap_or(0),
+        ciphertext_merkle_root: encode_bytes(
+            ciphertext_merkle_root.unwrap_or_else(|| bootstrap.ciphertext_merkle_root.to_vec()),
+        ),
+        download_url,
+        bootstrap_cbor: encode_bytes(bootstrap_cbor),
+        bootstrap_signature: encode_bytes(bootstrap_signature),
+        encrypted_manifest: encode_bytes(encrypted_manifest),
+        wrappers,
+        signer_key_version,
+        signer_ed25519_public_key: encode_bytes(node_signer_ed25519_public_key),
+        record_version: node_record_version,
+        record_hash: encode_bytes(record_hash),
+        share: Some(ShareDownloadMaterial {
+            share_id,
+            epoch: active_epoch,
+            root_node_id,
+            sender_id: owner_id,
+            recipient_id: user_id.to_owned(),
+            record_version: share_record_version,
+            previous_record_hash: share_previous_record_hash.map(encode_bytes),
+            envelope_cbor: encode_bytes(envelope_cbor),
+            envelope_signature: encode_bytes(envelope.signature),
+            envelope_hash: encode_bytes(envelope.envelope_hash),
+            sender_key_version: envelope.sender_key_version,
+            sender_x25519_public_key: encode_bytes(envelope.sender_x25519_public_key),
+            sender_ed25519_public_key: encode_bytes(envelope.sender_ed25519_public_key),
+            sender_fingerprint_sha256: encode_bytes(envelope.sender_fingerprint_sha256),
+            recipient_key_version,
+            authorization_version,
+            wrapper_proofs,
+            directory,
+        }),
+    };
+
+    Ok(Some(response))
 }
 
 enum SharedDownloadCpuResponse {
@@ -7587,10 +7880,9 @@ async fn validate_encrypted_parent(
     user: &SessionPrincipal,
     parent_id: Option<&str>,
 ) -> Result<Option<String>> {
-    let Some(parent_id) = parent_id.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(parent_id) = requested_parent_id(parent_id)? else {
         return Ok(None);
     };
-    validate_node_id(parent_id)?;
     let exists = state
         .db
         .query_opt(
@@ -7607,6 +7899,15 @@ async fn validate_encrypted_parent(
         return Err(error::ErrorBadRequest("encrypted parent folder is invalid"));
     }
     Ok(Some(parent_id.to_owned()))
+}
+
+/// The parent a request names, with blank meaning the vault root.
+fn requested_parent_id(parent_id: Option<&str>) -> Result<Option<&str>> {
+    let Some(parent_id) = parent_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    validate_node_id(parent_id)?;
+    Ok(Some(parent_id))
 }
 
 async fn require_configured_vault(state: &AppState, user: &SessionPrincipal) -> Result<()> {
@@ -9110,7 +9411,11 @@ mod tests {
                 "pub async fn metadata_plans(",
                 "fn owned_metadata_plan_from_row(",
             ),
-            ("pub async fn download_plan(", "pub async fn abort_upload("),
+            (
+                "pub async fn download_plan(",
+                "pub async fn download_plans(",
+            ),
+            ("pub async fn download_plans(", "enum DownloadPlanSource"),
             ("pub async fn share_plan(", "pub async fn share_contexts("),
             (
                 "pub async fn share_contexts(",
@@ -9300,16 +9605,47 @@ mod tests {
         let download = source_between(
             production,
             "pub async fn download_plan(",
-            "pub async fn abort_upload(",
+            "pub async fn download_plans(",
         );
         assert_markers_in_order(
             download,
             &[
                 "release_request_connection",
-                ".download_url(",
+                "sign_download_urls(",
                 "run_metadata_decode",
                 "encode_json_response",
             ],
+        );
+
+        let batch = source_between(
+            production,
+            "pub async fn download_plans(",
+            "enum DownloadPlanSource",
+        );
+        assert_markers_in_order(
+            batch,
+            &[
+                "acquire_interactive_operation",
+                ".commit()",
+                "drop(client)",
+                "sign_download_urls(",
+                "run_metadata_decode",
+            ],
+        );
+        // A whole batch is signed in one storage operation and decoded in one
+        // CPU job, never one queue slot per node.
+        assert_eq!(batch.matches("sign_download_urls(").count(), 1);
+        assert_eq!(batch.matches("run_metadata_decode(").count(), 1);
+        assert!(!batch.contains(".storage_operations"));
+        let signing = source_between(
+            production,
+            "async fn sign_download_urls(",
+            "fn owned_download_plan_from_row(",
+        );
+        assert_eq!(signing.matches(".storage_operations").count(), 1);
+        assert_markers_in_order(
+            signing,
+            &[".storage_operations", "for object_key in", ".download_url("],
         );
 
         let shared = source_between(
@@ -9322,7 +9658,7 @@ mod tests {
             &[
                 ".commit()",
                 "drop(client)",
-                ".download_url(",
+                "sign_download_urls(",
                 "run_metadata_decode",
                 "encode_json_response",
             ],
@@ -9737,7 +10073,7 @@ mod tests {
         for work in [
             "shared_download_snapshot_from_row(row)",
             "verify_share_envelope_material",
-            ".download_url(",
+            "sign_download_urls(",
             "encode_bytes(",
         ] {
             assert!(
@@ -9771,6 +10107,14 @@ mod tests {
             .prepare(OWNED_METADATA_PLANS_QUERY)
             .await
             .expect("owned metadata batch query should prepare");
+        client
+            .prepare(OWNED_DOWNLOAD_PLANS_QUERY)
+            .await
+            .expect("owned download plan query should prepare");
+        client
+            .prepare(OWNED_DOWNLOAD_WRAPPERS_QUERY)
+            .await
+            .expect("owned download wrapper query should prepare");
         client
             .prepare(OWNED_SHARE_PREPARATION_PLANS_QUERY)
             .await
@@ -10273,7 +10617,10 @@ mod tests {
         }
     }
 
-    fn encode_route_bootstrap_fixture(manifest_hash: [u8; 32], wrapper_hash: [u8; 32]) -> Vec<u8> {
+    pub(super) fn encode_route_bootstrap_fixture(
+        manifest_hash: [u8; 32],
+        wrapper_hash: [u8; 32],
+    ) -> Vec<u8> {
         let mut output = vec![0xaf];
         push_test_uint_pair(&mut output, 1, 1);
         push_test_uint_pair(&mut output, 2, 1);
@@ -10955,6 +11302,187 @@ mod account_cpu_tests {
                 StatusCode::BAD_REQUEST
             );
         }
+    }
+
+    #[actix_web::test]
+    #[ignore = "requires an initialized PostgreSQL test database"]
+    async fn batched_download_plans_match_single_route_authorization() {
+        use actix_web::{FromRequest, cookie::Cookie, test::TestRequest};
+        use serde_json::Value;
+
+        // Each outcome is (status, plan for 200 or error text otherwise).
+        async fn single(state: &web::Data<AppState>, token: &str, node: &str) -> (u16, Value) {
+            let request = TestRequest::get()
+                .app_data(state.clone())
+                .cookie(Cookie::new(crate::auth::SESSION_COOKIE, token.to_owned()))
+                .to_http_request();
+            let (result, _) = crate::db::scope_request(download_plan(
+                state.clone(),
+                request,
+                web::Path::from(node.to_owned()),
+            ))
+            .await;
+            match result {
+                Ok(response) => {
+                    let status = response.status().as_u16();
+                    let bytes = actix_web::body::to_bytes(response.into_body())
+                        .await
+                        .unwrap();
+                    if status == 200 {
+                        (status, serde_json::from_slice(&bytes).unwrap())
+                    } else if bytes.is_empty() {
+                        (status, Value::Null)
+                    } else {
+                        (
+                            status,
+                            Value::String(String::from_utf8(bytes.to_vec()).unwrap()),
+                        )
+                    }
+                }
+                Err(failure) => (
+                    failure.as_response_error().status_code().as_u16(),
+                    Value::String(failure.to_string()),
+                ),
+            }
+        }
+
+        async fn batch(
+            state: &web::Data<AppState>,
+            token: &str,
+            nodes: &[String],
+        ) -> std::result::Result<Vec<(String, u16, Value)>, u16> {
+            let (request, mut payload) = TestRequest::post()
+                .app_data(state.clone())
+                .insert_header((CONTENT_TYPE, "application/json"))
+                .insert_header(("x-csrf-token", "batch-csrf"))
+                .cookie(Cookie::new(crate::auth::SESSION_COOKIE, token.to_owned()))
+                .set_payload(serde_json::to_vec(&serde_json::json!({ "nodeIds": nodes })).unwrap())
+                .to_http_parts();
+            let body = web::Payload::from_request(&request, &mut payload)
+                .await
+                .unwrap();
+            let (result, _) =
+                crate::db::scope_request(download_plans(state.clone(), request, body)).await;
+            let response =
+                result.map_err(|failure| failure.as_response_error().status_code().as_u16())?;
+            assert_eq!(response.status(), actix_web::http::StatusCode::OK);
+            let bytes = actix_web::body::to_bytes(response.into_body())
+                .await
+                .unwrap();
+            let body: Value = serde_json::from_slice(&bytes).unwrap();
+            Ok(body["results"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|result| {
+                    let status = result["status"].as_u64().unwrap() as u16;
+                    let detail = if status == 200 {
+                        result["plan"].clone()
+                    } else {
+                        result.get("error").cloned().unwrap_or(Value::Null)
+                    };
+                    (
+                        result["nodeId"].as_str().unwrap().to_owned(),
+                        status,
+                        detail,
+                    )
+                })
+                .collect())
+        }
+
+        async fn assert_parity(
+            state: &web::Data<AppState>,
+            token: &str,
+            nodes: &[String],
+        ) -> Vec<u16> {
+            let results = batch(state, token, nodes).await.unwrap();
+            assert_eq!(results.len(), nodes.len());
+            let mut statuses = Vec::new();
+            for ((node_id, status, detail), node) in results.into_iter().zip(nodes) {
+                assert_eq!(&node_id, node);
+                assert_eq!(
+                    (status, detail),
+                    single(state, token, node).await,
+                    "batched plan for {node} must match the single route"
+                );
+                statuses.push(status);
+            }
+            statuses
+        }
+
+        let state = crate::state::database_test_state(2).await;
+        let suffix = random_id().unwrap();
+        let owner = format!("usr_batch_owner_{suffix}");
+        let recipient = format!("usr_batch_recipient_{suffix}");
+        let owner_token = format!("batch-owner-{suffix}");
+        let recipient_token = format!("batch-recipient-{suffix}");
+        let owned = format!("fil_batch_owned_{suffix}");
+        let trashed = format!("fil_batch_trashed_{suffix}");
+        let shared = format!("fil_batch_shared_{suffix}");
+        let share = format!("shr_batch_{suffix}");
+        let manifest = b"encrypted-manifest";
+        let bootstrap = super::tests::encode_route_bootstrap_fixture(sha256(manifest), [3_u8; 32]);
+        for (user, token) in [(&owner, &owner_token), (&recipient, &recipient_token)] {
+            let hash = crate::auth::hash_session_token(token);
+            state.db.execute("INSERT INTO users(id,username,password_hash,role,status) VALUES($1,$1,'test','user','active')", &[user]).await.unwrap();
+            state.db.execute("INSERT INTO sessions(id,user_id,token_hash,csrf_token,expires_at) VALUES($1,$1,$2,'batch-csrf',now()+interval '1 hour')", &[user, &hash.as_slice()]).await.unwrap();
+            state.db.execute("INSERT INTO user_vaults(user_id,kdf_algorithm,kdf_salt,kdf_operations,kdf_memory_bytes,kdf_output_bytes,password_wrapper_id,password_root_ciphertext,recovery_salt,recovery_wrapper_id,recovery_root_ciphertext,identity_record_id,identity_private_ciphertext) VALUES($1,'argon2id13',gen_random_bytes(16),3,268435456,32,gen_random_bytes(16),gen_random_bytes(48),gen_random_bytes(16),gen_random_bytes(16),gen_random_bytes(48),gen_random_bytes(16),gen_random_bytes(96))", &[user]).await.unwrap();
+            state.db.execute("INSERT INTO vault_identity_keys(user_id,key_version,x25519_public_key,ed25519_public_key,fingerprint_sha256,status) VALUES($1,1,gen_random_bytes(32),gen_random_bytes(32),gen_random_bytes(32),'active')", &[user]).await.unwrap();
+        }
+        for (node, node_state) in [
+            (&owned, "active"),
+            (&trashed, "trashed"),
+            (&shared, "active"),
+        ] {
+            state.db.execute("INSERT INTO files(id,owner_id,original_name,storage_name,size_bytes,entry_type,state,e2ee_state,current_generation_number,current_generation_id) VALUES($1,$2,$1,$1,0,'folder',$3,'encrypted',1,gen_random_bytes(16))", &[node, &owner, &node_state]).await.unwrap();
+            state.db.execute("INSERT INTO vault_node_records(node_id,owner_id,record_version,record_hash,bootstrap_cbor,bootstrap_signature,encrypted_manifest,manifest_hash,signer_key_version) VALUES($1,$2,1,gen_random_bytes(32),$3,gen_random_bytes(64),$4,gen_random_bytes(32),1)", &[node, &owner, &bootstrap, &manifest.as_slice()]).await.unwrap();
+            state.db.execute("INSERT INTO vault_node_heads(node_id,owner_id,record_version,record_hash) SELECT node_id,owner_id,record_version,record_hash FROM vault_node_records WHERE node_id=$1", &[node]).await.unwrap();
+            state.db.execute("INSERT INTO vault_wrappers(wrapper_id,owner_id,node_id,wrapper_kind,record_version,canonical_cbor,wrapper_hash) VALUES(gen_random_bytes(16),$2,$1,'account_root',1,gen_random_bytes(64),gen_random_bytes(32))", &[node, &owner]).await.unwrap();
+        }
+        state.db.execute("INSERT INTO vault_shares(id,owner_id,root_node_id,active_epoch,status,record_version,record_hash) VALUES($1,$2,$3,1,'active',1,gen_random_bytes(32))", &[&share, &owner, &shared]).await.unwrap();
+        state.db.execute("INSERT INTO vault_share_epochs(share_id,epoch,status,protocol_version) VALUES($1,1,'published',1)", &[&share]).await.unwrap();
+        state.db.execute("INSERT INTO vault_share_recipients(share_id,recipient_id,recipient_key_version,status) VALUES($1,$2,1,'active')", &[&share, &recipient]).await.unwrap();
+        state.db.execute("INSERT INTO vault_share_envelopes(envelope_id,share_id,epoch,sender_id,sender_key_version,recipient_id,recipient_key_version,node_id,permissions,record_version,encapsulated_key,ciphertext,canonical_cbor,signature,envelope_hash) VALUES(gen_random_bytes(16),$1,1,$2,1,$3,1,$4,'read',1,gen_random_bytes(32),gen_random_bytes(48),gen_random_bytes(128),gen_random_bytes(64),gen_random_bytes(32))", &[&share, &owner, &recipient, &shared]).await.unwrap();
+        state.db.execute("INSERT INTO vault_share_wrappers(wrapper_id,share_id,epoch,node_id,wrapper_kind,record_version,canonical_cbor,wrapper_hash,commitment_source) VALUES(gen_random_bytes(16),$1,1,$2,'metadata',1,gen_random_bytes(64),gen_random_bytes(32),'epoch')", &[&share, &shared]).await.unwrap();
+
+        // The owner sees active nodes; a trashed node fails only its own entry.
+        let nodes = [owned.clone(), trashed.clone(), shared.clone()];
+        assert_eq!(
+            assert_parity(&state, &owner_token, &nodes).await,
+            [200_u16, 404, 200]
+        );
+        // A recipient reaches only the shared node, through the share path
+        // (its fixture envelope is unsigned, so both routes reject it alike);
+        // foreign and trashed nodes are not found.
+        let statuses = assert_parity(&state, &recipient_token, &nodes).await;
+        assert_eq!(statuses[..2], [404_u16, 404]);
+        assert_ne!(statuses[2], 404);
+        state.db.execute("UPDATE vault_share_recipients SET status='revoked',revoked_at=now() WHERE share_id=$1", &[&share]).await.unwrap();
+        assert_eq!(
+            assert_parity(&state, &recipient_token, &nodes).await,
+            [404_u16, 404, 404]
+        );
+
+        for invalid in [
+            Vec::new(),
+            (0..=MAX_DOWNLOAD_PLAN_REQUEST_NODES)
+                .map(|index| format!("fil_batch_{index:04}"))
+                .collect(),
+            vec![owned.clone(), owned.clone()],
+            vec!["not a node".to_owned()],
+        ] {
+            assert_eq!(batch(&state, &owner_token, &invalid).await.err(), Some(400));
+        }
+
+        // Files, records, shares and sessions cascade from their users.
+        state
+            .db
+            .execute(
+                "DELETE FROM users WHERE id = ANY($1)",
+                &[&[owner, recipient].as_slice()],
+            )
+            .await
+            .unwrap();
     }
 
     async fn account_test_session(state: &AppState) -> (String, String, String) {

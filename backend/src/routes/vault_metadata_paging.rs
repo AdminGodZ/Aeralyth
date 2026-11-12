@@ -465,7 +465,7 @@ static SHARED_IDENTITY_BATCH_QUERY: LazyLock<String> = LazyLock::new(|| {
     )
 });
 
-static SHARED_PAYLOAD_BATCH_QUERY: LazyLock<String> = LazyLock::new(|| {
+pub(super) static SHARED_PAYLOAD_BATCH_QUERY: LazyLock<String> = LazyLock::new(|| {
     let query = SHARED_DOWNLOAD_SNAPSHOT_QUERY.replace("$1", "requested.node_id");
     format!(
         "SELECT requested.node_id AS requested_node_id, snapshot.* FROM unnest($1::text[]) WITH ORDINALITY AS requested(node_id,ordinal) CROSS JOIN LATERAL ({query}) snapshot ORDER BY requested.ordinal"

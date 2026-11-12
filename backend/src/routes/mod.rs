@@ -230,6 +230,10 @@ pub fn configure(config: &mut web::ServiceConfig) {
                         )
                         .route("/nodes/{id}/records", web::post().to(vault::publish_record))
                         .route(
+                            "/nodes/download-plans",
+                            web::post().to(vault::download_plans),
+                        )
+                        .route(
                             "/nodes/{id}/download-plan",
                             web::get().to(vault::download_plan),
                         )
