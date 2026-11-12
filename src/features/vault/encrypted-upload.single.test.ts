@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { createFetchBackedXhr } from "@/features/vault/fake-storage-xhr";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
 import type { VaultEncryptionInput } from "@/features/vault/vault-messages";
 
@@ -32,6 +33,7 @@ async function sha256Base64(bytes: Uint8Array<ArrayBuffer>): Promise<string> {
 describe("pre-encrypted single-object uploads", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal("XMLHttpRequest", createFetchBackedXhr().XMLHttpRequest);
     vaultApi.publishVaultInlineUploads.mockRejectedValue(
       new VaultApiError("not found", 404),
     );

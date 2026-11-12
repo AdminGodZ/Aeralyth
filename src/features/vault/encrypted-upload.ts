@@ -2,10 +2,7 @@ import type {
   ExistingUploadNode,
   FolderUploadResolution,
 } from "@/features/dashboard/folder-upload-conflicts";
-import {
-  runUploadWithRetry,
-  uploadRequestErrorFromResponse,
-} from "@/features/uploads/upload-retry";
+import { runUploadWithRetry } from "@/features/uploads/upload-retry";
 import {
   BoundedRollingPipeline,
   detectedCryptoConcurrency,
@@ -32,6 +29,10 @@ import {
   enqueueShareDirectorySync,
   finishShareDirectorySyncBatch,
 } from "@/features/vault/share-directory-sync";
+import {
+  putStorageObject,
+  type StoragePutResponse,
+} from "@/features/vault/storage-put";
 import {
   abortVaultUpload,
   getVaultContentUrl,
@@ -688,14 +689,19 @@ async function uploadEncryptedEntry({
         if (plan.mode !== "single") {
           throw new Error("The storage plan does not match the upload size.");
         }
+        const progress = createUploadProgress(
+          started.ciphertextLength,
+          file.size,
+          onChunk,
+        );
         await uploadSingle(
           csrfToken,
           plan.uploadId,
           singleContent.bytes,
           signal,
           { checksum: singleContent.checksum, signed: plan.contentUrl },
+          (sentBytes) => progress(1, sentBytes),
         );
-        onChunk(file.size);
       } finally {
         singleContent.bytes.fill(0);
         releaseSingleContent?.();
@@ -744,6 +750,35 @@ async function uploadEncryptedEntry({
     await abortVaultUpload(csrfToken, plan.uploadId).catch(() => undefined);
     throw error;
   }
+}
+
+/**
+ * Credits a file's plaintext bytes in proportion to the ciphertext its storage
+ * PUTs have sent. Each body counts only the furthest byte any attempt sent, so
+ * a retried or re-signed PUT starts over without counting its bytes twice or
+ * moving progress backwards.
+ */
+function createUploadProgress(
+  ciphertextLength: number,
+  plaintextBytes: number,
+  onChunk: (bytes: number) => void,
+): (body: number, sentBytes: number) => void {
+  const sentByBody = new Map<number, number>();
+  let sentCiphertextBytes = 0;
+  let reportedPlaintextBytes = 0;
+  return (body, sentBytes) => {
+    const previous = sentByBody.get(body) ?? 0;
+    if (sentBytes <= previous) return;
+    sentByBody.set(body, sentBytes);
+    sentCiphertextBytes += sentBytes - previous;
+    const plaintext = Math.min(
+      plaintextBytes,
+      Math.floor((sentCiphertextBytes / ciphertextLength) * plaintextBytes),
+    );
+    if (plaintext <= reportedPlaintextBytes) return;
+    onChunk(plaintext - reportedPlaintextBytes);
+    reportedPlaintextBytes = plaintext;
+  };
 }
 
 /** The share of the direct buffer budget one file's ciphertext occupies. */
@@ -807,24 +842,17 @@ async function encryptAndUploadFile({
     encryptedUploadBufferSize(plan, started.ciphertextLength),
   );
   const pipelineAbort = linkedAbortController(signal);
-  let uploadedCiphertextBytes = 0;
-  let reportedPlaintextBytes = 0;
+  const progress = createUploadProgress(
+    started.ciphertextLength,
+    file.size,
+    onChunk,
+  );
   const multipart = createMultipartUploadPipeline(
     csrfToken,
     plan.uploadId,
     pipelineAbort,
     encryptedUploadBufferSize(plan, started.ciphertextLength),
-    (bytes) => {
-      uploadedCiphertextBytes += bytes;
-      const plaintextBytes = Math.min(
-        file.size,
-        Math.floor(
-          (uploadedCiphertextBytes / started.ciphertextLength) * file.size,
-        ),
-      );
-      onChunk(plaintextBytes - reportedPlaintextBytes);
-      reportedPlaintextBytes = plaintextBytes;
-    },
+    progress,
   );
   let nextPartNumber = 1;
   let singleContent: Uint8Array | null = null;
@@ -871,8 +899,14 @@ async function encryptAndUploadFile({
       if (trailing || singleContent?.length !== started.ciphertextLength) {
         throw new Error("The encrypted upload length is inconsistent.");
       }
-      await uploadSingle(csrfToken, plan.uploadId, singleContent, signal);
-      onChunk(file.size);
+      await uploadSingle(
+        csrfToken,
+        plan.uploadId,
+        singleContent,
+        signal,
+        undefined,
+        (sentBytes) => progress(1, sentBytes),
+      );
     } else {
       const trailing = assembler.finish();
       if (trailing) {
@@ -1022,7 +1056,7 @@ function createMultipartUploadPipeline(
   uploadId: string,
   operation: ReturnType<typeof linkedAbortController>,
   partBytes: number,
-  onUploaded?: (bytes: number) => void,
+  onSent?: (partNumber: number, sentBytes: number) => void,
 ): MultipartUploadPipeline {
   const presign = createPartPresigner(csrfToken, uploadId, operation.signal);
   // Four active bodies plus the producer's next part, its partial assembler,
@@ -1057,14 +1091,14 @@ function createMultipartUploadPipeline(
             }
             return refreshed.url;
           },
+          onSent && ((sentBytes) => onSent(part.partNumber, sentBytes)),
         );
-        const etag = upload.headers.get("ETag")?.trim();
+        const etag = upload.getResponseHeader("ETag")?.trim();
         if (!etag) {
           throw new Error(
             "The storage service did not expose the multipart ETag header.",
           );
         }
-        onUploaded?.(part.content.length);
         return { partNumber: part.partNumber, etag, checksumSha256 };
       } finally {
         part.content.fill(0);
@@ -1216,6 +1250,7 @@ async function uploadSingle(
   content: Uint8Array,
   signal: AbortSignal,
   prepared?: { checksum: string; signed?: VaultUploadUrl },
+  onProgress?: (sentBytes: number) => void,
 ): Promise<void> {
   try {
     const checksum = prepared?.checksum ?? (await sha256Base64(content));
@@ -1225,18 +1260,25 @@ async function uploadSingle(
     if (signed.contentLength !== content.length) {
       throw new Error("The signed upload length is invalid.");
     }
-    await putEncryptedBytes(signed.url, content, checksum, signal, async () => {
-      const refreshed = await getVaultContentUrl(
-        csrfToken,
-        uploadId,
-        checksum,
-        signal,
-      );
-      if (refreshed.contentLength !== content.length) {
-        throw new Error("The signed upload length is invalid.");
-      }
-      return refreshed.url;
-    });
+    await putEncryptedBytes(
+      signed.url,
+      content,
+      checksum,
+      signal,
+      async () => {
+        const refreshed = await getVaultContentUrl(
+          csrfToken,
+          uploadId,
+          checksum,
+          signal,
+        );
+        if (refreshed.contentLength !== content.length) {
+          throw new Error("The signed upload length is invalid.");
+        }
+        return refreshed.url;
+      },
+      onProgress,
+    );
   } finally {
     content.fill(0);
   }
@@ -1248,27 +1290,24 @@ async function putEncryptedBytes(
   checksum: string,
   signal: AbortSignal,
   refreshUrl?: () => Promise<string>,
-): Promise<Response> {
+  onProgress?: (sentBytes: number) => void,
+): Promise<StoragePutResponse> {
   const release = await vaultStoragePutSlots.acquire(1, signal);
   try {
     return await runUploadWithRetry({
       initialUrl: url,
       refreshUrl,
-      request: async (candidateUrl) => {
-        const response = await fetch(candidateUrl, {
-          method: "PUT",
+      request: (candidateUrl) =>
+        putStorageObject({
+          url: candidateUrl,
+          body: content,
           headers: {
             "Content-Type": "application/octet-stream",
             "x-amz-checksum-sha256": checksum,
           },
-          body: asBufferSource(content),
           signal,
-        });
-        if (!response.ok) {
-          throw await uploadRequestErrorFromResponse(response);
-        }
-        return response;
-      },
+          onProgress,
+        }),
       signal,
     });
   } finally {

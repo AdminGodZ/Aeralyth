@@ -1,5 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import {
+  createFakeXhr,
+  createFetchBackedXhr,
+} from "@/features/vault/fake-storage-xhr";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
 import type { VaultEncryptionInput } from "@/features/vault/vault-messages";
 
@@ -38,6 +42,7 @@ const emptyRecord = {
 describe("encrypted upload scheduling", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    vi.stubGlobal("XMLHttpRequest", createFetchBackedXhr().XMLHttpRequest);
     vaultApi.abortVaultUpload.mockResolvedValue(undefined);
     vaultApi.publishVaultFoldersBatch.mockResolvedValue({ folders: [] });
     vaultApi.publishVaultUpload.mockResolvedValue({
@@ -777,6 +782,152 @@ describe("encrypted upload scheduling", () => {
     );
     expect(vaultApi.abortVaultUpload).toHaveBeenCalledWith("csrf", "rolling");
     expect(vaultApi.publishVaultUpload).not.toHaveBeenCalled();
+  });
+
+  it("credits multipart bytes as storage receives them and reads each ETag", async () => {
+    const xhr = createFakeXhr();
+    vi.stubGlobal("XMLHttpRequest", xhr.XMLHttpRequest);
+    vaultApi.initVaultUpload.mockResolvedValue({
+      uploadId: "upload-streamed",
+      nodeId: "node-streamed",
+      mode: "multipart",
+      partSizeBytes: 200,
+    });
+    vaultApi.getVaultPartUrls.mockImplementation(
+      async (_csrf, _upload, parts) => ({
+        parts: parts.map(({ partNumber }: { partNumber: number }) => ({
+          partNumber,
+          url: `https://storage.invalid/part-${partNumber}`,
+          contentLength: 200,
+        })),
+      }),
+    );
+    const onProgress = vi.fn();
+    const upload = uploadEncryptedSelections({
+      selections: [
+        {
+          file: new File([new Uint8Array(400)], "streamed.bin"),
+          relativePath: "streamed.bin",
+        },
+      ],
+      parentFolderId: null,
+      csrfToken: "csrf",
+      client: createCryptoClient(() => 400),
+      signal: new AbortController().signal,
+      onProgress,
+      onFileStart: () => undefined,
+      onFileComplete: () => undefined,
+    });
+    await vi.waitFor(() => expect(xhr.requests).toHaveLength(2));
+    const [first, second] = xhr.requests;
+    expect(first.requestHeaders).toEqual({
+      "Content-Type": "application/octet-stream",
+      "x-amz-checksum-sha256": expect.any(String),
+    });
+
+    first.progress(100);
+    expect(onProgress).toHaveBeenLastCalledWith(100, 400, 0, 100);
+    second.progress(50);
+    expect(onProgress).toHaveBeenLastCalledWith(150, 400, 0, 150);
+    first.respond(200, { headers: { ETag: '"etag-1"' } });
+    expect(onProgress).toHaveBeenLastCalledWith(250, 400, 0, 250);
+    second.respond(200, { headers: { ETag: '"etag-2"' } });
+    await upload;
+
+    expect(onProgress).toHaveBeenLastCalledWith(400, 400, 0, 400);
+    expect(vaultApi.publishVaultUpload).toHaveBeenCalledWith(
+      "csrf",
+      "upload-streamed",
+      [
+        expect.objectContaining({ partNumber: 1, etag: '"etag-1"' }),
+        expect.objectContaining({ partNumber: 2, etag: '"etag-2"' }),
+      ],
+      emptyRecord,
+      expect.any(AbortSignal),
+    );
+  });
+
+  it("fails a multipart part whose ETag storage does not expose", async () => {
+    const xhr = createFakeXhr();
+    vi.stubGlobal("XMLHttpRequest", xhr.XMLHttpRequest);
+    vaultApi.initVaultUpload.mockResolvedValue({
+      uploadId: "upload-hidden-etag",
+      nodeId: "node-hidden-etag",
+      mode: "multipart",
+      partSizeBytes: 2,
+    });
+    vaultApi.getVaultPartUrls.mockResolvedValue({
+      parts: [
+        {
+          partNumber: 1,
+          url: "https://storage.invalid/part-1",
+          contentLength: 2,
+        },
+      ],
+    });
+    const upload = runSelectionUpload(
+      createCryptoClient(() => 2),
+      [new File([Uint8Array.of(1)], "hidden.bin")],
+    );
+    await vi.waitFor(() => expect(xhr.requests).toHaveLength(1));
+    xhr.requests[0].respond(200);
+
+    await expect(upload).rejects.toThrow(
+      "The storage service did not expose the multipart ETag header.",
+    );
+    expect(vaultApi.publishVaultUpload).not.toHaveBeenCalled();
+  });
+
+  it("restarts a re-signed PUT without counting its bytes twice", async () => {
+    const xhr = createFakeXhr();
+    vi.stubGlobal("XMLHttpRequest", xhr.XMLHttpRequest);
+    vaultApi.initVaultUpload.mockResolvedValue({
+      uploadId: "upload-resigned",
+      nodeId: "node-resigned",
+      mode: "single",
+      partSizeBytes: null,
+    });
+    vaultApi.getVaultContentUrl
+      .mockResolvedValueOnce({
+        url: "https://storage.invalid/expired",
+        contentLength: 200,
+      })
+      .mockResolvedValueOnce({
+        url: "https://storage.invalid/refreshed",
+        contentLength: 200,
+      });
+    const onProgress = vi.fn();
+    const upload = uploadEncryptedSelections({
+      selections: [
+        {
+          file: new File([new Uint8Array(200)], "resigned.bin"),
+          relativePath: "resigned.bin",
+        },
+      ],
+      parentFolderId: null,
+      csrfToken: "csrf",
+      client: createCryptoClient(() => 200),
+      signal: new AbortController().signal,
+      onProgress,
+      onFileStart: () => undefined,
+      onFileComplete: () => undefined,
+    });
+    await vi.waitFor(() => expect(xhr.requests).toHaveLength(1));
+    xhr.requests[0].progress(150);
+    xhr.requests[0].respond(403, { body: "<Code>ExpiredToken</Code>" });
+    await vi.waitFor(() => expect(xhr.requests).toHaveLength(2));
+    const retried = xhr.requests[1];
+    expect(retried.url).toBe("https://storage.invalid/refreshed");
+    // The second attempt starts from zero; the file holds what the first
+    // attempt reached until the retry passes it.
+    retried.progress(100);
+    retried.progress(180);
+    retried.respond(200);
+    await upload;
+
+    expect(
+      onProgress.mock.calls.map(([processedBytes]) => processedBytes),
+    ).toEqual([150, 180, 200]);
   });
 });
 
