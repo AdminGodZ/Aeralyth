@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import { VAULT_INLINE_FILE_MAX_BYTES } from "@/features/vault/encrypted-upload";
 import {
+  INLINE_BATCH_MAX_BYTES,
   INLINE_BATCH_MAX_FILES,
   InlineUploadLane,
   InlineUploadsUnavailableError,
@@ -125,6 +127,35 @@ describe("inline upload lane", () => {
     expect(peak).toBe(2);
     expect(sizes.reduce((total, size) => total + size, 0)).toBe(8);
     expect(sizes.slice(0, 2)).toEqual([2, 2]);
+  });
+
+  it("packs the largest inline files within the batch byte limit", async () => {
+    const batches: number[][] = [];
+    const publish: Publish = async (_csrf, uploads) => {
+      batches.push(uploads.map((upload) => upload.content.length));
+      return { results: uploads.map(published) };
+    };
+    const uploads = lane(publish, 1);
+
+    // The ciphertext of the largest file the upload routes inline.
+    const results = Promise.all(
+      Array.from({ length: 8 }, (_, n) =>
+        uploads.submit(entry(n + 1, VAULT_INLINE_FILE_MAX_BYTES + 16)),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(100);
+    await results;
+
+    expect(batches.flat()).toHaveLength(8);
+    // Above the initial target each file goes alone; once fast requests
+    // raised it, two share a request and a third never fits.
+    expect(batches[0]).toHaveLength(1);
+    expect(Math.max(...batches.map((batch) => batch.length))).toBe(2);
+    for (const batch of batches) {
+      expect(
+        batch.reduce((total, bytes) => total + bytes, 0),
+      ).toBeLessThanOrEqual(INLINE_BATCH_MAX_BYTES);
+    }
   });
 
   it("retries only the files the server shed for capacity", async () => {

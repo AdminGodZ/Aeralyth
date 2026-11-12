@@ -19,11 +19,19 @@ vi.mock("@/features/vault/vault-api", async (importOriginal) => ({
   ...vaultApi,
 }));
 
-import { uploadEncryptedSelections } from "@/features/vault/encrypted-upload";
+import {
+  uploadEncryptedSelections,
+  VAULT_INLINE_FILE_MAX_BYTES,
+} from "@/features/vault/encrypted-upload";
+import { encryptedLength, padmeLength } from "@/features/vault/protocol";
 import { VaultApiError } from "@/features/vault/vault-api";
+import { VAULT_INLINE_UPLOAD_MAX_BYTES } from "@/features/vault/vault-wire";
 
 const CIPHERTEXT_LENGTH = 24;
-const LARGE_FILE_BYTES = 1024 * 1024 + 1;
+
+function paddedCiphertextLength(plaintextBytes: number) {
+  return encryptedLength(padmeLength(plaintextBytes)).ciphertextBytes;
+}
 
 function publishedFor(entry: InlineUploadEntry) {
   const name = new TextDecoder().decode(entry.record.bootstrapCbor);
@@ -247,6 +255,19 @@ describe("inline small-file uploads", () => {
     expect(peakPendingUploads).toBeLessThanOrEqual(4);
   });
 
+  it("sends the largest inline file within the wire limit", () => {
+    expect(paddedCiphertextLength(VAULT_INLINE_FILE_MAX_BYTES)).toBe(
+      VAULT_INLINE_FILE_MAX_BYTES + 16,
+    );
+    expect(
+      paddedCiphertextLength(VAULT_INLINE_FILE_MAX_BYTES),
+    ).toBeLessThanOrEqual(VAULT_INLINE_UPLOAD_MAX_BYTES);
+    // One byte more pads to the whole limit, which leaves no room for the tag.
+    expect(paddedCiphertextLength(VAULT_INLINE_FILE_MAX_BYTES + 1)).toBe(
+      VAULT_INLINE_UPLOAD_MAX_BYTES + 16,
+    );
+  });
+
   it("keeps files above the inline size on the client-driven path", async () => {
     vaultApi.initVaultUpload.mockResolvedValue({
       uploadId: "upload-large",
@@ -255,7 +276,7 @@ describe("inline small-file uploads", () => {
       partSizeBytes: null,
       contentUrl: {
         url: "https://storage.invalid/large",
-        contentLength: CIPHERTEXT_LENGTH,
+        contentLength: VAULT_INLINE_UPLOAD_MAX_BYTES + 16,
       },
     });
     vaultApi.publishVaultUpload.mockResolvedValue({
@@ -272,17 +293,23 @@ describe("inline small-file uploads", () => {
     await uploadEncryptedSelections({
       selections: [
         {
-          file: new File([new Uint8Array(LARGE_FILE_BYTES)], "large.bin"),
+          file: new File(
+            [new Uint8Array(VAULT_INLINE_FILE_MAX_BYTES + 1)],
+            "large.bin",
+          ),
           relativePath: "large.bin",
         },
         {
-          file: new File([Uint8Array.of(1)], "small.txt"),
-          relativePath: "small.txt",
+          file: new File(
+            [new Uint8Array(VAULT_INLINE_FILE_MAX_BYTES)],
+            "small.bin",
+          ),
+          relativePath: "small.bin",
         },
       ],
       parentFolderId: null,
       csrfToken: "csrf",
-      client: createCryptoClient(),
+      client: createCryptoClient(paddedCiphertextLength),
       signal: new AbortController().signal,
       onProgress: () => undefined,
       onFileStart: () => undefined,
@@ -292,7 +319,13 @@ describe("inline small-file uploads", () => {
     expect(vaultApi.initVaultUpload).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(vaultApi.publishVaultInlineUploads).toHaveBeenCalledTimes(1);
-    expect(vaultApi.publishVaultInlineUploads.mock.calls[0][1]).toHaveLength(1);
+    const inline: InlineUploadEntry[] =
+      vaultApi.publishVaultInlineUploads.mock.calls[0][1];
+    expect(inline).toHaveLength(1);
+    expect(new TextDecoder().decode(inline[0].record.bootstrapCbor)).toBe(
+      "small.bin",
+    );
+    expect(inline[0].content).toHaveLength(VAULT_INLINE_FILE_MAX_BYTES + 16);
   });
 });
 
@@ -327,24 +360,31 @@ function runUpload({
   });
 }
 
-function createCryptoClient(): VaultCryptoClient {
+function createCryptoClient(
+  ciphertextLength: (plaintextBytes: number) => number = () =>
+    CIPHERTEXT_LENGTH,
+): VaultCryptoClient {
+  const lengths = new Map<string, number>();
   return {
     async startEncryption(input: VaultEncryptionInput) {
+      const length = ciphertextLength(input.plaintextBytes);
+      lengths.set(`session-${input.name}`, length);
       return {
         sessionId: `session-${input.name}`,
         nodeId: `node-${input.name}`,
         generationNumber: 1,
         generationId: `generation-${input.name}`,
         recordVersion: 1,
-        paddedBytes: CIPHERTEXT_LENGTH,
-        ciphertextLength: CIPHERTEXT_LENGTH,
+        paddedBytes: length,
+        ciphertextLength: length,
         chunkCount: 1,
       };
     },
-    async encryptChunk() {
+    async encryptChunk(sessionId: string) {
+      const length = lengths.get(sessionId) ?? CIPHERTEXT_LENGTH;
       return {
-        ciphertext: new Uint8Array(CIPHERTEXT_LENGTH).fill(7).buffer,
-        ciphertextBytes: CIPHERTEXT_LENGTH,
+        ciphertext: new Uint8Array(length).fill(7).buffer,
+        ciphertextBytes: length,
       };
     },
     async finalizeEncryption(sessionId: string) {
@@ -354,7 +394,7 @@ function createCryptoClient(): VaultCryptoClient {
         generationNumber: 1,
         generationId: `generation-${name}`,
         recordVersion: 1,
-        ciphertextLength: CIPHERTEXT_LENGTH,
+        ciphertextLength: lengths.get(sessionId) ?? CIPHERTEXT_LENGTH,
         chunkCount: 1,
         record: {
           // The test server reads the file name back out of the record.

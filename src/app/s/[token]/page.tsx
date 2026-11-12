@@ -13,6 +13,7 @@ import {
 } from "lucide-react";
 import type { Metadata } from "next";
 import Link from "next/link";
+import { preconnect } from "react-dom";
 
 import { AeralythLogo } from "@/components/aeralyth-logo";
 import { DottedSurface } from "@/components/dotted-surface";
@@ -27,6 +28,7 @@ import {
   type SharedLinkData,
   type SharedLinkEntry,
 } from "@/lib/api";
+import { getConfiguredStorageOrigin } from "@/lib/storage-origin";
 
 export const metadata: Metadata = {
   title: "Shared item",
@@ -69,6 +71,10 @@ export default async function SharedItemPage({
   ]);
   const shareState = await getShareLinkState(token, folderId, cursor);
   const returnPath = getSharePath(token, folderId, cursor);
+  const storageOrigin = getConfiguredStorageOrigin();
+  // Downloads are top-level navigations redirected to the bucket, which use the
+  // credentialed connection pool, so this hint has no crossorigin attribute.
+  if (shareState.status === "ready" && storageOrigin) preconnect(storageOrigin);
 
   return (
     <main className="relative isolate min-h-dvh overflow-hidden bg-background px-4 py-8 text-foreground sm:px-6">
