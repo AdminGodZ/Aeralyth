@@ -11306,7 +11306,7 @@ mod account_cpu_tests {
             (&trashed, "trashed"),
             (&shared, "active"),
         ] {
-            state.db.execute("INSERT INTO files(id,owner_id,original_name,storage_name,size_bytes,entry_type,state,e2ee_state,current_generation_number,current_generation_id) VALUES($1,$2,'batch',$1,0,'folder',$3,'encrypted',1,gen_random_bytes(16))", &[node, &owner, &node_state]).await.unwrap();
+            state.db.execute("INSERT INTO files(id,owner_id,original_name,storage_name,size_bytes,entry_type,state,e2ee_state,current_generation_number,current_generation_id) VALUES($1,$2,$1,$1,0,'folder',$3,'encrypted',1,gen_random_bytes(16))", &[node, &owner, &node_state]).await.unwrap();
             state.db.execute("INSERT INTO vault_node_records(node_id,owner_id,record_version,record_hash,bootstrap_cbor,bootstrap_signature,encrypted_manifest,manifest_hash,signer_key_version) VALUES($1,$2,1,gen_random_bytes(32),$3,gen_random_bytes(64),$4,gen_random_bytes(32),1)", &[node, &owner, &bootstrap, &manifest.as_slice()]).await.unwrap();
             state.db.execute("INSERT INTO vault_node_heads(node_id,owner_id,record_version,record_hash) SELECT node_id,owner_id,record_version,record_hash FROM vault_node_records WHERE node_id=$1", &[node]).await.unwrap();
             state.db.execute("INSERT INTO vault_wrappers(wrapper_id,owner_id,node_id,wrapper_kind,record_version,canonical_cbor,wrapper_hash) VALUES(gen_random_bytes(16),$2,$1,'account_root',1,gen_random_bytes(64),gen_random_bytes(32))", &[node, &owner]).await.unwrap();
