@@ -7,6 +7,7 @@ use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use bytes::Bytes;
 use futures_util::stream;
 use serde::{Deserialize, Serialize};
+use tokio::sync::watch;
 
 use crate::auth::{SESSION_COOKIE, hash_session_token, require_principal};
 use crate::db::Database;
@@ -16,6 +17,7 @@ use crate::state::{AppState, LoadShedError};
 
 const HEARTBEAT: Duration = Duration::from_secs(5);
 const STREAM_LIFETIME: Duration = Duration::from_secs(25 * 60);
+const COALESCE_WINDOW: Duration = Duration::from_millis(75);
 const REPLAY_QUERY: &str = "
     SELECT state.head, state.floor,
       COALESCE((SELECT json_agg(batch)::text FROM (
@@ -72,6 +74,7 @@ struct EventStream {
     user_id: String,
     cursor: Option<i64>,
     initial: Option<Arc<Snapshot>>,
+    last_replay: Option<tokio::time::Instant>,
     expires: tokio::time::Instant,
     heartbeat: tokio::time::Instant,
 }
@@ -104,6 +107,7 @@ pub async fn events(
         user_id: principal.id,
         cursor,
         initial: None,
+        last_replay: None,
         expires: tokio::time::Instant::now() + STREAM_LIFETIME,
         heartbeat: tokio::time::Instant::now() + HEARTBEAT,
     };
@@ -151,8 +155,7 @@ pub async fn events(
                     _ = tokio::time::sleep_until(authorized_until.min(state.expires)) => { continue; }
                     result = state.subscription.wake.changed() => {
                         if result.is_err() { state.metrics.record_sse_termination("shutdown"); return None; }
-                        tokio::time::sleep(Duration::from_millis(75)).await;
-                        state.subscription.wake.borrow_and_update();
+                        settle_wake(&mut state.subscription.wake, &mut state.last_replay).await;
                         match tokio::time::timeout_at(authorized_until, snapshot(&state)).await {
                             Ok(Ok(snapshot)) => Some(snapshot),
                             Ok(Err(_)) => { state.metrics.record_sse_termination("database"); return None; },
@@ -210,6 +213,19 @@ pub async fn sync(
     Ok(HttpResponse::Ok()
         .insert_header(("Cache-Control", "private, no-store, no-transform"))
         .json(sync_response(cursor, &snapshot)))
+}
+
+/// Replays an isolated change at once. Within a burst, wait until one window
+/// after the previous replay; marking the wake seen then folds the burst in.
+async fn settle_wake(
+    wake: &mut watch::Receiver<u64>,
+    last_replay: &mut Option<tokio::time::Instant>,
+) {
+    if let Some(last_replay) = *last_replay {
+        tokio::time::sleep_until(last_replay + COALESCE_WINDOW).await;
+    }
+    wake.borrow_and_update();
+    *last_replay = Some(tokio::time::Instant::now());
 }
 
 fn require_same_origin(request: &HttpRequest) -> Result<()> {
@@ -389,6 +405,7 @@ mod tests {
             user_id: "replay-test".into(),
             cursor: Some(0),
             initial: None,
+            last_replay: None,
             expires: tokio::time::Instant::now() + STREAM_LIFETIME,
             heartbeat: tokio::time::Instant::now() + HEARTBEAT,
         };
@@ -419,6 +436,47 @@ mod tests {
             .await
             .expect("initial SSE replay did not finish")
             .unwrap();
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn isolated_wakes_replay_at_once_and_bursts_once_per_window() {
+        let (wake, mut receiver) = watch::channel(0_u64);
+        let mut last_replay = None;
+        let start = tokio::time::Instant::now();
+        wake.send_modify(|revision| *revision += 1);
+        receiver.changed().await.unwrap();
+        settle_wake(&mut receiver, &mut last_replay).await;
+        assert_eq!(start.elapsed(), Duration::ZERO, "isolated change waited");
+
+        tokio::time::advance(Duration::from_millis(10)).await;
+        wake.send_modify(|revision| *revision += 1);
+        receiver.changed().await.unwrap();
+        let settled = tokio::spawn(async move {
+            settle_wake(&mut receiver, &mut last_replay).await;
+            (receiver, last_replay)
+        });
+        // Changes during the wait join the trailing replay instead of
+        // starting another one.
+        tokio::time::advance(Duration::from_millis(30)).await;
+        wake.send_modify(|revision| *revision += 1);
+        let (mut receiver, mut last_replay) = settled.await.unwrap();
+        assert_eq!(start.elapsed(), COALESCE_WINDOW);
+        assert!(
+            !receiver.has_changed().unwrap(),
+            "burst wake was not folded in"
+        );
+        assert_eq!(*receiver.borrow(), 3);
+
+        tokio::time::advance(COALESCE_WINDOW).await;
+        let quiet = tokio::time::Instant::now();
+        wake.send_modify(|revision| *revision += 1);
+        receiver.changed().await.unwrap();
+        settle_wake(&mut receiver, &mut last_replay).await;
+        assert_eq!(
+            quiet.elapsed(),
+            Duration::ZERO,
+            "change after a quiet window waited"
+        );
     }
 
     #[test]

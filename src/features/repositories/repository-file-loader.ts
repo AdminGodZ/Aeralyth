@@ -9,7 +9,10 @@ import {
   readEncryptedFileBlob,
   readEncryptedFilePrefix,
 } from "@/features/vault/encrypted-download";
-import type { VaultManifest } from "@/features/vault/protocol";
+import type {
+  VaultDownloadPlan,
+  VaultManifest,
+} from "@/features/vault/protocol";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
 import type { RepositoryEntry } from "@/lib/api";
@@ -37,7 +40,11 @@ export type PreparedRepositoryFile = LoadedRepositoryFile & {
 
 type VaultFileAccess = {
   client: VaultCryptoClient | null;
-  openNode(nodeId: string): Promise<VaultManifest>;
+  openNode(
+    nodeId: string,
+    plan?: VaultDownloadPlan,
+    signal?: AbortSignal,
+  ): Promise<VaultManifest>;
 };
 
 export async function loadRepositoryFile({
@@ -60,7 +67,8 @@ export async function loadRepositoryFile({
     if (!vault.client) {
       throw new Error("Unlock the vault to preview this encrypted file.");
     }
-    const manifest = await vault.openNode(entry.id);
+    const plan = await getVaultDownloadPlan(entry.id, signal);
+    const manifest = await vault.openNode(entry.id, plan, signal);
     if (manifest.entryType !== "file") {
       throw new Error("The encrypted repository metadata is inconsistent.");
     }
@@ -69,7 +77,6 @@ export async function loadRepositoryFile({
       manifest.mimeType,
       manifest.plaintextBytes,
     );
-    const plan = await getVaultDownloadPlan(entry.id, signal);
     const options = {
       plan,
       manifest,

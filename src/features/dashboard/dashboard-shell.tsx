@@ -26,6 +26,7 @@ import {
 } from "@/features/realtime/realtime-provider";
 import { RepositoryDetail } from "@/features/repositories/repository-detail";
 import { RepositoryOverview } from "@/features/repositories/repository-overview";
+import { StoragePreconnect } from "@/features/vault/storage-preconnect";
 import { VaultBreadcrumbs } from "@/features/vault/vault-breadcrumbs";
 import { VaultFileList } from "@/features/vault/vault-file-list";
 import { VaultProvider } from "@/features/vault/vault-provider";
@@ -52,6 +53,7 @@ type DashboardFrameProps = {
   csrfToken: string;
   initialSidebarCollapsed: boolean;
   realtimeCursor: string;
+  storageOrigin: string | null;
 };
 
 type DashboardPageProps = {
@@ -78,6 +80,7 @@ export function DashboardFrame({
   csrfToken,
   initialSidebarCollapsed,
   realtimeCursor,
+  storageOrigin,
 }: DashboardFrameProps) {
   const accentColor =
     normalizeAccentColor(currentUser.accentColor) ?? DEFAULT_ACCENT_COLOR;
@@ -100,6 +103,7 @@ export function DashboardFrame({
         autoLockMinutes={currentUser.vaultAutoLockMinutes}
         onePasswordEnabled={currentUser.onePasswordEnabled}
       >
+        <StoragePreconnect origin={storageOrigin} />
         <RealtimeProvider key={currentUser.id} initialCursor={realtimeCursor}>
           <DashboardSidebar
             canViewSystemNavigation={currentUser.role === "admin"}
