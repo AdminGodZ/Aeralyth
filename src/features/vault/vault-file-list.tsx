@@ -38,6 +38,7 @@ import { FolderDownloadProgressPanel } from "@/features/files/folder-download-pr
 import { applyFileListOverlay } from "@/features/realtime/file-list-overlay";
 import { useRealtimeMutation } from "@/features/realtime/realtime-provider";
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
+import type { VaultMetadataReference } from "@/features/vault/protocol";
 import {
   type FileTreeMutation,
   getVaultDownloadPlan,
@@ -45,6 +46,7 @@ import {
   mutateFileTrees,
 } from "@/features/vault/vault-api";
 import { removeEncryptedSelections } from "@/features/vault/vault-list-selection";
+import type { VaultMetadataOpenResult } from "@/features/vault/vault-messages";
 import {
   markVaultFolderClick,
   recordVaultMetadataPerformance,
@@ -267,26 +269,15 @@ function useVaultFileListController({
       const next: Record<string, ResolvedMetadata> = {};
       const references = entries.flatMap((entry) => {
         if (entry.e2eeState !== "encrypted") return [];
-        if (
-          entry.vaultRecordHash === null ||
-          entry.vaultRecordVersion === null ||
-          entry.vaultGenerationId === null
-        ) {
+        const reference = entryMetadataReference(entry);
+        if (!reference) {
           next[entry.id] = {
             status: "unavailable",
             sourceRecordHash: entry.vaultRecordHash ?? "missing",
           };
           return [];
         }
-        return [
-          {
-            nodeId: entry.id,
-            parentId: entry.parentId,
-            recordVersion: entry.vaultRecordVersion,
-            recordHash: entry.vaultRecordHash,
-            generationId: entry.vaultGenerationId,
-          },
-        ];
+        return [reference];
       });
       const entriesById = new Map(entries.map((entry) => [entry.id, entry]));
       const metadataFromResults = (
@@ -297,26 +288,7 @@ function useVaultFileListController({
             const entry = entriesById.get(result.nodeId);
             if (!entry || result.recordHash !== entry.vaultRecordHash)
               return [];
-            const metadata: ResolvedMetadata =
-              result.status === "ready"
-                ? {
-                    status: "ready",
-                    name: result.manifest.name,
-                    kind:
-                      result.manifest.entryType === "folder"
-                        ? "Folder"
-                        : fileKind(
-                            result.manifest.name,
-                            result.manifest.mimeType,
-                          ),
-                    sizeBytes: result.manifest.plaintextBytes,
-                    sourceRecordHash: result.recordHash,
-                  }
-                : {
-                    status: "unavailable",
-                    sourceRecordHash: result.recordHash,
-                  };
-            return [[result.nodeId, metadata]];
+            return [[result.nodeId, metadataFromResult(result)]];
           }),
         );
       try {
@@ -377,6 +349,23 @@ function useVaultFileListController({
     vault.state,
   ]);
 
+  // Names already decrypted in memory render on the first paint instead of a
+  // skeleton; the effect above still resolves misses and re-validates. Shared
+  // views must not show a name before the server re-validates the grant.
+  const peeked = useMemo((): Record<string, ResolvedMetadata> => {
+    if (sectionKey === "shared") return {};
+    const references = localEntries.flatMap((entry) => {
+      if (entry.e2eeState !== "encrypted") return [];
+      const reference = entryMetadataReference(entry);
+      return reference ? [reference] : [];
+    });
+    return Object.fromEntries(
+      vault
+        .peekMetadata(references)
+        .map((result) => [result.nodeId, metadataFromResult(result)]),
+    );
+  }, [localEntries, sectionKey, vault.peekMetadata]);
+
   const displayed = useMemo(() => {
     const values = localEntries.map((entry) => {
       if (entry.e2eeState !== "encrypted") {
@@ -387,7 +376,10 @@ function useVaultFileListController({
         };
       }
 
-      const storedMetadata = resolved[entry.id];
+      const storedMetadata =
+        resolved[entry.id]?.sourceRecordHash === entry.vaultRecordHash
+          ? resolved[entry.id]
+          : peeked[entry.id];
       const sharedMetadataValidated =
         sectionKey !== "shared" ||
         (sharedValidatedSource?.entries === entries &&
@@ -464,6 +456,7 @@ function useVaultFileListController({
     direction,
     entries,
     localEntries,
+    peeked,
     resolved,
     sectionKey,
     sharedValidatedSource,
@@ -1430,6 +1423,40 @@ async function requestFavorite(
   }
 
   return payload.favorite;
+}
+
+function entryMetadataReference(
+  entry: FileEntry,
+): VaultMetadataReference | null {
+  if (
+    entry.vaultRecordHash === null ||
+    entry.vaultRecordVersion === null ||
+    entry.vaultGenerationId === null
+  ) {
+    return null;
+  }
+  return {
+    nodeId: entry.id,
+    parentId: entry.parentId,
+    recordVersion: entry.vaultRecordVersion,
+    recordHash: entry.vaultRecordHash,
+    generationId: entry.vaultGenerationId,
+  };
+}
+
+function metadataFromResult(result: VaultMetadataOpenResult): ResolvedMetadata {
+  return result.status === "ready"
+    ? {
+        status: "ready",
+        name: result.manifest.name,
+        kind:
+          result.manifest.entryType === "folder"
+            ? "Folder"
+            : fileKind(result.manifest.name, result.manifest.mimeType),
+        sizeBytes: result.manifest.plaintextBytes,
+        sourceRecordHash: result.recordHash,
+      }
+    : { status: "unavailable", sourceRecordHash: result.recordHash };
 }
 
 function fileKind(name: string, mimeType: string | null): string {

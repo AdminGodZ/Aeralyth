@@ -2,10 +2,11 @@
 
 import { ChevronRight, Folder } from "lucide-react";
 import Link from "next/link";
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import type { VaultMetadataReference } from "@/features/vault/protocol";
 import {
   getVaultNamePresentation,
   type VaultNameResolution,
@@ -37,11 +38,30 @@ export function VaultBreadcrumbs({
       basePath,
       values: {},
     });
+  // Folder names already decrypted in memory render on the first paint; the
+  // effect below still resolves misses and re-validates. Shared paths must not
+  // show a name before the server re-validates the grant.
+  const peeked = useMemo((): Record<string, VaultNameResolution> => {
+    if (basePath === "/shared") return {};
+    const references = breadcrumbs.flatMap((breadcrumb, index) => {
+      if (breadcrumb.e2eeState !== "encrypted") return [];
+      const reference = breadcrumbMetadataReference(breadcrumbs, index);
+      return reference ? [reference] : [];
+    });
+    return Object.fromEntries(
+      vault
+        .peekMetadata(references)
+        .map((result) => [
+          result.nodeId,
+          { status: "ready", name: result.manifest.name },
+        ]),
+    );
+  }, [basePath, breadcrumbs, vault.peekMetadata]);
   const names =
     resolutionState.source === breadcrumbs &&
     resolutionState.basePath === basePath
-      ? resolutionState.values
-      : {};
+      ? { ...peeked, ...resolutionState.values }
+      : peeked;
 
   useEffect(() => {
     if (vault.state !== "unlocked") {
@@ -59,23 +79,12 @@ export function VaultBreadcrumbs({
     const values: Record<string, VaultNameResolution> = {};
     const references = breadcrumbs.flatMap((breadcrumb, index) => {
       if (breadcrumb.e2eeState !== "encrypted") return [];
-      if (
-        breadcrumb.vaultRecordHash === null ||
-        breadcrumb.vaultRecordVersion === null ||
-        breadcrumb.vaultGenerationId === null
-      ) {
+      const reference = breadcrumbMetadataReference(breadcrumbs, index);
+      if (!reference) {
         values[breadcrumb.id] = { status: "unavailable" };
         return [];
       }
-      return [
-        {
-          nodeId: breadcrumb.id,
-          parentId: index > 0 ? breadcrumbs[index - 1].id : null,
-          recordVersion: breadcrumb.vaultRecordVersion,
-          recordHash: breadcrumb.vaultRecordHash,
-          generationId: breadcrumb.vaultGenerationId,
-        },
-      ];
+      return [reference];
     });
     const publish = (
       results: Awaited<ReturnType<typeof vault.resolveMetadata>>,
@@ -178,4 +187,25 @@ export function VaultBreadcrumbs({
       })}
     </nav>
   );
+}
+
+function breadcrumbMetadataReference(
+  breadcrumbs: FolderBreadcrumb[],
+  index: number,
+): VaultMetadataReference | null {
+  const breadcrumb = breadcrumbs[index];
+  if (
+    breadcrumb.vaultRecordHash === null ||
+    breadcrumb.vaultRecordVersion === null ||
+    breadcrumb.vaultGenerationId === null
+  ) {
+    return null;
+  }
+  return {
+    nodeId: breadcrumb.id,
+    parentId: index > 0 ? breadcrumbs[index - 1].id : null,
+    recordVersion: breadcrumb.vaultRecordVersion,
+    recordHash: breadcrumb.vaultRecordHash,
+    generationId: breadcrumb.vaultGenerationId,
+  };
 }

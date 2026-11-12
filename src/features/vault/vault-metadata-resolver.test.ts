@@ -110,6 +110,70 @@ describe("VaultMetadataResolver", () => {
     });
   });
 
+  it("peeks plaintext metadata cached for the exact revision and generation", () => {
+    const resolver = new VaultMetadataResolver();
+    const cached = reference("fil_peek_cached");
+    resolver.remember({
+      status: "ready",
+      nodeId: cached.nodeId,
+      recordHash: cached.recordHash,
+      manifest,
+    });
+
+    expect(resolver.peek([cached, reference("fil_peek_missing")])).toEqual([
+      {
+        status: "ready",
+        nodeId: cached.nodeId,
+        recordHash: cached.recordHash,
+        manifest,
+      },
+    ]);
+    expect(resolver.peek([reference("fil_peek_missing")])).toEqual([]);
+  });
+
+  it("never peeks metadata cached for another revision or generation", () => {
+    const resolver = new VaultMetadataResolver();
+    const cached = reference("fil_peek_stale");
+    resolver.remember({
+      status: "ready",
+      nodeId: cached.nodeId,
+      recordHash: cached.recordHash,
+      manifest,
+    });
+
+    expect(
+      resolver.peek([
+        { ...cached, recordVersion: 2, recordHash: `B${recordHash.slice(1)}` },
+      ]),
+    ).toEqual([]);
+    expect(
+      resolver.peek([{ ...cached, generationId: `B${generationId.slice(1)}` }]),
+    ).toEqual([]);
+    expect(resolver.peek([{ ...cached, generationId: "invalid" }])).toEqual([]);
+    resolver.clear();
+    expect(resolver.peek([cached])).toEqual([]);
+  });
+
+  it("peeks without reading the persistent cache or the network", async () => {
+    const target = reference("fil_peek_resolved");
+    apiMocks.getVaultMetadataPlans.mockResolvedValue({
+      plans: [planFor(target)],
+    });
+    const { client, getCachedMetadata, openMetadataPlans } = fakeClient();
+    const resolver = new VaultMetadataResolver();
+
+    expect(resolver.peek([target])).toEqual([]);
+    await resolver.resolve([target], {
+      csrfToken: "csrf",
+      client,
+      openNode: vi.fn(async () => undefined),
+    });
+    expect(resolver.peek([target])).toHaveLength(1);
+    expect(apiMocks.getVaultMetadataPlans).toHaveBeenCalledOnce();
+    expect(getCachedMetadata).toHaveBeenCalledOnce();
+    expect(openMetadataPlans).toHaveBeenCalledOnce();
+  });
+
   it("revalidates shared grants before consulting plaintext or plan caches", async () => {
     const target = reference("fil_shared_revalidation");
     apiMocks.getVaultMetadataPlans.mockResolvedValue({
