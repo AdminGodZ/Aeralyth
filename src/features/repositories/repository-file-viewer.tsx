@@ -462,9 +462,8 @@ function RepositoryOriginalDownload({ entry }: RepositoryFileViewerProps) {
     try {
       if (!vault.client)
         throw new Error("Unlock the vault to download this file.");
-      const manifest = await vault.openNode(entry.id);
-      controller.signal.throwIfAborted();
       const plan = await getVaultDownloadPlan(entry.id, controller.signal);
+      const manifest = await vault.openNode(entry.id, plan, controller.signal);
       await downloadEncryptedFile({
         plan,
         manifest,

@@ -2,10 +2,12 @@ import { Buffer } from "node:buffer";
 
 import { type NextRequest, NextResponse } from "next/server";
 
+import { getConfiguredStorageOrigin } from "@/lib/storage-origin";
+
 export function proxy(request: NextRequest) {
   const nonce = Buffer.from(crypto.randomUUID()).toString("base64");
   const isDevelopment = process.env.NODE_ENV === "development";
-  const storageOrigin = getStorageOrigin(process.env.AERALYTH_S3_CSP_ORIGIN);
+  const storageOrigin = getConfiguredStorageOrigin();
   const connectSources = [
     "'self'",
     ...(storageOrigin ? [storageOrigin] : []),
@@ -52,20 +54,6 @@ export function proxy(request: NextRequest) {
     response.headers.set("X-Robots-Tag", "noindex, nofollow, noarchive");
   }
   return response;
-}
-
-function getStorageOrigin(value: string | undefined): string | null {
-  if (!value) return null;
-  try {
-    const url = new URL(value);
-    if (url.protocol !== "https:" && process.env.NODE_ENV !== "development") {
-      return null;
-    }
-    if (url.protocol !== "https:" && url.protocol !== "http:") return null;
-    return url.origin;
-  } catch {
-    return null;
-  }
 }
 
 export const config = {

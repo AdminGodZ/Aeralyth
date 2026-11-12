@@ -133,6 +133,23 @@ export class VaultMetadataResolver {
     }
   }
 
+  // Reads plaintext metadata already in memory without awaiting anything, so a
+  // listing can render cached names on its first paint. It applies the same
+  // revision and generation checks as resolve() and leaves LRU order alone
+  // because it runs during render; the resolve() that follows touches hits.
+  // Callers that need server validation must not peek.
+  peek(references: VaultMetadataReference[]): VaultCachedMetadataResult[] {
+    return references.flatMap((reference) => {
+      if (!isVaultMetadataReference(reference)) return [];
+      const cached = this.metadata.get(
+        revisionKey(reference.nodeId, reference.recordHash),
+      );
+      return cached && cachedMetadataMatchesReference(cached, reference)
+        ? [cached]
+        : [];
+    });
+  }
+
   async resolve(
     references: VaultMetadataReference[],
     context: ResolverContext,
@@ -157,10 +174,7 @@ export class VaultMetadataResolver {
       const cached = options.requireServerValidation
         ? undefined
         : this.getMetadata(key);
-      if (
-        cached &&
-        toBase64Url(cached.manifest.generationId) === reference.generationId
-      ) {
+      if (cached && cachedMetadataMatchesReference(cached, reference)) {
         resolved.set(key, cached);
       } else {
         persistentCandidates.push(reference);
@@ -693,19 +707,30 @@ function getRequiredMetadataParentId(
 }
 
 function assertVaultMetadataReference(reference: VaultMetadataReference): void {
-  const base64Url = /^[A-Za-z0-9_-]+$/u;
-  if (
-    !isVaultNodeId(reference.nodeId) ||
-    (reference.parentId !== null && !isVaultNodeId(reference.parentId)) ||
-    !Number.isSafeInteger(reference.recordVersion) ||
-    reference.recordVersion < 1 ||
-    reference.recordHash.length !== 43 ||
-    !base64Url.test(reference.recordHash) ||
-    reference.generationId.length !== 22 ||
-    !base64Url.test(reference.generationId)
-  ) {
+  if (!isVaultMetadataReference(reference)) {
     throw new Error("The server returned an invalid metadata revision.");
   }
+}
+
+function isVaultMetadataReference(reference: VaultMetadataReference): boolean {
+  const base64Url = /^[A-Za-z0-9_-]+$/u;
+  return (
+    isVaultNodeId(reference.nodeId) &&
+    (reference.parentId === null || isVaultNodeId(reference.parentId)) &&
+    Number.isSafeInteger(reference.recordVersion) &&
+    reference.recordVersion >= 1 &&
+    reference.recordHash.length === 43 &&
+    base64Url.test(reference.recordHash) &&
+    reference.generationId.length === 22 &&
+    base64Url.test(reference.generationId)
+  );
+}
+
+function cachedMetadataMatchesReference(
+  cached: VaultCachedMetadataResult,
+  reference: VaultMetadataReference,
+): boolean {
+  return toBase64Url(cached.manifest.generationId) === reference.generationId;
 }
 
 function revisionKey(nodeId: string, recordHash: string): string {

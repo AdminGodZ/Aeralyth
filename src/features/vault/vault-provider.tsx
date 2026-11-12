@@ -45,7 +45,10 @@ import {
   VaultCryptoClient,
   VaultWorkerError,
 } from "@/features/vault/vault-client";
-import type { VaultMetadataOpenResult } from "@/features/vault/vault-messages";
+import type {
+  VaultCachedMetadataResult,
+  VaultMetadataOpenResult,
+} from "@/features/vault/vault-messages";
 import {
   type VaultMetadataResolutionOptions,
   VaultMetadataResolver,
@@ -93,6 +96,9 @@ type VaultContextValue = {
     references: VaultMetadataReference[],
     options?: VaultMetadataResolutionOptions,
   ): Promise<VaultMetadataOpenResult[]>;
+  peekMetadata(
+    references: VaultMetadataReference[],
+  ): VaultCachedMetadataResult[];
   prefetchFolderMetadata(
     folderId: string,
     view: "files" | "shared",
@@ -510,6 +516,12 @@ function useVaultProviderController({
     [csrfToken, getClient, metadataResolver, openNode, requestUnlock, state],
   );
 
+  const peekMetadata = useCallback(
+    (references: VaultMetadataReference[]): VaultCachedMetadataResult[] =>
+      state === "unlocked" ? metadataResolver.peek(references) : [],
+    [metadataResolver, state],
+  );
+
   const prefetchFolderMetadata = useCallback(
     (folderId: string, view: "files" | "shared"): Promise<void> => {
       if (
@@ -669,6 +681,7 @@ function useVaultProviderController({
       invalidateMetadata,
       openNode,
       resolveMetadata,
+      peekMetadata,
       prefetchFolderMetadata,
       rememberFolderMetadata,
     }),
@@ -677,6 +690,7 @@ function useVaultProviderController({
       lock,
       invalidateMetadata,
       openNode,
+      peekMetadata,
       prefetchFolderMetadata,
       rememberFolderMetadata,
       requestUnlock,
