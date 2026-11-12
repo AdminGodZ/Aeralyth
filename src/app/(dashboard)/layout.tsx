@@ -2,6 +2,7 @@ import { cookies } from "next/headers";
 import type { ReactNode } from "react";
 import { getDashboardSession } from "@/features/dashboard/dashboard-session";
 import { DashboardFrame } from "@/features/dashboard/dashboard-shell";
+import { getConfiguredStorageOrigin } from "@/lib/storage-origin";
 
 export const dynamic = "force-dynamic";
 
@@ -21,6 +22,7 @@ export default async function DashboardLayout({
       csrfToken={csrfToken}
       initialSidebarCollapsed={initialSidebarCollapsed}
       realtimeCursor={realtimeCursor}
+      storageOrigin={getConfiguredStorageOrigin()}
     >
       {children}
     </DashboardFrame>
