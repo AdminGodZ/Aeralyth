@@ -68,6 +68,7 @@ import {
   vaultSessionStorage,
   writeVaultResumeMarker,
 } from "@/features/vault/vault-session";
+import { VaultUnlockPrewarm } from "@/features/vault/vault-unlock-prewarm";
 
 type VaultState =
   | "off"
@@ -143,6 +144,9 @@ function useVaultProviderController({
   const clientRef = useRef<VaultCryptoClient | null>(null);
   const nodeOpenFlightsRef = useRef(new Map<string, Promise<VaultManifest>>());
   const [metadataResolver] = useState(() => new VaultMetadataResolver());
+  const [unlockPrewarm] = useState(
+    () => new VaultUnlockPrewarm<VaultCryptoClient>(getUnlockMaterial),
+  );
   const lockTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lockDeadlineRef = useRef(0);
   const resumeSessionIdRef = useRef<string | null>(null);
@@ -183,6 +187,9 @@ function useVaultProviderController({
         const client = new VaultCryptoClient((failure) => {
           if (clientRef.current !== client) return;
           clientRef.current = null;
+          // A worker booted ahead of an unlock holds no session; the next
+          // submit starts a fresh one instead of reporting this failure.
+          if (unlockPrewarm.dropIdleClient(client)) return;
           if (lockTimerRef.current) clearTimeout(lockTimerRef.current);
           lockTimerRef.current = null;
           lockDeadlineRef.current = 0;
@@ -206,7 +213,7 @@ function useVaultProviderController({
       }
       return clientRef.current;
     },
-    [metadataResolver],
+    [metadataResolver, unlockPrewarm],
   );
 
   const beginVaultResumeSession = useCallback(
@@ -249,6 +256,7 @@ function useVaultProviderController({
     persistedResumeExpirationRef.current = 0;
     clearVaultResumeMarkers();
     cancelShareDirectorySyncForLock();
+    unlockPrewarm.clearMaterial();
     if (enabled) {
       window.dispatchEvent(new Event(VAULT_LOCKING_EVENT));
       setState(configured ? "locked" : "setup");
@@ -257,7 +265,7 @@ function useVaultProviderController({
     metadataResolver.clear();
     nodeOpenFlightsRef.current.clear();
     await clientRef.current?.lock();
-  }, [configured, enabled, metadataResolver]);
+  }, [configured, enabled, metadataResolver, unlockPrewarm]);
 
   useEffect(() => {
     setActiveAutoLockMinutes(normalizeVaultAutoLockMinutes(autoLockMinutes));
@@ -287,7 +295,7 @@ function useVaultProviderController({
     const restore = async () => {
       let client: VaultCryptoClient | null = null;
       try {
-        client = getClient(true);
+        client = unlockPrewarm.claimClient(getClient(true));
         const material = await getUnlockMaterial();
         const resumed = await client.resume(
           marker.sessionId,
@@ -324,7 +332,7 @@ function useVaultProviderController({
     return () => {
       cancelled = true;
     };
-  }, [csrfToken, enabled, getClient, vaultConfigured]);
+  }, [csrfToken, enabled, getClient, unlockPrewarm, vaultConfigured]);
 
   // The returned cleanup directly removes both listeners and clears the one
   // timeout that the activity callback is allowed to replace.
@@ -409,10 +417,28 @@ function useVaultProviderController({
 
   useEffect(() => {
     return () => {
+      unlockPrewarm.clearMaterial();
       void clientRef.current?.close();
       clientRef.current = null;
     };
-  }, []);
+  }, [unlockPrewarm]);
+
+  // Boot the worker and fetch unlock material while the user types, so a
+  // submit only waits for Argon2id.
+  const prewarmUnlockMaterial = configured && mode !== "setup";
+  const prewarmUnlock = useCallback(() => {
+    unlockPrewarm.start({
+      currentClient: clientRef.current,
+      createClient: () => getClient(true),
+      material: prewarmUnlockMaterial,
+    });
+  }, [getClient, prewarmUnlockMaterial, unlockPrewarm]);
+
+  useEffect(() => {
+    if (!enabled || !dialogOpen) return;
+    prewarmUnlock();
+    return () => unlockPrewarm.clearMaterial();
+  }, [dialogOpen, enabled, prewarmUnlock, unlockPrewarm]);
 
   const requestUnlock = useCallback(() => {
     if (!enabled || state === "unlocked" || state === "unlocking") return;
@@ -532,6 +558,7 @@ function useVaultProviderController({
         reset ||
         changes.some(({ scope }) => scope === "shared" || scope === "vault")
       ) {
+        unlockPrewarm.clearMaterial();
         metadataResolver.clear();
         nodeOpenFlightsRef.current.clear();
         return;
@@ -541,7 +568,7 @@ function useVaultProviderController({
           metadataResolver.invalidateFolders(change.folderIds);
       }
     },
-    [metadataResolver],
+    [metadataResolver, unlockPrewarm],
   );
 
   async function submit(): Promise<void> {
@@ -551,7 +578,7 @@ function useVaultProviderController({
     setBusy(true);
     setState("unlocking");
     try {
-      client = getClient(true);
+      client = unlockPrewarm.claimClient(getClient(true));
       if (mode === "setup") {
         if (password !== passwordConfirmation) {
           throw new Error(
@@ -574,8 +601,10 @@ function useVaultProviderController({
         setRecoveryConfirmed(false);
         setState("unlocked");
       } else if (mode === "unlock") {
-        const material = await getUnlockMaterial();
-        const unlocked = await client.unlock(password, material);
+        const unlocking = client;
+        const unlocked = await unlockPrewarm.withMaterial((material) =>
+          unlocking.unlock(password, material),
+        );
         await beginVaultResumeSession(client, unlocked.vaultVersion);
         if (clientRef.current !== client)
           throw new VaultWorkerError(
@@ -588,11 +617,9 @@ function useVaultProviderController({
         if (password !== passwordConfirmation) {
           throw new Error("The new vault passwords do not match.");
         }
-        const material = await getUnlockMaterial();
-        const recovered = await client.recover(
-          recoveryCodeInput,
-          password,
-          material,
+        const recovering = client;
+        const recovered = await unlockPrewarm.withMaterial((material) =>
+          recovering.recover(recoveryCodeInput, password, material),
         );
         const rewrapped = await rewrapVault(csrfToken, recovered.payload);
         await beginVaultResumeSession(client, rewrapped.vaultVersion);
@@ -676,6 +703,11 @@ function useVaultProviderController({
     if (!busy && state !== "setup" && !newRecoveryCode) setDialogOpen(open);
   }
 
+  function changePassword(value: string): void {
+    setPassword(value);
+    prewarmUnlock();
+  }
+
   function switchMode(): void {
     if (onePasswordEnabled) return;
     setError(null);
@@ -694,7 +726,7 @@ function useVaultProviderController({
     onePasswordEnabled,
     onDialogOpenChange: changeDialogOpen,
     onFinishRecoveryConfirmation: finishRecoveryConfirmation,
-    onPasswordChange: setPassword,
+    onPasswordChange: changePassword,
     onPasswordConfirmationChange: setPasswordConfirmation,
     onRecoveryCodeInputChange: setRecoveryCodeInput,
     onRecoveryConfirmedChange: setRecoveryConfirmed,

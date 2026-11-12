@@ -8,7 +8,13 @@ import {
   Mail,
   ShieldCheck,
 } from "lucide-react";
-import { type FormEvent, useEffect, useRef, useState } from "react";
+import {
+  type FormEvent,
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -80,17 +86,31 @@ export function OnePasswordLoginForm({
     useState<PendingNavigation | null>(null);
   const [recoveryConfirmed, setRecoveryConfirmed] = useState(false);
 
+  const getClient = useCallback(() => {
+    if (!clientRef.current) {
+      const client = new VaultCryptoClient(() => {
+        if (clientRef.current === client) clientRef.current = null;
+      });
+      clientRef.current = client;
+    }
+    return clientRef.current;
+  }, []);
+
   useEffect(() => {
+    // Boot the worker and its WASM while the user types. A worker that fails
+    // to start before submit is dropped and the submit starts a fresh one.
+    if (!backendUnavailable) {
+      try {
+        getClient();
+      } catch {
+        // The submit retries and reports the failure.
+      }
+    }
     return () => {
       void clientRef.current?.close();
       clientRef.current = null;
     };
-  }, []);
-
-  function getClient() {
-    if (!clientRef.current) clientRef.current = new VaultCryptoClient();
-    return clientRef.current;
-  }
+  }, [backendUnavailable, getClient]);
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
