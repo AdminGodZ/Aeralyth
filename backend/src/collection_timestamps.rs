@@ -31,6 +31,35 @@ where
     Ok(())
 }
 
+pub(crate) const TOUCH_ANCESTOR_COLLECTION_SET_QUERY: &str = r#"
+    INSERT INTO collection_timestamp_changes (owner_id, parent_id)
+    SELECT $2, id FROM files
+    WHERE id = ANY($1::text[]) AND owner_id = $2 AND entry_type = 'folder' AND state = 'active'
+    ON CONFLICT (transaction_id, owner_id, parent_id) DO NOTHING
+"#;
+
+/// Queues the same timestamps as touching each parent in turn within one
+/// transaction, whose queue rows are already unique per parent.
+pub(crate) async fn touch_ancestor_collection_set<Client>(
+    client: &Client,
+    parent_ids: &[String],
+    owner_id: &str,
+) -> Result<(), tokio_postgres::Error>
+where
+    Client: GenericClient,
+{
+    if parent_ids.is_empty() {
+        return Ok(());
+    }
+    execute_cached(
+        client,
+        TOUCH_ANCESTOR_COLLECTION_SET_QUERY,
+        &[&parent_ids, &owner_id],
+    )
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
