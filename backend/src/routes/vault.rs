@@ -56,6 +56,8 @@ const SHARED_METADATA_PLAN_CONCURRENCY: usize = 8;
 const MAX_DOWNLOAD_PLAN_REQUEST_NODES: usize = 100;
 const MAX_DOWNLOAD_PLAN_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
 const VAULT_PUBLICATION_CONTENT_TYPE: &str = "application/vnd.aeralyth.vault-publication";
+#[path = "vault_inline_batches.rs"]
+mod inline_batches;
 #[path = "vault_inline_uploads.rs"]
 mod inline_uploads;
 #[path = "vault_metadata_paging.rs"]
@@ -635,7 +637,7 @@ pub(crate) struct PublishUploadRequest {
     wrappers: Vec<String>,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct PublishResponse {
     node_id: String,
@@ -2028,12 +2030,7 @@ async fn stage_vault_upload(
 
     let upload_id = format!("vup_{}", random_id()?);
     let object_key = if body.entry_type == "file" {
-        Some(format!(
-            "users/{}/vault/{}/{}",
-            user.id,
-            body.node_id,
-            random_id()?
-        ))
+        Some(vault_object_key(&user.id, &body.node_id)?)
     } else {
         None
     };
@@ -2280,6 +2277,11 @@ async fn stage_vault_upload(
         .ok_or_else(|| error::ErrorInternalServerError("upload was not persisted"))?;
 
     Ok((upload, true))
+}
+
+/// A fresh bucket key for one generation of an owner's encrypted file.
+fn vault_object_key(owner_id: &str, node_id: &str) -> Result<String> {
+    Ok(format!("users/{owner_id}/vault/{node_id}/{}", random_id()?))
 }
 
 pub async fn presign_content(
@@ -6014,8 +6016,26 @@ async fn publish_record_transaction(
         .await
         .map_err(error::ErrorInternalServerError)?;
     lock_share_topology(&transaction, &user.id).await?;
+    let published =
+        publish_record_in_transaction(&transaction, user, upload, decoded, metadata).await?;
+    transaction
+        .commit()
+        .await
+        .map_err(error::ErrorInternalServerError)?;
+    Ok(published)
+}
+
+/// Publishes one staged upload inside a transaction that already holds the
+/// owner's share-topology lock.
+async fn publish_record_in_transaction(
+    transaction: &deadpool_postgres::Transaction<'_>,
+    user: &SessionPrincipal,
+    upload: &VaultUpload,
+    decoded: &DecodedNodeRecord,
+    metadata: Option<&ObjectMetadata>,
+) -> Result<PublishResponse> {
     let upload_status = query_opt_cached(
-        &transaction,
+        transaction,
         "
                 SELECT status
                 FROM vault_uploads
@@ -6031,7 +6051,7 @@ async fn publish_record_transaction(
         return Err(error::ErrorConflict("upload state changed; retry"));
     }
     let existing = query_opt_cached(
-        &transaction,
+        transaction,
         "
                 SELECT owner_id, parent_id, entry_type, e2ee_state,
                        current_generation_number, current_generation_id,
@@ -6055,7 +6075,7 @@ async fn publish_record_transaction(
             "encrypted" => {}
             "staged" => {
                 let migration = query_opt_cached(
-                    &transaction,
+                    transaction,
                     "
                             SELECT state FROM vault_migrations
                             WHERE node_id = $1 AND owner_id = $2
@@ -6086,7 +6106,7 @@ async fn publish_record_transaction(
     }
 
     let head = query_opt_cached(
-        &transaction,
+        transaction,
         "SELECT record_version, record_hash FROM vault_node_heads WHERE node_id = $1 FOR UPDATE",
         &[&upload.node_id],
     )
@@ -6117,7 +6137,7 @@ async fn publish_record_transaction(
         }
     }
     reject_fenced_share_write(
-        &transaction,
+        transaction,
         &upload.node_id,
         upload.parent_id.as_deref(),
         &user.id,
@@ -6125,7 +6145,7 @@ async fn publish_record_transaction(
     .await?;
     validate_owner_wrappers(decoded, upload.parent_id.as_deref())?;
     let (committed_share_wrappers, share_sync_required) = publication_share_wrappers(
-        &transaction,
+        transaction,
         decoded,
         &upload.node_id,
         upload.parent_id.as_deref(),
@@ -6142,7 +6162,7 @@ async fn publish_record_transaction(
     let object_checksum = metadata.and_then(|value| value.checksum_sha256.clone());
     let object_etag = metadata.and_then(|value| value.etag.clone());
     if existing.is_none() {
-        execute_cached(&transaction, "
+        execute_cached(transaction, "
                     INSERT INTO files (
                       id, owner_id, original_name, storage_name, mime_type,
                       size_bytes, entry_type, parent_id, checksum_sha256,
@@ -6170,7 +6190,7 @@ async fn publish_record_transaction(
     } else if let Some(existing) = existing.as_ref() {
         let old_storage_name: String = existing.get("storage_name");
         execute_cached(
-            &transaction,
+            transaction,
             "
                     UPDATE files
                     SET original_name = $1,
@@ -6198,12 +6218,12 @@ async fn publish_record_transaction(
         .await
         .map_err(error::ErrorInternalServerError)?;
         if upload.entry_type == "file" && old_storage_name != storage_name {
-            execute_cached(&transaction, "UPDATE vault_object_generations SET status = 'retired', retired_at = now() WHERE node_id = $1 AND status = 'published'",
+            execute_cached(transaction, "UPDATE vault_object_generations SET status = 'retired', retired_at = now() WHERE node_id = $1 AND status = 'published'",
                     &[&upload.node_id],
                 )
                 .await
                 .map_err(error::ErrorInternalServerError)?;
-            execute_cached(&transaction, "INSERT INTO storage_deletion_jobs (object_key) VALUES ($1) ON CONFLICT (object_key) DO NOTHING",
+            execute_cached(transaction, "INSERT INTO storage_deletion_jobs (object_key) VALUES ($1) ON CONFLICT (object_key) DO NOTHING",
                     &[&old_storage_name],
                 )
                 .await
@@ -6216,7 +6236,7 @@ async fn publish_record_transaction(
                 "complete"
             };
             execute_cached(
-                &transaction,
+                transaction,
                 "
                         UPDATE vault_migrations
                         SET staged_object_key = $1, state = $2,
@@ -6235,9 +6255,9 @@ async fn publish_record_transaction(
         }
     }
 
-    insert_node_record(&transaction, &user.id, decoded).await?;
+    insert_node_record(transaction, &user.id, decoded).await?;
     update_share_sync_job(
-        &transaction,
+        transaction,
         &upload.node_id,
         &user.id,
         i64::try_from(decoded.verified.bootstrap.record_version)
@@ -6245,12 +6265,12 @@ async fn publish_record_transaction(
         share_sync_required,
     )
     .await?;
-    replace_owner_wrappers(&transaction, &user.id, decoded).await?;
-    insert_share_wrappers(&transaction, committed_share_wrappers.iter().copied(), None).await?;
-    update_node_head(&transaction, &user.id, decoded).await?;
+    replace_owner_wrappers(transaction, &user.id, decoded).await?;
+    insert_share_wrappers(transaction, committed_share_wrappers.iter().copied(), None).await?;
+    update_node_head(transaction, &user.id, decoded).await?;
     if upload.entry_type == "file" {
         execute_cached(
-            &transaction,
+            transaction,
             "
                     INSERT INTO vault_object_generations (
                       node_id, owner_id, generation_number, generation_id,
@@ -6274,11 +6294,11 @@ async fn publish_record_transaction(
         .map_err(error::ErrorInternalServerError)?;
     }
     if upload.entry_type == "file" && !is_migration {
-        touch_ancestor_collections(&transaction, upload.parent_id.as_deref(), &user.id)
+        touch_ancestor_collections(transaction, upload.parent_id.as_deref(), &user.id)
             .await
             .map_err(error::ErrorInternalServerError)?;
     }
-    let published = execute_cached(&transaction, "UPDATE vault_uploads SET status = 'published', published_at = now() WHERE id = $1 AND owner_id = $2 AND status IN ('pending', 'completing')",
+    let published = execute_cached(transaction, "UPDATE vault_uploads SET status = 'published', published_at = now() WHERE id = $1 AND owner_id = $2 AND status IN ('pending', 'completing')",
             &[&upload.id, &user.id],
         )
         .await
@@ -6286,10 +6306,6 @@ async fn publish_record_transaction(
     if published != 1 {
         return Err(error::ErrorConflict("upload state changed; retry"));
     }
-    transaction
-        .commit()
-        .await
-        .map_err(error::ErrorInternalServerError)?;
 
     Ok(PublishResponse {
         node_id: upload.node_id.clone(),
@@ -7154,11 +7170,25 @@ async fn current_publish_record(
     owner_id: &str,
     node_id: &str,
 ) -> Result<Option<PublishResponse>> {
-    let row = state
+    Ok(
+        current_publish_records(state, owner_id, std::slice::from_ref(&node_id.to_owned()))
+            .await?
+            .remove(node_id),
+    )
+}
+
+/// The current publication of each of the owner's nodes that has one.
+async fn current_publish_records(
+    state: &AppState,
+    owner_id: &str,
+    node_ids: &[String],
+) -> Result<HashMap<String, PublishResponse>> {
+    let rows = state
         .db
-        .query_opt(
+        .query(
             "
-                SELECT files.current_generation_number, files.current_generation_id,
+                SELECT files.id, files.current_generation_number,
+                       files.current_generation_id,
                        heads.record_version, heads.record_hash,
                        EXISTS (
                          SELECT 1 FROM vault_share_sync_jobs AS jobs
@@ -7167,20 +7197,27 @@ async fn current_publish_record(
                        ) AS share_sync_required
                 FROM visible_files AS files
                 INNER JOIN vault_node_heads AS heads ON heads.node_id = files.id
-                WHERE files.id = $1 AND files.owner_id = $2
+                WHERE files.id = ANY($1::text[]) AND files.owner_id = $2
             ",
-            &[&node_id, &owner_id],
+            &[&node_ids, &owner_id],
         )
         .await
         .map_err(crate::db::http_error)?;
-    Ok(row.map(|row| PublishResponse {
-        node_id: node_id.to_owned(),
-        generation_number: row.get("current_generation_number"),
-        generation_id: encode_bytes(row.get::<_, Vec<u8>>("current_generation_id")),
-        record_version: row.get("record_version"),
-        record_hash: encode_bytes(row.get::<_, Vec<u8>>("record_hash")),
-        share_sync_required: row.get("share_sync_required"),
-    }))
+    Ok(rows
+        .into_iter()
+        .map(|row| {
+            let node_id = row.get::<_, String>("id");
+            let published = PublishResponse {
+                node_id: node_id.clone(),
+                generation_number: row.get("current_generation_number"),
+                generation_id: encode_bytes(row.get::<_, Vec<u8>>("current_generation_id")),
+                record_version: row.get("record_version"),
+                record_hash: encode_bytes(row.get::<_, Vec<u8>>("record_hash")),
+                share_sync_required: row.get("share_sync_required"),
+            };
+            (node_id, published)
+        })
+        .collect())
 }
 
 async fn load_shared_plan(
@@ -7765,10 +7802,9 @@ async fn validate_encrypted_parent(
     user: &SessionPrincipal,
     parent_id: Option<&str>,
 ) -> Result<Option<String>> {
-    let Some(parent_id) = parent_id.map(str::trim).filter(|value| !value.is_empty()) else {
+    let Some(parent_id) = requested_parent_id(parent_id)? else {
         return Ok(None);
     };
-    validate_node_id(parent_id)?;
     let exists = state
         .db
         .query_opt(
@@ -7785,6 +7821,15 @@ async fn validate_encrypted_parent(
         return Err(error::ErrorBadRequest("encrypted parent folder is invalid"));
     }
     Ok(Some(parent_id.to_owned()))
+}
+
+/// The parent a request names, with blank meaning the vault root.
+fn requested_parent_id(parent_id: Option<&str>) -> Result<Option<&str>> {
+    let Some(parent_id) = parent_id.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    validate_node_id(parent_id)?;
+    Ok(Some(parent_id))
 }
 
 async fn require_configured_vault(state: &AppState, user: &SessionPrincipal) -> Result<()> {
