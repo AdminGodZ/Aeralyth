@@ -68,18 +68,33 @@ function requireExactStreamLength(
   expectedBytes: number,
   errorMessage: string,
 ): ReadableStream<Uint8Array> {
+  const reader = stream.getReader();
   let receivedBytes = 0;
-  return stream.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        receivedBytes += chunk.byteLength;
-        if (receivedBytes > expectedBytes) throw new Error(errorMessage);
-        controller.enqueue(chunk);
+  // Reads only on demand, unlike a pipe, so a stream opened ahead of the ZIP
+  // writer leaves its source backpressured instead of draining a chunk.
+  return new ReadableStream<Uint8Array>(
+    {
+      async pull(controller) {
+        try {
+          const result = await reader.read();
+          if (result.done) {
+            if (receivedBytes !== expectedBytes) throw new Error(errorMessage);
+            controller.close();
+            return;
+          }
+          receivedBytes += result.value.byteLength;
+          if (receivedBytes > expectedBytes) throw new Error(errorMessage);
+          controller.enqueue(result.value);
+        } catch (error) {
+          await reader.cancel(error).catch(() => undefined);
+          throw error;
+        }
       },
-      flush() {
-        if (receivedBytes !== expectedBytes) throw new Error(errorMessage);
+      cancel(reason) {
+        return reader.cancel(reason);
       },
-    }),
+    },
+    { highWaterMark: 0 },
   );
 }
 

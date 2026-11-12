@@ -1,3 +1,4 @@
+import { prefetchArchiveEntries } from "@/features/archive/archive-entry-prefetch";
 import {
   archivePercentage,
   readEncryptedArchiveFileStream,
@@ -11,10 +12,7 @@ import {
   triggerBlobDownload,
 } from "@/features/archive/browser-archive";
 import { archiveCompressionLevel } from "@/features/archive/compression-policy";
-import {
-  type OpenedEncryptedEntry,
-  prefetchEncryptedEntries,
-} from "@/features/archive/encrypted-entry-prefetch";
+import type { OpenedEncryptedEntry } from "@/features/archive/encrypted-entry-prefetch";
 import { createAnimationFrameProgressCoalescer } from "@/features/uploads/progress-coalescer";
 import type {
   VaultDownloadPlan,
@@ -128,6 +126,25 @@ export async function downloadFolderArchive({
   const destination = await createStreamingZipDestination({
     totalSourceBytes: archiveManifest.totalBytes,
   });
+  // Parent keys can be required to open children, so entries are opened in
+  // the bounded parent-first order returned by the server, and file content
+  // is requested a few entries ahead of the one currently being archived.
+  const archiveEntries = prefetchArchiveEntries(archiveManifest.entries, {
+    getPlan: getVaultDownloadPlan,
+    openNode: (nodeId, plan, openSignal) =>
+      vault.openNode(nodeId, plan, openSignal),
+    openSource: (entry, encrypted, sourceSignal) =>
+      encrypted
+        ? readEncryptedArchiveFileStream({
+            entry,
+            ...encrypted,
+            client: vault.client,
+            signal: sourceSignal,
+            subject: "folder",
+          })
+        : readLegacyArchiveFileStream(entry, entry.name, sourceSignal),
+    signal,
+  });
 
   try {
     await destination.zipWriter.add(`${archiveRoot}/`, undefined, {
@@ -135,22 +152,10 @@ export async function downloadFolderArchive({
       lastModDate: new Date(parseArchiveTimestamp(folder.updatedAt)),
       signal,
     });
-    // Parent keys can be required to open children, so entries are opened in
-    // the bounded parent-first order returned by the server, a few ahead of
-    // the entry currently being archived.
-    const openEncryptedEntry = prefetchEncryptedEntries(
-      archiveManifest.entries,
-      {
-        getPlan: getVaultDownloadPlan,
-        openNode: (nodeId, plan, openSignal) =>
-          vault.openNode(nodeId, plan, openSignal),
-        signal,
-      },
-    );
     for (const [index, entry] of archiveManifest.entries.entries()) {
       throwIfAborted(signal, ABORT_MESSAGE);
       let encrypted: OpenedEncryptedEntry | undefined;
-      const opening = openEncryptedEntry(index);
+      const { opening, source } = archiveEntries.take(index);
       if (opening) {
         // react-doctor-disable-next-line react-doctor/async-await-in-loop
         const { manifest, plan } = await opening;
@@ -194,19 +199,12 @@ export async function downloadFolderArchive({
           archiveManifest.totalBytes,
         ),
       });
-      const source = encrypted
-        ? readEncryptedArchiveFileStream({
-            entry,
-            ...encrypted,
-            client: vault.client,
-            signal,
-            subject: "folder",
-          })
-        : await readLegacyArchiveFileStream(entry, resolvedName, signal);
+      // react-doctor-disable-next-line react-doctor/async-await-in-loop
+      const content = await source;
       // A ZIP writer has one ordered output stream, so entries are consumed
       // sequentially while each source remains backpressured.
       // react-doctor-disable-next-line react-doctor/async-await-in-loop
-      await destination.zipWriter.add(path, source, {
+      await destination.zipWriter.add(path, content ?? undefined, {
         level: archiveCompressionLevel({
           path,
           mimeType: encrypted?.manifest.mimeType ?? entry.mimeType,
@@ -234,6 +232,7 @@ export async function downloadFolderArchive({
       });
     }
 
+    await archiveEntries.close();
     throwIfAborted(signal, ABORT_MESSAGE);
     const archive = await destination.close();
     throwIfAborted(signal, ABORT_MESSAGE);
@@ -248,6 +247,7 @@ export async function downloadFolderArchive({
     );
     reportProgress({ label: "ZIP download ready", percentage: 100 }, true);
   } catch (error) {
+    await archiveEntries.close(error);
     await destination.discard(error);
     throw error;
   } finally {

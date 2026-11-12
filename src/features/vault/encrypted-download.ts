@@ -240,9 +240,15 @@ export function readEncryptedFileStream({
 }): ReadableStream<Uint8Array> {
   const operation = new AbortController();
   let demand = Promise.withResolvers<void>();
+  // A stream opened ahead of its reader holds only its first chunk: the
+  // request, decryption session and first chunk are ready when the reader
+  // arrives, and fetching resumes once that chunk is taken.
+  const firstChunkTaken = Promise.withResolvers<void>();
+  let enqueued = false;
   const abortFromParent = () => {
     operation.abort(signal?.reason);
     demand.resolve();
+    firstChunkTaken.resolve();
   };
   if (signal?.aborted) abortFromParent();
   else signal?.addEventListener("abort", abortFromParent, { once: true });
@@ -259,11 +265,13 @@ export function readEncryptedFileStream({
           client,
           signal: operation.signal,
           onProgress,
+          firstChunkTaken: firstChunkTaken.promise,
           async write(plaintext) {
             if (operation.signal.aborted) {
               throw abortReason(operation.signal);
             }
             demand = Promise.withResolvers<void>();
+            enqueued = true;
             controller.enqueue(new Uint8Array(plaintext));
             await demand.promise;
             if (operation.signal.aborted) {
@@ -282,12 +290,15 @@ export function readEncryptedFileStream({
           });
       },
       pull() {
+        // With one queued chunk, a pull after an enqueue means it was read.
+        if (enqueued) firstChunkTaken.resolve();
         demand.resolve();
       },
       async cancel(reason) {
         canceled = true;
         operation.abort(reason);
         demand.resolve();
+        firstChunkTaken.resolve();
         await producer?.catch(() => undefined);
       },
     },
@@ -304,6 +315,7 @@ async function decryptEncryptedFile({
   write,
   selectedChunks = plan.chunkCount,
   metrics: providedMetrics,
+  firstChunkTaken,
 }: {
   plan: VaultDownloadPlan;
   manifest: VaultManifest;
@@ -313,6 +325,8 @@ async function decryptEncryptedFile({
   write(plaintext: ArrayBuffer): void | Promise<void>;
   selectedChunks?: number;
   metrics?: ReturnType<typeof createTransferMetrics>;
+  /** When given, nothing past the first chunk is fetched until it settles. */
+  firstChunkTaken?: Promise<void>;
 }): Promise<void> {
   if (!plan.downloadUrl || manifest.entryType !== "file") {
     throw new Error("This vault node does not contain downloadable file data.");
@@ -370,7 +384,9 @@ async function decryptEncryptedFile({
       const ciphertextBytes = ciphertext.length;
       // Exactly one read runs ahead. The worker remains strictly sequential;
       // it may decrypt the next chunk while the preceding sink write settles.
-      if (index + 1 < selectedChunks) lookahead = read(index + 1);
+      if (index + 1 < selectedChunks && (index > 0 || !firstChunkTaken)) {
+        lookahead = read(index + 1);
+      }
       const decrypted = await metrics.measure("decrypt", () =>
         client.decryptChunk(sessionId as string, index, ciphertext.buffer),
       );
@@ -391,6 +407,11 @@ async function decryptEncryptedFile({
         onProgress?.(Math.min(99, (received / endExclusive) * 100));
       });
       void pendingWrite.catch(() => undefined);
+      if (index === 0 && firstChunkTaken && selectedChunks > 1) {
+        await firstChunkTaken;
+        signal?.throwIfAborted();
+        lookahead = read(1);
+      }
     }
     await pendingWrite;
     await metrics.measure("network", () => network.finish());

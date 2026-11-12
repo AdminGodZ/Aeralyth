@@ -422,7 +422,7 @@ describe("encrypted repository ZIP", () => {
     expect(fetchMock).toHaveBeenNthCalledWith(
       2,
       "/api/files/file/download?version=2026-08-17T12%3A34%3A56.123456Z",
-      { signal: undefined, cache: "no-store" },
+      { signal: expect.any(AbortSignal), cache: "no-store" },
     );
     expect(mocks.triggerBlobDownload).toHaveBeenCalledOnce();
   });
