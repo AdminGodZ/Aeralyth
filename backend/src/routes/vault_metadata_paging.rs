@@ -641,7 +641,8 @@ mod tests {
         assert!(
             select_page(
                 &[identity("huge", None, MAX_METADATA_PLAN_RESPONSE_BYTES)],
-                0
+                0,
+                MAX_METADATA_PLAN_RESPONSE_BYTES,
             )
             .is_err()
         );
