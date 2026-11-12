@@ -757,6 +757,73 @@ export function getVaultDownloadPlan(
   );
 }
 
+/** Nodes per batched download-plan request, as the server accepts. */
+export const MAX_VAULT_DOWNLOAD_PLAN_BATCH = 100;
+
+type VaultDownloadPlanResult = {
+  nodeId: string;
+  status: number;
+  plan?: VaultDownloadPlan;
+  error?: string;
+};
+
+/**
+ * Download plans for several nodes in one request, in the order requested.
+ * Each node gets its plan or the error the single route would have answered,
+ * so one inaccessible node fails only its own entry. A plan too large for the
+ * batch response is fetched on its own.
+ */
+export async function getVaultDownloadPlans(
+  csrfToken: string,
+  nodeIds: readonly string[],
+  signal?: AbortSignal,
+): Promise<Array<VaultDownloadPlan | VaultApiError>> {
+  if (nodeIds.length === 0) return [];
+  if (nodeIds.length > MAX_VAULT_DOWNLOAD_PLAN_BATCH) {
+    throw new Error("Too many download plans were requested at once.");
+  }
+  // Like single plans, batches take no client admission lane.
+  const { results } = await runVaultRecursiveOperation(
+    () =>
+      vaultMutation<{ results: VaultDownloadPlanResult[] }>(
+        "/api/vault/nodes/download-plans",
+        csrfToken,
+        { nodeIds },
+        signal,
+      ),
+    signal,
+    null,
+  );
+  if (
+    !Array.isArray(results) ||
+    results.length !== nodeIds.length ||
+    results.some(
+      (result, index) =>
+        result.nodeId !== nodeIds[index] ||
+        (result.status === 200 && result.plan?.nodeId !== nodeIds[index]),
+    )
+  ) {
+    throw new Error("The download plan batch does not match the request.");
+  }
+  return Promise.all(
+    results.map(async (result) => {
+      if (result.status === 200 && result.plan) return result.plan;
+      if (result.status === 413) {
+        try {
+          return await getVaultDownloadPlan(result.nodeId, signal);
+        } catch (error) {
+          if (signal?.aborted || !(error instanceof VaultApiError)) throw error;
+          return error;
+        }
+      }
+      return new VaultApiError(
+        result.error || `Vault request failed with status ${result.status}.`,
+        result.status,
+      );
+    }),
+  );
+}
+
 export function getVaultMetadataPlans(
   csrfToken: string,
   nodeIds: readonly string[],

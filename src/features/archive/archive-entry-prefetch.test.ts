@@ -2,6 +2,10 @@ import { describe, expect, it, vi } from "vitest";
 
 import { prefetchArchiveEntries } from "@/features/archive/archive-entry-prefetch";
 import {
+  ARCHIVE_PLAN_BATCH_SIZE,
+  ARCHIVE_PLAN_REFILL,
+} from "@/features/archive/archive-plan-batches";
+import {
   VAULT_CRYPTO_CHUNK_BYTES,
   type VaultDownloadPlan,
   type VaultManifest,
@@ -94,7 +98,7 @@ async function readAll(stream: ReadableStream<Uint8Array>) {
 }
 
 const noPlans = {
-  getPlan: async (): Promise<VaultDownloadPlan> => {
+  getPlans: async (): Promise<VaultDownloadPlan[]> => {
     throw new Error("unexpected plan request");
   },
   openNode: async (): Promise<VaultManifest> => {
@@ -313,10 +317,10 @@ describe("prefetchArchiveEntries", () => {
     }
   });
 
-  it("requests plans only for entries inside the lookahead window", async () => {
-    const entries = files(Array(10).fill(10), "encrypted");
-    const getPlan = vi.fn(
-      async (nodeId: string) => ({ nodeId }) as unknown as VaultDownloadPlan,
+  it("requests plans in batches just ahead of the lookahead window", async () => {
+    const entries = files(Array(150).fill(10), "encrypted");
+    const getPlans = vi.fn(async (nodeIds: readonly string[]) =>
+      nodeIds.map((nodeId) => ({ nodeId }) as unknown as VaultDownloadPlan),
     );
     const openNode = vi.fn(
       async (nodeId: string) =>
@@ -324,24 +328,58 @@ describe("prefetchArchiveEntries", () => {
     );
     const { openSource } = sources(entries);
     const prefetch = prefetchArchiveEntries(entries, {
-      getPlan,
+      getPlans,
       openNode,
       openSource,
       lookahead: 3,
     });
+    const planned = () => getPlans.mock.calls.flatMap(([nodeIds]) => nodeIds);
 
     for (const index of entries.keys()) {
       const { opening, source } = prefetch.take(index);
-      expect(getPlan.mock.calls.length).toBeLessThanOrEqual(index + 4);
+      // Never the whole archive: at most one batch beyond the window.
+      expect(planned().length).toBeLessThanOrEqual(
+        index + 4 + ARCHIVE_PLAN_REFILL + ARCHIVE_PLAN_BATCH_SIZE,
+      );
       await expect(opening).resolves.toMatchObject({
         plan: { nodeId: entries[index].id },
       });
       await readAll((await source) as ReadableStream);
     }
-    expect(openSource).toHaveBeenCalledTimes(10);
+    expect(getPlans).toHaveBeenCalledTimes(3);
+    for (const [nodeIds] of getPlans.mock.calls) {
+      expect(nodeIds.length).toBeLessThanOrEqual(ARCHIVE_PLAN_BATCH_SIZE);
+    }
+    expect(planned()).toEqual(entries.map((entry) => entry.id));
     expect(openNode.mock.calls.map(([nodeId]) => nodeId)).toEqual(
       entries.map((entry) => entry.id),
     );
+  });
+
+  it("surfaces a refused plan only when its entry is taken", async () => {
+    const entries = files([10, 10, 10], "encrypted");
+    const refused = new Error("not found");
+    const prefetch = prefetchArchiveEntries(entries, {
+      getPlans: async (nodeIds) =>
+        nodeIds.map((nodeId) =>
+          nodeId === entries[1].id
+            ? refused
+            : ({ nodeId } as unknown as VaultDownloadPlan),
+        ),
+      openNode: async (nodeId) =>
+        ({ name: nodeId, plaintextBytes: 10 }) as unknown as VaultManifest,
+      openSource: sources(entries).openSource,
+    });
+
+    const first = prefetch.take(0);
+    await expect(first.opening).resolves.toMatchObject({
+      plan: { nodeId: entries[0].id },
+    });
+    await readAll((await first.source) as ReadableStream);
+    const second = prefetch.take(1);
+    await expect(second.opening).rejects.toBe(refused);
+    await expect(second.source).rejects.toBe(refused);
+    await prefetch.close();
   });
 
   it("rejects taking entries out of order", () => {

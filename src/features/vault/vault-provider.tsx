@@ -38,6 +38,7 @@ import {
 import {
   getUnlockMaterial,
   getVaultDownloadPlan,
+  getVaultDownloadPlans,
   rewrapVault,
   setupVault,
 } from "@/features/vault/vault-api";
@@ -92,6 +93,10 @@ type VaultContextValue = {
     plan?: VaultDownloadPlan,
     signal?: AbortSignal,
   ): Promise<VaultManifest>;
+  getDownloadPlans(
+    nodeIds: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<Array<VaultDownloadPlan | Error>>;
   resolveMetadata(
     references: VaultMetadataReference[],
     options?: VaultMetadataResolutionOptions,
@@ -446,6 +451,12 @@ function useVaultProviderController({
     setDialogOpen(true);
   }, [configured, enabled, state]);
 
+  const getDownloadPlans = useCallback(
+    (nodeIds: readonly string[], signal?: AbortSignal) =>
+      getVaultDownloadPlans(csrfToken, nodeIds, signal),
+    [csrfToken],
+  );
+
   const openNode = useCallback(
     (
       nodeId: string,
@@ -680,6 +691,7 @@ function useVaultProviderController({
       lock,
       invalidateMetadata,
       openNode,
+      getDownloadPlans,
       resolveMetadata,
       peekMetadata,
       prefetchFolderMetadata,
@@ -687,6 +699,7 @@ function useVaultProviderController({
     }),
     [
       enabled,
+      getDownloadPlans,
       lock,
       invalidateMetadata,
       openNode,

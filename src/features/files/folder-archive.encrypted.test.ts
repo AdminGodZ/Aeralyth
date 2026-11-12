@@ -35,6 +35,14 @@ vi.mock("@/features/vault/vault-api", () => ({
   getVaultDownloadPlan: mocks.getVaultDownloadPlan,
 }));
 
+// The vault's batched lookup, answered per node by the single-plan mock.
+const getDownloadPlans = (nodeIds: readonly string[], signal?: AbortSignal) =>
+  Promise.all(
+    nodeIds.map((nodeId) =>
+      mocks.getVaultDownloadPlan(nodeId, signal).catch((error: Error) => error),
+    ),
+  );
+
 const rootGeneration = Uint8Array.from({ length: 16 }, (_, index) => index);
 const fileGeneration = Uint8Array.from(
   { length: 16 },
@@ -156,6 +164,7 @@ describe("encrypted folder ZIP", () => {
           client: {} as VaultCryptoClient,
           requestUnlock: vi.fn(),
           openNode,
+          getDownloadPlans,
           isUnlocked: () => true,
         },
       }),
@@ -212,6 +221,7 @@ describe("encrypted folder ZIP", () => {
         requestUnlock: vi.fn(),
         openNode: async (nodeId) =>
           nodeId === "root" ? rootManifest : { ...fileManifest, name: nodeId },
+        getDownloadPlans,
         isUnlocked: () => true,
       },
     });
@@ -252,6 +262,7 @@ describe("encrypted folder ZIP", () => {
           requestUnlock: vi.fn(),
           openNode: async (nodeId) =>
             nodeId === "root" ? rootManifest : fileManifest,
+          getDownloadPlans,
           isUnlocked: () => true,
         },
       }),

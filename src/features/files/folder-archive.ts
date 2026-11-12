@@ -54,6 +54,10 @@ type VaultArchiveAccess = {
     plan?: VaultDownloadPlan,
     signal?: AbortSignal,
   ): Promise<VaultManifest>;
+  getDownloadPlans(
+    nodeIds: readonly string[],
+    signal?: AbortSignal,
+  ): Promise<Array<VaultDownloadPlan | Error>>;
   isUnlocked(): boolean;
 };
 
@@ -130,7 +134,8 @@ export async function downloadFolderArchive({
   // the bounded parent-first order returned by the server, and file content
   // is requested a few entries ahead of the one currently being archived.
   const archiveEntries = prefetchArchiveEntries(archiveManifest.entries, {
-    getPlan: getVaultDownloadPlan,
+    getPlans: (nodeIds, planSignal) =>
+      vault.getDownloadPlans(nodeIds, planSignal),
     openNode: (nodeId, plan, openSignal) =>
       vault.openNode(nodeId, plan, openSignal),
     openSource: (entry, encrypted, sourceSignal) =>
