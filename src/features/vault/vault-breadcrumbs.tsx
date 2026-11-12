@@ -6,7 +6,10 @@ import { useEffect, useMemo, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { VaultMetadataReference } from "@/features/vault/protocol";
+import type {
+  VaultMetadataPlan,
+  VaultMetadataReference,
+} from "@/features/vault/protocol";
 import {
   getVaultNamePresentation,
   type VaultNameResolution,
@@ -22,11 +25,14 @@ type BreadcrumbResolutionState = {
 
 export function VaultBreadcrumbs({
   breadcrumbs,
+  metadataPlans,
   sort,
   direction,
   basePath = "/files",
 }: {
   breadcrumbs: FolderBreadcrumb[];
+  /** Metadata plans delivered in the same response as `breadcrumbs`. */
+  metadataPlans?: VaultMetadataPlan[];
   sort?: FileSort;
   direction?: FileSortDirection;
   basePath?: "/files" | "/shared";
@@ -57,6 +63,12 @@ export function VaultBreadcrumbs({
         ]),
     );
   }, [basePath, breadcrumbs, vault.peekMetadata]);
+  // The listing's plans also cover its entries; the path needs only its own.
+  const breadcrumbPlans = useMemo(() => {
+    if (!metadataPlans) return undefined;
+    const ids = new Set(breadcrumbs.map((breadcrumb) => breadcrumb.id));
+    return metadataPlans.filter((plan) => ids.has(plan.nodeId));
+  }, [breadcrumbs, metadataPlans]);
   const names =
     resolutionState.source === breadcrumbs &&
     resolutionState.basePath === basePath
@@ -107,6 +119,7 @@ export function VaultBreadcrumbs({
       .resolveMetadata(references, {
         signal: controller.signal,
         requireServerValidation: basePath === "/shared",
+        plans: breadcrumbPlans,
         onCached: publish,
         onPriority: publish,
       })
@@ -128,7 +141,13 @@ export function VaultBreadcrumbs({
       canceled = true;
       controller.abort();
     };
-  }, [basePath, breadcrumbs, vault.resolveMetadata, vault.state]);
+  }, [
+    basePath,
+    breadcrumbPlans,
+    breadcrumbs,
+    vault.resolveMetadata,
+    vault.state,
+  ]);
 
   const query = sort
     ? { sort, ...(direction ? { direction } : {}) }

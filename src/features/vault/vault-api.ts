@@ -839,16 +839,20 @@ export async function getVaultFolderMetadataReferences(
   folderId: string,
   view: "files" | "shared",
   signal?: AbortSignal,
-): Promise<VaultMetadataReference[]> {
+): Promise<{
+  references: VaultMetadataReference[];
+  plans?: VaultMetadataPlan[];
+}> {
   const response = await runVaultRecursiveOperation(
     () =>
-      vaultRequest<{ entries?: unknown }>(
+      vaultRequest<{ entries?: unknown; metadataPlans?: unknown }>(
         `/api/files?${new URLSearchParams({
           view,
           folder: folderId,
           sort: "name",
           direction: "asc",
           limit: "100",
+          includePlans: "true",
         })}`,
         { signal },
       ),
@@ -857,7 +861,12 @@ export async function getVaultFolderMetadataReferences(
   if (!Array.isArray(response.entries)) {
     throw new Error("The folder metadata prefetch response is invalid.");
   }
-  return response.entries.flatMap((value) => {
+  // The resolver binds each plan to a listed revision and the worker verifies
+  // it, so a malformed or missing page only costs a metadata-plans request.
+  const plans = Array.isArray(response.metadataPlans)
+    ? (response.metadataPlans as VaultMetadataPlan[])
+    : undefined;
+  const references = response.entries.flatMap((value) => {
     if (!value || typeof value !== "object") return [];
     const entry = value as Record<string, unknown>;
     if (
@@ -880,6 +889,7 @@ export async function getVaultFolderMetadataReferences(
       },
     ];
   });
+  return { references, plans };
 }
 
 export function getVaultIdentity(

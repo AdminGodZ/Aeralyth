@@ -188,7 +188,7 @@ fn snapshot(identities: &[Identity], user: &str, purpose: bool) -> String {
     encode_bytes(hash.finalize())
 }
 
-fn select_page(identities: &[Identity], offset: usize) -> Result<usize> {
+fn select_page(identities: &[Identity], offset: usize, page_bytes: usize) -> Result<usize> {
     if offset > identities.len() {
         return Err(error::ErrorBadRequest("metadata continuation is invalid"));
     }
@@ -201,7 +201,7 @@ fn select_page(identities: &[Identity], offset: usize) -> Result<usize> {
             .raw_bytes
             .saturating_mul(2)
             .saturating_add(16 * 1024);
-        if budget.saturating_add(estimate) > MAX_METADATA_PLAN_RESPONSE_BYTES {
+        if budget.saturating_add(estimate) > page_bytes {
             break;
         }
         budget += estimate;
@@ -215,10 +215,13 @@ fn select_page(identities: &[Identity], offset: usize) -> Result<usize> {
     Ok(end)
 }
 
+/// Loads one bounded page. `page_bytes` caps the estimated response: the
+/// metadata-plans route allows a full response, listings embed a smaller page.
 pub(super) async fn load_page(
     state: &AppState,
     user: &SessionPrincipal,
     body: &MetadataPlansRequest,
+    page_bytes: usize,
 ) -> Result<Page> {
     let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
@@ -227,7 +230,7 @@ pub(super) async fn load_page(
         .start()
         .await
         .map_err(error::ErrorInternalServerError)?;
-    let page = load_transaction_page(&transaction, &user.id, body).await?;
+    let page = load_transaction_page(&transaction, &user.id, body, page_bytes).await?;
     transaction
         .commit()
         .await
@@ -240,6 +243,7 @@ pub(super) async fn load_transaction_page(
     transaction: &deadpool_postgres::Transaction<'_>,
     user_id: &str,
     body: &MetadataPlansRequest,
+    page_bytes: usize,
 ) -> Result<Page> {
     let share_preparation = body.purpose == MetadataPlanPurpose::SharePreparation;
     let offset = body.continuation.unwrap_or(0);
@@ -388,7 +392,7 @@ pub(super) async fn load_transaction_page(
     {
         return Err(conflict());
     }
-    let end = select_page(&ordered, offset)?;
+    let end = select_page(&ordered, offset, page_bytes)?;
     let selected = &ordered[offset..end];
     let selected_owned: Vec<_> = selected
         .iter()
@@ -499,12 +503,12 @@ impl Write for CappedWriter {
     }
 }
 
-pub(super) fn encode_page(
+/// Restores the selected parent-first identity order and rejects a page whose
+/// payloads do not match its identities one to one.
+pub(super) fn order_plans(
     mut plans: Vec<MetadataPlanResponse>,
-    order: Vec<String>,
-    continuation: Option<usize>,
-    snapshot: String,
-) -> std::result::Result<Bytes, (u16, String)> {
+    order: &[String],
+) -> std::result::Result<Vec<MetadataPlanResponse>, (u16, String)> {
     let positions: HashMap<_, _> = order
         .iter()
         .enumerate()
@@ -514,7 +518,7 @@ pub(super) fn encode_page(
     if plans.len() != order.len()
         || plans
             .iter()
-            .zip(&order)
+            .zip(order)
             .any(|(plan, id)| &plan.node_id != id)
     {
         return Err((
@@ -522,6 +526,16 @@ pub(super) fn encode_page(
             "metadata page is incomplete; restart metadata resolution".into(),
         ));
     }
+    Ok(plans)
+}
+
+pub(super) fn encode_page(
+    plans: Vec<MetadataPlanResponse>,
+    order: Vec<String>,
+    continuation: Option<usize>,
+    snapshot: String,
+) -> std::result::Result<Bytes, (u16, String)> {
+    let plans = order_plans(plans, &order)?;
     let mut writer = CappedWriter {
         bytes: Vec::new(),
         limit: MAX_METADATA_PLAN_RESPONSE_BYTES,
@@ -611,10 +625,19 @@ mod tests {
         let nodes: Vec<_> = (0..20)
             .map(|n| identity(&n.to_string(), None, 1024 * 1024))
             .collect();
-        assert_eq!(select_page(&nodes, 0).unwrap(), 3);
-        assert_eq!(select_page(&nodes, 3).unwrap(), 6);
-        assert_eq!(select_page(&nodes, 18).unwrap(), 20);
-        assert!(select_page(&nodes, 21).is_err());
+        assert_eq!(
+            select_page(&nodes, 0, MAX_METADATA_PLAN_RESPONSE_BYTES).unwrap(),
+            3
+        );
+        assert_eq!(
+            select_page(&nodes, 3, MAX_METADATA_PLAN_RESPONSE_BYTES).unwrap(),
+            6
+        );
+        assert_eq!(
+            select_page(&nodes, 18, MAX_METADATA_PLAN_RESPONSE_BYTES).unwrap(),
+            20
+        );
+        assert!(select_page(&nodes, 21, MAX_METADATA_PLAN_RESPONSE_BYTES).is_err());
         assert!(
             select_page(
                 &[identity("huge", None, MAX_METADATA_PLAN_RESPONSE_BYTES)],
@@ -731,7 +754,10 @@ mod tests {
             let identities: Vec<_> = (0..count)
                 .map(|index| identity(&index.to_string(), None, bytes + OTHER_BINARY_BYTES))
                 .collect();
-            assert_eq!(select_page(&identities, 0).unwrap(), count);
+            assert_eq!(
+                select_page(&identities, 0, MAX_METADATA_PLAN_RESPONSE_BYTES).unwrap(),
+                count
+            );
             let mut summaries = Vec::new();
             let mut reference = None;
             let mut timings = [0_u128; 2];
@@ -840,9 +866,14 @@ mod tests {
                 SELECT id,decode(repeat('ff',1048576),'hex') FROM files;
         "#).await.unwrap();
         let mut body = request((1..=20).map(|n| format!("child_{n}")).collect());
-        let first = load_transaction_page(&transaction, "owner", &body)
-            .await
-            .unwrap();
+        let first = load_transaction_page(
+            &transaction,
+            "owner",
+            &body,
+            MAX_METADATA_PLAN_RESPONSE_BYTES,
+        )
+        .await
+        .unwrap();
         assert_eq!(first.order[0], "root");
         assert_eq!(first.owned_rows.len(), 3);
         assert_eq!(first.continuation, Some(3));
@@ -856,18 +887,28 @@ mod tests {
         );
         body.continuation = first.continuation;
         body.snapshot = Some(first.snapshot.clone());
-        let second = load_transaction_page(&transaction, "owner", &body)
-            .await
-            .unwrap();
+        let second = load_transaction_page(
+            &transaction,
+            "owner",
+            &body,
+            MAX_METADATA_PLAN_RESPONSE_BYTES,
+        )
+        .await
+        .unwrap();
         assert_eq!(second.owned_rows.len(), 3);
         assert!(second.order.iter().all(|id| !first.order.contains(id)));
         let mut seen = first.order;
         seen.extend(second.order);
         body.continuation = second.continuation;
         while body.continuation.is_some() {
-            let page = load_transaction_page(&transaction, "owner", &body)
-                .await
-                .unwrap();
+            let page = load_transaction_page(
+                &transaction,
+                "owner",
+                &body,
+                MAX_METADATA_PLAN_RESPONSE_BYTES,
+            )
+            .await
+            .unwrap();
             seen.extend(page.order);
             body.continuation = page.continuation;
         }
@@ -876,13 +917,99 @@ mod tests {
         body.continuation = Some(3);
         transaction.execute("UPDATE vault_node_heads SET record_hash = decode(repeat('ff',32),'hex') WHERE node_id='child_20'",&[]).await.unwrap();
         assert_eq!(
-            load_transaction_page(&transaction, "owner", &body)
-                .await
-                .err()
-                .unwrap()
-                .as_response_error()
-                .status_code(),
+            load_transaction_page(
+                &transaction,
+                "owner",
+                &body,
+                MAX_METADATA_PLAN_RESPONSE_BYTES
+            )
+            .await
+            .err()
+            .unwrap()
+            .as_response_error()
+            .status_code(),
             actix_web::http::StatusCode::CONFLICT
+        );
+        transaction.rollback().await.unwrap();
+    }
+
+    #[test]
+    fn listing_requests_are_deduplicated_and_capped_like_route_requests() {
+        assert!(listing_metadata_plan_request(Vec::new()).is_none());
+        let request =
+            listing_metadata_plan_request(["a", "b", "a", "c"].into_iter().map(str::to_owned))
+                .unwrap();
+        assert_eq!(request.node_ids, vec!["a", "b", "c"]);
+        assert!(request.continuation.is_none() && request.snapshot.is_none());
+        assert!(request.purpose == MetadataPlanPurpose::Listing);
+        let capped = listing_metadata_plan_request((0..150).map(|n| format!("node_{n}"))).unwrap();
+        assert_eq!(capped.node_ids.len(), MAX_METADATA_PLAN_REQUEST_NODES);
+        assert_eq!(capped.node_ids[0], "node_0");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires isolated PostgreSQL DATABASE_URL"]
+    async fn listing_pages_select_what_the_route_selects_within_a_smaller_budget() {
+        let mut client = crate::db::test_client(&std::env::var("DATABASE_URL").unwrap()).await;
+        let transaction = client.transaction().await.unwrap();
+        fixture(&transaction).await;
+        transaction.batch_execute(r#"
+            INSERT INTO files(id) VALUES ('root');
+            INSERT INTO files(id,parent_id,entry_type) SELECT 'child_'||n,'root','file' FROM generate_series(1,8) n;
+            INSERT INTO files(id,parent_id,state) VALUES ('trashed','root','trashed');
+            INSERT INTO files(id,owner_id) VALUES ('foreign','someone_else');
+            INSERT INTO vault_node_heads(node_id) SELECT id FROM files;
+            INSERT INTO vault_node_records(node_id,owner_id,encrypted_manifest)
+                SELECT id,owner_id,decode(repeat('ff',262144),'hex') FROM files;
+        "#).await.unwrap();
+        let ids: Vec<String> = (1..=8)
+            .map(|n| format!("child_{n}"))
+            .chain(["trashed".to_owned(), "root".to_owned()])
+            .collect();
+        let listing = listing_metadata_plan_request(ids.clone()).unwrap();
+        let route = request(ids);
+        let full = load_transaction_page(
+            &transaction,
+            "owner",
+            &route,
+            MAX_METADATA_PLAN_RESPONSE_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(full.order.len(), 10);
+        assert_eq!(full.order[0], "root");
+        assert!(full.order.contains(&"trashed".to_owned()));
+        assert_eq!(full.continuation, None);
+        // Same identities and snapshot; the listing embeds a parent-first
+        // prefix and the browser fetches the remainder as before.
+        let embedded = load_transaction_page(
+            &transaction,
+            "owner",
+            &listing,
+            MAX_LISTING_METADATA_PLAN_BYTES,
+        )
+        .await
+        .unwrap();
+        assert_eq!(embedded.snapshot, full.snapshot);
+        assert_eq!(embedded.order[..], full.order[..embedded.order.len()]);
+        assert_eq!(embedded.owned_rows.len(), embedded.order.len());
+        assert_eq!(embedded.continuation, Some(embedded.order.len()));
+        assert!(embedded.order.len() < full.order.len());
+        // A node the route would refuse withholds the listing's plans.
+        let foreign = listing_metadata_plan_request(vec!["child_1".into(), "foreign".into()]);
+        assert_eq!(
+            load_transaction_page(
+                &transaction,
+                "owner",
+                &foreign.unwrap(),
+                MAX_LISTING_METADATA_PLAN_BYTES,
+            )
+            .await
+            .err()
+            .unwrap()
+            .as_response_error()
+            .status_code(),
+            actix_web::http::StatusCode::NOT_FOUND
         );
         transaction.rollback().await.unwrap();
     }
@@ -909,33 +1036,48 @@ mod tests {
         ] {
             let mut body = request(ids);
             assert_eq!(
-                load_transaction_page(&transaction, "owner", &body)
-                    .await
-                    .err()
-                    .unwrap()
-                    .as_response_error()
-                    .status_code(),
-                actix_web::http::StatusCode::NOT_FOUND
-            );
-            body.snapshot = Some("previous".into());
-            assert_eq!(
-                load_transaction_page(&transaction, "owner", &body)
-                    .await
-                    .err()
-                    .unwrap()
-                    .as_response_error()
-                    .status_code(),
-                actix_web::http::StatusCode::CONFLICT
-            );
-        }
-        let body = request(vec!["orphan".into()]);
-        assert_eq!(
-            load_transaction_page(&transaction, "owner", &body)
+                load_transaction_page(
+                    &transaction,
+                    "owner",
+                    &body,
+                    MAX_METADATA_PLAN_RESPONSE_BYTES
+                )
                 .await
                 .err()
                 .unwrap()
                 .as_response_error()
                 .status_code(),
+                actix_web::http::StatusCode::NOT_FOUND
+            );
+            body.snapshot = Some("previous".into());
+            assert_eq!(
+                load_transaction_page(
+                    &transaction,
+                    "owner",
+                    &body,
+                    MAX_METADATA_PLAN_RESPONSE_BYTES
+                )
+                .await
+                .err()
+                .unwrap()
+                .as_response_error()
+                .status_code(),
+                actix_web::http::StatusCode::CONFLICT
+            );
+        }
+        let body = request(vec!["orphan".into()]);
+        assert_eq!(
+            load_transaction_page(
+                &transaction,
+                "owner",
+                &body,
+                MAX_METADATA_PLAN_RESPONSE_BYTES
+            )
+            .await
+            .err()
+            .unwrap()
+            .as_response_error()
+            .status_code(),
             actix_web::http::StatusCode::CONFLICT
         );
         transaction.rollback().await.unwrap();
@@ -961,10 +1103,15 @@ mod tests {
             .await
             .unwrap();
         let body = request((1..=6).map(|n| format!("chain_{n}_99")).collect());
-        let failure = load_transaction_page(&transaction, "owner", &body)
-            .await
-            .err()
-            .unwrap();
+        let failure = load_transaction_page(
+            &transaction,
+            "owner",
+            &body,
+            MAX_METADATA_PLAN_RESPONSE_BYTES,
+        )
+        .await
+        .err()
+        .unwrap();
         assert_eq!(
             failure.as_response_error().status_code(),
             actix_web::http::StatusCode::PAYLOAD_TOO_LARGE

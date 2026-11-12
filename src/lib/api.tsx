@@ -3,6 +3,7 @@ import {
   isStorageOverview,
   type StorageOverviewState,
 } from "@/features/dashboard/storage-overview";
+import type { VaultMetadataPlan } from "@/features/vault/protocol";
 
 type HeaderSource = {
   get(name: string): string | null;
@@ -237,6 +238,11 @@ export type FilesData = {
   storage: StorageStats;
   nextCursor: string | null;
   hasMore: boolean;
+  /**
+   * The first page of metadata plans for the listed encrypted entries and
+   * breadcrumbs, from the same response. Absent when the API omits them.
+   */
+  metadataPlans?: VaultMetadataPlan[];
 };
 
 export type FilesState =
@@ -733,6 +739,11 @@ export async function getFilesState(
         ...(sort ? { sort } : {}),
         ...(sort && direction ? { direction } : {}),
         ...(cursor ? { cursor } : {}),
+        // Folder views carry their first page of metadata plans so the
+        // browser can decrypt names without its own metadata-plans round trip.
+        ...(view === "files" || view === "shared"
+          ? { includePlans: "true" }
+          : {}),
       })}`,
       {
         headers: getForwardedHeaders(requestHeaders, cookie),
@@ -751,6 +762,9 @@ export async function getFilesState(
 
         if (!isFilesData(data)) {
           return { status: "unavailable" };
+        }
+        if (!isMetadataPlanList(data.metadataPlans)) {
+          delete data.metadataPlans;
         }
 
         return {
@@ -1012,6 +1026,22 @@ function isFileEntry(entry: unknown): entry is FileEntry {
     (fileEntry.e2eeState === "legacy" ||
       fileEntry.e2eeState === "staged" ||
       fileEntry.e2eeState === "encrypted")
+  );
+}
+
+// Shape check only: the browser's vault worker verifies every plan before
+// use, exactly as it does plans fetched from the metadata-plans route.
+function isMetadataPlanList(value: unknown): value is VaultMetadataPlan[] {
+  return (
+    Array.isArray(value) &&
+    value.every(
+      (plan) =>
+        plan !== null &&
+        typeof plan === "object" &&
+        typeof plan.nodeId === "string" &&
+        typeof plan.recordHash === "string" &&
+        Array.isArray(plan.wrappers),
+    )
   );
 }
 

@@ -1,6 +1,9 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { getVaultMetadataPlans } from "@/features/vault/vault-api";
+import {
+  getVaultFolderMetadataReferences,
+  getVaultMetadataPlans,
+} from "@/features/vault/vault-api";
 
 describe("vault metadata plan API", () => {
   afterEach(() => {
@@ -29,6 +32,48 @@ describe("vault metadata plan API", () => {
     });
     expect(new Headers(init?.headers).get("X-CSRF-Token")).toBe("csrf-token");
     expect(JSON.parse(String(init?.body))).toEqual({ nodeIds });
+  });
+
+  it("asks for a folder listing and its plans in one request", async () => {
+    const entry = {
+      id: "fil_listed_child",
+      parentId: "fil_listed_folder",
+      e2eeState: "encrypted",
+      vaultRecordVersion: 1,
+      vaultRecordHash: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      vaultGenerationId: "AAAAAAAAAAAAAAAAAAAAAA",
+    };
+    const plan = { nodeId: entry.id, recordHash: entry.vaultRecordHash };
+    const fetchMock = vi.fn<
+      (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>
+    >(async () =>
+      Response.json(
+        { entries: [entry], metadataPlans: [plan] },
+        { status: 200 },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const listing = await getVaultFolderMetadataReferences(
+      "fil_listed_folder",
+      "shared",
+    );
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const url = new URL(String(fetchMock.mock.calls[0][0]), "http://local");
+    expect(url.pathname).toBe("/api/files");
+    expect(url.searchParams.get("view")).toBe("shared");
+    expect(url.searchParams.get("includePlans")).toBe("true");
+    expect(listing.references).toEqual([
+      {
+        nodeId: entry.id,
+        parentId: entry.parentId,
+        recordVersion: 1,
+        recordHash: entry.vaultRecordHash,
+        generationId: entry.vaultGenerationId,
+      },
+    ]);
+    expect(listing.plans).toEqual([plan]);
   });
 
   it("sends an encoded-size continuation without changing the authorized targets", async () => {

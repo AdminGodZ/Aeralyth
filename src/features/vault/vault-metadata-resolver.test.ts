@@ -45,7 +45,9 @@ describe("VaultMetadataResolver", () => {
       client,
       openNode: vi.fn(async () => undefined),
     };
-    apiMocks.getVaultFolderMetadataReferences.mockResolvedValue([]);
+    apiMocks.getVaultFolderMetadataReferences.mockResolvedValue({
+      references: [],
+    });
     await resolver.prefetchFolder("fil_first_folder", "files", context);
     await resolver.prefetchFolder("fil_other_folder", "files", context);
     resolver.invalidateFolders(["fil_first_folder"]);
@@ -62,13 +64,13 @@ describe("VaultMetadataResolver", () => {
       client,
       openNode: vi.fn(async () => undefined),
     };
-    const pending = deferred<VaultMetadataReference[]>();
+    const pending = deferred<{ references: VaultMetadataReference[] }>();
     apiMocks.getVaultFolderMetadataReferences
       .mockReturnValueOnce(pending.promise)
-      .mockResolvedValue([]);
+      .mockResolvedValue({ references: [] });
     const old = resolver.prefetchFolder("fil_changed_folder", "files", context);
     resolver.invalidateFolders(["fil_changed_folder"]);
-    pending.resolve([]);
+    pending.resolve({ references: [] });
     await old;
     await resolver.prefetchFolder("fil_changed_folder", "files", context);
     expect(apiMocks.getVaultFolderMetadataReferences).toHaveBeenCalledTimes(2);
@@ -108,6 +110,215 @@ describe("VaultMetadataResolver", () => {
     expect(openMetadataPlans.mock.calls[0][1]).toMatchObject({
       concurrency: 4,
     });
+  });
+
+  it("resolves a folder from the plans delivered with its listing without a metadata-plans request", async () => {
+    const parent = reference("fil_delivered_parent");
+    const references = Array.from({ length: 100 }, (_, index) => ({
+      ...reference(`fil_delivered_${index}`),
+      parentId: parent.nodeId,
+    }));
+    const delivered = [planFor(parent), ...references.map(planFor)];
+    const { client, openMetadataPlans } = fakeClient();
+    const resolver = new VaultMetadataResolver();
+    const context = {
+      csrfToken: "csrf",
+      client,
+      openNode: vi.fn(async () => undefined),
+    };
+
+    const results = await resolver.resolve(references, context, {
+      plans: delivered,
+    });
+
+    expect(results.every((result) => result.status === "ready")).toBe(true);
+    expect(apiMocks.getVaultMetadataPlans).not.toHaveBeenCalled();
+    expect(openMetadataPlans).toHaveBeenCalledOnce();
+    // The parent travels in the same worker batch, ahead of its children.
+    expect(openMetadataPlans.mock.calls[0][0]).toEqual(delivered);
+  });
+
+  it("opens only the delivered plans for nodes the call did not already resolve", async () => {
+    const cached = reference("fil_delivered_cached");
+    const cold = reference("fil_delivered_cold");
+    const { client, openMetadataPlans } = fakeClient();
+    const resolver = new VaultMetadataResolver();
+    resolver.remember({
+      status: "ready",
+      nodeId: cached.nodeId,
+      recordHash: cached.recordHash,
+      manifest,
+    });
+
+    await resolver.resolve(
+      [cached, cold],
+      { csrfToken: "csrf", client, openNode: vi.fn(async () => undefined) },
+      { plans: [planFor(cached), planFor(cold)] },
+    );
+
+    expect(apiMocks.getVaultMetadataPlans).not.toHaveBeenCalled();
+    expect(openMetadataPlans.mock.calls[0][0]).toEqual([planFor(cold)]);
+  });
+
+  it("fetches a plan when the delivered one is for another revision", async () => {
+    const target = reference("fil_delivered_stale");
+    const stale = { ...planFor(target), recordVersion: 2 };
+    apiMocks.getVaultMetadataPlans.mockResolvedValue({
+      plans: [planFor(target)],
+    });
+    const { client, openMetadataPlans } = fakeClient();
+    const resolver = new VaultMetadataResolver();
+
+    const [result] = await resolver.resolve(
+      [target],
+      { csrfToken: "csrf", client, openNode: vi.fn(async () => undefined) },
+      { plans: [stale] },
+    );
+
+    expect(result.status).toBe("ready");
+    expect(apiMocks.getVaultMetadataPlans).toHaveBeenCalledOnce();
+    expect(openMetadataPlans.mock.calls[0][0]).toEqual([planFor(target)]);
+  });
+
+  it("fetches and reopens a delivered plan that fails verification", async () => {
+    const target = reference("fil_delivered_tampered");
+    const sibling = reference("fil_delivered_sibling");
+    const tampered = { ...planFor(target), bootstrapSignature: "tampered" };
+    apiMocks.getVaultMetadataPlans.mockResolvedValue({
+      plans: [planFor(target)],
+    });
+    const { client, openMetadataPlans } = fakeClient(
+      (plan) => plan.bootstrapSignature === "tampered",
+    );
+    const resolver = new VaultMetadataResolver();
+    const priority: VaultMetadataOpenResult[] = [];
+
+    const results = await resolver.resolve(
+      [target, sibling],
+      { csrfToken: "csrf", client, openNode: vi.fn(async () => undefined) },
+      {
+        plans: [tampered, planFor(sibling)],
+        onPriority: (visible) => priority.push(...visible),
+      },
+    );
+
+    expect(results.map((result) => result.status)).toEqual(["ready", "ready"]);
+    expect(apiMocks.getVaultMetadataPlans).toHaveBeenCalledOnce();
+    expect(apiMocks.getVaultMetadataPlans.mock.calls[0][1]).toEqual([
+      target.nodeId,
+    ]);
+    expect(openMetadataPlans).toHaveBeenCalledTimes(2);
+    expect(openMetadataPlans.mock.calls[1][0]).toEqual([planFor(target)]);
+    // The failed delivered plan is retried, so its failure is never shown.
+    expect(priority.every((result) => result.status === "ready")).toBe(true);
+  });
+
+  it("reports a delivered plan unavailable when its refetch also fails", async () => {
+    const target = reference("fil_delivered_unavailable");
+    apiMocks.getVaultMetadataPlans.mockRejectedValue(
+      new Error("requested metadata is not available"),
+    );
+    const { client } = fakeClient(() => true);
+    const resolver = new VaultMetadataResolver();
+
+    const [result] = await resolver.resolve(
+      [target],
+      { csrfToken: "csrf", client, openNode: vi.fn(async () => undefined) },
+      { plans: [planFor(target)] },
+    );
+
+    expect(result.status).toBe("unavailable");
+    expect(apiMocks.getVaultMetadataPlans).toHaveBeenCalledOnce();
+  });
+
+  it("lets delivered plans validate a shared listing once", async () => {
+    const target = reference("fil_shared_delivered");
+    const delivered = [planFor(target)];
+    apiMocks.getVaultMetadataPlans.mockResolvedValue({ plans: delivered });
+    const { client, getCachedMetadata, openMetadataPlans } = fakeClient();
+    const resolver = new VaultMetadataResolver();
+    const context = {
+      csrfToken: "csrf",
+      client,
+      openNode: vi.fn(async () => undefined),
+    };
+
+    const [first] = await resolver.resolve([target], context, {
+      requireServerValidation: true,
+      plans: delivered,
+    });
+    expect(first.status).toBe("ready");
+    expect(apiMocks.getVaultMetadataPlans).not.toHaveBeenCalled();
+    expect(getCachedMetadata).not.toHaveBeenCalled();
+
+    // A listing replayed from the back/forward cache carries the same plans
+    // and must ask the server again before it shows a shared name.
+    await resolver.resolve([target], context, {
+      requireServerValidation: true,
+      plans: delivered,
+    });
+    expect(apiMocks.getVaultMetadataPlans).toHaveBeenCalledOnce();
+    expect(openMetadataPlans).toHaveBeenCalledTimes(2);
+
+    // A fresh response delivers new plan objects and validates again.
+    await resolver.resolve([target], context, {
+      requireServerValidation: true,
+      plans: [planFor(target)],
+    });
+    expect(apiMocks.getVaultMetadataPlans).toHaveBeenCalledOnce();
+  });
+
+  it("shows no shared name when the listing carried no plan and the grant is revoked", async () => {
+    const target = reference("fil_shared_revoked");
+    apiMocks.getVaultMetadataPlans.mockRejectedValue(
+      new Error("requested metadata is not available"),
+    );
+    const { client, getCachedMetadata, openMetadataPlans } = fakeClient();
+    const resolver = new VaultMetadataResolver();
+    resolver.remember({
+      status: "ready",
+      nodeId: target.nodeId,
+      recordHash: target.recordHash,
+      manifest,
+    });
+    const shown: VaultMetadataOpenResult[] = [];
+
+    await expect(
+      resolver.resolve(
+        [target],
+        { csrfToken: "csrf", client, openNode: vi.fn(async () => undefined) },
+        {
+          requireServerValidation: true,
+          plans: [],
+          onCached: (cached) => shown.push(...cached),
+          onPriority: (priority) => shown.push(...priority),
+        },
+      ),
+    ).rejects.toThrow("requested metadata is not available");
+    expect(shown).toEqual([]);
+    expect(getCachedMetadata).not.toHaveBeenCalled();
+    expect(openMetadataPlans).not.toHaveBeenCalled();
+  });
+
+  it("prefetches a cold folder with one listing request that carries its plans", async () => {
+    const references = [reference("fil_prefetch_child")];
+    apiMocks.getVaultFolderMetadataReferences.mockResolvedValue({
+      references,
+      plans: references.map(planFor),
+    });
+    const { client, openMetadataPlans } = fakeClient();
+    const resolver = new VaultMetadataResolver();
+
+    await resolver.prefetchFolder("fil_prefetch_folder", "files", {
+      csrfToken: "csrf",
+      client,
+      openNode: vi.fn(async () => undefined),
+    });
+
+    expect(apiMocks.getVaultFolderMetadataReferences).toHaveBeenCalledOnce();
+    expect(apiMocks.getVaultMetadataPlans).not.toHaveBeenCalled();
+    expect(openMetadataPlans).toHaveBeenCalledOnce();
+    expect(resolver.peek(references)).toHaveLength(1);
   });
 
   it("peeks plaintext metadata cached for the exact revision and generation", () => {
@@ -465,7 +676,9 @@ function planFor(referenceValue: VaultMetadataReference): VaultMetadataPlan {
   };
 }
 
-function fakeClient(): {
+function fakeClient(
+  failsVerification: (plan: VaultMetadataPlan) => boolean = () => false,
+): {
   client: VaultCryptoClient;
   getCachedMetadata: ReturnType<typeof vi.fn>;
   openMetadataPlans: ReturnType<typeof vi.fn>;
@@ -478,12 +691,21 @@ function fakeClient(): {
         onPriority?(results: VaultMetadataOpenResult[]): void;
       },
     ) => {
-      const results: VaultMetadataOpenResult[] = plans.map((plan) => ({
-        status: "ready",
-        nodeId: plan.nodeId,
-        recordHash: plan.recordHash,
-        manifest,
-      }));
+      const results: VaultMetadataOpenResult[] = plans.map((plan) =>
+        failsVerification(plan)
+          ? {
+              status: "unavailable",
+              nodeId: plan.nodeId,
+              recordHash: plan.recordHash,
+              error: "The metadata record signature is invalid.",
+            }
+          : {
+              status: "ready",
+              nodeId: plan.nodeId,
+              recordHash: plan.recordHash,
+              manifest,
+            },
+      );
       options.onPriority?.(results);
       return results;
     },

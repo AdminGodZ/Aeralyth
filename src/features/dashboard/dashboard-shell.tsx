@@ -422,6 +422,7 @@ function FileContent({
     currentFolderId,
     entries,
     hasMore,
+    metadataPlans,
     nextCursor,
     summary,
   } = filesState.data;
@@ -448,6 +449,7 @@ function FileContent({
               ) : (
                 <VaultBreadcrumbs
                   breadcrumbs={breadcrumbs}
+                  metadataPlans={metadataPlans}
                   sort={fileSort}
                   direction={fileSortDirection}
                   basePath={section.key === "shared" ? "/shared" : "/files"}
@@ -469,6 +471,7 @@ function FileContent({
             <>
               <VaultFileList
                 entries={entries}
+                metadataPlans={metadataPlans}
                 sectionKey={section.key}
                 csrfToken={csrfToken}
                 currentUserId={currentUserId}
