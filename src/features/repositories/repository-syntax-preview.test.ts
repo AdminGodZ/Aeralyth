@@ -5,6 +5,7 @@ import {
   highlightSource,
   MAX_HIGHLIGHTED_CHARACTERS,
   MAX_HIGHLIGHTED_LINES,
+  SOURCE_THEME_COLORS,
   splitSourceLines,
 } from "@/features/repositories/repository-syntax-preview";
 
@@ -54,6 +55,15 @@ describe("repository syntax highlighting", () => {
     const light = await highlightSource(source, "javascript", "github-light");
     expect(light.tokens).toHaveLength(3);
     expect(light.bg).not.toBe(dark.bg);
+  });
+
+  it("paints plain lines in the colors each theme highlights with", async () => {
+    for (const theme of ["github-dark", "github-light"] as const) {
+      const result = await highlightSource("a", "text", theme);
+      expect({ bg: result.bg, fg: result.fg }).toEqual(
+        SOURCE_THEME_COLORS[theme],
+      );
+    }
   });
 
   it("keeps the full text of lines too long to tokenize", async () => {

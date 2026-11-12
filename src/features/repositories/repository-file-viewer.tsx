@@ -40,7 +40,11 @@ import {
   prepareRepositoryFile,
   RepositoryPreviewTooLargeError,
 } from "@/features/repositories/repository-file-loader";
-import type { RepositoryFilePresentation } from "@/features/repositories/repository-file-types";
+import {
+  getRepositoryFilePresentation,
+  type RepositoryFilePresentation,
+} from "@/features/repositories/repository-file-types";
+import { preloadSourceHighlighter } from "@/features/repositories/repository-syntax-preview";
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import { useVault, VAULT_LOCKING_EVENT } from "@/features/vault/vault-provider";
@@ -100,14 +104,24 @@ function RepositoryFileViewerRequest({
   // RepositoryFileViewer remounts this request when the file itself changes.
   const requestUnlock = useEffectEvent(() => vault.requestUnlock());
   const startLoad = useEffectEvent(
-    (signal: AbortSignal, onProgress: (percentage: number | null) => void) =>
-      loadRepositoryFile({
+    (signal: AbortSignal, onProgress: (percentage: number | null) => void) => {
+      // Source files fetch the highlighter and their grammar while the file
+      // downloads and decrypts, instead of after the preview mounts.
+      const expected = getRepositoryFilePresentation(
+        entry.resolvedName,
+        entry.mimeType,
+      );
+      if (expected.kind === "text" && expected.language) {
+        preloadSourceHighlighter(expected.language);
+      }
+      return loadRepositoryFile({
         entry,
         resolvedName: requestName,
         vault,
         signal,
         onProgress,
-      }),
+      });
+    },
   );
 
   useEffect(() => {
