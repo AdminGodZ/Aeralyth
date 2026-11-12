@@ -66,7 +66,11 @@ const VAULT_DIRECT_BUFFER_MEBIBYTES =
   ((VAULT_UPLOAD_CONCURRENCY + 1) * VAULT_BUFFER_PART_BYTES) / MEBIBYTE;
 // Files this small cost more in round trips than in bytes, so they publish
 // through inline batches instead of one init, storage PUT and publish each.
-const VAULT_INLINE_FILE_MAX_BYTES = 1024 * 1024;
+// Padmé pads sizes below 2 MiB to multiples of 64 KiB, so this is the largest
+// file whose padding and one chunk tag stay inside the inline wire limit; one
+// byte more pads to the full 2 MiB and its tag would overflow it.
+export const VAULT_INLINE_FILE_MAX_BYTES =
+  VAULT_INLINE_UPLOAD_MAX_BYTES - 64 * 1024;
 // Enough files in flight to fill every batch request, bounded by the
 // ciphertext they keep in memory.
 const VAULT_INLINE_ACTIVE_FILES = 128;
