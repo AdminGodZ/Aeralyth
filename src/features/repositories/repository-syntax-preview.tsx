@@ -4,7 +4,6 @@ import { useTheme } from "next-themes";
 import { type CSSProperties, useEffect, useMemo, useState } from "react";
 import type { HighlighterCore } from "shiki/core";
 
-import { Skeleton } from "@/components/ui/skeleton";
 import { cn } from "@/lib/utils";
 
 // Tokenizing runs on the main thread, so only the head of a large file is
@@ -42,7 +41,15 @@ type HighlightCache = {
   byTheme: Partial<Record<SourceTheme, HighlightResult>>;
 };
 
-const CODE_SKELETON_WIDTHS = [42, 61, 80, 49, 68, 87, 56, 75, 94];
+// The bg and fg shiki reports for each theme, so the plain lines shown before
+// highlighting paint in the colors the tokens arrive in.
+export const SOURCE_THEME_COLORS: Record<
+  SourceTheme,
+  { bg: string; fg: string }
+> = {
+  "github-dark": { bg: "#24292e", fg: "#e1e4e8" },
+  "github-light": { bg: "#fff", fg: "#24292e" },
+};
 
 export function RepositorySyntaxPreview({
   code,
@@ -91,7 +98,11 @@ export function RepositorySyntaxPreview({
   useEffect(() => {
     if (current) return;
     let canceled = false;
+    preloadSourceHighlighter(language);
     void (async () => {
+      // The plain lines paint first; tokenizing then holds the main thread.
+      await afterNextPaint();
+      if (canceled) return;
       const source = lines.slice(0, highlightedLineCount).join("\n");
       let result: HighlightResult;
       try {
@@ -112,28 +123,21 @@ export function RepositorySyntaxPreview({
     };
   }, [code, current, highlightedLineCount, language, lines, theme]);
 
-  if (!highlighted) {
-    return (
-      <div className={cn("space-y-2 p-4", compact && "p-3")}>
-        {CODE_SKELETON_WIDTHS.slice(0, compact ? 4 : 9).map((width) => (
-          <Skeleton
-            key={`code-skeleton-${width}`}
-            className="h-4"
-            style={{ width: `${width}%` }}
-          />
-        ))}
-      </div>
-    );
-  }
+  // Until tokens arrive, and when highlighting fails, the lines render plain
+  // in the theme's colors.
+  const colors = SOURCE_THEME_COLORS[theme];
 
   return (
     <div
       className="overflow-auto font-mono text-[13px] leading-5"
-      style={{ backgroundColor: highlighted.bg, color: highlighted.fg }}
+      style={{
+        backgroundColor: highlighted?.bg ?? colors.bg,
+        color: highlighted?.fg ?? colors.fg,
+      }}
     >
       <ol className={cn("py-3", !wrap && "min-w-max", compact && "py-2")}>
         {lineItems.map((line, index) => {
-          const tokens = highlighted.lines[index];
+          const tokens = highlighted?.lines[index];
           return (
             <li
               key={line.id}
@@ -218,6 +222,16 @@ function sourceColumns(line: string): number {
 let highlighterPromise: Promise<HighlighterCore> | null = null;
 const languageLoads = new Map<string, Promise<string>>();
 
+/**
+ * Starts loading the highlighter and the grammar for `language`, so they
+ * download while the file itself is still downloading and decrypting.
+ */
+export function preloadSourceHighlighter(language: string): void {
+  // Failures are dropped here; highlighting retries and falls back to text.
+  void loadHighlighter().catch(() => undefined);
+  void loadLanguage(language).catch(() => undefined);
+}
+
 function loadHighlighter(): Promise<HighlighterCore> {
   highlighterPromise ??= (async () => {
     const [{ createHighlighterCore }, { createJavaScriptRegexEngine }] =
@@ -239,10 +253,7 @@ function loadHighlighter(): Promise<HighlighterCore> {
   return highlighterPromise;
 }
 
-async function loadLanguage(
-  highlighter: HighlighterCore,
-  language: string,
-): Promise<string> {
+async function loadLanguage(language: string): Promise<string> {
   const requested = language.toLowerCase();
   const { bundledLanguagesInfo } = await import("shiki/langs");
   const info = bundledLanguagesInfo.find(
@@ -252,8 +263,9 @@ async function loadLanguage(
   if (!info) return "text";
   let loading = languageLoads.get(info.id);
   if (!loading) {
-    loading = highlighter
-      .loadLanguage(info.import)
+    // The grammar chunk downloads while the highlighter is still loading.
+    loading = Promise.all([loadHighlighter(), info.import()])
+      .then(([highlighter, grammar]) => highlighter.loadLanguage(grammar))
       .then(() => info.id)
       .catch((error: unknown) => {
         languageLoads.delete(info.id);
@@ -269,17 +281,29 @@ export async function highlightSource(
   language: string,
   theme: SourceTheme,
 ): Promise<RawHighlightResult> {
-  const highlighter = await loadHighlighter();
+  const [highlighter, lang] = await Promise.all([
+    loadHighlighter(),
+    loadLanguage(language).catch(() => "text"),
+  ]);
   const options = {
     theme,
     tokenizeMaxLineLength: MAX_TOKENIZED_LINE_LENGTH,
   };
   try {
-    const lang = await loadLanguage(highlighter, language);
     return highlighter.codeToTokens(code, { ...options, lang });
   } catch {
     return highlighter.codeToTokens(code, { ...options, lang: "text" });
   }
+}
+
+function afterNextPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    if (typeof requestAnimationFrame !== "function") {
+      setTimeout(resolve, 0);
+      return;
+    }
+    requestAnimationFrame(() => setTimeout(resolve, 0));
+  });
 }
 
 function normalizeHighlightResult(
