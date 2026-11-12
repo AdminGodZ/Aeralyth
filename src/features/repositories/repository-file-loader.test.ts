@@ -278,6 +278,37 @@ describe("bounded repository previews", () => {
     expect(file.sizeBytes).toBe(entry.sizeBytes);
   });
 
+  it("fetches the encrypted download plan once and opens the manifest from it", async () => {
+    const manifest = {
+      name: "secret.log",
+      mimeType: "text/plain",
+      plaintextBytes: entry.sizeBytes,
+      entryType: "file",
+      lastModified: 123,
+    } as VaultManifest;
+    const plan = { nodeId: entry.id, recordHash: "hash" };
+    const openNode = vi.fn(async () => manifest);
+    const controller = new AbortController();
+    encrypted.plan.mockResolvedValue(plan);
+    encrypted.prefix.mockResolvedValue({
+      blob: new Blob([new Uint8Array(MAX_REPOSITORY_TEXT_BYTES)]),
+      verification: "partial",
+    });
+    await loadRepositoryFile({
+      entry: { ...entry, e2eeState: "encrypted" },
+      resolvedName: "secret.log",
+      vault: { client: {} as VaultCryptoClient, openNode },
+      signal: controller.signal,
+    });
+    expect(encrypted.plan).toHaveBeenCalledOnce();
+    expect(encrypted.plan).toHaveBeenCalledWith(entry.id, controller.signal);
+    expect(openNode).toHaveBeenCalledOnce();
+    expect(openNode).toHaveBeenCalledWith(entry.id, plan, controller.signal);
+    expect(encrypted.prefix).toHaveBeenCalledWith(
+      expect.objectContaining({ plan, signal: controller.signal }),
+    );
+  });
+
   it("propagates encrypted prefix authentication failures", async () => {
     encrypted.prefix.mockRejectedValue(
       new Error("Chunk authentication failed"),
