@@ -5,10 +5,10 @@ import {
   type VaultManifest,
 } from "@/features/vault/protocol";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
-import type { RepositoryArchiveEntry } from "@/lib/api";
+import type { FolderArchiveEntry } from "@/lib/api";
 
 export async function readLegacyArchiveFileStream(
-  entry: RepositoryArchiveEntry,
+  entry: FolderArchiveEntry,
   resolvedName: string,
   signal?: AbortSignal,
 ): Promise<ReadableStream<Uint8Array>> {
@@ -37,12 +37,12 @@ export function readEncryptedArchiveFileStream({
   signal,
   subject,
 }: {
-  entry: RepositoryArchiveEntry;
+  entry: FolderArchiveEntry;
   manifest: VaultManifest | undefined;
   plan: VaultDownloadPlan | undefined;
   client: VaultCryptoClient | null;
   signal?: AbortSignal;
-  /** What is being archived, used in error messages ("folder", "repository"). */
+  /** What is being archived, used in error messages (e.g. "folder"). */
   subject: string;
 }): ReadableStream<Uint8Array> {
   if (!manifest || !plan || !client) {

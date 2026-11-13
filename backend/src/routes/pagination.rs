@@ -51,8 +51,8 @@ mod tests {
     #[test]
     fn cursor_round_trip_is_url_safe_and_opaque() {
         let cursor = TestCursor {
-            scope: "repositories".to_owned(),
-            id: "repo_123".to_owned(),
+            scope: "files".to_owned(),
+            id: "fil_123".to_owned(),
         };
         let encoded = encode_cursor(&cursor).expect("cursor should encode");
 

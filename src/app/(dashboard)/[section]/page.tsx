@@ -10,9 +10,7 @@ import {
   type FileView,
   getAdminUsersState,
   getFilesState,
-  getRepositoriesState,
   getStorageOverviewState,
-  type RepositoriesState,
 } from "@/lib/api";
 
 type SectionPageProps = {
@@ -101,27 +99,17 @@ export default async function SectionPage({
         cursor?.trim() || undefined,
       )
     : Promise.resolve<FilesState>({ status: "unavailable" });
-  const repositoriesPromise =
-    section.key === "repositories"
-      ? getRepositoriesState(cursor?.trim() || undefined)
-      : Promise.resolve<RepositoriesState>({ status: "unavailable" });
   const storagePromise =
     section.key === "storage"
       ? getStorageOverviewState()
       : Promise.resolve(undefined);
-  const [
-    session,
-    adminUsersState,
-    filesState,
-    repositoriesState,
-    storageState,
-  ] = await Promise.all([
-    sessionPromise,
-    adminUsersPromise,
-    filesPromise,
-    repositoriesPromise,
-    storagePromise,
-  ]);
+  const [session, adminUsersState, filesState, storageState] =
+    await Promise.all([
+      sessionPromise,
+      adminUsersPromise,
+      filesPromise,
+      storagePromise,
+    ]);
   const { csrfToken, currentUser } = session;
   if (section.group === "system" && currentUser.role !== "admin") {
     notFound();
@@ -131,7 +119,6 @@ export default async function SectionPage({
   const realtimeCursor =
     readyCursor(adminUsersState) ??
     readyCursor(filesState) ??
-    readyCursor(repositoriesState) ??
     readyCursor(storageState) ??
     session.realtimeCursor;
 
@@ -143,10 +130,6 @@ export default async function SectionPage({
     filesState.status === "unauthorized" ||
     storageState?.status === "unauthorized"
   ) {
-    redirect("/login");
-  }
-
-  if (repositoriesState.status === "unauthorized") {
     redirect("/login");
   }
 
@@ -169,7 +152,6 @@ export default async function SectionPage({
       filesState={filesState}
       fileSort={fileSort}
       fileSortDirection={fileSortDirection}
-      repositoriesState={repositoriesState}
       storageState={storageState}
     />
   );

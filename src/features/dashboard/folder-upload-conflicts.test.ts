@@ -1,7 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
 import {
-  folderUploadCreatesRepository,
   resolveFolderUploadConflicts,
   UPLOAD_PATH_LOOKUP_CONCURRENCY,
   UPLOAD_TREE_REQUEST_CONCURRENCY,
@@ -137,16 +136,5 @@ describe("resolveFolderUploadConflicts", () => {
 
     expect(resolution.existingFolders.size).toBe(projectCount * 2);
     expect(maximumActiveLoads).toBe(UPLOAD_TREE_REQUEST_CONCURRENCY);
-  });
-});
-
-describe("folderUploadCreatesRepository", () => {
-  it("keeps folders uploaded from Files in regular file storage", () => {
-    expect(folderUploadCreatesRepository("files")).toBe(false);
-    expect(folderUploadCreatesRepository("shared")).toBe(false);
-  });
-
-  it("creates repositories only from the Repositories surface", () => {
-    expect(folderUploadCreatesRepository("repositories")).toBe(true);
   });
 });

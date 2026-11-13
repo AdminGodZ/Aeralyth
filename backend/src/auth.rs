@@ -647,7 +647,6 @@ mod tests {
     fn ordinary_route_modules_do_not_load_full_profiles() {
         for (name, source) in [
             ("files", include_str!("routes/files.rs")),
-            ("repositories", include_str!("routes/repositories.rs")),
             ("share links", include_str!("routes/share_links.rs")),
             ("vault", include_str!("routes/vault.rs")),
             ("profile mutations", include_str!("routes/profile.rs")),
@@ -703,7 +702,6 @@ mod tests {
     fn protected_json_routes_keep_body_parsing_inside_authenticated_handlers() {
         for (name, source, expected_payloads) in [
             ("files", include_str!("routes/files.rs"), 7),
-            ("repositories", include_str!("routes/repositories.rs"), 3),
             ("share links", include_str!("routes/share_links.rs"), 1),
             ("profile", include_str!("routes/profile.rs"), 1),
             ("admin", include_str!("routes/admin.rs"), 1),

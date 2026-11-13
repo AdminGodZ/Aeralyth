@@ -192,10 +192,6 @@ pub async fn run(
         database_url.clone(),
         shutdown.clone(),
     )));
-    let mut counts = ConnectionTask(tokio::spawn(maintain_repository_counts(
-        database_url.clone(),
-        shutdown.clone(),
-    )));
     while !*shutdown.borrow() {
         let listener_shutdown = shutdown.clone();
         tokio::select! {
@@ -216,7 +212,7 @@ pub async fn run(
     // connections. The guards still abort the tasks if the supervisor itself
     // is cancelled.
     let _ = tokio::time::timeout(Duration::from_secs(2), async {
-        let _ = tokio::join!(&mut collections.0, &mut counts.0);
+        let _ = (&mut collections.0).await;
     })
     .await;
 }
@@ -363,8 +359,7 @@ async fn connect_maintenance(
     }))
 }
 
-/// Timestamp propagation and repository count deltas. Each pass is bounded and
-/// never walks a whole repository; full recounts run in their own task.
+/// Folder timestamp propagation, in bounded passes.
 async fn maintain_collections(database_url: String, mut shutdown: watch::Receiver<bool>) {
     let mut connected: Option<ClientWrapper> = None;
     let mut backoff = Duration::from_secs(1);
@@ -419,80 +414,6 @@ async fn maintain_collections(database_url: String, mut shutdown: watch::Receive
                 connected = None;
                 delay = backoff;
                 backoff = (backoff * 2).min(Duration::from_secs(30));
-            }
-        }
-    }
-}
-
-/// Full repository recounts, one repository per statement. The claim commits
-/// a backoff before the walk starts, so a recount that times out is retried
-/// later while other repositories go first.
-async fn maintain_repository_counts(database_url: String, mut shutdown: watch::Receiver<bool>) {
-    let mut connected: Option<ClientWrapper> = None;
-    let mut backoff = Duration::from_secs(1);
-    let mut delay = Duration::ZERO;
-    loop {
-        if *shutdown.borrow() {
-            return;
-        }
-        tokio::select! {
-            _ = shutdown.changed() => return,
-            _ = tokio::time::sleep(delay) => {},
-        }
-        if connected.as_ref().is_some_and(|client| client.is_closed()) {
-            connected = None;
-        }
-        if connected.is_none() {
-            match connect_maintenance(&database_url, "aeralyth-repository-counts", &mut shutdown)
-                .await
-            {
-                None => return,
-                Some(Ok(connection)) => connected = Some(connection),
-                Some(Err(error)) => {
-                    tracing::warn!(%error, "repository count connection unavailable");
-                    delay = backoff;
-                    backoff = (backoff * 2).min(Duration::from_secs(30));
-                    continue;
-                }
-            }
-        }
-        let client = connected.as_ref().expect("connected");
-        let claimed = match collection_batch(
-            client,
-            &mut shutdown,
-            "SELECT repository_counts_claim()",
-            &[],
-        )
-        .await
-        {
-            Ok(Some(row)) => row.get::<_, Option<String>>(0),
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(%error, "repository count claim interrupted; durable work will retry");
-                connected = None;
-                delay = backoff;
-                backoff = (backoff * 2).min(Duration::from_secs(30));
-                continue;
-            }
-        };
-        backoff = Duration::from_secs(1);
-        let Some(repository_id) = claimed else {
-            delay = Duration::from_secs(1);
-            continue;
-        };
-        delay = Duration::from_millis(100);
-        match collection_batch(
-            client,
-            &mut shutdown,
-            "SELECT repository_counts_recount($1)",
-            &[&repository_id],
-        )
-        .await
-        {
-            Ok(Some(_)) => {}
-            Ok(None) => return,
-            Err(error) => {
-                tracing::warn!(%error, repository_id, "repository recount failed; retrying after backoff");
             }
         }
     }

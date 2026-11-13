@@ -36,12 +36,6 @@ export class UploadPathConflictError extends Error {
   }
 }
 
-export function folderUploadCreatesRepository(
-  surface: "files" | "repositories" | "shared",
-): boolean {
-  return surface === "repositories";
-}
-
 export async function resolveFolderUploadConflicts({
   relativePaths,
   parentFolderId,

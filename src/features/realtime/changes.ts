@@ -2,7 +2,6 @@ export const changeScopes = [
   "files",
   "paths",
   "shared",
-  "repositories",
   "profile",
   "vault",
   "security",
@@ -11,17 +10,20 @@ export const changeScopes = [
 export type ChangeScope = (typeof changeScopes)[number];
 export type RealtimeChange = { scope: ChangeScope; folderIds: string[] };
 
+// The server sends at most one entry per scope, including scopes this client
+// no longer renders.
+const MAX_CHANGES = 16;
+
 export function parseChanges(data: string): RealtimeChange[] | null {
   try {
     const changes: unknown = JSON.parse(data);
-    if (!Array.isArray(changes) || changes.length > changeScopes.length)
-      return null;
+    if (!Array.isArray(changes) || changes.length > MAX_CHANGES) return null;
     if (
       !changes.every(
         (change) =>
           change &&
           typeof change === "object" &&
-          changeScopes.includes(change.scope) &&
+          typeof change.scope === "string" &&
           Array.isArray(change.folderIds) &&
           change.folderIds.length <= 32 &&
           change.folderIds.every(
@@ -30,7 +32,9 @@ export function parseChanges(data: string): RealtimeChange[] | null {
       )
     )
       return null;
-    return changes;
+    // An unknown scope, such as one queued for a removed section, must not
+    // discard the changes beside it.
+    return changes.filter((change) => changeScopes.includes(change.scope));
   } catch {
     return null;
   }
@@ -69,7 +73,6 @@ export function affectsRoute(
     if (scope === "profile" || scope === "vault" || scope === "security")
       return true;
     if (scope === "users") return section === "users";
-    if (scope === "repositories") return section === "repositories";
     if (scope === "shared") return section === "shared";
     if (scope === "paths") {
       return (
@@ -83,11 +86,9 @@ export function affectsRoute(
     if (section === "files") {
       return folderIds.length === 0 || folderIds.includes(currentFolderId);
     }
-    // These are account-wide collections, or repository aggregates whose
-    // membership can change when a file elsewhere in their tree changes.
-    return ["recent", "favorites", "trash", "storage", "repositories"].includes(
-      section,
-    );
+    // These are account-wide collections whose membership can change when a
+    // file elsewhere changes.
+    return ["recent", "favorites", "trash", "storage"].includes(section);
   });
 }
 

@@ -521,7 +521,6 @@ const USER_DELETION_PHASES: &[&str] = &[
     "vault_shares",
     "file_shares",
     "share_links",
-    "repositories",
     "vault_node_heads",
     "vault_node_records",
     "vault_wrappers",
@@ -2550,11 +2549,22 @@ async fn process_user_deletion_batch(
     Ok(())
 }
 
+/// Phases no longer in `USER_DELETION_PHASES`, with the phase each led to. A
+/// job an earlier release left in one carries on from there; its unknown
+/// phase deletes nothing.
+const RETIRED_USER_DELETION_PHASES: &[(&str, &str)] = &[("repositories", "vault_node_heads")];
+
 fn next_user_deletion_phase(current: &str) -> Option<&'static str> {
     USER_DELETION_PHASES
         .iter()
         .position(|phase| *phase == current)
         .and_then(|index| USER_DELETION_PHASES.get(index + 1))
+        .or_else(|| {
+            RETIRED_USER_DELETION_PHASES
+                .iter()
+                .find(|(retired, _)| *retired == current)
+                .map(|(_, next)| next)
+        })
         .copied()
 }
 
@@ -2815,9 +2825,6 @@ fn user_deletion_statement(phase: &str) -> Option<&'static str> {
         ),
         "share_links" => Some(
             "DELETE FROM share_links WHERE ctid IN (SELECT ctid FROM share_links WHERE owner_id = $1 OR recipient_id = $1 ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED)",
-        ),
-        "repositories" => Some(
-            "DELETE FROM repositories WHERE ctid IN (SELECT ctid FROM repositories WHERE owner_id = $1 ORDER BY id LIMIT $2 FOR UPDATE SKIP LOCKED)",
         ),
         "vault_node_heads" => Some(
             "DELETE FROM vault_node_heads WHERE ctid IN (SELECT ctid FROM vault_node_heads WHERE owner_id = $1 ORDER BY node_id LIMIT $2 FOR UPDATE SKIP LOCKED)",
@@ -5495,6 +5502,11 @@ mod tests {
                     .position(|phase| *phase == "files")
         );
         assert_eq!(USER_DELETION_PHASES.last(), Some(&"finalize"));
+        for (retired, next) in RETIRED_USER_DELETION_PHASES {
+            assert!(!USER_DELETION_PHASES.contains(retired));
+            assert!(USER_DELETION_PHASES.contains(next));
+            assert_eq!(next_user_deletion_phase(retired), Some(*next));
+        }
 
         for phase in USER_DELETION_PHASES {
             if matches!(

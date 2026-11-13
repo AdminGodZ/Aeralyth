@@ -67,16 +67,11 @@ describe("getVaultNamePresentation", () => {
     const sourceUrls = [
       new URL("./vault-file-list.tsx", import.meta.url),
       new URL("./vault-breadcrumbs.tsx", import.meta.url),
-      new URL("../repositories/use-resolved-vault-names.ts", import.meta.url),
-      new URL("../repositories/repository-overview.tsx", import.meta.url),
-      new URL("../repositories/repository-detail.tsx", import.meta.url),
     ];
     const sources = await Promise.all(
       sourceUrls.map((sourceUrl) => readFile(sourceUrl, "utf8")),
     );
 
-    expect(sources.join("\n")).not.toMatch(
-      /Encrypted (?:file|folder|repository)/u,
-    );
+    expect(sources.join("\n")).not.toMatch(/Encrypted (?:file|folder)/u);
   });
 });

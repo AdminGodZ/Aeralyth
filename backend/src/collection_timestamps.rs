@@ -71,7 +71,7 @@ mod tests {
 
     #[actix_web::test]
     #[ignore = "requires an initialized PostgreSQL test database"]
-    async fn touching_a_child_refreshes_folder_and_repository_timestamps() {
+    async fn touching_a_child_refreshes_ancestor_folder_timestamps() {
         let database_url = std::env::var("DATABASE_URL").expect("DATABASE_URL is required");
         let postgres_config = database_url
             .parse::<tokio_postgres::Config>()
@@ -103,7 +103,6 @@ mod tests {
         let root_id = format!("fil_collection_root_{suffix}");
         let child_id = format!("fil_collection_child_{suffix}");
         let unrelated_id = format!("fil_collection_other_{suffix}");
-        let repository_id = format!("repo_collection_touch_{suffix}");
 
         transaction
             .execute(
@@ -126,15 +125,6 @@ mod tests {
             )
             .await
             .expect("folder fixtures should insert");
-        transaction
-            .execute(
-                "INSERT INTO repositories (
-                   id, owner_id, root_file_id, updated_at
-                 ) VALUES ($1, $2, $3, '2020-01-01')",
-                &[&repository_id, &owner_id, &root_id],
-            )
-            .await
-            .expect("repository fixture should insert");
 
         touch_ancestor_collections(&transaction, Some(&child_id), &owner_id)
             .await
@@ -174,17 +164,6 @@ mod tests {
         assert_eq!(touched.get(&root_id), Some(&true));
         assert_eq!(touched.get(&child_id), Some(&true));
         assert_eq!(touched.get(&unrelated_id), Some(&false));
-
-        let repository_touched: bool = transaction
-            .query_one(
-                "SELECT updated_at > '2020-01-01'::timestamptz AS touched
-                 FROM repositories WHERE id = $1",
-                &[&repository_id],
-            )
-            .await
-            .expect("repository timestamp should load")
-            .get("touched");
-        assert!(repository_touched);
 
         transaction
             .rollback()

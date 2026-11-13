@@ -6,12 +6,10 @@ import {
   FileArchive,
   FileUp,
   Folder,
-  FolderGit2,
   FolderUp,
   UploadCloud,
   X,
 } from "lucide-react";
-import { useRouter } from "next/navigation";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 import { GhostLoader } from "@/components/ghost-mascot";
 import { Button } from "@/components/ui/button";
@@ -32,7 +30,6 @@ import {
 import { Progress } from "@/components/ui/progress";
 import {
   type FolderUploadResolution,
-  folderUploadCreatesRepository,
   normalizeUploadPath,
   resolveFolderUploadConflicts,
   type UploadTreeEntry,
@@ -90,7 +87,6 @@ type UploadSelection = {
 
 type PendingUploadExclusionReview = {
   prepared: PreparedFolderUploadSelection<UploadSelection>;
-  createRepository: boolean;
 };
 
 type PendingFolderUpload = {
@@ -103,14 +99,12 @@ type PendingFolderUpload = {
 type PendingReplacementUpload = {
   files: UploadSelection[];
   folderName: string;
-  createRepository: boolean;
   ignoredFiles: number;
   resolution: FolderUploadResolution;
 };
 
 type QueuedUpload = {
   files: UploadSelection[];
-  createRepository: boolean;
   ignoredFiles: number;
   resolution?: FolderUploadResolution;
   replacementConfirmed: boolean;
@@ -178,11 +172,6 @@ type UploadPanelProps = {
   e2eeMode: "off" | "migrate" | "required";
   folderZipPromptEnabled: boolean;
   parentFolderId?: string | null;
-  surface?: "files" | "repositories" | "shared";
-};
-
-type CreatedRepository = {
-  id: string;
 };
 
 type UploadChildrenPage = {
@@ -221,9 +210,7 @@ function useUploadPanelController({
   e2eeMode,
   folderZipPromptEnabled,
   parentFolderId,
-  surface = "shared",
 }: UploadPanelProps) {
-  const router = useRouter();
   const refreshRoute = useRealtimeRefresh();
   const vault = useVault();
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -292,7 +279,6 @@ function useUploadPanelController({
       if (queued.kind === "prepare-folder") {
         void prepareFolderUpload(
           queued.upload.files,
-          queued.upload.createRepository,
           queued.upload.ignoredFiles,
           queued.upload.replacementConfirmed,
         );
@@ -300,7 +286,6 @@ function useUploadPanelController({
       }
       submitFiles(
         queued.upload.files,
-        queued.upload.createRepository,
         queued.upload.ignoredFiles,
         queued.upload.resolution,
         queued.upload.replacementConfirmed,
@@ -319,7 +304,6 @@ function useUploadPanelController({
 
   function submitFiles(
     files: UploadSelection[],
-    createRepository = false,
     ignoredFiles = 0,
     resolution?: FolderUploadResolution,
     replacementConfirmed = false,
@@ -342,7 +326,6 @@ function useUploadPanelController({
         kind: resolution ? "prepare-folder" : "upload",
         upload: {
           files,
-          createRepository,
           ignoredFiles,
           resolution,
           replacementConfirmed,
@@ -355,12 +338,11 @@ function useUploadPanelController({
     setUploadError(null);
     setIsUploading(true);
     setUploadSession(createUploadProgressSession(files, ignoredFiles));
-    void uploadSelections(files, createRepository, resolution);
+    void uploadSelections(files, resolution);
   }
 
   async function uploadSelections(
     files: UploadSelection[],
-    createRepository: boolean,
     resolution?: FolderUploadResolution,
   ) {
     const controller = new AbortController();
@@ -479,7 +461,7 @@ function useUploadPanelController({
         if (parentFolderId) {
           await vault.openNode(parentFolderId);
         }
-        const encryptedUpload = await uploadEncryptedSelections({
+        await uploadEncryptedSelections({
           selections: files,
           parentFolderId: parentFolderId ?? null,
           resolution,
@@ -504,11 +486,7 @@ function useUploadPanelController({
           },
         });
         progressPublisher.flush();
-        await finishSuccessfulUpload(
-          encryptedUpload.rootFolderId,
-          createRepository,
-          controller.signal,
-        );
+        await finishSuccessfulUpload(controller.signal);
         return;
       }
 
@@ -531,9 +509,8 @@ function useUploadPanelController({
               }),
           )
         : null;
-      let rootFolderId: string | null = folderManifest?.rootFolderId ?? null;
       const multipartSlots = new WeightedSemaphore(MULTIPART_CONCURRENCY);
-      const uploadedRootFolderIds = await scheduleLegacyUploads(
+      await scheduleLegacyUploads(
         Array.from(files.entries()),
         controller.signal,
         ([, selection]) => selection.file.size,
@@ -558,17 +535,8 @@ function useUploadPanelController({
           return uploadedRootFolderId;
         },
       );
-      rootFolderId ??=
-        uploadedRootFolderIds.find(
-          (candidate): candidate is string => candidate !== null,
-        ) ?? null;
-
       progressPublisher.flush();
-      await finishSuccessfulUpload(
-        rootFolderId,
-        createRepository,
-        controller.signal,
-      );
+      await finishSuccessfulUpload(controller.signal);
     } catch (uploadFailure) {
       uploadAbortRef.current = null;
 
@@ -589,50 +557,16 @@ function useUploadPanelController({
     }
   }
 
-  async function finishSuccessfulUpload(
-    rootFolderId: string | null,
-    createRepository: boolean,
-    signal: AbortSignal,
-  ) {
-    let repositoryId: string | null = null;
-    if (createRepository) {
-      if (!csrfToken) {
-        throw new Error("The repository session is unavailable.");
-      }
-      if (!rootFolderId) {
-        throw new Error(
-          "The folder was uploaded, but its repository root could not be identified.",
-        );
-      }
-      const repository = await requestJson<CreatedRepository>(
-        "/api/repositories",
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-CSRF-Token": csrfToken,
-          },
-          body: JSON.stringify({ rootFolderId }),
-          signal,
-        },
-      );
-      repositoryId = repository.id;
-    }
-
-    if (!repositoryId) {
-      // The upload is committed, so this refresh will include it. Keep the
-      // finalizing panel up until the list shows it instead of leaving a gap.
-      await waitForListRefresh(
-        refreshRoute([{ scope: "files", folderIds: [parentFolderId ?? ""] }]),
-        signal,
-      );
-    }
+  async function finishSuccessfulUpload(signal: AbortSignal) {
+    // The upload is committed, so this refresh will include it. Keep the
+    // finalizing panel up until the list shows it instead of leaving a gap.
+    await waitForListRefresh(
+      refreshRoute([{ scope: "files", folderIds: [parentFolderId ?? ""] }]),
+      signal,
+    );
     setIsUploading(false);
     setUploadSession(null);
     uploadAbortRef.current = null;
-    if (repositoryId) {
-      router.push(`/repositories/${encodeURIComponent(repositoryId)}`);
-    }
   }
 
   async function uploadSelection(
@@ -935,7 +869,6 @@ function useUploadPanelController({
       return;
     }
 
-    const createRepository = folderUploadCreatesRepository(surface);
     if (folderSelection) {
       setPreparingMessage("Checking upload exclusions");
       setIsPreparingSelection(true);
@@ -959,7 +892,7 @@ function useUploadPanelController({
       }
 
       if (prepared.reviewItems.length > 0) {
-        setPendingUploadExclusionReview({ prepared, createRepository });
+        setPendingUploadExclusionReview({ prepared });
         return;
       }
 
@@ -968,12 +901,7 @@ function useUploadPanelController({
         return;
       }
 
-      queueFolderOrUpload(prepared.files, 0, createRepository);
-      return;
-    }
-
-    if (createRepository) {
-      setUploadError("Choose a project folder to create a repository.");
+      queueFolderOrUpload(prepared.files);
       return;
     }
 
@@ -992,20 +920,11 @@ function useUploadPanelController({
       return;
     }
 
-    const createRepository = pendingUploadExclusionReview.createRepository;
     setPendingUploadExclusionReview(null);
-    queueFolderOrUpload(
-      finalized.files,
-      finalized.ignoredFiles,
-      createRepository,
-    );
+    queueFolderOrUpload(finalized.files, finalized.ignoredFiles);
   }
 
-  function queueFolderOrUpload(
-    files: UploadSelection[],
-    ignoredFiles = 0,
-    createRepository = false,
-  ) {
+  function queueFolderOrUpload(files: UploadSelection[], ignoredFiles = 0) {
     if (folderZipPromptEnabled && isFolderSelection(files)) {
       setCompressionError(null);
       setPendingFolderUpload({
@@ -1021,16 +940,15 @@ function useUploadPanelController({
     }
 
     if (isFolderSelection(files) && !shareToken) {
-      void prepareFolderUpload(files, createRepository, ignoredFiles);
+      void prepareFolderUpload(files, ignoredFiles);
       return;
     }
 
-    submitFiles(files, createRepository, ignoredFiles);
+    submitFiles(files, ignoredFiles);
   }
 
   async function prepareFolderUpload(
     files: UploadSelection[],
-    createRepository: boolean,
     ignoredFiles: number,
     replacementConfirmed = false,
   ) {
@@ -1039,7 +957,6 @@ function useUploadPanelController({
         kind: "prepare-folder",
         upload: {
           files,
-          createRepository,
           ignoredFiles,
           replacementConfirmed,
         },
@@ -1074,20 +991,13 @@ function useUploadPanelController({
         setPendingReplacementUpload({
           files,
           folderName: getFolderSelectionName(files),
-          createRepository,
           ignoredFiles,
           resolution,
         });
         return;
       }
 
-      submitFiles(
-        files,
-        createRepository,
-        ignoredFiles,
-        resolution,
-        replacementConfirmed,
-      );
+      submitFiles(files, ignoredFiles, resolution, replacementConfirmed);
     } catch (error) {
       if (!isAbortError(error)) {
         setUploadError(
@@ -1276,13 +1186,7 @@ function useUploadPanelController({
     if (!pendingReplacementUpload) return;
     const pending = pendingReplacementUpload;
     setPendingReplacementUpload(null);
-    submitFiles(
-      pending.files,
-      pending.createRepository,
-      pending.ignoredFiles,
-      pending.resolution,
-      true,
-    );
+    submitFiles(pending.files, pending.ignoredFiles, pending.resolution, true);
   }
 
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
@@ -1371,7 +1275,6 @@ function useUploadPanelController({
                 relativePath: archiveFile.name,
               },
             ],
-            false,
             pendingFolderUpload.ignoredFiles,
           );
           return;
@@ -1429,7 +1332,7 @@ function useUploadPanelController({
     const files = pendingFolderUpload.files;
     const ignoredFiles = pendingFolderUpload.ignoredFiles;
     setPendingFolderUpload(null);
-    void prepareFolderUpload(files, false, ignoredFiles);
+    void prepareFolderUpload(files, ignoredFiles);
   }
 
   function cancelCompression() {
@@ -1473,7 +1376,6 @@ function useUploadPanelController({
     cancelUpload,
     dismissUploadSession: () => setUploadSession(null),
     replacementFileId,
-    surface,
   };
 }
 
@@ -1501,7 +1403,6 @@ function UploadPanelView({
   cancelUpload,
   dismissUploadSession,
   replacementFileId,
-  surface,
 }: ReturnType<typeof useUploadPanelController>) {
   const isBusy = activity !== "idle";
   const isCompressing = activity === "compressing";
@@ -1532,16 +1433,6 @@ function UploadPanelView({
           <FileUp className="size-4" aria-hidden="true" />
           Replace file
         </Button>
-      ) : surface === "repositories" ? (
-        <Button
-          type="button"
-          variant="outline"
-          disabled={isBusy}
-          onClick={() => folderInputRef.current?.click()}
-        >
-          <FolderGit2 className="size-4" aria-hidden="true" />
-          Import repository
-        </Button>
       ) : (
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -1564,31 +1455,25 @@ function UploadPanelView({
         </DropdownMenu>
       )}
 
-      {surface === "repositories" ? null : (
-        <input
-          ref={fileInputRef}
-          type="file"
-          aria-label={
-            replacementFileId
-              ? "Choose replacement file"
-              : "Choose files to upload"
-          }
-          multiple={!replacementFileId}
-          disabled={isBusy}
-          className="sr-only"
-          tabIndex={-1}
-          onChange={handleFileChange}
-        />
-      )}
+      <input
+        ref={fileInputRef}
+        type="file"
+        aria-label={
+          replacementFileId
+            ? "Choose replacement file"
+            : "Choose files to upload"
+        }
+        multiple={!replacementFileId}
+        disabled={isBusy}
+        className="sr-only"
+        tabIndex={-1}
+        onChange={handleFileChange}
+      />
       {replacementFileId ? null : (
         <input
           ref={folderInputRef}
           type="file"
-          aria-label={
-            surface === "repositories"
-              ? "Choose a project folder to import"
-              : "Choose a folder to upload"
-          }
+          aria-label="Choose a folder to upload"
           multiple
           disabled={isBusy}
           className="sr-only"

@@ -84,7 +84,6 @@ mod tests {
             ("admin", include_str!("routes/admin.rs")),
             ("files", include_str!("routes/files.rs")),
             ("invitations", include_str!("routes/invitations.rs")),
-            ("repositories", include_str!("routes/repositories.rs")),
             ("share_links", include_str!("routes/share_links.rs")),
             ("vault", include_str!("routes/vault.rs")),
         ] {
