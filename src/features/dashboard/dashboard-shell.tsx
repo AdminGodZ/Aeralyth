@@ -24,8 +24,6 @@ import {
   RealtimeProvider,
   RealtimeSnapshotFence,
 } from "@/features/realtime/realtime-provider";
-import { RepositoryDetail } from "@/features/repositories/repository-detail";
-import { RepositoryOverview } from "@/features/repositories/repository-overview";
 import { StoragePreconnect } from "@/features/vault/storage-preconnect";
 import { VaultBreadcrumbs } from "@/features/vault/vault-breadcrumbs";
 import { VaultFileList } from "@/features/vault/vault-file-list";
@@ -42,8 +40,6 @@ import type {
   FileSortDirection,
   FilesState,
   FolderBreadcrumb,
-  RepositoriesState,
-  RepositoryDetailState,
 } from "@/lib/api";
 import { getInitials } from "@/lib/format";
 
@@ -67,8 +63,6 @@ type DashboardPageProps = {
   filesState: FilesState;
   fileSort?: FileSort;
   fileSortDirection?: FileSortDirection;
-  repositoriesState?: RepositoriesState;
-  repositoryDetailState?: RepositoryDetailState;
   storageState?: StorageOverviewState;
 };
 
@@ -134,8 +128,6 @@ export function DashboardPage({
   filesState,
   fileSort,
   fileSortDirection,
-  repositoriesState,
-  repositoryDetailState,
   storageState,
 }: DashboardPageProps) {
   const section =
@@ -152,9 +144,7 @@ export function DashboardPage({
         ? hasSettledSnapshot(adminUsersState)
         : section.key === "storage"
           ? hasSettledSnapshot(storageState)
-          : section.key === "repositories"
-            ? hasSettledSnapshot(repositoryDetailState ?? repositoriesState)
-            : hasSettledSnapshot(filesState);
+          : hasSettledSnapshot(filesState);
 
   return (
     <RealtimeSnapshotFence cursor={realtimeCursor} ready={snapshotReady}>
@@ -169,8 +159,6 @@ export function DashboardPage({
         filesState={filesState}
         fileSort={fileSort}
         fileSortDirection={fileSortDirection}
-        repositoriesState={repositoriesState}
-        repositoryDetailState={repositoryDetailState}
         storageState={storageState}
       />
     </RealtimeSnapshotFence>
@@ -295,8 +283,6 @@ function DashboardContent({
   filesState,
   fileSort,
   fileSortDirection,
-  repositoriesState,
-  repositoryDetailState,
   storageState,
 }: {
   section: DashboardSection;
@@ -308,8 +294,6 @@ function DashboardContent({
   filesState: FilesState;
   fileSort?: FileSort;
   fileSortDirection?: FileSortDirection;
-  repositoriesState?: RepositoriesState;
-  repositoryDetailState?: RepositoryDetailState;
   storageState?: StorageOverviewState;
 }) {
   if (section.key === "settings") {
@@ -332,26 +316,6 @@ function DashboardContent({
     return (
       <StorageContent
         initialState={storageState ?? { status: "unavailable" }}
-      />
-    );
-  }
-
-  if (section.key === "repositories") {
-    if (repositoryDetailState) {
-      return (
-        <RepositoryDetail
-          csrfToken={csrfToken}
-          repositoryState={repositoryDetailState}
-        />
-      );
-    }
-
-    return (
-      <RepositoryOverview
-        repositoriesState={repositoriesState ?? { status: "unavailable" }}
-        csrfToken={csrfToken}
-        e2eeMode={currentUser.e2eeMode}
-        ownerUsername={currentUser.username}
       />
     );
   }
@@ -462,7 +426,6 @@ function FileContent({
                   e2eeMode={e2eeMode}
                   parentFolderId={currentFolderId}
                   folderZipPromptEnabled={folderZipPromptEnabled}
-                  surface="files"
                 />
               ) : null}
             </div>

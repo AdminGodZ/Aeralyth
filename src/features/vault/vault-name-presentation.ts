@@ -1,7 +1,7 @@
 export type VaultNamedNode = {
   name: string;
   e2eeState: "legacy" | "staged" | "encrypted";
-  entryType?: "file" | "folder";
+  entryType: "file" | "folder";
 };
 
 export type VaultNameResolution =
@@ -40,8 +40,6 @@ export function getVaultNamePresentation({
   return resolution;
 }
 
-function lockedName(entryType?: "file" | "folder"): string {
-  if (entryType === "file") return "Locked file";
-  if (entryType === "folder") return "Locked folder";
-  return "Locked repository";
+function lockedName(entryType: "file" | "folder"): string {
+  return entryType === "file" ? "Locked file" : "Locked folder";
 }

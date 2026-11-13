@@ -796,7 +796,6 @@ mod tests {
                 include_str!("routes/vault_metadata_paging.rs"),
             ),
             ("tree jobs", include_str!("routes/tree_jobs.rs")),
-            ("repositories", include_str!("routes/repositories.rs")),
             ("share links", include_str!("routes/share_links.rs")),
             ("realtime", include_str!("realtime.rs")),
         ] {

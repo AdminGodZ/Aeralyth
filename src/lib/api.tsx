@@ -259,41 +259,8 @@ export type FilesState =
       retryable?: boolean;
     };
 
-export type RepositoryRoot = {
-  id: string;
-  name: string;
-  e2eeState: "legacy" | "staged" | "encrypted";
-  updatedAt: string;
-  vaultGenerationId: string | null;
-  vaultRecordVersion: number | null;
-  vaultRecordHash: string | null;
-};
-
-export type RepositorySummary = {
-  id: string;
-  ownerUsername: string;
-  defaultBranch: string;
-  description: string | null;
-  root: RepositoryRoot;
-  createdAt: string;
-  updatedAt: string;
-  /** Repository tree revision; absent from older API responses. */
-  contentVersion?: number;
-};
-
-export type RepositoriesData = {
-  repositories: RepositorySummary[];
-  nextCursor: string | null;
-  hasMore: boolean;
-};
-
-export type RepositoriesState =
-  | { status: "ready"; data: RepositoriesData; realtimeCursor?: string }
-  | { status: "unauthorized" }
-  | { status: "not-found" }
-  | { status: "unavailable"; retryable?: boolean };
-
-export type RepositoryEntry = {
+/** One node of a folder archive manifest, in the folder's tree order. */
+export type FolderArchiveEntry = {
   id: string;
   name: string;
   mimeType: string | null;
@@ -305,64 +272,14 @@ export type RepositoryEntry = {
   vaultGenerationId: string | null;
   vaultRecordVersion: number | null;
   vaultRecordHash: string | null;
-};
-
-export type RepositoryBreadcrumb = {
-  id: string;
-  name: string;
-  e2eeState: "legacy" | "staged" | "encrypted";
-  vaultGenerationId: string | null;
-  vaultRecordVersion: number | null;
-  vaultRecordHash: string | null;
-};
-
-export type RepositoryDetailData = {
-  repository: RepositorySummary;
-  currentFolderId: string;
-  breadcrumbs: RepositoryBreadcrumb[];
-  entries: RepositoryEntry[];
-  summary: {
-    totalFiles: number;
-    totalFolders: number;
-    stale?: boolean;
-  };
-  entriesTruncated: boolean;
-  nextCursor: string | null;
-  hasMore: boolean;
-};
-
-export type RepositoryArchiveManifest = {
-  repository: RepositorySummary;
-  entries: RepositoryArchiveEntry[];
-  totalBytes: number;
-};
-
-export type RepositoryArchiveManifestPage = RepositoryArchiveManifest & {
-  snapshotVersion: number;
-  totalEntries: number;
-  totalFiles: number;
-  totalEncryptedEntries: number;
-  nextCursor: string | null;
-  hasMore: boolean;
-};
-
-export type RepositoryArchiveEntry = RepositoryEntry & {
   contentVersion: string;
 };
-
-export type FolderArchiveEntry = RepositoryArchiveEntry;
 
 export type FolderArchiveManifest = {
   rootId: string;
   entries: FolderArchiveEntry[];
   totalBytes: number;
 };
-
-export type RepositoryDetailState =
-  | { status: "ready"; data: RepositoryDetailData; realtimeCursor?: string }
-  | { status: "unauthorized" }
-  | { status: "not-found" }
-  | { status: "unavailable"; retryable?: boolean };
 
 function getApiOrigin() {
   return process.env.AERALYTH_API_ORIGIN?.trim() || "http://127.0.0.1:8080";
@@ -777,188 +694,6 @@ export async function getFilesState(
   } catch {
     return { status: "unavailable" };
   }
-}
-
-export async function getRepositoriesState(
-  cursor?: string,
-): Promise<RepositoriesState> {
-  const requestHeaders = await headers();
-  const cookie = requestHeaders.get("cookie");
-
-  try {
-    return await requestApi<RepositoriesState>(
-      `${getApiOrigin()}/api/repositories${cursor ? `?${new URLSearchParams({ cursor })}` : ""}`,
-      {
-        headers: getForwardedHeaders(requestHeaders, cookie),
-        cache: "no-store",
-      },
-      async (response) => {
-        if (response.status === 401) {
-          return { status: "unauthorized" };
-        }
-
-        if (!response.ok) {
-          return snapshotFailureState(response.status);
-        }
-
-        const data = (await response.json()) as Partial<RepositoriesData>;
-        if (!isRepositoriesData(data)) {
-          return { status: "unavailable" };
-        }
-
-        return { status: "ready", data, ...snapshotCursor(response) };
-      },
-    );
-  } catch {
-    return { status: "unavailable" };
-  }
-}
-
-export async function getRepositoryDetailState(
-  repositoryId: string,
-  folderId?: string,
-  cursor?: string,
-): Promise<RepositoryDetailState> {
-  const requestHeaders = await headers();
-  const cookie = requestHeaders.get("cookie");
-  const params = new URLSearchParams({
-    ...(folderId ? { folder: folderId } : {}),
-    ...(cursor ? { cursor } : {}),
-  });
-  const query = params.size > 0 ? `?${params}` : "";
-
-  try {
-    return await requestApi<RepositoryDetailState>(
-      `${getApiOrigin()}/api/repositories/${encodeURIComponent(repositoryId)}${query}`,
-      {
-        headers: getForwardedHeaders(requestHeaders, cookie),
-        cache: "no-store",
-      },
-      async (response) => {
-        if (response.status === 401) {
-          return { status: "unauthorized" };
-        }
-
-        if (response.status === 404) {
-          return { status: "not-found" };
-        }
-
-        if (!response.ok) {
-          return snapshotFailureState(response.status);
-        }
-
-        const data = (await response.json()) as Partial<RepositoryDetailData>;
-        if (!isRepositoryDetailData(data)) {
-          return { status: "unavailable" };
-        }
-
-        return { status: "ready", data, ...snapshotCursor(response) };
-      },
-    );
-  } catch {
-    return { status: "unavailable" };
-  }
-}
-
-function isRepositoriesData(
-  data: Partial<RepositoriesData>,
-): data is RepositoriesData {
-  return (
-    Array.isArray(data.repositories) &&
-    data.repositories.every(isRepositorySummary) &&
-    (typeof data.nextCursor === "string" || data.nextCursor === null) &&
-    typeof data.hasMore === "boolean"
-  );
-}
-
-function isRepositoryDetailData(
-  data: Partial<RepositoryDetailData>,
-): data is RepositoryDetailData {
-  return (
-    isRepositorySummary(data.repository) &&
-    typeof data.currentFolderId === "string" &&
-    Array.isArray(data.breadcrumbs) &&
-    data.breadcrumbs.every(
-      (breadcrumb) =>
-        typeof breadcrumb.id === "string" &&
-        typeof breadcrumb.name === "string" &&
-        isE2eeState(breadcrumb.e2eeState) &&
-        isNullableVaultMetadataReference(breadcrumb),
-    ) &&
-    Array.isArray(data.entries) &&
-    data.entries.every(isRepositoryEntry) &&
-    data.summary !== undefined &&
-    typeof data.summary.totalFiles === "number" &&
-    typeof data.summary.totalFolders === "number" &&
-    (data.summary.stale === undefined ||
-      typeof data.summary.stale === "boolean") &&
-    typeof data.entriesTruncated === "boolean" &&
-    (typeof data.nextCursor === "string" || data.nextCursor === null) &&
-    typeof data.hasMore === "boolean"
-  );
-}
-
-function isRepositorySummary(value: unknown): value is RepositorySummary {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const repository = value as Partial<RepositorySummary>;
-  return (
-    typeof repository.id === "string" &&
-    typeof repository.ownerUsername === "string" &&
-    typeof repository.defaultBranch === "string" &&
-    (typeof repository.description === "string" ||
-      repository.description === null) &&
-    typeof repository.createdAt === "string" &&
-    typeof repository.updatedAt === "string" &&
-    repository.root !== undefined &&
-    typeof repository.root.id === "string" &&
-    typeof repository.root.name === "string" &&
-    typeof repository.root.updatedAt === "string" &&
-    isE2eeState(repository.root.e2eeState) &&
-    isNullableVaultMetadataReference(repository.root)
-  );
-}
-
-function isRepositoryEntry(value: unknown): value is RepositoryEntry {
-  if (!value || typeof value !== "object") {
-    return false;
-  }
-
-  const entry = value as Partial<RepositoryEntry>;
-  return (
-    typeof entry.id === "string" &&
-    typeof entry.name === "string" &&
-    (typeof entry.mimeType === "string" || entry.mimeType === null) &&
-    (entry.entryType === "file" || entry.entryType === "folder") &&
-    (typeof entry.parentId === "string" || entry.parentId === null) &&
-    typeof entry.sizeBytes === "number" &&
-    typeof entry.updatedAt === "string" &&
-    isE2eeState(entry.e2eeState) &&
-    isNullableVaultMetadataReference(entry)
-  );
-}
-
-function isNullableVaultMetadataReference(value: {
-  vaultGenerationId?: unknown;
-  vaultRecordVersion?: unknown;
-  vaultRecordHash?: unknown;
-}): boolean {
-  return (
-    (typeof value.vaultGenerationId === "string" ||
-      value.vaultGenerationId === null) &&
-    (typeof value.vaultRecordVersion === "number" ||
-      value.vaultRecordVersion === null) &&
-    (typeof value.vaultRecordHash === "string" ||
-      value.vaultRecordHash === null)
-  );
-}
-
-function isE2eeState(
-  value: unknown,
-): value is "legacy" | "staged" | "encrypted" {
-  return value === "legacy" || value === "staged" || value === "encrypted";
 }
 
 function isFilesData(data: Partial<FilesData>): data is FilesData {

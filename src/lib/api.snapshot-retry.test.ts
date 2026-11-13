@@ -3,8 +3,6 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   getAdminUsersState,
   getFilesState,
-  getRepositoriesState,
-  getRepositoryDetailState,
   getStorageOverviewState,
 } from "@/lib/api";
 
@@ -18,18 +16,6 @@ const reads = [
     read: () => getFilesState("files"),
     forbidden: false,
     notFound: false,
-  },
-  {
-    name: "repositories",
-    read: () => getRepositoriesState(),
-    forbidden: false,
-    notFound: false,
-  },
-  {
-    name: "repository detail",
-    read: () => getRepositoryDetailState("repo-1"),
-    forbidden: false,
-    notFound: true,
   },
   {
     name: "admin users",

@@ -2,14 +2,11 @@ import { isValidElement } from "react";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import SectionPage from "@/app/(dashboard)/[section]/page";
-import RepositoryPage from "@/app/(dashboard)/repositories/[repositoryId]/page";
 
 const mocks = vi.hoisted(() => ({
   bootstrap: vi.fn(),
   admin: vi.fn(),
   files: vi.fn(),
-  repositories: vi.fn(),
-  repository: vi.fn(),
   storage: vi.fn(),
 }));
 
@@ -22,18 +19,10 @@ vi.mock("@/features/dashboard/dashboard-shell", () => ({
 vi.mock("@/lib/api", () => ({
   getAdminUsersState: mocks.admin,
   getFilesState: mocks.files,
-  getRepositoriesState: mocks.repositories,
-  getRepositoryDetailState: mocks.repository,
   getStorageOverviewState: mocks.storage,
 }));
 
-const dataReads = [
-  mocks.admin,
-  mocks.files,
-  mocks.repositories,
-  mocks.repository,
-  mocks.storage,
-];
+const dataReads = [mocks.admin, mocks.files, mocks.storage];
 
 const SECTIONS = [
   "files",
@@ -41,22 +30,15 @@ const SECTIONS = [
   "favorites",
   "shared",
   "trash",
-  "repositories",
   "users",
   "storage",
-  "repository-detail",
 ] as const;
 
 function render(section: (typeof SECTIONS)[number]) {
-  return section === "repository-detail"
-    ? RepositoryPage({
-        params: Promise.resolve({ repositoryId: "repo-1" }),
-        searchParams: Promise.resolve({}),
-      })
-    : SectionPage({
-        params: Promise.resolve({ section }),
-        searchParams: Promise.resolve({}),
-      });
+  return SectionPage({
+    params: Promise.resolve({ section }),
+    searchParams: Promise.resolve({}),
+  });
 }
 
 async function renderedCursor(rendering: ReturnType<typeof render>) {

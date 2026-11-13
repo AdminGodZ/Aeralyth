@@ -12,7 +12,6 @@ mod local_file_stream;
 mod metrics;
 mod pagination;
 mod profile;
-mod repositories;
 mod session_bootstrap;
 mod share_links;
 pub(crate) mod tree_jobs;
@@ -114,25 +113,6 @@ pub fn configure(config: &mut web::ServiceConfig) {
                 .route(
                     "/share-links/access/{token}/files/{file_id}",
                     web::delete().to(share_links::remove_entry),
-                )
-                .route("/repositories", snapshot(web::get().to(repositories::list)))
-                .route("/repositories", web::post().to(repositories::create))
-                .route(
-                    "/repositories/empty",
-                    web::post().to(repositories::create_empty),
-                )
-                .route("/repositories/{id}", web::patch().to(repositories::update))
-                .route(
-                    "/repositories/{id}/archive-manifest",
-                    web::get().to(repositories::archive_manifest),
-                )
-                .route(
-                    "/repositories/{id}/language-stats",
-                    web::get().to(repositories::language_stats),
-                )
-                .route(
-                    "/repositories/{id}",
-                    snapshot(web::get().to(repositories::detail)),
                 )
                 .route("/files/summary", web::get().to(files::summary))
                 .route("/files/operations", web::post().to(files::mutate_batch))
@@ -288,8 +268,6 @@ mod snapshot_route_tests {
         for route in [
             r#".route("/users", snapshot(web::get().to(admin::users)))"#,
             r#".route("/storage", snapshot(web::get().to(files::storage_overview)))"#,
-            r#".route("/repositories", snapshot(web::get().to(repositories::list)))"#,
-            r#".route("/repositories/{id}", snapshot(web::get().to(repositories::detail)))"#,
             r#".route("/files", snapshot(web::get().to(files::list_files)))"#,
         ] {
             assert!(
@@ -306,7 +284,6 @@ mod hierarchy_query_tests {
     fn every_route_recursive_query_is_cycle_and_depth_bounded() {
         for (name, source) in [
             ("files", include_str!("files.rs")),
-            ("repositories", include_str!("repositories.rs")),
             ("share_links", include_str!("share_links.rs")),
             ("vault", include_str!("vault.rs")),
         ] {

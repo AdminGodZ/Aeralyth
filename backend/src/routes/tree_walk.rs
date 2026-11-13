@@ -234,35 +234,10 @@ mod tests {
     fn large_route_operations_do_not_reintroduce_recursive_subtree_statements() {
         for (name, source) in [
             ("files", include_str!("files.rs")),
-            ("repositories", include_str!("repositories.rs")),
             ("share_links", include_str!("share_links.rs")),
             ("vault", include_str!("vault.rs")),
         ] {
-            let inspected = if name == "repositories" {
-                // Only the named, identically bounded repository walks may
-                // recurse: archive preparation and the language aggregate.
-                let mut inspected = source.to_owned();
-                for walk in [
-                    "const PREPARE_REPOSITORY_ARCHIVE_QUERY",
-                    "const REPOSITORY_LANGUAGE_STATS_QUERY",
-                ] {
-                    let (prefix, tail) = inspected
-                        .split_once(walk)
-                        .expect("named bounded repository walk");
-                    let (walk_sql, suffix) = tail
-                        .split_once("\"#;")
-                        .expect("repository walk SQL boundary");
-                    assert!(walk_sql.contains("visited_ids"));
-                    assert!(walk_sql.contains("t.depth < 100"));
-                    assert!(walk_sql.contains("selected_tree AS MATERIALIZED"));
-                    assert!(walk_sql.contains("SELECT * FROM tree LIMIT 50002"));
-                    inspected = format!("{prefix}{suffix}");
-                }
-                inspected
-            } else {
-                source.to_owned()
-            };
-            let normalized = inspected.to_ascii_lowercase();
+            let normalized = source.to_ascii_lowercase();
             assert!(
                 !normalized.contains("with recursive subtree")
                     && !normalized.contains("with recursive tree as"),

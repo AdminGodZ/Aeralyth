@@ -1466,7 +1466,7 @@ mod tests {
             SuccessLogClass::HighVolume
         );
         assert_eq!(
-            success_log_class("/api/repositories/{id}"),
+            success_log_class("/api/files/{id}/download"),
             SuccessLogClass::Standard
         );
 

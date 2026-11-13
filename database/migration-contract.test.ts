@@ -40,6 +40,7 @@ describe.each([
     "043_inline_tree_operation_visibility.sql",
     "043-inline-tree-operation-visibility",
   ],
+  ["044_remove_repositories.sql", "044-remove-repositories"],
 ])("%s", (fileName, version) => {
   const migration = readFileSync(resolve(migrationRoot, fileName), "utf8");
 

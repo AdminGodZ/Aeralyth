@@ -198,7 +198,14 @@ describe("realtime refresh coordination", () => {
 
 it("limits and validates event payloads", () => {
   expect(parseChanges("not JSON")).toBeNull();
-  expect(parseChanges('[{"scope":"admin-all","folderIds":[]}]')).toBeNull();
+  // Unknown scopes are dropped without discarding the known ones beside them.
+  expect(
+    parseChanges(
+      '[{"scope":"repositories","folderIds":[]},{"scope":"files","folderIds":["a"]}]',
+    ),
+  ).toEqual([{ scope: "files", folderIds: ["a"] }]);
+  expect(parseChanges('[{"scope":"admin-all","folderIds":[]}]')).toEqual([]);
+  expect(parseChanges('[{"scope":42,"folderIds":[]}]')).toBeNull();
   expect(parseChanges('[{"scope":"files","folderIds":[42]}]')).toBeNull();
   expect(parseChanges('[{"scope":"files","folderIds":[""]}]')).toEqual([
     { scope: "files", folderIds: [""] },

@@ -21,11 +21,7 @@ import type {
 import { getVaultDownloadPlan } from "@/features/vault/vault-api";
 import type { VaultCryptoClient } from "@/features/vault/vault-client";
 import { throwIfAborted } from "@/lib/abort";
-import type {
-  FolderArchiveEntry,
-  FolderArchiveManifest,
-  RepositoryEntry,
-} from "@/lib/api";
+import type { FolderArchiveEntry, FolderArchiveManifest } from "@/lib/api";
 
 const ABORT_MESSAGE = "The folder download was canceled.";
 
@@ -303,14 +299,14 @@ export function buildFolderArchivePath({
   archiveRoot,
 }: {
   entry: FolderArchiveEntry;
-  entriesById: Map<string, RepositoryEntry>;
+  entriesById: Map<string, FolderArchiveEntry>;
   namesById: Map<string, string>;
   rootFolderId: string;
   archiveRoot: string;
 }): string {
   const segments: string[] = [];
   const visited = new Set<string>();
-  let current: RepositoryEntry | undefined = entry;
+  let current: FolderArchiveEntry | undefined = entry;
 
   while (current) {
     if (visited.has(current.id)) {

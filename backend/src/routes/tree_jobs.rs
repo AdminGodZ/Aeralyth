@@ -468,7 +468,7 @@ async fn process_batch(db: &Database) -> Result<bool, DatabaseError> {
                 )
                 .await?;
             execute_cached(&transaction, "UPDATE tree_operation_jobs SET status='complete',completed_at=now(),updated_at=now() WHERE id=$1", &[&job_id]).await?;
-            query_one_cached(&transaction, "SELECT realtime_enqueue($1,'files'),realtime_enqueue($1,'repositories')", &[&owner_id]).await?;
+            query_one_cached(&transaction, "SELECT realtime_enqueue($1,'files')", &[&owner_id]).await?;
         } else {
             let ids = nodes
                 .iter()
