@@ -28,16 +28,14 @@ export default function SectionLoading() {
       <span className="sr-only" role="status" aria-live="polite">
         Loading {section.title}
       </span>
-      <header className="grid min-h-20 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 border-b px-4 py-3 sm:px-6">
+      <header className="grid min-h-16 grid-cols-[minmax(0,1fr)_auto] items-center gap-3 px-4 py-3 sm:px-6">
         <div className="min-w-0">
-          <p className="font-display text-xl font-semibold leading-6">
-            {section.title}
-          </p>
+          <p className="text-lg font-medium leading-6">{section.title}</p>
           <p className="truncate text-sm text-muted-foreground">
             {section.subtitle}
           </p>
         </div>
-        <Skeleton className="size-9 rounded-full" />
+        <Skeleton className="size-9 rounded-full lg:hidden" />
       </header>
 
       {section.key === "settings" ? (

@@ -190,7 +190,7 @@ export function UsersContent({
       <Tabs
         value={activeTab}
         onValueChange={setActiveTab}
-        className="min-h-0 gap-0 overflow-hidden rounded-md border"
+        className="dashboard-card min-h-0 gap-0"
       >
         <div className="flex flex-col gap-3 border-b px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
           <TabsList variant="line" className="justify-start">
@@ -310,16 +310,14 @@ function DirectoryMetric({
   value: number;
 }) {
   return (
-    <div className="flex min-h-20 items-center gap-3 rounded-md border px-4 py-3">
-      <span className="flex size-9 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
-        <Icon className="size-4" aria-hidden="true" />
-      </span>
-      <div className="min-w-0">
-        <p className="truncate text-xs text-muted-foreground">{label}</p>
-        <p className="mt-0.5 font-display text-xl font-semibold tabular-nums">
-          {value}
-        </p>
-      </div>
+    <div className="dashboard-card p-5">
+      <p className="flex min-w-0 items-center gap-2 text-[13px] font-medium text-muted-foreground">
+        <Icon className="size-3.5 shrink-0" aria-hidden="true" />
+        <span className="truncate">{label}</span>
+      </p>
+      <p className="mt-4 text-[1.625rem] leading-8 font-semibold tracking-tight tabular-nums">
+        {value}
+      </p>
     </div>
   );
 }

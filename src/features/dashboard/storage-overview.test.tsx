@@ -44,6 +44,7 @@ describe("storage overview", () => {
     expect(html).toContain("Your account");
     expect(html).toContain("Storage bucket");
     expect(html).toContain("332.8 MB");
+    expect(html).toContain("319.2 MB");
     expect(html).toContain("350");
   });
 
@@ -67,6 +68,7 @@ describe("storage overview", () => {
         />,
       );
       expect(html).not.toContain("332.8 MB");
+      expect(html).not.toContain("319.2 MB");
       expect(html).not.toContain("Bucket capacity");
       expect(html).toContain("0.1%");
     }

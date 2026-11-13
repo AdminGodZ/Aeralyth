@@ -46,7 +46,7 @@ export function RepositoryDetail({
   if (repositoryState.status !== "ready") {
     return (
       <div className="flex flex-1 flex-col px-4 py-5 sm:px-6">
-        <section className="rounded-md border p-5">
+        <section className="dashboard-card p-5">
           <p className="font-medium">Repository unavailable</p>
           <p className="mt-2 text-sm text-muted-foreground">
             This repository could not be loaded.
@@ -247,7 +247,7 @@ function ReadyRepositoryDetail({
               />
             </>
           ) : (
-            <section className="overflow-hidden rounded-md border">
+            <section className="dashboard-card">
               <RepositoryPath
                 data={data}
                 repositoryName={repositoryNamePresentation}

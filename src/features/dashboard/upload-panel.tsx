@@ -8,12 +8,12 @@ import {
   Folder,
   FolderGit2,
   FolderUp,
-  LoaderCircle,
   UploadCloud,
   X,
 } from "lucide-react";
 import { useRouter } from "next/navigation";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
+import { GhostLoader } from "@/components/ghost-mascot";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -1522,13 +1522,7 @@ function UploadPanelView({
       ) : null}
 
       {activity === "preparing" ? (
-        <div className="flex min-h-9 items-center gap-2 text-sm text-muted-foreground">
-          <LoaderCircle
-            className="size-4 animate-spin text-primary"
-            aria-hidden="true"
-          />
-          <span role="status">{preparingMessage}</span>
-        </div>
+        <GhostLoader label={preparingMessage} />
       ) : replacementFileId ? (
         <Button
           type="button"

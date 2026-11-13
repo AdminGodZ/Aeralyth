@@ -4,7 +4,7 @@ import Link from "next/link";
 import type { CSSProperties, ReactNode } from "react";
 
 import { AeralythLogo } from "@/components/aeralyth-logo";
-import { FileEmptyIllustration } from "@/components/file-empty-illustration";
+import { GhostMascot } from "@/components/ghost-mascot";
 import { Button } from "@/components/ui/button";
 import {
   type DashboardSection,
@@ -109,6 +109,9 @@ export function DashboardFrame({
             canViewSystemNavigation={currentUser.role === "admin"}
             csrfToken={csrfToken}
             initialCollapsed={initialSidebarCollapsed}
+            profileName={getProfileName(currentUser)}
+            username={currentUser.username}
+            avatar={<UserAvatar currentUser={currentUser} />}
           />
 
           <section className="dashboard-main-panel flex min-w-0 flex-1 flex-col lg:mt-4 lg:min-h-[calc(100dvh-1rem)] lg:overflow-hidden lg:rounded-tl-3xl">
@@ -191,13 +194,11 @@ function TopBar({
   currentUser: CurrentUser;
 }) {
   return (
-    <header className="dashboard-topbar grid min-h-20 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-3 border-b px-4 py-3 sm:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,34rem)_minmax(0,1fr)] lg:items-center">
+    <header className="dashboard-topbar grid min-h-16 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-3 px-4 py-3 sm:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,34rem)_minmax(0,1fr)] lg:items-center">
       <div className="col-start-1 row-start-1 flex min-w-0 items-center gap-3">
         <AeralythLogo className="size-9 lg:hidden" />
         <div className="min-w-0">
-          <p className="font-display text-xl font-semibold leading-6">
-            {section.title}
-          </p>
+          <p className="text-lg font-medium leading-6">{section.title}</p>
           <p className="truncate text-sm text-muted-foreground">
             {section.subtitle}
           </p>
@@ -229,7 +230,7 @@ function ProfileLink({ currentUser }: { currentUser: CurrentUser }) {
   return (
     <Link
       href="/settings"
-      className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-full border bg-background text-sm font-semibold text-primary transition-colors hover:bg-muted"
+      className="flex size-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-white/10 text-sm font-semibold transition-colors hover:bg-white/15 lg:hidden"
       title={profileName}
       aria-label={`Open settings for ${profileName}`}
     >
@@ -407,7 +408,7 @@ function FileContent({
   if (!hasReadyFilesState(filesState)) {
     return (
       <div className="flex min-h-0 flex-1 flex-col gap-6 px-4 py-5 sm:px-6">
-        <section className="rounded-md border p-5">
+        <section className="dashboard-card p-5">
           <p className="font-medium">Files unavailable</p>
           <p className="mt-2 text-sm text-muted-foreground">
             The files API is not reachable.
@@ -436,7 +437,7 @@ function FileContent({
       <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-hidden px-4 py-5 sm:px-6">
         <FileSummaryMetrics initialSummary={summary} />
 
-        <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-md border">
+        <section className="dashboard-card flex min-h-0 min-w-0 flex-1 flex-col">
           {section.key === "files" || section.key === "shared" ? (
             <div className="flex min-h-16 shrink-0 flex-col justify-center gap-3 border-b px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
               {e2eeMode === "off" ? (
@@ -587,8 +588,8 @@ function FilesEmptyState({
 
   return (
     <div className="flex min-h-72 flex-1 flex-col items-center justify-center px-4 py-12 text-center">
-      <FileEmptyIllustration className="size-32" />
-      <p className="mt-2 font-display text-lg font-semibold">
+      <GhostMascot className="size-24" />
+      <p className="mt-4 font-display text-lg font-semibold">
         {isFilesView
           ? inFolder
             ? "This folder is empty"

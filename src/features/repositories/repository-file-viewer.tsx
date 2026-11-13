@@ -226,7 +226,7 @@ function ReadyRepositoryFileViewer({
   }
 
   return (
-    <section className="overflow-hidden rounded-md border">
+    <section className="dashboard-card">
       <header className="flex flex-col gap-3 border-b px-4 py-3 xl:flex-row xl:items-center xl:justify-between">
         <div className="flex min-w-0 items-center gap-3">
           <FilePresentationIcon presentation={file.presentation} />
@@ -364,7 +364,7 @@ function RepositoryFileLoading({
   progress: number | null;
 }) {
   return (
-    <section className="overflow-hidden rounded-md border" aria-live="polite">
+    <section className="dashboard-card" aria-live="polite">
       <header className="flex min-h-14 items-center gap-3 border-b px-4">
         <LoaderCircle className="size-5 animate-spin text-primary" />
         <div className="min-w-0 flex-1">
@@ -546,7 +546,7 @@ function ViewerMessage({
   children: ReactNode;
 }) {
   return (
-    <section className="flex min-h-80 flex-col items-center justify-center rounded-md border px-6 py-12 text-center">
+    <section className="dashboard-card flex min-h-80 flex-col items-center justify-center px-6 py-12 text-center">
       <span className="flex size-12 items-center justify-center rounded-full bg-muted text-muted-foreground">
         <Icon className="size-6" aria-hidden="true" />
       </span>

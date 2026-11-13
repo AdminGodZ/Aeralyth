@@ -98,6 +98,27 @@ const logoFacets: LogoFacet[] = [
   { id: "gem-bottom-right", points: "32,38 32,46 38,38", fill: "deep" },
 ];
 
+/** How bright each tone is, 0 to 255, for rendering the mark without color. */
+export const aeralythLogoToneLevels: Record<LogoTone, number> = {
+  pale: 255,
+  light: 238,
+  bright: 222,
+  baseLight: 204,
+  base: 184,
+  baseDark: 150,
+  deep: 122,
+  shadow: 98,
+};
+
+/** The mark's facets as numbers, in its 64 by 64 box. */
+export const aeralythLogoFacets = logoFacets.map((facet) => ({
+  points: facet.points
+    .split(" ")
+    .map((point) => point.split(",").map(Number) as [number, number]),
+  from: typeof facet.fill === "string" ? facet.fill : facet.fill.from,
+  to: typeof facet.fill === "string" ? facet.fill : facet.fill.to,
+}));
+
 export function AeralythLogo({
   className,
   title,

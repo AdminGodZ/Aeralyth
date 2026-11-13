@@ -59,7 +59,7 @@ export function RepositoryOverview({
   if (repositoriesState.status !== "ready") {
     return (
       <div className="flex flex-1 flex-col px-4 py-5 sm:px-6">
-        <section className="rounded-md border p-5">
+        <section className="dashboard-card p-5">
           <p className="font-medium">Repositories unavailable</p>
           <p className="mt-2 text-sm text-muted-foreground">
             The repositories API is not reachable.
@@ -72,7 +72,7 @@ export function RepositoryOverview({
   return (
     <div className="flex min-h-0 flex-1 flex-col overflow-auto px-4 py-5 sm:px-6">
       <div className="mx-auto w-full max-w-6xl">
-        <section className="rounded-md border">
+        <section className="dashboard-card">
           <div className="flex flex-col gap-4 border-b px-4 py-4 sm:flex-row sm:items-center sm:justify-between">
             <div>
               <h1 className="font-display text-lg font-semibold">
