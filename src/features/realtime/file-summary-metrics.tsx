@@ -66,18 +66,14 @@ function FileMetric({
   value: string;
 }) {
   return (
-    <div className="grid h-24 grid-cols-[2.5rem_minmax(0,1fr)] items-center gap-3 rounded-md border px-4">
-      <span className="flex size-10 items-center justify-center text-primary">
-        <Icon className="size-5" aria-hidden="true" />
-      </span>
-      <div className="flex min-w-0 flex-col justify-center">
-        <p className="truncate text-sm leading-5 text-muted-foreground">
-          {label}
-        </p>
-        <p className="mt-0.5 truncate font-display text-2xl font-semibold leading-7 tabular-nums">
-          {value}
-        </p>
-      </div>
+    <div className="dashboard-card p-5">
+      <p className="flex min-w-0 items-center gap-2 text-[13px] font-medium text-muted-foreground">
+        <Icon className="size-3.5 shrink-0" aria-hidden="true" />
+        <span className="truncate">{label}</span>
+      </p>
+      <p className="mt-4 truncate text-[1.625rem] leading-8 font-semibold tracking-tight tabular-nums">
+        {value}
+      </p>
     </div>
   );
 }

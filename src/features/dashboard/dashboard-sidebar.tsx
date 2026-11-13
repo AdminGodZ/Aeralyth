@@ -5,6 +5,7 @@ import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   type CSSProperties,
+  type ReactNode,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -13,7 +14,6 @@ import {
 } from "react";
 
 import { AeralythLogo } from "@/components/aeralyth-logo";
-import { Button } from "@/components/ui/button";
 import {
   type DashboardSection,
   getDashboardSection,
@@ -36,10 +36,16 @@ export function DashboardSidebar({
   canViewSystemNavigation,
   csrfToken,
   initialCollapsed,
+  profileName,
+  username,
+  avatar,
 }: {
   canViewSystemNavigation: boolean;
   csrfToken: string;
   initialCollapsed: boolean;
+  profileName: string;
+  username: string;
+  avatar: ReactNode;
 }) {
   const pathname = usePathname();
   const vault = useVault();
@@ -107,79 +113,88 @@ export function DashboardSidebar({
     document.cookie = `${SIDEBAR_COOKIE}=${nextCollapsed ? "1" : "0"}; Path=/; Max-Age=${SIDEBAR_COOKIE_MAX_AGE}; SameSite=Lax`;
   }
 
+  const collapseToggle = (
+    <button
+      type="button"
+      onClick={toggleSidebar}
+      aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+      aria-expanded={!isCollapsed}
+      title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
+      className="sidebar-icon-button"
+    >
+      {isCollapsed ? (
+        <PanelLeftOpen className="size-4" aria-hidden="true" />
+      ) : (
+        <PanelLeftClose className="size-4" aria-hidden="true" />
+      )}
+    </button>
+  );
+
   return (
     <aside
       ref={sidebarRef}
       data-collapsed={isCollapsed}
       className={cn(
-        "dashboard-sidebar hidden shrink-0 flex-col px-4 pb-5 pt-9 transition-[width] duration-200 lg:flex",
-        isCollapsed ? "w-20" : "w-[15.5rem]",
+        "dashboard-sidebar hidden shrink-0 flex-col px-3 pt-5 pb-3 transition-[width] duration-200 lg:flex",
+        isCollapsed ? "w-[4.5rem]" : "w-64",
       )}
     >
-      <span className="dashboard-sidebar-ambient" aria-hidden="true" />
       <span
         aria-hidden="true"
         className={cn(
-          "pointer-events-none absolute left-4 top-0 z-0 h-9 rounded-[12px] motion-reduce:transition-none",
+          "sidebar-active-indicator pointer-events-none absolute top-0 z-0 h-10 motion-reduce:transition-none",
           navigationIndicator.animate &&
             "transition-[transform,width,opacity] duration-[220ms] ease-[cubic-bezier(0.22,1,0.36,1)]",
-          "bg-primary/[0.12]",
         )}
         style={
           {
+            left: isCollapsed ? "1rem" : "0.75rem",
             opacity: navigationIndicator.visible ? 1 : 0,
             transform: `translate3d(0, ${navigationIndicator.top}px, 0)`,
-            width: isCollapsed ? "2.5rem" : "calc(100% - 2rem)",
+            width: isCollapsed ? "2.5rem" : "calc(100% - 1.5rem)",
           } satisfies CSSProperties
         }
       />
 
-      <div>
+      <div
+        className={cn(
+          "flex min-h-10 items-center gap-2",
+          isCollapsed ? "flex-col" : "justify-between pl-2",
+        )}
+      >
         <Link
           href="/files"
           aria-label="Aeralyth files"
           title={isCollapsed ? "Aeralyth" : undefined}
-          className={cn(
-            "flex h-10 min-w-0 items-center gap-3",
-            isCollapsed ? "w-10 justify-start" : "w-full justify-center",
-          )}
+          className="flex h-10 min-w-0 items-center gap-2.5"
         >
-          <AeralythLogo className="size-10 shrink-0" />
+          <AeralythLogo className="size-7 shrink-0" />
           {!isCollapsed ? (
-            <span className="min-w-0 truncate font-display text-4xl font-semibold leading-10">
+            <span className="min-w-0 truncate text-lg font-semibold tracking-tight">
               Aeralyth
             </span>
           ) : null}
         </Link>
-        <hr className={cn("mt-5 border-border", isCollapsed && "w-10")} />
+        {collapseToggle}
       </div>
 
-      <div className="mt-6 space-y-7">
-        <nav className="space-y-1" aria-label="Main navigation">
-          {primaryDashboardSections.map((item) => (
-            <SidebarLink
-              key={item.key}
-              section={item}
-              active={item.key === pathnameSectionKey}
-              collapsed={isCollapsed}
-            />
-          ))}
-        </nav>
+      <div className="mt-8 flex flex-col gap-7">
+        <SidebarGroup label="Workspace" collapsed={isCollapsed}>
+          <nav className="space-y-1" aria-label="Main navigation">
+            {primaryDashboardSections.map((item) => (
+              <SidebarLink
+                key={item.key}
+                section={item}
+                active={item.key === pathnameSectionKey}
+                collapsed={isCollapsed}
+              />
+            ))}
+          </nav>
+        </SidebarGroup>
 
         {canViewSystemNavigation ? (
-          <section className={cn("border-t pt-5", isCollapsed && "w-10")}>
-            <p
-              className={cn(
-                "px-3 text-xs font-medium uppercase text-muted-foreground",
-                isCollapsed && "sr-only",
-              )}
-            >
-              System
-            </p>
-            <nav
-              className={cn("space-y-1", !isCollapsed && "mt-2")}
-              aria-label="System navigation"
-            >
+          <SidebarGroup label="System" collapsed={isCollapsed}>
+            <nav className="space-y-1" aria-label="System navigation">
               {systemDashboardSections.map((item) => (
                 <SidebarLink
                   key={item.key}
@@ -189,17 +204,37 @@ export function DashboardSidebar({
                 />
               ))}
             </nav>
-          </section>
+          </SidebarGroup>
         ) : null}
       </div>
 
       <div className="mt-auto pt-6">
         <div
           className={cn(
-            "relative h-9 transition-[height] duration-200 ease-out",
-            isCollapsed && "h-[5.25rem]",
+            "flex gap-1",
+            isCollapsed ? "flex-col items-center" : "items-center",
           )}
         >
+          <Link
+            href="/settings"
+            title={isCollapsed ? profileName : undefined}
+            aria-label={`Open settings for ${profileName}`}
+            className="flex min-w-0 flex-1 items-center gap-3 rounded-xl p-1.5 transition-colors hover:bg-white/[5%]"
+          >
+            <span className="flex size-8 shrink-0 items-center justify-center overflow-hidden rounded-full bg-white/10 text-xs font-semibold">
+              {avatar}
+            </span>
+            {!isCollapsed ? (
+              <span className="min-w-0 leading-tight">
+                <span className="block truncate text-sm font-medium">
+                  {profileName}
+                </span>
+                <span className="mt-0.5 block truncate text-xs text-muted-foreground">
+                  @{username}
+                </span>
+              </span>
+            ) : null}
+          </Link>
           <form
             action="/api/auth/logout"
             method="post"
@@ -209,51 +244,44 @@ export function DashboardSidebar({
               // Erase the persisted resume key before navigation closes its worker.
               void vault.lock().finally(() => form.submit());
             }}
-            className={cn(
-              "absolute left-0 top-0 h-9 min-w-0 transition-[width] duration-200 ease-out",
-              isCollapsed ? "w-10" : "w-[calc(100%-2.5rem)]",
-            )}
           >
             <input type="hidden" name="csrf_token" value={csrfToken} />
-            <Button
+            <button
               type="submit"
-              variant="ghost"
-              title={isCollapsed ? "Sign out" : undefined}
-              aria-label={isCollapsed ? "Sign out" : undefined}
-              className={cn(
-                "h-9 justify-start border-transparent bg-transparent px-3 text-destructive hover:bg-destructive/10 hover:text-destructive focus-visible:border-transparent dark:hover:bg-destructive/15",
-                isCollapsed ? "w-10" : "w-full",
-              )}
+              title="Sign out"
+              aria-label="Sign out"
+              className="sidebar-icon-button hover:text-destructive"
             >
               <LogOut className="size-4" aria-hidden="true" />
-              {!isCollapsed ? <span>Sign out</span> : null}
-            </Button>
+            </button>
           </form>
-
-          <Button
-            type="button"
-            variant="ghost"
-            size="icon-lg"
-            onClick={toggleSidebar}
-            aria-label={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            aria-expanded={!isCollapsed}
-            title={isCollapsed ? "Expand sidebar" : "Collapse sidebar"}
-            className={cn(
-              "absolute border-transparent bg-transparent text-foreground transition-[top,right,width] duration-200 ease-out hover:bg-foreground/[0.08] focus-visible:border-transparent aria-expanded:bg-transparent aria-expanded:hover:bg-foreground/[0.08] active:not-aria-[haspopup]:translate-y-0",
-              isCollapsed
-                ? "right-2 top-12 w-10 justify-start px-3"
-                : "right-0 top-0",
-            )}
-          >
-            {isCollapsed ? (
-              <PanelLeftOpen className="size-4" aria-hidden="true" />
-            ) : (
-              <PanelLeftClose className="size-4" aria-hidden="true" />
-            )}
-          </Button>
         </div>
       </div>
     </aside>
+  );
+}
+
+function SidebarGroup({
+  label,
+  collapsed,
+  children,
+}: {
+  label: string;
+  collapsed: boolean;
+  children: ReactNode;
+}) {
+  return (
+    <section>
+      <p
+        className={cn(
+          "mb-2 px-3 text-[13px] text-muted-foreground",
+          collapsed && "sr-only",
+        )}
+      >
+        {label}
+      </p>
+      {children}
+    </section>
   );
 }
 
@@ -274,14 +302,14 @@ function SidebarLink({
       title={collapsed ? section.label : undefined}
       data-sidebar-active={active ? "true" : "false"}
       className={cn(
-        "relative z-10 flex h-9 items-center gap-2 rounded-[12px] px-3 text-left text-sm transition-colors",
-        collapsed ? "w-10" : "w-full",
+        "relative z-10 flex h-10 items-center gap-3 rounded-xl px-3 text-left text-[15px] font-medium transition-colors",
+        collapsed ? "ml-1 w-10 justify-center px-0" : "w-full",
         active
-          ? "font-medium text-foreground [&_svg]:text-primary"
-          : "text-muted-foreground hover:bg-primary/[0.07] hover:text-foreground",
+          ? "text-foreground"
+          : "text-muted-foreground hover:text-foreground",
       )}
     >
-      <section.icon className="size-4 shrink-0" aria-hidden="true" />
+      <section.icon className="size-[1.125rem] shrink-0" aria-hidden="true" />
       {!collapsed ? <span className="truncate">{section.label}</span> : null}
     </Link>
   );

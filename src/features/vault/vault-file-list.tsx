@@ -64,6 +64,7 @@ import { useVault, VAULT_LOCKING_EVENT } from "@/features/vault/vault-provider";
 import { isAbortError } from "@/lib/abort";
 import type { FileEntry, FileSort, FileSortDirection } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
+import { cn } from "@/lib/utils";
 
 // Both share dialogs only mount once a share action is chosen, so their code
 // (react-day-picker, date-fns and the vault sharing flow) stays out of the file
@@ -850,7 +851,12 @@ function VaultFileListView({
 
   return (
     <>
-      <div className="grid min-h-14 grid-cols-[2rem_minmax(0,1fr)_7rem] gap-3 border-b px-4 py-3 text-sm font-medium text-muted-foreground md:grid-cols-[2rem_minmax(12rem,1fr)_7rem_7rem_9rem_6rem] md:items-center">
+      <div
+        className={cn(
+          "grid min-h-14 grid-cols-[2rem_minmax(0,1fr)_7rem] gap-3 border-b px-4 py-3 text-sm font-medium text-muted-foreground transition-colors md:grid-cols-[2rem_minmax(12rem,1fr)_7rem_7rem_9rem_6rem] md:items-center",
+          selectedCount > 0 && "bg-muted/20",
+        )}
+      >
         <span className="flex items-center justify-center">
           <Checkbox
             checked={selectAllState}
@@ -865,111 +871,120 @@ function VaultFileListView({
             }
           />
         </span>
-        <SortButton
-          field="name"
-          label="Name"
-          sort={sort}
-          direction={direction}
-          onChange={onSortChange}
-        />
-        <span>Kind</span>
-        <SortButton
-          field="size"
-          label="Size"
-          sort={sort}
-          direction={direction}
-          onChange={onSortChange}
-          className="hidden md:flex"
-        />
-        <SortButton
-          field="updated"
-          label={dateLabel}
-          sort={sort}
-          direction={direction}
-          onChange={onSortChange}
-          className="hidden md:flex"
-        />
-        <span className="hidden items-center justify-end gap-1.5 md:flex">
-          Actions
-          <ListFilter className="size-3.5" aria-hidden="true" />
-        </span>
-      </div>
-      {selectedCount > 0 ? (
-        <div className="flex min-h-11 shrink-0 items-center justify-between gap-3 border-b bg-muted/20 px-4 py-2 text-sm">
-          <span className="font-medium">
-            {selectedCount} {selectedCount === 1 ? "item" : "items"} selected
-          </span>
-          <div className="flex items-center gap-2">
-            {!isTrash && !isShared && singleSelectedEntry ? (
-              <Button
-                type="button"
-                variant="secondary"
-                size="sm"
-                disabled={
-                  singleSelectedEntry.e2eeState === "encrypted" &&
-                  !singleSelectedEntry.resolved
-                }
-                onClick={() => onShareEntryChange(singleSelectedEntry)}
-                onFocus={() => preloadShareDialog(singleSelectedEntry)}
-                onPointerEnter={() => preloadShareDialog(singleSelectedEntry)}
-              >
-                {hasManagedSharing(singleSelectedEntry) ? (
-                  <Link2 className="size-4" aria-hidden="true" />
-                ) : (
-                  <Share2 className="size-4" aria-hidden="true" />
-                )}
-                {sharingActionLabel(singleSelectedEntry)}
-              </Button>
-            ) : null}
-            {isTrash ? (
-              <>
+        {selectedCount > 0 ? (
+          // The selection's actions take the place of the column labels, so
+          // selecting an entry never moves the rows beneath.
+          <div className="col-[2/-1] flex min-w-0 items-center justify-between gap-3 self-center">
+            <span className="truncate text-foreground">
+              {selectedCount} {selectedCount === 1 ? "item" : "items"} selected
+            </span>
+            <div className="-my-1 flex shrink-0 items-center gap-2">
+              {!isTrash && !isShared && singleSelectedEntry ? (
                 <Button
                   type="button"
                   variant="secondary"
                   size="sm"
-                  disabled={mutationBusy}
-                  onClick={() => void onRestore(selectedEntries)}
+                  disabled={
+                    singleSelectedEntry.e2eeState === "encrypted" &&
+                    !singleSelectedEntry.resolved
+                  }
+                  onClick={() => onShareEntryChange(singleSelectedEntry)}
+                  onFocus={() => preloadShareDialog(singleSelectedEntry)}
+                  onPointerEnter={() => preloadShareDialog(singleSelectedEntry)}
                 >
-                  <RotateCcw className="size-4" aria-hidden="true" />
-                  Restore
+                  {hasManagedSharing(singleSelectedEntry) ? (
+                    <Link2 className="size-4" aria-hidden="true" />
+                  ) : (
+                    <Share2 className="size-4" aria-hidden="true" />
+                  )}
+                  <span className={selectionActionLabel}>
+                    {sharingActionLabel(singleSelectedEntry)}
+                  </span>
                 </Button>
+              ) : null}
+              {isTrash ? (
+                <>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={mutationBusy}
+                    onClick={() => void onRestore(selectedEntries)}
+                  >
+                    <RotateCcw className="size-4" aria-hidden="true" />
+                    <span className={selectionActionLabel}>Restore</span>
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="secondary"
+                    size="sm"
+                    disabled={mutationBusy}
+                    className="text-destructive hover:text-destructive"
+                    onClick={() => void onDeletePermanently(selectedEntries)}
+                  >
+                    <Trash2 className="size-4" aria-hidden="true" />
+                    <span className={selectionActionLabel}>
+                      Delete permanently
+                    </span>
+                  </Button>
+                </>
+              ) : !isShared ? (
                 <Button
                   type="button"
                   variant="secondary"
                   size="sm"
                   disabled={mutationBusy}
                   className="text-destructive hover:text-destructive"
-                  onClick={() => void onDeletePermanently(selectedEntries)}
+                  onClick={() => void onMoveToTrash(selectedEntries)}
                 >
                   <Trash2 className="size-4" aria-hidden="true" />
-                  Delete permanently
+                  <span className={selectionActionLabel}>Delete</span>
                 </Button>
-              </>
-            ) : !isShared ? (
+              ) : null}
               <Button
                 type="button"
-                variant="secondary"
+                variant="ghost"
                 size="sm"
-                disabled={mutationBusy}
-                className="text-destructive hover:text-destructive"
-                onClick={() => void onMoveToTrash(selectedEntries)}
+                onClick={onClearSelection}
               >
-                <Trash2 className="size-4" aria-hidden="true" />
-                Delete
+                <X className="size-4" aria-hidden="true" />
+                <span className={selectionActionLabel}>Clear</span>
               </Button>
-            ) : null}
-            <Button
-              type="button"
-              variant="ghost"
-              size="sm"
-              onClick={onClearSelection}
-            >
-              <X className="size-4" aria-hidden="true" />
-              Clear
-            </Button>
+            </div>
           </div>
-        </div>
-      ) : null}
+        ) : (
+          <>
+            <SortButton
+              field="name"
+              label="Name"
+              sort={sort}
+              direction={direction}
+              onChange={onSortChange}
+            />
+            <span>Kind</span>
+            <SortButton
+              field="size"
+              label="Size"
+              sort={sort}
+              direction={direction}
+              onChange={onSortChange}
+              className="hidden md:flex"
+            />
+            <SortButton
+              field="updated"
+              label={dateLabel}
+              sort={sort}
+              direction={direction}
+              onChange={onSortChange}
+              className="hidden md:flex"
+            />
+            <span className="hidden items-center justify-end gap-1.5 md:flex">
+              Actions
+              <ListFilter className="size-3.5" aria-hidden="true" />
+            </span>
+          </>
+        )}
+      </div>
       {vault.enabled && vault.state !== "unlocked" ? (
         <button
           type="button"
@@ -1390,6 +1405,10 @@ function hasManagedSharing(entry: FileEntry): boolean {
     ? entry.shared
     : entry.hasActiveShareLink;
 }
+
+// On narrow screens the actions keep their icons and accessible names only,
+// so they fit on the header's single line.
+const selectionActionLabel = "sr-only sm:not-sr-only";
 
 function sharingActionLabel(entry: FileEntry): string {
   if (!hasManagedSharing(entry)) return "Share";

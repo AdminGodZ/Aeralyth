@@ -67,7 +67,7 @@ h3 {
 }
 
 :root {
-  --dashboard-sidebar: #080a0e;
+  --dashboard-sidebar: #0a0a0a;
   --login-panel: rgb(0 0 0 / 50%);
   --card: oklch(1 0 0);
   --card-foreground: oklch(0.141 0.005 285.823);
@@ -142,17 +142,58 @@ h3 {
   color: var(--foreground);
 }
 
+/*
+ * The dashboard is monochrome: neutral greys with white as the highlight, in
+ * place of the accent preference and the zinc tint. Pop-ups render outside
+ * the frame, so the body carries the same highlight for them.
+ */
+body:has(.dashboard-frame) {
+  /* One typeface throughout; headings no longer switch family. */
+  --font-figtree: var(--font-geist-sans);
+  --primary: oklch(0.205 0 0);
+  --primary-foreground: oklch(0.985 0 0);
+  --ring: oklch(0.55 0 0);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+}
+
+.dark body:has(.dashboard-frame) {
+  --background: oklch(0.145 0 0);
+  --foreground: oklch(0.97 0 0);
+  --card: #171717;
+  --popover: #171717;
+  --secondary: oklch(0.25 0 0);
+  --muted: oklch(0.25 0 0);
+  --muted-foreground: oklch(0.68 0 0);
+  --accent: oklch(0.25 0 0);
+  --border: oklch(1 0 0 / 8%);
+  --input: oklch(1 0 0 / 12%);
+}
+
+.dark body:has(.dashboard-frame),
+.dashboard-sidebar,
+.dashboard-main-panel {
+  --primary: oklch(0.96 0 0);
+  --primary-foreground: oklch(0.17 0 0);
+  --ring: oklch(0.6 0 0);
+  --sidebar-primary: var(--primary);
+  --sidebar-primary-foreground: var(--primary-foreground);
+}
+
 .dashboard-frame {
-  --dashboard-canvas: #0b0d12;
-  --dashboard-control: #101319;
-  --dashboard-divider: rgb(255 255 255 / 8%);
+  --dashboard-canvas: #111111;
+  --dashboard-control: #171717;
+  --dashboard-card: #171717;
+  /* Captured here, before the sidebar and panel turn the highlight white. */
+  --dashboard-accent: var(--primary);
+  --dashboard-divider: rgb(255 255 255 / 6%);
   background: var(--dashboard-sidebar);
 }
 
 .dashboard-sidebar {
   position: relative;
-  --foreground: oklch(0.97 0.004 286);
-  --muted-foreground: oklch(0.62 0.012 286);
+  --foreground: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.68 0 0);
   --border: var(--dashboard-divider);
   --destructive: oklch(0.72 0.17 24);
   isolation: isolate;
@@ -160,69 +201,59 @@ h3 {
   color: var(--foreground);
 }
 
-.dashboard-sidebar-ambient {
-  position: absolute;
-  inset: 0;
-  z-index: -1;
-  /* Spill sideways into the gap above the main panel; the panel paints over the rest. */
-  overflow-x: visible;
-  overflow-y: clip;
-  pointer-events: none;
+.sidebar-active-indicator {
+  border-radius: 0.75rem;
+  background: rgb(255 255 255 / 7%);
 }
 
-.dashboard-sidebar-ambient::before {
-  content: "";
-  position: absolute;
-  inset: -16% -45%;
-  background:
-    radial-gradient(
-      ellipse at 20% 22%,
-      color-mix(in srgb, var(--primary) 16%, transparent) 0%,
-      color-mix(in srgb, var(--primary) 5%, transparent) 30%,
-      transparent 60%
-    ),
-    radial-gradient(
-      ellipse at 85% 80%,
-      color-mix(in srgb, var(--primary) 10%, transparent) 0%,
-      transparent 55%
-    );
-  animation: sidebar-accent-drift 22s ease-in-out infinite alternate;
+.sidebar-icon-button {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: center;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 0.625rem;
+  color: var(--muted-foreground);
+  transition:
+    background-color 150ms ease,
+    color 150ms ease;
 }
 
-@keyframes sidebar-accent-drift {
-  from {
-    transform: translate3d(-5%, -4%, 0) scale(1.02);
-  }
-  to {
-    transform: translate3d(10%, 8%, 0) scale(1.1);
-  }
+.sidebar-icon-button:hover {
+  background: rgb(255 255 255 / 6%);
+  color: var(--foreground);
+}
+
+.sidebar-icon-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
 }
 
 .dashboard-topbar {
   --background: var(--dashboard-control);
-  --foreground: oklch(0.97 0.004 286);
-  --muted-foreground: oklch(0.66 0.012 286);
+  --foreground: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.68 0 0);
   --border: var(--dashboard-divider);
   background: var(--dashboard-canvas);
-  border-bottom-color: var(--dashboard-divider);
   color: var(--foreground);
 }
 
 .dashboard-main-panel {
   position: relative;
   --background: var(--dashboard-canvas);
-  --foreground: oklch(0.97 0.004 286);
-  --card: rgb(11 12 16 / 66%);
-  --card-foreground: oklch(0.97 0.004 286);
-  --popover: rgb(13 14 18 / 92%);
-  --popover-foreground: oklch(0.97 0.004 286);
+  --foreground: oklch(0.97 0 0);
+  --card: var(--dashboard-card);
+  --card-foreground: oklch(0.97 0 0);
+  --popover: rgb(23 23 23 / 96%);
+  --popover-foreground: oklch(0.97 0 0);
   --secondary: rgb(255 255 255 / 7%);
-  --secondary-foreground: oklch(0.97 0.004 286);
+  --secondary-foreground: oklch(0.97 0 0);
   --muted: rgb(255 255 255 / 7%);
-  --muted-foreground: oklch(0.66 0.012 286);
+  --muted-foreground: oklch(0.68 0 0);
   --accent: rgb(255 255 255 / 8%);
-  --accent-foreground: oklch(0.97 0.004 286);
-  --border: rgb(255 255 255 / 10%);
+  --accent-foreground: oklch(0.97 0 0);
+  --border: rgb(255 255 255 / 7%);
   --input: rgb(255 255 255 / 12%);
   background: var(--dashboard-canvas);
   color: var(--foreground);
@@ -235,23 +266,430 @@ h3 {
   }
 }
 
+/* The sign-in page shares the dashboard's monochrome palette and typeface. */
 .login-page {
-  --primary: #f4b64d;
-  --primary-foreground: #241a0c;
-  --background: #131211;
-  --muted-foreground: #b9b4aa;
-  --ring: var(--primary);
+  --font-figtree: var(--font-geist-sans);
+  --primary: oklch(0.96 0 0);
+  --primary-foreground: oklch(0.17 0 0);
+  --background: #0a0a0a;
+  --foreground: oklch(0.97 0 0);
+  --muted-foreground: oklch(0.7 0 0);
+  --ring: oklch(0.6 0 0);
+  --login-panel: rgb(14 14 14 / 82%);
 }
 
+/* The sign-in panel: dark glass inside a ring of cells that light travels round. */
+.login-card {
+  --login-ember: #ff4416;
+  --login-ember-hot: #ff9a66;
+  position: relative;
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  justify-content: center;
+  border-radius: 1.75rem;
+  background:
+    radial-gradient(
+      120% 60% at 50% 0%,
+      rgb(255 255 255 / 4.5%),
+      transparent 60%
+    ),
+    rgb(9 9 9 / 80%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 6%),
+    inset 0 0 0 1px rgb(255 255 255 / 4%),
+    0 30px 80px -20px rgb(0 0 0 / 80%),
+    0 40px 110px -40px color-mix(in srgb, var(--login-ember) 55%, transparent);
+  backdrop-filter: blur(22px) saturate(1.2);
+  animation: login-card-in 900ms cubic-bezier(0.2, 0.8, 0.2, 1) 250ms both;
+}
+
+.login-card-frame {
+  position: absolute;
+  inset: 0;
+  overflow: visible;
+  pointer-events: none;
+  animation: login-frame-in 1200ms ease 700ms both;
+}
+
+.login-card-cells {
+  fill: none;
+  stroke: var(--login-ember);
+  stroke-width: 3;
+  stroke-linecap: square;
+}
+
+.login-card-cells-idle {
+  stroke: rgb(255 255 255 / 13%);
+}
+
+.login-card-cells-mask {
+  stroke: #fff;
+}
+
+.login-card-comet {
+  fill: none;
+  stroke: var(--login-ember-hot);
+  stroke-width: 5;
+  animation: login-comet linear infinite;
+}
+
+/* Cells near the pointer warm up. */
+.login-card-spotlight {
+  opacity: 0;
+  mask-image: radial-gradient(
+    9rem circle at var(--pointer-x, 50%) var(--pointer-y, 0%),
+    #000,
+    transparent
+  );
+  transition: opacity 300ms ease;
+  animation: none;
+}
+
+.login-card:hover .login-card-spotlight {
+  opacity: 1;
+}
+
+.login-card h2,
+.login-card h2 + p,
+.login-card form > * {
+  animation: login-rise 700ms cubic-bezier(0.2, 0.8, 0.2, 1) both;
+  animation-delay: 520ms;
+}
+
+.login-card h2 + p {
+  animation-delay: 580ms;
+}
+
+.login-card form > :nth-child(1) {
+  animation-delay: 660ms;
+}
+
+.login-card form > :nth-child(2) {
+  animation-delay: 740ms;
+}
+
+.login-card form > :nth-child(3) {
+  animation-delay: 820ms;
+}
+
+.login-card form > :nth-child(4) {
+  animation-delay: 900ms;
+}
+
+.login-card input:focus-visible {
+  border-color: color-mix(in srgb, var(--login-ember) 65%, transparent);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 6%),
+    0 0 0 3px color-mix(in srgb, var(--login-ember) 16%, transparent);
+}
+
+@keyframes login-card-in {
+  from {
+    opacity: 0;
+    transform: translateY(18px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes login-frame-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+@keyframes login-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+@keyframes login-comet {
+  from {
+    stroke-dashoffset: 1;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+.led-matrix {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  background: #000;
+  pointer-events: none;
+}
+
+.led-matrix canvas {
+  position: absolute;
+  top: 0;
+  left: 0;
+  opacity: 0;
+  transition: opacity 900ms ease;
+}
+
+.led-matrix[data-ready] canvas {
+  opacity: 1;
+}
+
+/* Each canvas holds one pixel per cell and is scaled up to the cell pitch. */
+.led-matrix-bloom {
+  filter: blur(14px);
+}
+
+.led-matrix[data-ready] .led-matrix-bloom {
+  opacity: 0.72;
+}
+
+.led-matrix-cells,
+.led-matrix-cores {
+  image-rendering: pixelated;
+  mask-size: var(--led-pitch) var(--led-pitch);
+}
+
+.led-matrix-cells {
+  mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 10'%3E%3Crect x='1' y='1' width='8' height='8' rx='1.8'/%3E%3C/svg%3E");
+}
+
+.led-matrix-cores {
+  mask-image: radial-gradient(circle, #000 0 20%, transparent 29%);
+}
+
+/* Darkens the edges so the light reads as a glow rather than a flat wall. */
+.led-matrix::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: radial-gradient(
+    140% 110% at 40% 40%,
+    transparent 45%,
+    rgb(0 0 0 / 60%) 100%
+  );
+}
+
+/* The usage bars are the one place the accent preference still shows. */
 .storage-overview {
-  --storage-tone-own: var(--primary);
+  --storage-tone-own: var(--dashboard-accent);
   --storage-tone-rest: oklch(0.74 0.11 232);
 }
 
 @supports (color: oklch(from red l c h)) {
   .storage-overview {
     /* Sits opposite the accent on the hue wheel, whichever accent is chosen. */
-    --storage-tone-rest: oklch(from var(--primary) 0.74 0.12 calc(h + 150));
+    --storage-tone-rest: oklch(
+      from var(--dashboard-accent) 0.74 0.12 calc(h + 150)
+    );
+  }
+}
+
+/* The dashboard's card surface: a flat fill one step above the canvas. */
+.dashboard-card {
+  min-width: 0;
+  overflow: hidden;
+  border-radius: 1.125rem;
+  background: var(--dashboard-card);
+}
+
+.storage-status-dot {
+  position: relative;
+  width: 0.375rem;
+  height: 0.375rem;
+  border-radius: 999px;
+  background: var(--muted-foreground);
+}
+
+.storage-status-dot[data-tone="ok"] {
+  background: oklch(0.77 0.15 160);
+  box-shadow: 0 0 8px oklch(0.77 0.15 160 / 60%);
+}
+
+.storage-status-dot[data-tone="busy"],
+.storage-status-dot[data-tone="warn"] {
+  background: oklch(0.82 0.15 80);
+  box-shadow: 0 0 8px oklch(0.82 0.15 80 / 60%);
+}
+
+.storage-status-dot[data-tone="busy"] {
+  animation: storage-status-pulse 1.4s ease-in-out infinite;
+}
+
+.storage-status-dot[data-tone="error"] {
+  background: oklch(0.7 0.18 25);
+}
+
+@keyframes storage-status-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+.ghost-mascot {
+  overflow: visible;
+  color: var(--foreground);
+  fill: currentColor;
+}
+
+.ghost-mascot-body {
+  transform-box: fill-box;
+  transform-origin: 50% 60%;
+  animation: ghost-float 3.2s ease-in-out infinite;
+}
+
+.ghost-mascot-face {
+  fill: var(--background);
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ghost-blink 4.6s ease-in-out infinite;
+}
+
+.ghost-mascot-shadow {
+  opacity: 0.22;
+  transform-box: fill-box;
+  transform-origin: center;
+  animation: ghost-shadow 3.2s ease-in-out infinite;
+}
+
+.ghost-mascot[data-flying] .ghost-mascot-body {
+  animation: ghost-fly 1.5s ease-in-out infinite;
+}
+
+.ghost-mascot-streaks rect {
+  opacity: 0;
+  animation: ghost-streak 0.9s linear infinite;
+}
+
+.ghost-mascot-streaks rect:nth-child(2) {
+  animation-delay: -0.3s;
+}
+
+.ghost-mascot-streaks rect:nth-child(3) {
+  animation-delay: -0.6s;
+}
+
+@keyframes ghost-float {
+  0%,
+  100% {
+    transform: translateY(2px) rotate(-2deg);
+  }
+  50% {
+    transform: translateY(-3px) rotate(2deg);
+  }
+}
+
+@keyframes ghost-fly {
+  0%,
+  100% {
+    transform: translateY(1.5px) rotate(5deg);
+  }
+  50% {
+    transform: translateY(-2.5px) rotate(9deg);
+  }
+}
+
+@keyframes ghost-blink {
+  0%,
+  44%,
+  50%,
+  100% {
+    transform: scaleY(1);
+  }
+  47% {
+    transform: scaleY(0.12);
+  }
+}
+
+@keyframes ghost-shadow {
+  0%,
+  100% {
+    transform: scaleX(1);
+    opacity: 0.24;
+  }
+  50% {
+    transform: scaleX(0.78);
+    opacity: 0.14;
+  }
+}
+
+@keyframes ghost-streak {
+  0% {
+    opacity: 0;
+    transform: translateX(7px);
+  }
+  35% {
+    opacity: 0.75;
+  }
+  100% {
+    opacity: 0;
+    transform: translateX(-5px);
+  }
+}
+
+/* The mascot in a pill, beside a status message that trails moving dots. */
+.ghost-loader {
+  display: inline-flex;
+  min-width: 0;
+  height: 2.25rem;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0 0.875rem 0 0.375rem;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--foreground) 9%, transparent);
+  font-size: 0.875rem;
+  font-weight: 600;
+}
+
+.ghost-loader-text {
+  display: inline-flex;
+  min-width: 0;
+  align-items: baseline;
+  gap: 2px;
+}
+
+/* An empty box's baseline is its bottom edge, so the dots sit on the text baseline. */
+.ghost-loader-dots {
+  display: inline-flex;
+  flex-shrink: 0;
+  gap: 2px;
+}
+
+.ghost-loader-dots span {
+  width: 3px;
+  height: 3px;
+  background: currentColor;
+  opacity: 0.3;
+  animation: ghost-dot 1.2s ease-in-out infinite;
+}
+
+.ghost-loader-dots span:nth-child(2) {
+  animation-delay: 0.15s;
+}
+
+.ghost-loader-dots span:nth-child(3) {
+  animation-delay: 0.3s;
+}
+
+@keyframes ghost-dot {
+  0%,
+  60%,
+  100% {
+    opacity: 0.3;
+    transform: translateY(0);
+  }
+  30% {
+    opacity: 1;
+    transform: translateY(-2px);
   }
 }
 
@@ -289,7 +727,8 @@ h3 {
   transition:
     transform 240ms cubic-bezier(0.2, 0.8, 0.2, 1),
     background-color 160ms ease,
-    opacity 160ms ease;
+    opacity 160ms ease,
+    box-shadow 240ms ease;
 }
 
 .login-submit:not(:disabled):active {
@@ -312,6 +751,10 @@ h3 {
 @media (hover: hover) {
   .login-submit:not(:disabled):hover .login-submit-arrow {
     transform: translateX(3px);
+  }
+
+  .login-submit:not(:disabled):hover {
+    box-shadow: 0 10px 34px -10px rgb(255 68 22 / 85%);
   }
 }
 
@@ -343,41 +786,6 @@ h3 {
   to {
     opacity: 1;
     transform: translateY(0);
-  }
-}
-
-.login-gradient-drift {
-  animation: login-gradient-drift 12s ease-in-out infinite alternate;
-  will-change: transform;
-}
-
-.login-light-ray {
-  opacity: 0.2;
-  transform-origin: 20% 0%;
-  animation: login-light-ray 12s ease-in-out infinite alternate;
-}
-
-@keyframes login-light-ray {
-  0% {
-    opacity: 0.12;
-    transform: translate3d(-5%, -2%, 0) skewX(36deg) scaleX(0.88);
-  }
-  50% {
-    opacity: 0.28;
-    transform: translate3d(2%, 0, 0) skewX(44deg) scaleX(1.06);
-  }
-  100% {
-    opacity: 0.16;
-    transform: translate3d(6%, 1%, 0) skewX(49deg) scaleX(0.95);
-  }
-}
-
-@keyframes login-gradient-drift {
-  from {
-    transform: translate3d(-3%, -2%, 0) scale(1.02);
-  }
-  to {
-    transform: translate3d(4%, 3%, 0) scale(1.06);
   }
 }
 
@@ -614,23 +1022,35 @@ h3 {
     animation: none;
   }
 
-  .dashboard-sidebar-ambient::before,
-  .login-gradient-drift,
-  .login-light-ray,
   .dotted-surface::before,
   .dotted-surface::after,
   .upload-edge-glow,
   .upload-edge-rim,
-  .upload-edge-spark {
+  .upload-edge-spark,
+  .storage-status-dot,
+  .ghost-mascot-body,
+  .ghost-mascot-face,
+  .ghost-mascot-shadow,
+  .ghost-loader-dots span,
+  .login-card,
+  .login-card-frame,
+  .login-card h2,
+  .login-card h2 + p,
+  .login-card form > * {
     animation: none;
+  }
+
+  .login-card-comet {
+    display: none;
+  }
+
+  .ghost-mascot-streaks rect {
+    animation: none;
+    opacity: 0.5;
   }
 
   .upload-edge-spark {
     display: none;
-  }
-
-  .login-gradient-drift {
-    will-change: auto;
   }
 }
 

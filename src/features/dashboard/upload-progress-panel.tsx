@@ -11,6 +11,7 @@ import {
 } from "lucide-react";
 import { useState } from "react";
 
+import { GhostMascot } from "@/components/ghost-mascot";
 import { Button } from "@/components/ui/button";
 import {
   Popover,
@@ -85,23 +86,13 @@ export function UploadProgressPanel({
             }
           >
             <div className="flex items-center gap-3">
-              <span
-                className={cn(
-                  "flex size-8 shrink-0 items-center justify-center rounded-full",
-                  failed
-                    ? "bg-destructive/10 text-destructive"
-                    : "bg-primary/10 text-primary",
-                )}
-              >
-                {failed ? (
+              {failed ? (
+                <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-destructive/10 text-destructive">
                   <CircleAlert className="size-4" aria-hidden="true" />
-                ) : (
-                  <LoaderCircle
-                    className="size-4 animate-spin"
-                    aria-hidden="true"
-                  />
-                )}
-              </span>
+                </span>
+              ) : (
+                <GhostMascot flying className="size-9 shrink-0" />
+              )}
 
               <span className="min-w-0 flex-1">
                 <span className="block truncate text-sm font-medium">
