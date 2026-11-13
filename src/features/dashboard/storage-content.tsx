@@ -1,14 +1,23 @@
 "use client";
 
-import { Cloud, HardDrive } from "lucide-react";
-import { useEffect, useState } from "react";
+import {
+  Boxes,
+  Cloud,
+  Database,
+  Gauge,
+  HardDrive,
+  type LucideIcon,
+} from "lucide-react";
+import { type ReactNode, useEffect, useState } from "react";
 import { Badge } from "@/components/ui/badge";
+import { StorageMatrix } from "@/features/dashboard/storage-matrix";
 import {
   formatStorageBytes,
   isStorageOverview,
   type StorageOverviewState,
   storagePercentage,
 } from "@/features/dashboard/storage-overview";
+import { cn } from "@/lib/utils";
 
 const measurementTime = new Intl.DateTimeFormat("en", {
   year: "numeric",
@@ -27,6 +36,8 @@ export function StorageContent({
 }) {
   const [state, setState] = useState(initialState);
   const [refreshFailed, setRefreshFailed] = useState(false);
+  const [activeAccountKey, setActiveAccountKey] = useState<string | null>(null);
+  const [activeBucketKey, setActiveBucketKey] = useState<string | null>(null);
 
   useEffect(() => {
     setState(initialState);
@@ -130,143 +141,235 @@ export function StorageContent({
   const percentLabel = `${percent.toFixed(1)}%`;
   const quotaKnown = account.totalBytes > 0;
   const bucketReady = bucketUsage.status === "ready";
+  const bucketPending =
+    bucketUsage.status === "loading" ||
+    (bucketUsage.status === "ready" && bucketUsage.refreshing);
+  const bucketBytes = bucketReady ? bucketUsage.usage.usedBytes : 0;
+  // The two figures are measured separately, so the account can briefly lead the bucket.
+  const ownBucketBytes = Math.min(account.aeralythUsedBytes, bucketBytes);
   const ProviderIcon = bucketName ? Cloud : HardDrive;
 
   return (
-    <div className="flex flex-1 flex-col gap-5 px-4 py-5 sm:px-6">
+    <div className="storage-overview flex flex-1 flex-col gap-5 px-4 py-5 sm:px-6">
       <section
         className="overflow-hidden rounded-xl border"
         aria-labelledby="account-storage-title"
       >
-        <div className="flex flex-wrap items-start justify-between gap-3 border-b p-5">
-          <div>
-            <h2 id="account-storage-title" className="font-medium">
-              Your account
-            </h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Your files and Trash, within your account quota.
-            </p>
-          </div>
-          <Badge variant="outline" className="gap-2">
-            <ProviderIcon
-              className="size-3.5 text-primary"
-              aria-hidden="true"
-            />
-            {provider}
-          </Badge>
-        </div>
-        <dl className="grid grid-cols-2 gap-5 p-5 xl:grid-cols-4">
-          <StorageMetric
-            label="Used"
-            value={formatStorageBytes(account.aeralythUsedBytes)}
-          />
-          <StorageMetric
-            label="Remaining"
-            value={
-              quotaKnown ? formatStorageBytes(account.availableBytes) : "—"
-            }
-          />
-          <StorageMetric
-            label="Account quota"
-            value={
-              quotaKnown ? formatStorageBytes(account.totalBytes) : "Not set"
-            }
-          />
-          <StorageMetric
-            label="Utilization"
-            value={quotaKnown ? percentLabel : "—"}
-          />
-        </dl>
-        {quotaKnown ? (
-          <div className="px-5 pb-5">
-            <progress
-              className="storage-usage-meter"
-              value={Math.min(100, percent)}
-              max={100}
-              aria-label="Account quota used"
-              aria-valuetext={`${percentLabel} of your account quota used`}
-            />
-            <div className="mt-2 flex flex-wrap justify-between gap-2 text-xs text-muted-foreground">
-              <span>{percentLabel} used</span>
-              <span>
-                {formatStorageBytes(account.availableBytes)} remaining
-              </span>
+        <div className="flex flex-col gap-5 p-5 sm:p-6">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2
+                id="account-storage-title"
+                className="text-sm font-medium text-muted-foreground"
+              >
+                Your account
+              </h2>
+              <p className="mt-1.5 flex flex-wrap items-baseline gap-x-2">
+                <span className="font-display text-3xl font-semibold tabular-nums">
+                  {formatStorageBytes(account.aeralythUsedBytes)}
+                </span>
+                <span className="text-sm text-muted-foreground">
+                  {quotaKnown
+                    ? `of ${formatStorageBytes(account.totalBytes)} used`
+                    : "used"}
+                </span>
+              </p>
             </div>
+            <Badge variant="outline" className="gap-2">
+              <ProviderIcon
+                className="size-3.5 text-primary"
+                aria-hidden="true"
+              />
+              {provider}
+            </Badge>
           </div>
-        ) : null}
+          {quotaKnown ? (
+            <>
+              <StorageMatrix
+                segments={[
+                  {
+                    key: "used",
+                    value: account.aeralythUsedBytes,
+                    color: "var(--storage-tone-own)",
+                  },
+                ]}
+                total={account.totalBytes}
+                restKey="free"
+                activeKey={activeAccountKey}
+                onActiveKeyChange={setActiveAccountKey}
+              />
+              <progress
+                className="sr-only"
+                value={Math.min(100, percent)}
+                max={100}
+                aria-label="Account quota used"
+                aria-valuetext={`${percentLabel} of your account quota used`}
+              />
+            </>
+          ) : null}
+          <dl className="-mx-2.5 grid gap-x-4 gap-y-0.5 sm:grid-cols-2 xl:grid-cols-4">
+            <StorageLegendItem
+              marker={<StorageTone color="var(--storage-tone-own)" />}
+              label="Used"
+              value={formatStorageBytes(account.aeralythUsedBytes)}
+              active={activeAccountKey === "used"}
+              onActiveChange={(active) =>
+                setActiveAccountKey(active ? "used" : null)
+              }
+            />
+            <StorageLegendItem
+              marker={<StorageTone />}
+              label="Remaining"
+              value={
+                quotaKnown ? formatStorageBytes(account.availableBytes) : "—"
+              }
+              active={activeAccountKey === "free"}
+              onActiveChange={(active) =>
+                setActiveAccountKey(active ? "free" : null)
+              }
+            />
+            <StorageLegendItem
+              marker={<StorageLegendIcon icon={Database} />}
+              label="Account quota"
+              value={
+                quotaKnown ? formatStorageBytes(account.totalBytes) : "Not set"
+              }
+            />
+            <StorageLegendItem
+              marker={<StorageLegendIcon icon={Gauge} />}
+              label="Utilization"
+              value={quotaKnown ? percentLabel : "—"}
+            />
+          </dl>
+        </div>
+        <p className="border-t px-5 py-3 text-xs text-muted-foreground sm:px-6">
+          Your files and Trash, within your account quota.
+        </p>
       </section>
 
       <section
         className="overflow-hidden rounded-xl border"
         aria-labelledby="bucket-storage-title"
       >
-        <div className="flex flex-wrap items-start justify-between gap-3 border-b p-5">
-          <div>
-            <h2 id="bucket-storage-title" className="font-medium">
-              Storage bucket
-            </h2>
-            <p className="mt-1 text-sm text-muted-foreground">
-              Total object storage across all accounts.
-            </p>
-          </div>
-          {region ? (
-            <Badge variant="secondary">{region.toUpperCase()}</Badge>
-          ) : null}
-        </div>
-        {bucketUsage.status === "notConfigured" ? (
-          <p className="p-5 text-sm text-muted-foreground">
-            This environment uses local storage. Bucket totals appear when S3 is
-            configured.
-          </p>
-        ) : (
-          <>
-            <dl className="grid gap-5 p-5 sm:grid-cols-2 xl:grid-cols-3">
-              <StorageMetric
-                label="Bucket used"
-                value={
-                  bucketReady
-                    ? formatStorageBytes(bucketUsage.usage.usedBytes)
-                    : "—"
-                }
-              />
-              <StorageMetric
-                label="Objects"
-                value={
-                  bucketReady
-                    ? bucketUsage.usage.objectCount.toLocaleString("en")
-                    : "—"
-                }
-              />
-              <div className="min-w-0 sm:col-span-2 xl:col-span-1">
-                <dt className="text-sm text-muted-foreground">Bucket</dt>
-                <dd className="mt-2 break-all text-sm font-medium">
-                  {bucketName}
-                </dd>
-                <dd className="mt-1 text-xs text-muted-foreground">
-                  {provider}
-                </dd>
-              </div>
-            </dl>
-            <div
-              className="flex flex-wrap justify-between gap-2 border-t px-5 py-3 text-xs text-muted-foreground"
-              role="status"
-            >
-              <span>
-                {bucketUsage.status === "loading"
-                  ? "Measuring bucket usage…"
-                  : bucketUsage.status === "unavailable"
-                    ? "Bucket usage is temporarily unavailable. We’ll retry shortly."
-                    : bucketReady && bucketUsage.stale
-                      ? `Showing an older measurement from ${measurementTime.format(bucketUsage.usage.measuredAt)} UTC.`
-                      : bucketReady && bucketUsage.refreshing
-                        ? "Updating bucket measurement…"
-                        : bucketReady
-                          ? `Measured at ${measurementTime.format(bucketUsage.usage.measuredAt)} UTC`
-                          : null}
-              </span>
-              <span>Completed objects · Reconciles every 15 minutes</span>
+        <div className="flex flex-col gap-5 p-5 sm:p-6">
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div className="min-w-0">
+              <h2
+                id="bucket-storage-title"
+                className="text-sm font-medium text-muted-foreground"
+              >
+                Storage bucket
+              </h2>
+              {bucketUsage.status === "notConfigured" ? null : (
+                <p className="mt-1.5 flex flex-wrap items-baseline gap-x-2">
+                  <span
+                    className={cn(
+                      "font-display text-3xl font-semibold tabular-nums",
+                      !bucketReady && "text-muted-foreground",
+                    )}
+                  >
+                    {bucketReady ? formatStorageBytes(bucketBytes) : "—"}
+                  </span>
+                  <span className="text-sm text-muted-foreground">
+                    across all accounts
+                  </span>
+                </p>
+              )}
             </div>
-          </>
+            {region ? (
+              <Badge variant="secondary">{region.toUpperCase()}</Badge>
+            ) : null}
+          </div>
+          {bucketUsage.status === "notConfigured" ? (
+            <p className="text-sm text-muted-foreground">
+              This environment uses local storage. Bucket totals appear when S3
+              is configured.
+            </p>
+          ) : (
+            <>
+              <StorageMatrix
+                segments={[
+                  {
+                    key: "own",
+                    value: ownBucketBytes,
+                    color: "var(--storage-tone-own)",
+                  },
+                  {
+                    key: "rest",
+                    value: bucketBytes - ownBucketBytes,
+                    color: "var(--storage-tone-rest)",
+                  },
+                ]}
+                total={bucketBytes}
+                activeKey={activeBucketKey}
+                onActiveKeyChange={setActiveBucketKey}
+                scanning={bucketPending}
+              />
+              <dl className="-mx-2.5 grid gap-x-4 gap-y-0.5 sm:grid-cols-2 xl:grid-cols-4">
+                <StorageLegendItem
+                  marker={<StorageTone color="var(--storage-tone-own)" />}
+                  label="Your account"
+                  value={
+                    bucketReady
+                      ? formatStorageBytes(account.aeralythUsedBytes)
+                      : "—"
+                  }
+                  active={activeBucketKey === "own"}
+                  onActiveChange={(active) =>
+                    setActiveBucketKey(active ? "own" : null)
+                  }
+                />
+                <StorageLegendItem
+                  marker={<StorageTone color="var(--storage-tone-rest)" />}
+                  label="Rest of bucket"
+                  value={
+                    bucketReady
+                      ? formatStorageBytes(bucketBytes - ownBucketBytes)
+                      : "—"
+                  }
+                  active={activeBucketKey === "rest"}
+                  onActiveChange={(active) =>
+                    setActiveBucketKey(active ? "rest" : null)
+                  }
+                />
+                <StorageLegendItem
+                  marker={<StorageLegendIcon icon={Boxes} />}
+                  label="Objects"
+                  value={
+                    bucketReady
+                      ? bucketUsage.usage.objectCount.toLocaleString("en")
+                      : "—"
+                  }
+                />
+                <StorageLegendItem
+                  marker={<StorageLegendIcon icon={ProviderIcon} />}
+                  label="Bucket"
+                  value={bucketName ?? "—"}
+                />
+              </dl>
+            </>
+          )}
+        </div>
+        {bucketUsage.status === "notConfigured" ? null : (
+          <div
+            className="flex flex-wrap justify-between gap-2 border-t px-5 py-3 text-xs text-muted-foreground sm:px-6"
+            role="status"
+          >
+            <span>
+              {bucketUsage.status === "loading"
+                ? "Measuring bucket usage…"
+                : bucketUsage.status === "unavailable"
+                  ? "Bucket usage is temporarily unavailable. We’ll retry shortly."
+                  : bucketReady && bucketUsage.stale
+                    ? `Showing an older measurement from ${measurementTime.format(bucketUsage.usage.measuredAt)} UTC.`
+                    : bucketReady && bucketUsage.refreshing
+                      ? "Updating bucket measurement…"
+                      : bucketReady
+                        ? `Measured at ${measurementTime.format(bucketUsage.usage.measuredAt)} UTC`
+                        : null}
+            </span>
+            <span>Completed objects · Reconciles every 15 minutes</span>
+          </div>
         )}
       </section>
       {refreshFailed ? (
@@ -279,13 +382,59 @@ export function StorageContent({
   );
 }
 
-function StorageMetric({ label, value }: { label: string; value: string }) {
+function StorageLegendItem({
+  marker,
+  label,
+  value,
+  active = false,
+  onActiveChange,
+}: {
+  marker: ReactNode;
+  label: string;
+  value: string;
+  active?: boolean;
+  /** Present on entries that have a matching part of the bar to highlight. */
+  onActiveChange?: (active: boolean) => void;
+}) {
   return (
-    <div className="min-w-0">
-      <dt className="text-sm text-muted-foreground">{label}</dt>
-      <dd className="mt-2 font-display text-2xl font-semibold tabular-nums">
+    <div
+      className={cn(
+        "flex min-w-0 items-center gap-2.5 rounded-lg px-2.5 py-2 transition-colors duration-200",
+        active && "bg-muted",
+      )}
+      onPointerEnter={onActiveChange ? () => onActiveChange(true) : undefined}
+      onPointerLeave={onActiveChange ? () => onActiveChange(false) : undefined}
+    >
+      {marker}
+      <dt className="shrink-0 text-sm">{label}</dt>
+      <dd
+        className="ml-auto min-w-0 truncate pl-2 font-mono text-sm tabular-nums text-muted-foreground"
+        title={value}
+      >
         {value}
       </dd>
     </div>
+  );
+}
+
+function StorageTone({ color }: { color?: string }) {
+  return (
+    <span
+      className={cn(
+        "size-2.5 shrink-0 rounded-[3px]",
+        !color && "border border-dashed border-muted-foreground/70",
+      )}
+      style={color ? { background: color } : undefined}
+      aria-hidden="true"
+    />
+  );
+}
+
+function StorageLegendIcon({ icon: Icon }: { icon: LucideIcon }) {
+  return (
+    <Icon
+      className="size-3.5 shrink-0 text-muted-foreground"
+      aria-hidden="true"
+    />
   );
 }
