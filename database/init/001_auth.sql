@@ -834,7 +834,7 @@ CREATE INDEX IF NOT EXISTS file_shares_recipient_created_idx
   ON file_shares (recipient_id, created_at DESC, file_id);
 
 INSERT INTO users (id, username, password_hash, role)
-VALUES ('usr_admingod', 'admingod', crypt('admingod', gen_salt('bf')), 'admin')
+VALUES ('usr_aeralyth', 'aeralyth', crypt('aeralyth', gen_salt('bf')), 'admin')
 ON CONFLICT (username) DO NOTHING;
 
 INSERT INTO schema_migrations (version)

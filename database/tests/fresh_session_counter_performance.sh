@@ -43,7 +43,7 @@ ALTER TABLE sessions
 INSERT INTO sessions (id, user_id, token_hash, csrf_token, expires_at)
 VALUES (
   'ses_legacy_hex',
-  'usr_admingod',
+  'usr_aeralyth',
   encode(digest('legacy-session-token', 'sha256'), 'hex'),
   'legacy-csrf',
   now() + interval '1 hour'
@@ -52,7 +52,7 @@ VALUES (
 INSERT INTO sessions (id, user_id, token_hash, expires_at)
 SELECT
   'ses_legacy_bulk_' || value,
-  'usr_admingod',
+  'usr_aeralyth',
   encode(digest('legacy-bulk-token-' || value, 'sha256'), 'hex'),
   now() + interval '1 hour'
 FROM generate_series(1, 100000) AS value;

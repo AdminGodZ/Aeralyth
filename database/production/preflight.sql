@@ -14,11 +14,16 @@ BEGIN
     RAISE EXCEPTION 'production requires a restored active administrator account';
   END IF;
 
+  -- 'admingod' was the seed password before the seed account was renamed, and
+  -- databases created back then may still carry it.
   IF EXISTS (
     SELECT 1
     FROM users
     WHERE status = 'active'
-      AND password_hash = crypt('admingod', password_hash)
+      AND (
+        password_hash = crypt('aeralyth', password_hash)
+        OR password_hash = crypt('admingod', password_hash)
+      )
   ) THEN
     RAISE EXCEPTION 'production refuses to start while an account uses the local seed password';
   END IF;

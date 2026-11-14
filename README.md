@@ -95,7 +95,7 @@ npm run dev:api                       # Actix API  → http://127.0.0.1:8080
 npm run dev                           # Next.js    → http://localhost:3000
 ```
 
-Sign in with the development seed account **`admingod` / `admingod`**.
+Sign in with the development seed account **`aeralyth` / `aeralyth`**.
 
 During `next dev`, browser `/api/*` requests are proxied to the API. Point `AERALYTH_API_ORIGIN` elsewhere if Actix isn't on the default port. Without `DATABASE_URL`, the API uses the Docker database at `postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth`.
 

@@ -21,7 +21,7 @@ const maxControlP95Ms = Number(
 const maxCheckoutP99BucketSeconds = Number(
   process.env.AERALYTH_AUTH_ISOLATION_MAX_CHECKOUT_P99_BUCKET_SECONDS ?? 0.1,
 );
-const username = process.env.AERALYTH_PERF_USERNAME ?? "admingod";
+const username = process.env.AERALYTH_PERF_USERNAME ?? "aeralyth";
 const password = process.env.AERALYTH_PERF_PASSWORD?.trim();
 
 if (!metricsToken) {
