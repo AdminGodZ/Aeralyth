@@ -171,7 +171,9 @@ and publication steps as a client-driven upload. Larger files continue to go
 from the browser straight to the bucket.
 
 `AERALYTH_COOKIE_SECURE` defaults to `false` for debug builds and `true` for
-release builds.
+release builds. With secure cookies the session cookie is named
+`__Host-aeralyth_session`, which browsers accept only from the exact host over
+HTTPS; without them it is `aeralyth_session`.
 
 `AERALYTH_SHARE_LINK_SECRET` is required in production so active share URLs can
 be shown to their owner again without storing bearer tokens in PostgreSQL.

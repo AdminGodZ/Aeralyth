@@ -323,6 +323,9 @@ export async function createMixedFixture({
   env = process.env,
 }) {
   const base = new URL(isolatedOrigin(origin, env));
+  // An API that issues Secure cookies names its session `__Host-aeralyth_session`.
+  const sessionCookie =
+    env.AERALYTH_PERF_SESSION_COOKIE?.trim() || "aeralyth_session";
   const allowedProviders = new Set(
     (env.AERALYTH_PERF_PROVIDER_HOSTS ?? "")
       .split(",")
@@ -473,7 +476,7 @@ export async function createMixedFixture({
     const response = await fetch(new URL(path, base.origin), {
       method,
       headers: {
-        Cookie: `aeralyth_session=${token}`,
+        Cookie: `${sessionCookie}=${token}`,
         "X-CSRF-Token": csrf,
         ...headers,
       },
@@ -524,7 +527,7 @@ export async function createMixedFixture({
     const token = index % 2 === 0 ? ownerToken : recipientToken;
     const stream = createFixtureStream({
       url: new URL("/api/events", base.origin),
-      headers: { Cookie: `aeralyth_session=${token}` },
+      headers: { Cookie: `${sessionCookie}=${token}` },
       timeoutMs,
       onFrame() {
         streamFrames++;
