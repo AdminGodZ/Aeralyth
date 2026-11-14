@@ -95,6 +95,18 @@ npm run dev:api
 npm run dev
 ```
 
+Stored content is always end-to-end encrypted, and the browser sends encrypted
+uploads straight to the bucket, so the API refuses to start without S3 storage,
+locally too. Any S3-compatible store works; CI runs MinIO (see "Start isolated
+S3-compatible storage" in `.github/workflows/performance.yml`). Set
+`AERALYTH_STORAGE_BACKEND=s3`, `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`,
+`AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET_NAME`, `AWS_DEFAULT_REGION` and, for
+MinIO, `AWS_S3_URL_STYLE=path` before `npm run dev:api`.
+
+`AERALYTH_E2EE_MODE` only chooses how plaintext from an earlier deployment is
+handled: `migrate` (the default) keeps it readable until each account converts
+it, and `required` refuses to start while any remains. `off` is rejected.
+
 The frontend expects the Actix API at `http://127.0.0.1:8080` by default. If
 the login page shows a backend unavailable error, the Actix process is not
 reachable or `AERALYTH_API_ORIGIN` points at the wrong API origin.
