@@ -115,6 +115,23 @@ describe("Railway production deployment", () => {
     expect(encode).not.toContain("application/vnd.aeralyth");
   });
 
+  it("can refuse callers that skipped the edge network", () => {
+    const caddyfile = read("deployment/Caddyfile");
+    const lock = caddyfile
+      .split("@outsideEdge {")[1]
+      ?.split("handle /workers/*")[0];
+    // Admits everyone unless a deployment lists its edge addresses.
+    expect(lock).toContain(
+      "not client_ip {$AERALYTH_ALLOWED_EDGE_RANGES:0.0.0.0/0 ::/0}",
+    );
+    // Railway probes health from inside its own network.
+    expect(lock).toContain("not path /health /health/*");
+    // `respond` alone would sort after every `handle` and never run.
+    expect(lock).toContain("rewrite @outsideEdge /forbidden-origin");
+    expect(lock).toContain("handle /forbidden-origin {");
+    expect(lock).toContain(" 403");
+  });
+
   it("serves content-named browser workers with immutable caching", () => {
     const caddyfile = read("deployment/Caddyfile");
     expect(caddyfile).toContain("handle /workers/*");
