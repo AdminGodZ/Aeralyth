@@ -52,7 +52,7 @@ bootstrap_kept="$(docker compose exec -T postgres psql \
   -v ON_ERROR_STOP=1 \
   -U aeralyth \
   -d "${test_database}" \
-  -c "SELECT password_hash = crypt('${bootstrap_password}', password_hash) FROM users WHERE id = 'usr_admingod';")"
+  -c "SELECT password_hash = crypt('${bootstrap_password}', password_hash) FROM users WHERE id = 'usr_aeralyth';")"
 if [[ "${bootstrap_kept}" != "t" ]]; then
   echo "production bootstrap overwrote a password that was no longer the local seed" >&2
   exit 1
@@ -63,7 +63,7 @@ docker compose exec -T postgres psql \
   -v ON_ERROR_STOP=1 \
   -U aeralyth \
   -d "${test_database}" \
-  -c "ALTER TABLE users DISABLE TRIGGER USER; UPDATE users SET role = 'user' WHERE id = 'usr_admingod'; ALTER TABLE users ENABLE TRIGGER USER;" >/dev/null
+  -c "ALTER TABLE users DISABLE TRIGGER USER; UPDATE users SET role = 'user' WHERE id = 'usr_aeralyth'; ALTER TABLE users ENABLE TRIGGER USER;" >/dev/null
 
 if docker compose exec -T postgres psql \
   -q \
@@ -81,7 +81,7 @@ docker compose exec -T postgres psql \
   -v ON_ERROR_STOP=1 \
   -U aeralyth \
   -d "${test_database}" \
-  -c "ALTER TABLE users DISABLE TRIGGER USER; UPDATE users SET role = 'admin' WHERE id = 'usr_admingod'; ALTER TABLE users ENABLE TRIGGER USER;" >/dev/null
+  -c "ALTER TABLE users DISABLE TRIGGER USER; UPDATE users SET role = 'admin' WHERE id = 'usr_aeralyth'; ALTER TABLE users ENABLE TRIGGER USER;" >/dev/null
 
 docker compose exec -T postgres psql \
   -q \
@@ -90,4 +90,40 @@ docker compose exec -T postgres psql \
   -d "${test_database}" \
   < database/production/preflight.sql >/dev/null
 
-echo "production preflight requires an active admin, rejects the seed password, and accepts a one-time bootstrap password"
+# A database created before the seed account was renamed still carries the old
+# seed credential. It must be refused and bootstrapped the same way.
+docker compose exec -T postgres psql \
+  -q \
+  -v ON_ERROR_STOP=1 \
+  -U aeralyth \
+  -d "${test_database}" \
+  -c "INSERT INTO users (id, username, password_hash, role) VALUES ('usr_admingod', 'admingod', crypt('admingod', gen_salt('bf')), 'admin');" >/dev/null
+
+if docker compose exec -T postgres psql \
+  -q \
+  -v ON_ERROR_STOP=1 \
+  -U aeralyth \
+  -d "${test_database}" \
+  < database/production/preflight.sql >/dev/null 2>&1
+then
+  echo "production preflight accepted the previous seed password" >&2
+  exit 1
+fi
+
+docker compose exec -T \
+  -e AERALYTH_BOOTSTRAP_ADMIN_PASSWORD="${bootstrap_password}" \
+  postgres psql \
+  -q \
+  -v ON_ERROR_STOP=1 \
+  -U aeralyth \
+  -d "${test_database}" \
+  < database/production/bootstrap_admin.sql >/dev/null
+
+docker compose exec -T postgres psql \
+  -q \
+  -v ON_ERROR_STOP=1 \
+  -U aeralyth \
+  -d "${test_database}" \
+  < database/production/preflight.sql >/dev/null
+
+echo "production preflight requires an active admin, rejects the current and previous seed passwords, and accepts a one-time bootstrap password"

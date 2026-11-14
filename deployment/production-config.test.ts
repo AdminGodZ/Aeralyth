@@ -84,8 +84,35 @@ describe("Railway production deployment", () => {
     expect(globalOptions).not.toContain("0.0.0.0/0");
     const apiProxy = caddyfile
       .split("reverse_proxy 127.0.0.1:{$AERALYTH_API_PORT:8081} {")[1]
+      ?.split("\n\t\t\t}")[0];
+    expect(apiProxy).toContain(
+      "header_up X-Forwarded-For {vars.client_address}",
+    );
+  });
+
+  it("takes the visitor from CF-Connecting-IP only for requests Cloudflare relayed", () => {
+    const api = read("deployment/Caddyfile")
+      .split("handle @api {")[1]
+      ?.split("\n\thandle {")[0];
+    const cloudflare = api
+      ?.split("@throughCloudflare {")[1]
       ?.split("\n\t\t}")[0];
-    expect(apiProxy).toContain("header_up X-Forwarded-For {client_ip}");
+    // Without the address check, anyone reaching the origin could choose the
+    // address their login attempts are counted against.
+    expect(cloudflare).toContain("client_ip {$AERALYTH_CLOUDFLARE_RANGES:");
+    expect(cloudflare).toContain("173.245.48.0/20");
+    expect(cloudflare).toContain("2606:4700::/32");
+    expect(cloudflare).toContain("header CF-Connecting-IP *");
+
+    // The fallback must be assigned first; `route` keeps this literal order.
+    const route = api?.split("route {")[1] ?? "";
+    const fallback = route.indexOf("vars client_address {client_ip}");
+    const visitor = route.indexOf(
+      "vars @throughCloudflare client_address {http.request.header.CF-Connecting-IP}",
+    );
+    expect(fallback).toBeGreaterThanOrEqual(0);
+    expect(visitor).toBeGreaterThan(fallback);
+    expect(route.indexOf("reverse_proxy")).toBeGreaterThan(visitor);
   });
 
   it("bounds public HTTP lifetimes without imposing a short large-body deadline", () => {
@@ -96,6 +123,14 @@ describe("Railway production deployment", () => {
     expect(caddyfile).toContain("idle 2m");
     expect(caddyfile).toContain("max_header_size 64KB");
     expect(caddyfile).toContain("grace_period 30s");
+  });
+
+  it("pins browsers to HTTPS on every response", () => {
+    const site = read("deployment/Caddyfile").split(":{$PORT:8080} {")[1];
+    const siteDirectives = site?.split("encode zstd gzip {")[0];
+    expect(siteDirectives).toContain(
+      'header Strict-Transport-Security "max-age=31536000; includeSubDomains"',
+    );
   });
 
   it("compresses text responses but excludes encrypted and object bodies", () => {
@@ -113,6 +148,23 @@ describe("Railway production deployment", () => {
     expect(encode).not.toContain("text/event-stream");
     expect(encode).not.toContain("application/octet-stream");
     expect(encode).not.toContain("application/vnd.aeralyth");
+  });
+
+  it("can refuse callers that skipped the edge network", () => {
+    const caddyfile = read("deployment/Caddyfile");
+    const lock = caddyfile
+      .split("@outsideEdge {")[1]
+      ?.split("handle /workers/*")[0];
+    // Admits everyone unless a deployment lists its edge addresses.
+    expect(lock).toContain(
+      "not client_ip {$AERALYTH_ALLOWED_EDGE_RANGES:0.0.0.0/0 ::/0}",
+    );
+    // Railway probes health from inside its own network.
+    expect(lock).toContain("not path /health /health/*");
+    // `respond` alone would sort after every `handle` and never run.
+    expect(lock).toContain("rewrite @outsideEdge /forbidden-origin");
+    expect(lock).toContain("handle /forbidden-origin {");
+    expect(lock).toContain(" 403");
   });
 
   it("serves content-named browser workers with immutable caching", () => {
@@ -213,6 +265,19 @@ describe("Railway production deployment", () => {
     );
     expect(preflight).toContain("role = 'admin'");
     expect(preflight).toContain("production refuses to start");
+    // The seed credential, and the one databases created before the seed
+    // account was renamed may still hold.
+    expect(read("database/init/001_auth.sql")).toContain(
+      "VALUES ('usr_aeralyth', 'aeralyth', crypt('aeralyth', gen_salt('bf')), 'admin')",
+    );
+    const bootstrap = read("database/production/bootstrap_admin.sql");
+    for (const seedPassword of ["aeralyth", "admingod"]) {
+      const seedCheck = `password_hash = crypt('${seedPassword}', password_hash)`;
+      expect(preflight).toContain(seedCheck);
+      expect(bootstrap).toContain(
+        `id = 'usr_${seedPassword}' AND ${seedCheck}`,
+      );
+    }
     expect(read("database/tests/fresh_production_preflight.sh")).toContain(
       "no active administrator",
     );

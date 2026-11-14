@@ -22,7 +22,6 @@ type SectionPageProps = {
     sort?: string;
     direction?: string;
     cursor?: string;
-    token?: string;
     q?: string;
     usersCursor?: string;
     invitationsCursor?: string;
@@ -52,16 +51,8 @@ export default async function SectionPage({
   searchParams,
 }: SectionPageProps) {
   const { section: sectionKey } = await params;
-  const {
-    cursor,
-    direction,
-    folder,
-    invitationsCursor,
-    q,
-    sort,
-    token,
-    usersCursor,
-  } = await searchParams;
+  const { cursor, direction, folder, invitationsCursor, q, sort, usersCursor } =
+    await searchParams;
   const section = getDashboardSection(sectionKey);
 
   if (!section) {
@@ -146,7 +137,6 @@ export default async function SectionPage({
       currentUser={currentUser}
       csrfToken={csrfToken}
       realtimeCursor={realtimeCursor}
-      invitationToken={section.key === "users" ? token?.trim() : undefined}
       adminQuery={section.key === "users" ? q?.trim() : undefined}
       adminUsersState={adminUsersState}
       filesState={filesState}

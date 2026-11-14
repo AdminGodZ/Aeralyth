@@ -95,7 +95,7 @@ npm run dev:api                       # Actix API  → http://127.0.0.1:8080
 npm run dev                           # Next.js    → http://localhost:3000
 ```
 
-Sign in with the development seed account **`admingod` / `admingod`**.
+Sign in with the development seed account **`aeralyth` / `aeralyth`**.
 
 During `next dev`, browser `/api/*` requests are proxied to the API. Point `AERALYTH_API_ORIGIN` elsewhere if Actix isn't on the default port. Without `DATABASE_URL`, the API uses the Docker database at `postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth`.
 
@@ -161,9 +161,11 @@ On [Railway](https://railway.com), migrations run as a pre-deploy command and a 
 <br>
 
 - Attach the public domain before applying the origin-restricted bucket CORS policy.
+- Behind Cloudflare, Railway reports Cloudflare's address as the client. Caddy then takes the visitor from `CF-Connecting-IP`, but only when the reported address is inside `AERALYTH_CLOUDFLARE_RANGES` (Cloudflare's published ranges by default); from any other address that header is ignored.
 - On S3 providers that support lifecycle rules, `AERALYTH_S3_ABORT_INCOMPLETE_MULTIPART_DAYS=7` installs a prefix-scoped cleanup rule and relaxes the provider scan from hourly to daily. Railway buckets don't support lifecycle rules, so leave it unset there.
 - Changing `AERALYTH_SHARE_LINK_SECRET` doesn't break existing links, but their owners can no longer re-display them until they're replaced.
 - Set `AERALYTH_ENABLE_NEXT_API_PROXY=true` only when running `next start` without the Caddy ingress.
+- A CDN in front of Railway does not stop anyone from connecting to Railway's edge directly with the custom domain as the host name. Set `AERALYTH_ALLOWED_EDGE_RANGES` to the CDN's address ranges and Caddy answers 403 to every other caller, except on the health endpoints Railway probes itself.
 - For the durable-tree migration, apply the full chain, then drain older API instances and workers before starting the new API.
 
 </details>

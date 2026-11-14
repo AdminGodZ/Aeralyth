@@ -118,6 +118,8 @@ const UPDATE_USER_ROLE_QUERY: &str = "
              AS last_admin_blocked,
            EXISTS (SELECT 1 FROM updated) AS updated
 ";
+// Disabling an account also ends its sessions. Otherwise a session taken before
+// the account was disabled would work again the moment it is re-enabled.
 const UPDATE_USER_STATUS_QUERY: &str = "
     WITH mutation_lock AS MATERIALIZED (
       SELECT pg_advisory_xact_lock($1)
@@ -157,6 +159,11 @@ const UPDATE_USER_STATUS_QUERY: &str = "
       WHERE users.id = decision.id
         AND NOT decision.last_admin_blocked
       RETURNING users.id
+    ), revoked_sessions AS (
+      DELETE FROM sessions
+      WHERE user_id IN (SELECT id FROM updated)
+        AND $6::text = 'disabled'
+      RETURNING user_id
     )
     SELECT EXISTS (SELECT 1 FROM authorized) AS authorized,
            EXISTS (SELECT 1 FROM target) AS target_exists,
@@ -213,6 +220,11 @@ const UPDATE_USER_QUERY: &str = "
         AND NOT decision.last_admin_blocked
         AND NOT decision.username_in_use
       RETURNING users.id
+    ), revoked_sessions AS (
+      DELETE FROM sessions
+      WHERE user_id IN (SELECT id FROM updated)
+        AND $9::text = 'disabled'
+      RETURNING user_id
     )
     SELECT EXISTS (SELECT 1 FROM authorized) AS authorized,
            EXISTS (SELECT 1 FROM target) AS target_exists,
@@ -501,7 +513,7 @@ pub async fn create_invitation(
         return Ok(redirect("/users?invite=invite-exists"));
     }
 
-    Ok(redirect(format!("/users?invite=created&token={token}")))
+    Ok(redirect(invitation_created_location(&token)))
 }
 
 pub async fn create_one_password_user(
@@ -786,7 +798,7 @@ pub async fn rotate_invitation(
         return Ok(redirect("/users?invite=missing"));
     }
 
-    Ok(redirect(format!("/users?invite=created&token={token}")))
+    Ok(redirect(invitation_created_location(&token)))
 }
 
 pub async fn revoke_invitation(
@@ -1248,6 +1260,12 @@ fn create_token() -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// The new token travels in the URL fragment, which the browser keeps to itself:
+/// it is absent from the follow-up request, so no proxy or access log sees it.
+fn invitation_created_location(token: &str) -> String {
+    format!("/users?invite=created#invitation={token}")
+}
+
 fn redirect(location: impl AsRef<str>) -> HttpResponse {
     HttpResponse::SeeOther()
         .insert_header((LOCATION, location.as_ref().to_owned()))
@@ -1259,7 +1277,8 @@ mod tests {
     use super::{
         ADMIN_USER_MUTATION_LOCK_ID, CREATE_INVITATION_QUERY, CREATE_ONE_PASSWORD_USER_QUERY,
         DELETE_USER_QUERY, INVITATION_LIFETIME_DAYS, UPDATE_USER_QUERY, UPDATE_USER_ROLE_QUERY,
-        UPDATE_USER_STATUS_QUERY, admin_mutation_outcome, literal_ilike_pattern,
+        UPDATE_USER_STATUS_QUERY, admin_mutation_outcome, invitation_created_location,
+        literal_ilike_pattern,
     };
 
     #[test]
@@ -1284,6 +1303,16 @@ mod tests {
     }
 
     #[test]
+    fn a_new_invitation_token_stays_out_of_the_request_url() {
+        let location = invitation_created_location("new-token");
+        let (request_url, fragment) = location
+            .split_once('#')
+            .expect("the token belongs in the fragment");
+        assert_eq!(request_url, "/users?invite=created");
+        assert_eq!(fragment, "invitation=new-token");
+    }
+
+    #[test]
     fn admin_mutations_keep_invariants_in_one_statement_each() {
         for query in [
             UPDATE_USER_ROLE_QUERY,
@@ -1301,6 +1330,18 @@ mod tests {
         assert!(UPDATE_USER_QUERY.contains("username_in_use"));
         assert!(DELETE_USER_QUERY.contains("DELETE FROM sessions"));
         assert!(DELETE_USER_QUERY.contains("INSERT INTO user_deletion_jobs"));
+        for (query, status_parameter) in [
+            (UPDATE_USER_STATUS_QUERY, "$6::text = 'disabled'"),
+            (UPDATE_USER_QUERY, "$9::text = 'disabled'"),
+        ] {
+            let revocation = query
+                .split_once("revoked_sessions AS (")
+                .expect("disabling an account must revoke its sessions")
+                .1;
+            assert!(revocation.contains("DELETE FROM sessions"));
+            assert!(revocation.contains("user_id IN (SELECT id FROM updated)"));
+            assert!(revocation.contains(status_parameter));
+        }
 
         let source = include_str!("admin.rs");
         for (start, end) in [
@@ -1573,6 +1614,9 @@ mod tests {
                  ) VALUES (
                    'ses_perf_admin', 'usr_perf_admin',
                    decode(repeat('a1', 32), 'hex'), 'csrf-perf-admin', now() + interval '1 hour'
+                 ), (
+                   'ses_perf_target', 'usr_perf_target',
+                   decode(repeat('b2', 32), 'hex'), 'csrf-perf-target', now() + interval '1 hour'
                  );",
             )
             .await
@@ -1595,6 +1639,24 @@ mod tests {
             .expect("one-statement role update should execute");
         assert!(role.authorized && role.target_exists && role.updated);
         assert!(!role.last_admin_blocked);
+        async fn session_count(
+            transaction: &tokio_postgres::Transaction<'_>,
+            user_id: &str,
+        ) -> i64 {
+            transaction
+                .query_one(
+                    "SELECT count(*) FROM sessions WHERE user_id = $1",
+                    &[&user_id],
+                )
+                .await
+                .expect("sessions should count")
+                .get(0)
+        }
+        assert_eq!(
+            session_count(&transaction, "usr_perf_target").await,
+            1,
+            "a role change keeps sessions"
+        );
 
         let status = transaction
             .query_one(
@@ -1612,6 +1674,27 @@ mod tests {
             .map(admin_mutation_outcome)
             .expect("one-statement status update should execute");
         assert!(status.authorized && status.target_exists && status.updated);
+        assert_eq!(
+            session_count(&transaction, "usr_perf_target").await,
+            0,
+            "disabling revokes sessions"
+        );
+        assert_eq!(
+            session_count(&transaction, "usr_perf_admin").await,
+            1,
+            "only the disabled account is signed out"
+        );
+
+        transaction
+            .execute(
+                "INSERT INTO sessions (id, user_id, token_hash, csrf_token, expires_at)
+                 VALUES ('ses_perf_target_2', 'usr_perf_target',
+                         decode(repeat('c3', 32), 'hex'), 'csrf-perf-target-2',
+                         now() + interval '1 hour')",
+                &[],
+            )
+            .await
+            .expect("second target session should insert");
 
         let display_name = Some("Updated Target");
         let update = transaction
@@ -1634,6 +1717,35 @@ mod tests {
             .expect("one-statement full update should execute");
         assert!(update.authorized && update.target_exists && update.updated);
         assert!(!update.username_in_use);
+        assert_eq!(
+            session_count(&transaction, "usr_perf_target").await,
+            1,
+            "re-enabling keeps new sessions"
+        );
+        let disabling_update = transaction
+            .query_one(
+                UPDATE_USER_QUERY,
+                &[
+                    &ADMIN_USER_MUTATION_LOCK_ID,
+                    &"ses_perf_admin",
+                    &"csrf-perf-admin",
+                    &"usr_perf_admin",
+                    &"usr_perf_target",
+                    &"perf_target_updated",
+                    &display_name,
+                    &"user",
+                    &"disabled",
+                ],
+            )
+            .await
+            .map(admin_mutation_outcome)
+            .expect("one-statement disabling update should execute");
+        assert!(disabling_update.updated);
+        assert_eq!(
+            session_count(&transaction, "usr_perf_target").await,
+            0,
+            "a disabling edit revokes sessions"
+        );
 
         let deletion = transaction
             .query_one(

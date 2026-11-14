@@ -57,7 +57,6 @@ type DashboardPageProps = {
   sectionKey: DashboardSectionKey;
   currentUser: CurrentUser;
   csrfToken: string;
-  invitationToken?: string;
   adminQuery?: string;
   adminUsersState?: AdminUsersState;
   filesState: FilesState;
@@ -122,7 +121,6 @@ export function DashboardPage({
   sectionKey,
   currentUser,
   csrfToken,
-  invitationToken,
   adminQuery,
   adminUsersState,
   filesState,
@@ -153,7 +151,6 @@ export function DashboardPage({
         section={section}
         currentUser={currentUser}
         csrfToken={csrfToken}
-        invitationToken={invitationToken}
         adminQuery={adminQuery}
         adminUsersState={adminUsersState}
         filesState={filesState}
@@ -277,7 +274,6 @@ function DashboardContent({
   section,
   currentUser,
   csrfToken,
-  invitationToken,
   adminQuery,
   adminUsersState,
   filesState,
@@ -288,7 +284,6 @@ function DashboardContent({
   section: DashboardSection;
   currentUser: CurrentUser;
   csrfToken: string;
-  invitationToken?: string;
   adminQuery?: string;
   adminUsersState?: AdminUsersState;
   filesState: FilesState;
@@ -305,7 +300,6 @@ function DashboardContent({
       <UsersDirectory
         currentUser={currentUser}
         csrfToken={csrfToken}
-        invitationToken={invitationToken}
         initialQuery={adminQuery}
         adminUsersState={adminUsersState}
       />

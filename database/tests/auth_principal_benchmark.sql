@@ -3,7 +3,7 @@ BEGIN;
 INSERT INTO sessions (id, user_id, token_hash, csrf_token, expires_at)
 VALUES (
   'ses_auth_principal_benchmark',
-  'usr_admingod',
+  'usr_aeralyth',
   '\xdf464c2995ef29c10a3b69bfaf1ff6081f4dc55511c2d0af0e373b196fac8b7e'::bytea,
   'auth-principal-benchmark-csrf',
   now() + interval '1 hour'

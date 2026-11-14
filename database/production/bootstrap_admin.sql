@@ -6,5 +6,6 @@
 UPDATE users
 SET password_hash = crypt(:'bootstrap_password', gen_salt('bf')),
     updated_at = now()
-WHERE id = 'usr_admingod'
-  AND password_hash = crypt('admingod', password_hash);
+WHERE (id = 'usr_aeralyth' AND password_hash = crypt('aeralyth', password_hash))
+   -- The seed account of databases created before it was renamed.
+   OR (id = 'usr_admingod' AND password_hash = crypt('admingod', password_hash));

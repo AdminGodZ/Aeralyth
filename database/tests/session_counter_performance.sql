@@ -40,7 +40,7 @@ $schema_assertions$;
 INSERT INTO sessions (id, user_id, token_hash, csrf_token, expires_at)
 VALUES (
   'ses_perf_active_' || pg_backend_pid()::text,
-  'usr_admingod',
+  'usr_aeralyth',
   digest('active-session-' || pg_backend_pid()::text, 'sha256'),
   'active-csrf',
   now() + interval '1 hour'
@@ -49,7 +49,7 @@ VALUES (
 INSERT INTO sessions (id, user_id, token_hash, expires_at)
 SELECT
   'ses_perf_expired_' || pg_backend_pid()::text || '_' || value,
-  'usr_admingod',
+  'usr_aeralyth',
   digest('expired-session-' || pg_backend_pid()::text || '-' || value, 'sha256'),
   now() - interval '1 day' - (value * interval '1 microsecond')
 FROM generate_series(1, 1000000) AS value;
@@ -205,7 +205,7 @@ INSERT INTO invitations (
   'user',
   encode(digest(:'counter_invitation_id', 'sha256'), 'hex'),
   'pending',
-  'usr_admingod',
+  'usr_aeralyth',
   now() + interval '1 day'
 );
 TRUNCATE admin_counter_writes;

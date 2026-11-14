@@ -145,8 +145,8 @@ jobs:
       AERALYTH_DB_MAINTENANCE_POOL_MAX: "2"
       AERALYTH_METRICS_TOKEN: ci-only-performance-token-000000000
       AERALYTH_DATABASE_INTEGRATION_TESTS: "1"
-      AERALYTH_PERF_USERNAME: admingod
-      AERALYTH_PERF_PASSWORD: admingod
+      AERALYTH_PERF_USERNAME: aeralyth
+      AERALYTH_PERF_PASSWORD: aeralyth
       AERALYTH_PERF_URL: http://127.0.0.1:18080/health
       AERALYTH_PERF_MAX_P95_MS: "500"
       AERALYTH_PERF_ISOLATED: "1"
@@ -406,7 +406,7 @@ jobs:
             -v ON_ERROR_STOP=1 \
             -U aeralyth \
             -d aeralyth \
-            -c "UPDATE users SET password_hash = crypt('production-ci-password', gen_salt('bf')) WHERE id = 'usr_admingod';"
+            -c "UPDATE users SET password_hash = crypt('production-ci-password', gen_salt('bf')) WHERE id = 'usr_aeralyth';"
           docker run --rm --network aeralyth_default \
             -e DATABASE_URL=postgres://aeralyth:aeralyth@postgres:5432/aeralyth \
             -e AERALYTH_ENV=Production \
@@ -414,7 +414,7 @@ jobs:
       - name: Verify production image on standard and colliding Railway ports
         env:
           AERALYTH_PERF_URL: http://127.0.0.1:18081/health
-          AERALYTH_PERF_USERNAME: admingod
+          AERALYTH_PERF_USERNAME: aeralyth
           AERALYTH_PERF_PASSWORD: production-ci-password
           AERALYTH_METRICS_TOKEN: ci-only-metrics-token-0000000000000
           AERALYTH_PERF_ISOLATED: "1"
