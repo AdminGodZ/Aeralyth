@@ -73,6 +73,19 @@ SELECT
   timestamptz '2025-01-01 00:00:00+00' + series * interval '1 millisecond'
 FROM generate_series(1, :scale_rows::integer) AS series;
 
+-- Every invitation shares one inviter. Its id sorts ahead of the scale
+-- accounts, as the seed account's did when this benchmark was calibrated: an
+-- inviter that sorts after them makes the join walk the whole user index
+-- before it reaches the one account the invitations refer to.
+INSERT INTO users (
+  id, username, password_hash, role, status, created_at, updated_at
+)
+VALUES (
+  'usr_aaa_scale_inviter', 'scale_inviter', 'not-a-login-hash', 'admin',
+  'active', timestamptz '2025-01-01 00:00:00+00',
+  timestamptz '2025-01-01 00:00:00+00'
+);
+
 INSERT INTO invitations (
   id, invited_username, role, token_hash, status, created_by,
   expires_at, created_at
@@ -86,7 +99,7 @@ SELECT
   CASE WHEN series % 20 = 0 THEN 'admin' ELSE 'user' END,
   encode(digest(format('admin-scale-token-%s', series), 'sha256'), 'hex'),
   CASE WHEN series % 4 = 0 THEN 'accepted' ELSE 'pending' END,
-  'usr_aeralyth',
+  'usr_aaa_scale_inviter',
   timestamptz '2027-01-01 00:00:00+00',
   timestamptz '2025-01-01 00:00:00+00' + series * interval '1 millisecond'
 FROM generate_series(1, :scale_rows::integer) AS series;
