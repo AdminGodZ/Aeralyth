@@ -29,28 +29,28 @@
 
 ## Features
 
-|                         |                                                                                                                                        |
-| :---------------------- | :------------------------------------------------------------------------------------------------------------------------------------- |
-| **Zero-knowledge vault** | Files and names are encrypted in a browser worker before they leave the device. The server and bucket only ever see ciphertext.       |
-| **Fast transfers**      | Small files upload in batched requests, large ones stream straight to the bucket in parallel multipart chunks. Downloads resume.       |
-| **Folders, end to end** | Drop whole folders — `.gitignore` rules are honoured. Download any folder as a ZIP assembled locally, never on the server.             |
-| **Share links**         | Expiring links with viewer or editor access, re-displayable to their owner without storing bearer tokens.                             |
-| **Live everywhere**     | Changes stream to every open tab and device over server-sent events.                                                                   |
-| **Trash & auto-lock**   | Configurable trash retention and a vault that locks itself after inactivity.                                                           |
-| **Invite-only**         | No public sign-up: admins create accounts or send invitation links, and get a live storage overview.                                            |
-| **Built to stay up**    | Bounded queues per route class, separate request and maintenance pools, and early `429` / `503 Retry-After` instead of piling up work. |
+|                          |                                                                                                                                        |
+| :----------------------- | :------------------------------------------------------------------------------------------------------------------------------------- |
+| **Zero-knowledge vault** | Files and names are encrypted in a browser worker before they leave the device. The server and bucket only ever see ciphertext.        |
+| **Fast transfers**       | Small files upload in batched requests, large ones stream straight to the bucket in parallel multipart chunks. Downloads resume.       |
+| **Folders, end to end**  | Drop whole folders — `.gitignore` rules are honoured. Download any folder as a ZIP assembled locally, never on the server.             |
+| **Share links**          | Expiring links with viewer or editor access, re-displayable to their owner without storing bearer tokens.                              |
+| **Live everywhere**      | Changes stream to every open tab and device over server-sent events.                                                                   |
+| **Trash & auto-lock**    | Configurable trash retention and a vault that locks itself after inactivity.                                                           |
+| **Invite-only**          | No public sign-up: admins create accounts or send invitation links, and get a live storage overview.                                   |
+| **Built to stay up**     | Bounded queues per route class, separate request and maintenance pools, and early `429` / `503 Retry-After` instead of piling up work. |
 
 <details>
 <summary><b>Cryptography at a glance</b></summary>
 <br>
 
-| Purpose              | Primitive                                     |
-| :------------------- | :-------------------------------------------- |
-| Content encryption   | AES-256-GCM, 4 MiB chunks                     |
-| Password → key       | Argon2id                                      |
-| Key wrapping         | HPKE · X25519 · HKDF-SHA256                   |
-| Record integrity     | Ed25519 signatures                            |
-| Upload integrity     | Incremental SHA-256 of the ciphertext         |
+| Purpose            | Primitive                             |
+| :----------------- | :------------------------------------ |
+| Content encryption | AES-256-GCM, 4 MiB chunks             |
+| Password → key     | Argon2id                              |
+| Key wrapping       | HPKE · X25519 · HKDF-SHA256           |
+| Record integrity   | Ed25519 signatures                    |
+| Upload integrity   | Incremental SHA-256 of the ciphertext |
 
 All crypto runs in a dedicated Web Worker. Encryption cannot be turned off: `AERALYTH_E2EE_MODE` only chooses how plaintext from an earlier deployment is handled. `migrate` (the default) converts it as each account signs in, and `required` refuses to start while any remains.
 
@@ -118,15 +118,15 @@ curl http://127.0.0.1:8080/api/health/ready     # API + database readiness
 
 In development only the S3 settings are required. In production, these matter:
 
-| Variable                            | Purpose                                                                                     |
-| :---------------------------------- | :------------------------------------------------------------------------------------------ |
-| `DATABASE_URL`                      | PostgreSQL connection string                                                                |
-| `AERALYTH_STORAGE_BACKEND=s3`       | Store objects in S3, configured through the standard `AWS_*` variables                      |
-| `AERALYTH_E2EE_MODE`                | `migrate` (default) or `required`; `off` is rejected at startup                             |
-| `AERALYTH_SHARE_LINK_SECRET`        | **Required.** Generate once with `openssl rand -base64 32` and keep it stable               |
-| `AERALYTH_BOOTSTRAP_ADMIN_PASSWORD` | First deploy only — replaces the seed password (≥ 32 characters)                            |
-| `AERALYTH_COOKIE_SECURE`            | Defaults to `false` in debug builds, `true` in release builds                               |
-| `AERALYTH_TRUSTED_PROXY_RANGES`     | CIDRs whose `X-Forwarded-For` Caddy trusts (default `100.64.0.0/10`)                        |
+| Variable                            | Purpose                                                                       |
+| :---------------------------------- | :---------------------------------------------------------------------------- |
+| `DATABASE_URL`                      | PostgreSQL connection string                                                  |
+| `AERALYTH_STORAGE_BACKEND=s3`       | Store objects in S3, configured through the standard `AWS_*` variables        |
+| `AERALYTH_E2EE_MODE`                | `migrate` (default) or `required`; `off` is rejected at startup               |
+| `AERALYTH_SHARE_LINK_SECRET`        | **Required.** Generate once with `openssl rand -base64 32` and keep it stable |
+| `AERALYTH_BOOTSTRAP_ADMIN_PASSWORD` | First deploy only — replaces the seed password (≥ 32 characters)              |
+| `AERALYTH_COOKIE_SECURE`            | Defaults to `false` in debug builds, `true` in release builds                 |
+| `AERALYTH_TRUSTED_PROXY_RANGES`     | CIDRs whose `X-Forwarded-For` Caddy trusts (default `100.64.0.0/10`)          |
 
 The production image refuses to start while any active account still uses the seed password. The full list, including pool sizes, admission budgets, and multipart tuning, lives in [`.env.example`](.env.example).
 
@@ -148,13 +148,13 @@ One image runs **Caddy**, the standalone **Next.js** server, and the **Actix** A
 
 On [Railway](https://railway.com), migrations run as a pre-deploy command and a deployment only goes live once `/health/ready` passes.
 
-| File                                                                                                     | Contents                    |
-| :------------------------------------------------------------------------------------------------------- | :-------------------------- |
-| [`railway.json`](railway.json)                                                                           | Build and deploy settings   |
-| [`Dockerfile`](Dockerfile)                                                                               | The production image        |
-| [`deployment/Caddyfile`](deployment/Caddyfile)                                                           | Ingress routing             |
-| [`deployment/railway-s3-cors.production.json`](deployment/railway-s3-cors.production.json)               | Bucket CORS policy          |
-| [`database/MIGRATIONS.md`](database/MIGRATIONS.md)                                                       | Migration contract          |
+| File                                                                                       | Contents                  |
+| :----------------------------------------------------------------------------------------- | :------------------------ |
+| [`railway.json`](railway.json)                                                             | Build and deploy settings |
+| [`Dockerfile`](Dockerfile)                                                                 | The production image      |
+| [`deployment/Caddyfile`](deployment/Caddyfile)                                             | Ingress routing           |
+| [`deployment/railway-s3-cors.production.json`](deployment/railway-s3-cors.production.json) | Bucket CORS policy        |
+| [`database/MIGRATIONS.md`](database/MIGRATIONS.md)                                         | Migration contract        |
 
 <details>
 <summary><b>Operational notes</b></summary>
