@@ -2618,6 +2618,8 @@ const SHARED_FOLDER_CONTEXT_QUERY: &str = "
            heads.record_hash AS vault_record_hash
     FROM ancestors
     CROSS JOIN access
+    INNER JOIN users AS owners
+      ON owners.id = ancestors.owner_id AND owners.status = 'active'
     LEFT JOIN vault_node_heads AS heads ON heads.node_id = ancestors.id
     WHERE ancestors.depth <= access.root_depth
     ORDER BY ancestors.depth DESC
@@ -3115,6 +3117,7 @@ async fn list_shared_folder_entries(
             INNER JOIN visible_files AS files ON files.owner_id = access.owner_id
               AND files.parent_id = $2 AND files.state = 'active'
             INNER JOIN users AS owners ON owners.id = files.owner_id
+              AND owners.status = 'active'
             LEFT JOIN vault_node_heads AS heads ON heads.node_id = files.id
             WHERE ($4::text IS NULL OR $4::text IS NOT NULL)
               AND ($5::bigint IS NULL OR $5::bigint IS NOT NULL)
@@ -4391,6 +4394,9 @@ mod tests {
         assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("ORDER BY ancestors.depth DESC"));
         assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("heads.record_version"));
         assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("heads.record_hash"));
+        // A disabled owner's share must stop resolving, as it does for
+        // downloads and archives.
+        assert!(SHARED_FOLDER_CONTEXT_QUERY.contains("owners.status = 'active'"));
     }
 
     #[test]
