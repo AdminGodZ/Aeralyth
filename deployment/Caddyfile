@@ -55,10 +55,21 @@
 
 	@api path /api/* /health /health/* /metrics
 	handle @api {
-		reverse_proxy 127.0.0.1:{$AERALYTH_API_PORT:8081} {
-			# The API trusts X-Forwarded-For only from this loopback hop and keys
-			# login rate limits on it, so pass exactly the resolved client.
-			header_up X-Forwarded-For {client_ip}
+		# Behind Cloudflare, Railway reports Cloudflare's address and the visitor
+		# is only in CF-Connecting-IP. Anyone can send that header, so it counts
+		# only when the address Railway resolved is one of Cloudflare's own.
+		@throughCloudflare {
+			client_ip {$AERALYTH_CLOUDFLARE_RANGES:173.245.48.0/20 103.21.244.0/22 103.22.200.0/22 103.31.4.0/22 141.101.64.0/18 108.162.192.0/18 190.93.240.0/20 188.114.96.0/20 197.234.240.0/22 198.41.128.0/17 162.158.0.0/15 104.16.0.0/13 104.24.0.0/14 172.64.0.0/13 131.0.72.0/22 2400:cb00::/32 2606:4700::/32 2803:f800::/32 2405:b500::/32 2405:8100::/32 2a06:98c0::/29 2c0f:f248::/32}
+			header CF-Connecting-IP *
+		}
+		route {
+			vars client_address {client_ip}
+			vars @throughCloudflare client_address {http.request.header.CF-Connecting-IP}
+			reverse_proxy 127.0.0.1:{$AERALYTH_API_PORT:8081} {
+				# The API trusts X-Forwarded-For only from this loopback hop and keys
+				# login rate limits on it, so pass exactly the resolved client.
+				header_up X-Forwarded-For {vars.client_address}
+			}
 		}
 	}
 

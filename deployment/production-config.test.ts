@@ -84,8 +84,35 @@ describe("Railway production deployment", () => {
     expect(globalOptions).not.toContain("0.0.0.0/0");
     const apiProxy = caddyfile
       .split("reverse_proxy 127.0.0.1:{$AERALYTH_API_PORT:8081} {")[1]
+      ?.split("\n\t\t\t}")[0];
+    expect(apiProxy).toContain(
+      "header_up X-Forwarded-For {vars.client_address}",
+    );
+  });
+
+  it("takes the visitor from CF-Connecting-IP only for requests Cloudflare relayed", () => {
+    const api = read("deployment/Caddyfile")
+      .split("handle @api {")[1]
+      ?.split("\n\thandle {")[0];
+    const cloudflare = api
+      ?.split("@throughCloudflare {")[1]
       ?.split("\n\t\t}")[0];
-    expect(apiProxy).toContain("header_up X-Forwarded-For {client_ip}");
+    // Without the address check, anyone reaching the origin could choose the
+    // address their login attempts are counted against.
+    expect(cloudflare).toContain("client_ip {$AERALYTH_CLOUDFLARE_RANGES:");
+    expect(cloudflare).toContain("173.245.48.0/20");
+    expect(cloudflare).toContain("2606:4700::/32");
+    expect(cloudflare).toContain("header CF-Connecting-IP *");
+
+    // The fallback must be assigned first; `route` keeps this literal order.
+    const route = api?.split("route {")[1] ?? "";
+    const fallback = route.indexOf("vars client_address {client_ip}");
+    const visitor = route.indexOf(
+      "vars @throughCloudflare client_address {http.request.header.CF-Connecting-IP}",
+    );
+    expect(fallback).toBeGreaterThanOrEqual(0);
+    expect(visitor).toBeGreaterThan(fallback);
+    expect(route.indexOf("reverse_proxy")).toBeGreaterThan(visitor);
   });
 
   it("bounds public HTTP lifetimes without imposing a short large-body deadline", () => {

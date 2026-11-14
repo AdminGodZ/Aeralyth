@@ -207,7 +207,10 @@ customized to one of the normal internal defaults.
 Caddy resolves the client address from `X-Forwarded-For` only when the request
 arrives from a trusted proxy (`AERALYTH_TRUSTED_PROXY_RANGES`, Railway's private
 ingress range `100.64.0.0/10` by default) and forwards exactly that address to
-Actix. Actix honors `X-Forwarded-For` only from a loopback peer and keys the
+Actix. Behind Cloudflare that address is Cloudflare's own, so when it falls in
+`AERALYTH_CLOUDFLARE_RANGES` (Cloudflare's published ranges by default) Caddy
+forwards the visitor from `CF-Connecting-IP` instead; from any other address
+that header is ignored. Actix honors `X-Forwarded-For` only from a loopback peer and keys the
 per-address login limit on it; direct connections from any other peer use the
 socket address.
 Set
