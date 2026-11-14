@@ -210,6 +210,11 @@ ingress range `100.64.0.0/10` by default) and forwards exactly that address to
 Actix. Actix honors `X-Forwarded-For` only from a loopback peer and keys the
 per-address login limit on it; direct connections from any other peer use the
 socket address.
+A CDN in front of Railway does not stop anyone from connecting to Railway's
+edge directly with the custom domain as the host name. To refuse those callers,
+set `AERALYTH_ALLOWED_EDGE_RANGES` to the CDN's address ranges: Caddy then
+answers 403 unless the address Railway reports is in the list, except on the
+health endpoints Railway probes itself. Unset, every caller is admitted.
 Set
 `AERALYTH_ENABLE_NEXT_API_PROXY=true` only as an explicit compatibility fallback
 when running `next start` without that ingress router.

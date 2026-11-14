@@ -35,6 +35,20 @@
 		}
 	}
 
+	# Optional origin lock. A CDN in front of Railway only protects the app if
+	# the app refuses visitors who skip it, and Railway's edge answers for a
+	# custom domain to anyone who connects to it directly. List the CDN's
+	# addresses here to turn every other caller away; the default admits all.
+	# Health checks stay open because Railway probes them from inside.
+	@outsideEdge {
+		not client_ip {$AERALYTH_ALLOWED_EDGE_RANGES:0.0.0.0/0 ::/0}
+		not path /health /health/*
+	}
+	rewrite @outsideEdge /forbidden-origin
+	handle /forbidden-origin {
+		respond "This origin only accepts requests through its edge network." 403
+	}
+
 	handle /workers/* {
 		root * /app/frontend/public
 		@existingWorker file
