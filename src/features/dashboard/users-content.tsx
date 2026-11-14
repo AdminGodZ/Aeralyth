@@ -79,6 +79,7 @@ import {
   TableRow,
 } from "@/components/ui/table";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { invitationTokenFromFragment } from "@/features/dashboard/invitation-token";
 import { randomBytes, toBase64Url } from "@/features/vault/protocol";
 import { VaultCryptoClient } from "@/features/vault/vault-client";
 import type {
@@ -100,7 +101,6 @@ type UsersContentProps = {
   currentUser: CurrentUser;
   csrfToken: string;
   adminUsersState?: AdminUsersState;
-  invitationToken?: string;
   initialQuery?: string;
 };
 
@@ -108,7 +108,6 @@ export function UsersContent({
   currentUser,
   csrfToken,
   adminUsersState,
-  invitationToken,
   initialQuery = "",
 }: UsersContentProps) {
   const [activeTab, setActiveTab] = useState("accounts");
@@ -162,7 +161,7 @@ export function UsersContent({
 
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-5 overflow-auto px-4 py-5 sm:px-6">
-      <InvitationLinkDialog token={invitationToken} />
+      <InvitationLinkDialog />
 
       <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
         <DirectoryMetric
@@ -1085,14 +1084,29 @@ function InvitationActions({
   );
 }
 
-function InvitationLinkDialog({ token }: { token?: string }) {
-  const [open, setOpen] = useState(Boolean(token));
+function InvitationLinkDialog() {
+  const [token, setToken] = useState<string | null>(null);
   const origin = useSyncExternalStore(
     subscribeToOrigin,
     getBrowserOrigin,
     getServerOrigin,
   );
   const [copied, setCopied] = useState(false);
+
+  // The API hands a new token over in the URL fragment so that it never
+  // reaches a server. Take it out of the address bar and history right away.
+  useEffect(() => {
+    const createdToken = invitationTokenFromFragment(window.location.hash);
+    if (!createdToken) {
+      return;
+    }
+    window.history.replaceState(
+      null,
+      "",
+      `${window.location.pathname}${window.location.search}`,
+    );
+    setToken(createdToken);
+  }, []);
 
   if (!token) {
     return null;
@@ -1112,11 +1126,10 @@ function InvitationLinkDialog({ token }: { token?: string }) {
 
   return (
     <Dialog
-      open={open}
+      open
       onOpenChange={(nextOpen) => {
-        setOpen(nextOpen);
-
         if (!nextOpen) {
+          setToken(null);
           window.history.replaceState(null, "", "/users");
         }
       }}

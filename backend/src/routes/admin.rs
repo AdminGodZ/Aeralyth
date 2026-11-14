@@ -513,7 +513,7 @@ pub async fn create_invitation(
         return Ok(redirect("/users?invite=invite-exists"));
     }
 
-    Ok(redirect(format!("/users?invite=created&token={token}")))
+    Ok(redirect(invitation_created_location(&token)))
 }
 
 pub async fn create_one_password_user(
@@ -798,7 +798,7 @@ pub async fn rotate_invitation(
         return Ok(redirect("/users?invite=missing"));
     }
 
-    Ok(redirect(format!("/users?invite=created&token={token}")))
+    Ok(redirect(invitation_created_location(&token)))
 }
 
 pub async fn revoke_invitation(
@@ -1260,6 +1260,12 @@ fn create_token() -> Result<String> {
     Ok(URL_SAFE_NO_PAD.encode(bytes))
 }
 
+/// The new token travels in the URL fragment, which the browser keeps to itself:
+/// it is absent from the follow-up request, so no proxy or access log sees it.
+fn invitation_created_location(token: &str) -> String {
+    format!("/users?invite=created#invitation={token}")
+}
+
 fn redirect(location: impl AsRef<str>) -> HttpResponse {
     HttpResponse::SeeOther()
         .insert_header((LOCATION, location.as_ref().to_owned()))
@@ -1271,7 +1277,8 @@ mod tests {
     use super::{
         ADMIN_USER_MUTATION_LOCK_ID, CREATE_INVITATION_QUERY, CREATE_ONE_PASSWORD_USER_QUERY,
         DELETE_USER_QUERY, INVITATION_LIFETIME_DAYS, UPDATE_USER_QUERY, UPDATE_USER_ROLE_QUERY,
-        UPDATE_USER_STATUS_QUERY, admin_mutation_outcome, literal_ilike_pattern,
+        UPDATE_USER_STATUS_QUERY, admin_mutation_outcome, invitation_created_location,
+        literal_ilike_pattern,
     };
 
     #[test]
@@ -1293,6 +1300,16 @@ mod tests {
         assert!(!source.contains(&("status ".to_owned() + "ILIKE")));
         assert!(source.contains("OR role = $5"));
         assert!(source.contains("OR invitations.status = $6"));
+    }
+
+    #[test]
+    fn a_new_invitation_token_stays_out_of_the_request_url() {
+        let location = invitation_created_location("new-token");
+        let (request_url, fragment) = location
+            .split_once('#')
+            .expect("the token belongs in the fragment");
+        assert_eq!(request_url, "/users?invite=created");
+        assert_eq!(fragment, "invitation=new-token");
     }
 
     #[test]
