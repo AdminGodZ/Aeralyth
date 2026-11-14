@@ -518,12 +518,12 @@ pub async fn create(
         }))
 }
 
-pub async fn list_owned(
-    state: web::Data<AppState>,
-    request: HttpRequest,
-    query: web::Query<OwnedShareLinksQuery>,
-) -> Result<HttpResponse> {
+pub async fn list_owned(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
     let owner = require_principal(&state, &request).await?;
+    // Parsed after the session check so that a caller without one learns
+    // nothing about the parameters.
+    let query = web::Query::<OwnedShareLinksQuery>::from_query(request.query_string())
+        .map_err(|_| error::ErrorBadRequest("malformed request"))?;
     let cursor = decode_cursor::<OwnedShareLinkCursor>(query.cursor.as_deref())?;
     if cursor.as_ref().is_some_and(|cursor| {
         cursor.scope != "owned-share-links" || cursor.file_id != query.file_id

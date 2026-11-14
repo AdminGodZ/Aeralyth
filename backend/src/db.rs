@@ -272,6 +272,7 @@ impl Database {
             .map_err(DatabaseError::from)
     }
 
+    #[cfg(test)]
     pub fn status(&self) -> deadpool_postgres::Status {
         self.pool.status()
     }

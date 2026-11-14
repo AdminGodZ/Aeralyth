@@ -173,6 +173,11 @@ async fn main() -> std::io::Result<()> {
         App::new()
             .app_data(state.clone())
             .app_data(web::Data::new(request_metrics))
+            // Extractors run before a handler checks the session, so their
+            // errors must not describe the parameters a route expects.
+            .app_data(web::QueryConfig::default().error_handler(|_, _| malformed_request()))
+            .app_data(web::FormConfig::default().error_handler(|_, _| malformed_request()))
+            .app_data(web::PathConfig::default().error_handler(|_, _| malformed_request()))
             .wrap(actix_web::middleware::from_fn(
                 observability::observe_request,
             ))
@@ -217,6 +222,10 @@ async fn main() -> std::io::Result<()> {
     result
 }
 
+fn malformed_request() -> actix_web::Error {
+    actix_web::error::ErrorBadRequest("malformed request")
+}
+
 #[cfg(test)]
 mod tests {
     use super::REQUIRED_E2EE_READY_QUERY;
@@ -242,6 +251,20 @@ mod tests {
         assert!(source.contains(".keep_alive(HTTP_KEEP_ALIVE)"));
         assert!(source.contains(".shutdown_timeout(HTTP_SHUTDOWN_TIMEOUT_SECONDS)"));
         assert!(!source.contains(&blanket_handler_timeout));
+    }
+
+    #[test]
+    fn extractor_failures_do_not_describe_route_parameters() {
+        let source = include_str!("main.rs");
+        for extractor in ["QueryConfig", "FormConfig", "PathConfig"] {
+            let handler =
+                format!("web::{extractor}::default().error_handler(|_, _| malformed_request())");
+            assert!(
+                source.contains(&handler),
+                "{extractor} would answer with its own parse error"
+            );
+        }
+        assert_eq!(super::malformed_request().to_string(), "malformed request");
     }
 
     #[test]
