@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dialog";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { getAccountAuthInfo } from "@/features/auth/auth-api";
 import type { RealtimeChange } from "@/features/realtime/changes";
 import { isVaultNodeId } from "@/features/vault/node-id";
 import type {
@@ -128,6 +129,7 @@ type VaultProviderProps = {
   vaultConfigured: boolean;
   autoLockMinutes: number;
   onePasswordEnabled?: boolean;
+  username?: string;
 };
 
 export function VaultProvider({
@@ -144,6 +146,7 @@ function useVaultProviderController({
   vaultConfigured,
   autoLockMinutes,
   onePasswordEnabled = false,
+  username,
 }: Omit<VaultProviderProps, "children">) {
   const enabled = e2eeMode !== "off";
   const clientRef = useRef<VaultCryptoClient | null>(null);
@@ -598,8 +601,21 @@ function useVaultProviderController({
               : "The vault passwords do not match.",
           );
         }
+        // The API creates a vault only for a caller who proves the account
+        // password. This dialog knows it when the vault shares that password;
+        // otherwise the proof comes from signing in again.
+        const proof =
+          onePasswordEnabled && username
+            ? {
+                currentCredential: await client.deriveAuthCredential(
+                  username,
+                  password,
+                  (await getAccountAuthInfo(username)).salt,
+                ),
+              }
+            : undefined;
         const setup = await client.setup(password);
-        const created = await setupVault(csrfToken, setup.payload);
+        const created = await setupVault(csrfToken, setup.payload, proof);
         configuredRef.current = true;
         setConfigured(true);
         await beginVaultResumeSession(client, created.vaultVersion);

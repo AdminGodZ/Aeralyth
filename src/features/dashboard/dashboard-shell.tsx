@@ -95,6 +95,7 @@ export function DashboardFrame({
         vaultConfigured={currentUser.vaultConfigured}
         autoLockMinutes={currentUser.vaultAutoLockMinutes}
         onePasswordEnabled={currentUser.onePasswordEnabled}
+        username={currentUser.username}
       >
         <StoragePreconnect origin={storageOrigin} />
         <RealtimeProvider key={currentUser.id} initialCursor={realtimeCursor}>

@@ -493,12 +493,26 @@ export async function getVaultAccountState(
   return ciphertext;
 }
 
+/**
+ * Proof that the caller knows the account password. The API refuses to create
+ * a vault for a session that cannot give one.
+ */
+export type AccountPasswordProof =
+  | { currentCredential: string }
+  | { legacyPassword: string };
+
 export function setupVault(
   csrfToken: string,
   payload: VaultSetupPayload,
+  proof?: AccountPasswordProof,
   signal?: AbortSignal,
 ): Promise<{ vaultVersion: number }> {
-  return vaultMutation("/api/vault/setup", csrfToken, payload, signal);
+  return vaultMutation(
+    "/api/vault/setup",
+    csrfToken,
+    { ...payload, ...proof },
+    signal,
+  );
 }
 
 export function rewrapVault(

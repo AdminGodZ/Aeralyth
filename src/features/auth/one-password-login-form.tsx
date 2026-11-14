@@ -153,7 +153,13 @@ export function OnePasswordLoginForm({
 
       if (!login.user.vaultConfigured) {
         const setup = await client.setup(password);
-        const created = await setupVault(login.csrfToken, setup.payload);
+        const created = await setupVault(
+          login.csrfToken,
+          setup.payload,
+          authInfo.authVersion === ONE_PASSWORD_AUTH_VERSION
+            ? { currentCredential: credential }
+            : { legacyPassword: password },
+        );
         await persistLoginVaultSession(client, login, created.vaultVersion);
         await finishAccountMigration({
           authVersion: authInfo.authVersion,
