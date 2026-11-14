@@ -18,17 +18,17 @@ describe("security header proxy matcher", () => {
       "/missing.ico",
       "/api",
       "/apifoo",
+      "/workers/vault.worker.js",
     ]) {
       expect(runsProxy(pathname), pathname).toBe(true);
     }
   });
 
-  it("skips the API, build output, workers and public images", () => {
+  it("skips the API, build output and public images", () => {
     for (const pathname of [
       "/api/auth/me",
       "/_next/static/chunks/app.js",
       "/_next/image",
-      "/workers/vault.worker.js",
       "/favicon.ico",
       "/aeralyth_logo.svg",
     ]) {
