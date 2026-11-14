@@ -19,6 +19,10 @@
 }
 
 :{$PORT:8080} {
+	# TLS ends at the public edge, so every response that reaches a browser was
+	# served over HTTPS. Pin browsers to it so a later visit cannot be downgraded.
+	header Strict-Transport-Security "max-age=31536000; includeSubDomains"
+
 	encode zstd gzip {
 		minimum_length 1024
 		match {
