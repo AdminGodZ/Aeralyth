@@ -429,6 +429,7 @@ jobs:
           AERALYTH_PERF_BUILD_PROFILE: production-image
           AERALYTH_PERF_OUTPUT: performance-results/production-image-mixed.json
           AERALYTH_PERF_MEMORY_CONTAINER: aeralyth-production-smoke
+          AERALYTH_PERF_SESSION_COOKIE: __Host-aeralyth_session
           DATABASE_URL: postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth
         run: |
           trap 'docker logs aeralyth-production-smoke 2>/dev/null || true' ERR

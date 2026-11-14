@@ -125,7 +125,7 @@ Everything is optional in development. In production, these matter:
 | `AERALYTH_E2EE_MODE`                | `off`, `migrate`, or `required` (the last two need S3)                        |
 | `AERALYTH_SHARE_LINK_SECRET`        | **Required.** Generate once with `openssl rand -base64 32` and keep it stable |
 | `AERALYTH_BOOTSTRAP_ADMIN_PASSWORD` | First deploy only — replaces the seed password (≥ 32 characters)              |
-| `AERALYTH_COOKIE_SECURE`            | Defaults to `false` in debug builds, `true` in release builds                 |
+| `AERALYTH_COOKIE_SECURE`            | `false` in debug builds; `true` in release, as `__Host-aeralyth_session`      |
 | `AERALYTH_TRUSTED_PROXY_RANGES`     | CIDRs whose `X-Forwarded-For` Caddy trusts (default `100.64.0.0/10`)          |
 
 The production image refuses to start while any active account still uses the seed password. The full list, including pool sizes, admission budgets, and multipart tuning, lives in [`.env.example`](.env.example).

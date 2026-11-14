@@ -5,7 +5,7 @@ use actix_web::middleware::Next;
 use actix_web::{HttpRequest, HttpResponse, Result, web};
 use serde::Serialize;
 
-use crate::auth::{AuthUser, SESSION_COOKIE, auth_user_from_row, hash_session_token};
+use crate::auth::{AuthUser, auth_user_from_row, hash_session_token, request_session_cookie};
 use crate::state::AppState;
 
 const SESSION_BOOTSTRAP_QUERY: &str = "
@@ -55,7 +55,7 @@ struct SessionBootstrapResponse {
 }
 
 pub async fn bootstrap(state: web::Data<AppState>, request: HttpRequest) -> Result<HttpResponse> {
-    let Some(cookie) = request.cookie(SESSION_COOKIE) else {
+    let Some(cookie) = request_session_cookie(&state, &request) else {
         return Ok(unauthorized());
     };
     let token_hash = hash_session_token(cookie.value());

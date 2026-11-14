@@ -1,5 +1,5 @@
 use actix_web::cookie::{Cookie, SameSite, time::Duration};
-use actix_web::http::header::{HeaderMap, LOCATION};
+use actix_web::http::header::{HOST, HeaderMap, LOCATION, ORIGIN};
 use actix_web::{HttpRequest, HttpResponse, Result, error, web};
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use hmac::{Hmac, KeyInit, Mac};
@@ -8,8 +8,8 @@ use sha2::Sha256;
 use std::net::{IpAddr, Ipv4Addr};
 
 use crate::auth::{
-    SESSION_COOKIE, authenticate_password, current_user, hash_session_token, parse_json_body,
-    require_csrf, require_principal,
+    authenticate_password, current_user, hash_session_token, parse_json_body, require_csrf,
+    require_principal, session_cookie_name,
 };
 use crate::state::{AppState, LoadShedError};
 
@@ -121,6 +121,7 @@ pub async fn login(
     request: HttpRequest,
     form: web::Form<LoginForm>,
 ) -> Result<HttpResponse> {
+    require_same_origin_login(&request)?;
     let username = form.username.trim();
 
     if username.is_empty() || form.password.is_empty() {
@@ -189,6 +190,7 @@ pub async fn login_json(
     request: HttpRequest,
     body: web::Payload,
 ) -> Result<HttpResponse> {
+    require_same_origin_login(&request)?;
     let body = parse_json_body::<JsonLoginRequest>(&request, body, AUTH_JSON_LIMIT).await?;
     let username = body.username.trim();
     let legacy_password = body.legacy_password.as_deref().unwrap_or("");
@@ -392,6 +394,39 @@ pub async fn me(state: web::Data<AppState>, request: HttpRequest) -> Result<Http
     Ok(status.json(MeResponse { user }))
 }
 
+/// Refuses sign-ins that another site started. Signing in needs no existing
+/// session, so the CSRF token cannot cover it; without this check any page
+/// could sign a visitor into an account of its own choosing and collect
+/// whatever they then upload.
+fn require_same_origin_login(request: &HttpRequest) -> Result<()> {
+    if is_same_origin_request(request.headers()) {
+        return Ok(());
+    }
+    Err(error::ErrorForbidden("cross-site sign-in is not allowed"))
+}
+
+/// Browsers state where a request came from in `Sec-Fetch-Site`; older ones
+/// only send `Origin` with a form post. A request with neither header did not
+/// come from a page, so there is no visitor to protect.
+fn is_same_origin_request(headers: &HeaderMap) -> bool {
+    if let Some(site) = headers.get("sec-fetch-site") {
+        return matches!(site.as_bytes(), b"same-origin" | b"none");
+    }
+    let Some(origin) = headers.get(ORIGIN) else {
+        return true;
+    };
+    let origin_host = origin
+        .to_str()
+        .ok()
+        .and_then(|origin| origin.split_once("://"))
+        .map(|(_, host)| host);
+    let host = headers.get(HOST).and_then(|host| host.to_str().ok());
+    matches!(
+        (origin_host, host),
+        (Some(origin_host), Some(host)) if origin_host.eq_ignore_ascii_case(host)
+    )
+}
+
 /// The address the login limiter keys on. In production the API listens on
 /// loopback behind Caddy, so every connection's peer is 127.0.0.1. Caddy
 /// overwrites X-Forwarded-For with the client address it resolved through its
@@ -457,7 +492,7 @@ pub(crate) fn decode_fixed_auth_value<const N: usize>(value: &str, label: &str) 
 }
 
 fn session_cookie(value: String, max_age_seconds: i64, secure: bool) -> Cookie<'static> {
-    Cookie::build(SESSION_COOKIE, value)
+    Cookie::build(session_cookie_name(secure), value)
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
@@ -467,7 +502,7 @@ fn session_cookie(value: String, max_age_seconds: i64, secure: bool) -> Cookie<'
 }
 
 pub(super) fn expired_session_cookie(secure: bool) -> Cookie<'static> {
-    Cookie::build(SESSION_COOKIE, "")
+    Cookie::build(session_cookie_name(secure), "")
         .path("/")
         .http_only(true)
         .same_site(SameSite::Lax)
@@ -516,7 +551,10 @@ mod tests {
     use actix_web::http::header::{HeaderMap, HeaderName, HeaderValue};
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-    use super::{client_address, encode_query_component, login_error_location, safe_next_path};
+    use super::{
+        client_address, encode_query_component, expired_session_cookie, is_same_origin_request,
+        login_error_location, safe_next_path, session_cookie,
+    };
 
     const LOOPBACK: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 
@@ -579,6 +617,73 @@ mod tests {
         assert_eq!(
             client_address(LOOPBACK, &forwarded(&["203.0.113.7:443"])),
             LOOPBACK
+        );
+    }
+
+    fn request_headers(values: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        for (name, value) in values {
+            headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_static(value),
+            );
+        }
+        headers
+    }
+
+    #[test]
+    fn sign_in_is_refused_when_another_site_started_it() {
+        for site in ["cross-site", "same-site"] {
+            assert!(!is_same_origin_request(&request_headers(&[
+                ("sec-fetch-site", site),
+                // Sec-Fetch-Site is authoritative when the browser sends it.
+                ("origin", "https://cloud.example"),
+                ("host", "cloud.example"),
+            ])));
+        }
+        assert!(!is_same_origin_request(&request_headers(&[
+            ("origin", "https://evil.example"),
+            ("host", "cloud.example"),
+        ])));
+        assert!(!is_same_origin_request(&request_headers(&[
+            ("origin", "null"),
+            ("host", "cloud.example"),
+        ])));
+        assert!(!is_same_origin_request(&request_headers(&[(
+            "origin",
+            "https://cloud.example"
+        )])));
+    }
+
+    #[test]
+    fn sign_in_is_accepted_from_the_app_and_from_non_browser_clients() {
+        assert!(is_same_origin_request(&request_headers(&[(
+            "sec-fetch-site",
+            "same-origin"
+        )])));
+        assert!(is_same_origin_request(&request_headers(&[
+            ("origin", "https://Cloud.Example:8443"),
+            ("host", "cloud.example:8443"),
+        ])));
+        assert!(is_same_origin_request(&HeaderMap::new()));
+    }
+
+    #[test]
+    fn secure_session_cookies_are_bound_to_this_host() {
+        for cookie in [
+            session_cookie("token".to_owned(), 60, true),
+            expired_session_cookie(true),
+        ] {
+            assert_eq!(cookie.name(), "__Host-aeralyth_session");
+            // Browsers drop a `__Host-` cookie that breaks any of these.
+            assert_eq!(cookie.secure(), Some(true));
+            assert_eq!(cookie.path(), Some("/"));
+            assert_eq!(cookie.domain(), None);
+        }
+        // Plain HTTP in development cannot carry the prefix.
+        assert_eq!(
+            session_cookie("token".to_owned(), 60, false).name(),
+            "aeralyth_session"
         );
     }
 

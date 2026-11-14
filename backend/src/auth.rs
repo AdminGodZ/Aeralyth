@@ -11,6 +11,10 @@ use crate::state::{AppState, LoadShedError};
 use crate::timestamps;
 
 pub const SESSION_COOKIE: &str = "aeralyth_session";
+/// The name used once cookies are `Secure`. Browsers accept a `__Host-` cookie
+/// only from this exact host over HTTPS, so a site elsewhere under the same
+/// parent domain cannot plant a session of its own in a visitor's browser.
+pub const HOST_SESSION_COOKIE: &str = "__Host-aeralyth_session";
 pub const CSRF_FIELD: &str = "csrf_token";
 const SESSION_PRINCIPAL_QUERY: &str = "
     SELECT sessions.id AS session_id, sessions.csrf_token,
@@ -22,6 +26,22 @@ const SESSION_PRINCIPAL_QUERY: &str = "
       AND users.status = 'active'
     LIMIT 1
 ";
+
+pub fn session_cookie_name(secure: bool) -> &'static str {
+    if secure {
+        HOST_SESSION_COOKIE
+    } else {
+        SESSION_COOKIE
+    }
+}
+
+/// The session cookie this deployment issues, when the request carries one.
+pub fn request_session_cookie(
+    state: &AppState,
+    request: &HttpRequest,
+) -> Option<actix_web::cookie::Cookie<'static>> {
+    request.cookie(session_cookie_name(state.config.cookie_secure))
+}
 
 pub async fn parse_json_body<T: DeserializeOwned>(
     request: &HttpRequest,
@@ -278,7 +298,7 @@ pub async fn current_user(state: &AppState, request: &HttpRequest) -> Result<Opt
         return Ok(Some(user));
     }
 
-    let Some(cookie) = request.cookie(SESSION_COOKIE) else {
+    let Some(cookie) = request_session_cookie(state, request) else {
         return Ok(None);
     };
 
@@ -370,7 +390,7 @@ pub async fn session_principal(
     request: &HttpRequest,
 ) -> Result<Option<SessionPrincipal>> {
     cached_or_load_principal(request, || async {
-        let Some(cookie) = request.cookie(SESSION_COOKIE) else {
+        let Some(cookie) = request_session_cookie(state, request) else {
             return Ok(None);
         };
         let token_hash = hash_session_token(cookie.value());

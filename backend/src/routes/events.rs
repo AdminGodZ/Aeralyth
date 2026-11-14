@@ -9,7 +9,7 @@ use futures_util::stream;
 use serde::{Deserialize, Serialize};
 use tokio::sync::watch;
 
-use crate::auth::{SESSION_COOKIE, hash_session_token, require_principal};
+use crate::auth::{hash_session_token, request_session_cookie, require_principal};
 use crate::db::Database;
 use crate::observability::Metrics;
 use crate::realtime::{AUTHORIZATION_LIFETIME, Subscription};
@@ -91,8 +91,7 @@ pub async fn events(
     state.db.release_request_connection().await;
     let cursor = request_cursor(&request, &query)?;
     let token_hash = hash_session_token(
-        request
-            .cookie(SESSION_COOKIE)
+        request_session_cookie(&state, &request)
             .expect("authenticated cookie")
             .value(),
     );
