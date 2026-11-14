@@ -98,6 +98,14 @@ describe("Railway production deployment", () => {
     expect(caddyfile).toContain("grace_period 30s");
   });
 
+  it("pins browsers to HTTPS on every response", () => {
+    const site = read("deployment/Caddyfile").split(":{$PORT:8080} {")[1];
+    const siteDirectives = site?.split("encode zstd gzip {")[0];
+    expect(siteDirectives).toContain(
+      'header Strict-Transport-Security "max-age=31536000; includeSubDomains"',
+    );
+  });
+
   it("compresses text responses but excludes encrypted and object bodies", () => {
     const caddyfile = read("deployment/Caddyfile");
     const encode = caddyfile
