@@ -107,18 +107,42 @@ impl PasswordService {
     }
 }
 
+/// Bounds login attempts three ways within one window:
+/// - per client address, across all usernames;
+/// - per account from one client address, which is what slows guessing;
+/// - per account across all addresses, at a much higher ceiling.
+///
+/// The account limit is scoped to the address so that one client guessing at
+/// a username cannot lock its owner out. Attempts an earlier limit refused do
+/// not count toward the next, so filling the shared ceiling takes that many
+/// distinct addresses, each sending attempts that were otherwise allowed.
 #[derive(Clone)]
 pub struct LoginRateLimiter {
     inner: Arc<Mutex<LoginRateState>>,
     window: Duration,
     per_address: u32,
+    per_account_address: u32,
     per_account: u32,
 }
+
+/// How many clients may each spend their own budget on one account before the
+/// account itself stops accepting attempts for the rest of the window.
+const ACCOUNT_ADDRESS_FANOUT: u32 = 10;
 
 #[derive(Default)]
 struct LoginRateState {
     addresses: HashMap<IpAddr, AttemptWindow>,
+    account_addresses: HashMap<(String, IpAddr), AttemptWindow>,
     accounts: HashMap<String, AttemptWindow>,
+}
+
+impl LoginRateState {
+    fn tracked_keys(&self) -> usize {
+        self.addresses
+            .len()
+            .saturating_add(self.account_addresses.len())
+            .saturating_add(self.accounts.len())
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -128,54 +152,71 @@ struct AttemptWindow {
 }
 
 impl LoginRateLimiter {
-    pub fn new(window: Duration, per_address: u32, per_account: u32) -> Self {
-        assert!(!window.is_zero() && per_address > 0 && per_account > 0);
+    pub fn new(window: Duration, per_address: u32, per_account_address: u32) -> Self {
+        assert!(!window.is_zero() && per_address > 0 && per_account_address > 0);
         Self {
             inner: Arc::new(Mutex::new(LoginRateState::default())),
             window,
             per_address,
-            per_account,
+            per_account_address,
+            per_account: per_account_address.saturating_mul(ACCOUNT_ADDRESS_FANOUT),
         }
     }
 
     pub fn allow(&self, address: IpAddr, username: &str) -> bool {
         let now = Instant::now();
+        let address = rate_limit_address(address);
         let username = username.trim().to_ascii_lowercase();
         let mut state = self
             .inner
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-        if state.addresses.len().saturating_add(state.accounts.len()) > MAX_TRACKED_LOGIN_KEYS {
+        if state.tracked_keys() > MAX_TRACKED_LOGIN_KEYS {
             let window = self.window;
-            state
-                .addresses
-                .retain(|_, attempts| now.duration_since(attempts.started_at) < window);
-            state
-                .accounts
-                .retain(|_, attempts| now.duration_since(attempts.started_at) < window);
+            let live =
+                |attempts: &mut AttemptWindow| now.duration_since(attempts.started_at) < window;
+            state.addresses.retain(|_, attempts| live(attempts));
+            state.account_addresses.retain(|_, attempts| live(attempts));
+            state.accounts.retain(|_, attempts| live(attempts));
         }
 
-        let address_allowed = record_attempt(
-            state.addresses.entry(address).or_insert(AttemptWindow {
-                started_at: now,
-                attempts: 0,
-            }),
+        let fresh = AttemptWindow {
+            started_at: now,
+            attempts: 0,
+        };
+        record_attempt(
+            state.addresses.entry(address).or_insert(fresh),
             now,
             self.window,
             self.per_address,
-        );
-        let account_allowed = record_attempt(
-            state.accounts.entry(username).or_insert(AttemptWindow {
-                started_at: now,
-                attempts: 0,
-            }),
+        ) && record_attempt(
+            state
+                .account_addresses
+                .entry((username.clone(), address))
+                .or_insert(fresh),
+            now,
+            self.window,
+            self.per_account_address,
+        ) && record_attempt(
+            state.accounts.entry(username).or_insert(fresh),
             now,
             self.window,
             self.per_account,
-        );
+        )
+    }
+}
 
-        address_allowed && account_allowed
+/// One IPv6 customer normally holds a whole /64, so every address in it shares
+/// a budget. Otherwise rotating through the prefix would reset each limit.
+fn rate_limit_address(address: IpAddr) -> IpAddr {
+    match address.to_canonical() {
+        IpAddr::V6(address) => {
+            let mut segments = address.segments();
+            segments[4..].fill(0);
+            IpAddr::V6(segments.into())
+        }
+        address => address,
     }
 }
 
@@ -195,11 +236,11 @@ fn record_attempt(
 
 #[cfg(test)]
 mod tests {
-    use std::net::{IpAddr, Ipv4Addr};
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
     use std::sync::Arc;
     use std::time::Duration;
 
-    use super::{LoginRateLimiter, PasswordError, PasswordService};
+    use super::{LoginRateLimiter, PasswordError, PasswordService, rate_limit_address};
 
     #[actix_web::test]
     async fn password_service_verifies_postgres_bcrypt_and_rejects_missing_users() {
@@ -267,13 +308,60 @@ mod tests {
     #[test]
     fn login_limits_apply_per_address_and_per_account() {
         let address = IpAddr::V4(Ipv4Addr::LOCALHOST);
-        let other_address = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 2));
         let limiter = LoginRateLimiter::new(Duration::from_secs(60), 3, 2);
 
         assert!(limiter.allow(address, "Alice"));
-        assert!(limiter.allow(address, "alice"));
-        assert!(!limiter.allow(other_address, "ALICE"));
-        assert!(limiter.allow(address, "bob"));
-        assert!(!limiter.allow(address, "charlie"));
+        assert!(limiter.allow(address, " alice "));
+        assert!(!limiter.allow(address, "ALICE"));
+        // The refused attempt still spent the address budget.
+        assert!(!limiter.allow(address, "bob"));
+    }
+
+    #[test]
+    fn one_client_cannot_lock_an_account_for_everyone_else() {
+        let attacker = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        let owner = IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4));
+        let limiter = LoginRateLimiter::new(Duration::from_secs(60), 1_000, 2);
+
+        for _ in 0..500 {
+            limiter.allow(attacker, "alice");
+        }
+        assert!(!limiter.allow(attacker, "alice"));
+        assert!(limiter.allow(owner, "alice"));
+        assert!(limiter.allow(owner, "alice"));
+        assert!(!limiter.allow(owner, "alice"));
+    }
+
+    #[test]
+    fn an_account_stops_accepting_attempts_at_its_shared_ceiling() {
+        let limiter = LoginRateLimiter::new(Duration::from_secs(60), 1_000, 2);
+        let client = |index: u8| IpAddr::V4(Ipv4Addr::new(203, 0, 113, index));
+
+        for index in 0..10 {
+            assert!(limiter.allow(client(index), "alice"));
+            assert!(limiter.allow(client(index), "alice"));
+        }
+        assert!(!limiter.allow(client(10), "alice"));
+        assert!(limiter.allow(client(10), "bob"));
+    }
+
+    #[test]
+    fn ipv6_clients_share_a_budget_across_their_prefix() {
+        let limiter = LoginRateLimiter::new(Duration::from_secs(60), 2, 2);
+        let within_prefix =
+            |host: u16| IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 2, 0, 0, 0, host));
+
+        assert!(limiter.allow(within_prefix(1), "alice"));
+        assert!(limiter.allow(within_prefix(2), "bob"));
+        assert!(!limiter.allow(within_prefix(3), "carol"));
+        assert!(limiter.allow(
+            IpAddr::V6(Ipv6Addr::new(0x2001, 0xdb8, 1, 3, 0, 0, 0, 1)),
+            "carol"
+        ));
+        // An IPv4 client reported in mapped form keeps its own exact address.
+        assert_eq!(
+            rate_limit_address("::ffff:198.51.100.4".parse().unwrap()),
+            IpAddr::V4(Ipv4Addr::new(198, 51, 100, 4))
+        );
     }
 }
