@@ -1,245 +1,176 @@
-# Aeralyth
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset=".github/assets/banner-dark.svg">
+  <img alt="Aeralyth — a simple, performant, self-hosted cloud" src=".github/assets/banner-light.svg" width="100%">
+</picture>
 
-Aeralyth is a self-hosted cloud project with a TypeScript/Next.js frontend and
-an Actix Web backend.
+<p align="center">
+  <b>Your files. Your server. Your keys.</b><br>
+  End-to-end encrypted cloud storage with a Rust core and a Next.js frontend.
+</p>
 
-## Structure
+<p align="center">
+  <img alt="Next.js 16" src="https://img.shields.io/badge/Next.js-16-0a0a0a?style=flat-square&logo=nextdotjs&logoColor=white">
+  <img alt="React 19" src="https://img.shields.io/badge/React-19-0a0a0a?style=flat-square&logo=react&logoColor=white">
+  <img alt="Rust · Actix Web" src="https://img.shields.io/badge/Rust-Actix_Web-0a0a0a?style=flat-square&logo=rust&logoColor=white">
+  <img alt="PostgreSQL" src="https://img.shields.io/badge/PostgreSQL-0a0a0a?style=flat-square&logo=postgresql&logoColor=white">
+  <img alt="S3 compatible" src="https://img.shields.io/badge/S3-compatible-0a0a0a?style=flat-square&logo=amazons3&logoColor=white">
+  <img alt="End-to-end encrypted" src="https://img.shields.io/badge/E2EE-AES--256--GCM-f4b64d?style=flat-square">
+</p>
 
-```text
-src/app/      Next.js App Router frontend
-backend/src/  Actix Web backend
-```
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#architecture">Architecture</a> ·
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#configuration">Configuration</a> ·
+  <a href="#deployment">Deployment</a>
+</p>
 
-The frontend is responsible for the user interface. The Actix backend owns API
-behavior, authentication, sessions, file permissions, metadata, and storage
-access.
+<br>
 
-## Git workspace setup
+## Features
 
-Use a Git clone when a workspace needs branches, history, or a working remote:
+|                         |                                                                                                                                        |
+| :---------------------- | :------------------------------------------------------------------------------------------------------------------------------------- |
+| **Zero-knowledge vault** | Files and names are encrypted in a browser worker before they leave the device. The server and bucket only ever see ciphertext.       |
+| **Fast transfers**      | Small files upload in batched requests, large ones stream straight to the bucket in parallel multipart chunks. Downloads resume.       |
+| **Folders, end to end** | Drop whole folders — `.gitignore` rules are honoured. Download any folder as a ZIP assembled locally, never on the server.             |
+| **Share links**         | Expiring links with viewer or editor access, re-displayable to their owner without storing bearer tokens.                             |
+| **Live everywhere**     | Changes stream to every open tab and device over server-sent events.                                                                   |
+| **Trash & auto-lock**   | Configurable trash retention and a vault that locks itself after inactivity.                                                           |
+| **Invite-only**         | No public sign-up: admins create accounts or send invitation links, and get a live storage overview.                                            |
+| **Built to stay up**    | Bounded queues per route class, separate request and maintenance pools, and early `429` / `503 Retry-After` instead of piling up work. |
 
-```bash
-git clone https://github.com/AdminGodZ/Aeralyth.git
-cd Aeralyth
-git rev-parse --show-toplevel
-git branch --show-current
-git log --oneline -5
-git remote -v
-```
+<details>
+<summary><b>Cryptography at a glance</b></summary>
+<br>
 
-The `.git` directory belongs to the checkout. Do not copy it into Aeralyth's
-tracked source or try to commit it. A GitHub source archive and a plain folder
-copy contain a source snapshot, not repository metadata. A workspace created
-from either form must clone the repository separately if it needs Git history
-or branch operations. GitHub-connected workspace tools should use their
-checkout or clone workflow instead of importing the source archive. Aeralyth
-does not provide automatic two-way Git synchronization.
+| Purpose              | Primitive                                     |
+| :------------------- | :-------------------------------------------- |
+| Content encryption   | AES-256-GCM, 4 MiB chunks                     |
+| Password → key       | Argon2id                                      |
+| Key wrapping         | HPKE · X25519 · HKDF-SHA256                   |
+| Record integrity     | Ed25519 signatures                            |
+| Upload integrity     | Incremental SHA-256 of the ciphertext         |
 
-Aeralyth's folder-upload review treats `.git` as a hidden directory. It is not
-uploaded automatically, but the user can explicitly include it in the review
-dialog. That option stores the selected metadata as files in Aeralyth. It does
-not turn an unrelated external workspace into a Git checkout.
+All crypto runs in a dedicated Web Worker. Encryption cannot be turned off: `AERALYTH_E2EE_MODE` only chooses how plaintext from an earlier deployment is handled. `migrate` (the default) converts it as each account signs in, and `required` refuses to start while any remains.
 
-## Build Checks
+</details>
 
-```bash
-npm run build
-cargo build --manifest-path backend/Cargo.toml
-```
-
-## Local Database
-
-```bash
-docker compose up -d postgres
-docker compose exec -T postgres psql -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/001_auth.sql
-docker compose exec -T postgres psql -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/002_e2ee.sql
-docker compose exec -T postgres psql -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/003_share_links.sql
-docker compose exec -T postgres psql -U aeralyth -d aeralyth -f /docker-entrypoint-initdb.d/004_repositories.sql
-```
-
-In local development, the Actix backend uses this Docker database by default
-when `DATABASE_URL` is not set:
+## Architecture
 
 ```text
-postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth
+                 ┌──────────────────────── Browser ─────────────────────────┐
+                 │   Next.js UI    ·    Web Workers: encrypt · hash · zip    │
+                 └───────────┬──────────────────────────────────┬───────────┘
+                             │ pages · /api/*                    │ ciphertext
+                             ▼                                   │ (presigned)
+                 ┌───────── Caddy ─────────┐                     │
+                 ▼                         ▼                     ▼
+          Next.js server            Actix API (Rust) ───────▶ S3 bucket
+          UI · SSR                  auth · sessions · tree
+                                    shares · events · jobs
+                                           │
+                                           ▼
+                                      PostgreSQL
 ```
 
-The local seed creates one admin user for development:
+The frontend owns the interface. The Actix API owns everything else: authentication, sessions, permissions, metadata, and storage access.
 
 ```text
-username: admingod
-password: admingod
+src/app/         Next.js App Router
+src/features/    vault, uploads, sharing, realtime, archive, …
+backend/src/     Actix Web API
+database/init/   numbered, immutable SQL migrations
+deployment/      Caddy ingress and production config
 ```
 
-The production image refuses to migrate or start while any active account
-still uses this seed password. On a fresh production database, set
-`AERALYTH_BOOTSTRAP_ADMIN_PASSWORD` (at least 32 characters, for example
-`openssl rand -base64 32`) for the first deploy. The migration replaces the
-seed password only while it is still the seed, so the variable can be removed
-afterwards.
+## Quick start
 
-## Local Runtime
-
-Run the local stack in three processes:
+> **Requires** Node.js, Rust (stable), Docker, and an S3-compatible bucket such as MinIO. The API does not start without one; see [`.env.example`](.env.example) for the `AWS_*` variables.
 
 ```bash
-npm run db:up
-npm run db:migrate
+npm install
+npm run db:up && npm run db:migrate   # PostgreSQL in Docker
+npm run dev:api                       # Actix API  → http://127.0.0.1:8080
+npm run dev                           # Next.js    → http://localhost:3000
 ```
+
+Sign in with the development seed account **`admingod` / `admingod`**.
+
+During `next dev`, browser `/api/*` requests are proxied to the API. Point `AERALYTH_API_ORIGIN` elsewhere if Actix isn't on the default port. Without `DATABASE_URL`, the API uses the Docker database at `postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth`.
+
+<details>
+<summary><b>Checks</b></summary>
+<br>
 
 ```bash
-npm run dev:api
+npm run lint                                    # Biome
+npm test                                        # Vitest
+cargo test --manifest-path backend/Cargo.toml   # API
+npm run build                                   # production build
+
+curl http://127.0.0.1:8080/api/health/ready     # API + database readiness
 ```
 
-```bash
-npm run dev
-```
+</details>
 
-Stored content is always end-to-end encrypted, and the browser sends encrypted
-uploads straight to the bucket, so the API refuses to start without S3 storage,
-locally too. Any S3-compatible store works; CI runs MinIO (see "Start isolated
-S3-compatible storage" in `.github/workflows/performance.yml`). Set
-`AERALYTH_STORAGE_BACKEND=s3`, `AWS_ENDPOINT_URL`, `AWS_ACCESS_KEY_ID`,
-`AWS_SECRET_ACCESS_KEY`, `AWS_S3_BUCKET_NAME`, `AWS_DEFAULT_REGION` and, for
-MinIO, `AWS_S3_URL_STYLE=path` before `npm run dev:api`.
+## Configuration
 
-`AERALYTH_E2EE_MODE` only chooses how plaintext from an earlier deployment is
-handled: `migrate` (the default) keeps it readable until each account converts
-it, and `required` refuses to start while any remains. `off` is rejected.
+In development only the S3 settings are required. In production, these matter:
 
-The frontend expects the Actix API at `http://127.0.0.1:8080` by default. If
-the login page shows a backend unavailable error, the Actix process is not
-reachable or `AERALYTH_API_ORIGIN` points at the wrong API origin.
+| Variable                            | Purpose                                                                                     |
+| :---------------------------------- | :------------------------------------------------------------------------------------------ |
+| `DATABASE_URL`                      | PostgreSQL connection string                                                                |
+| `AERALYTH_STORAGE_BACKEND=s3`       | Store objects in S3, configured through the standard `AWS_*` variables                      |
+| `AERALYTH_E2EE_MODE`                | `migrate` (default) or `required`; `off` is rejected at startup                             |
+| `AERALYTH_SHARE_LINK_SECRET`        | **Required.** Generate once with `openssl rand -base64 32` and keep it stable               |
+| `AERALYTH_BOOTSTRAP_ADMIN_PASSWORD` | First deploy only — replaces the seed password (≥ 32 characters)                            |
+| `AERALYTH_COOKIE_SECURE`            | Defaults to `false` in debug builds, `true` in release builds                               |
+| `AERALYTH_TRUSTED_PROXY_RANGES`     | CIDRs whose `X-Forwarded-For` Caddy trusts (default `100.64.0.0/10`)                        |
 
-Useful checks:
+The production image refuses to start while any active account still uses the seed password. The full list, including pool sizes, admission budgets, and multipart tuning, lives in [`.env.example`](.env.example).
 
-```bash
-curl http://127.0.0.1:8080/api/health
-curl http://127.0.0.1:8080/api/health/ready
-curl http://127.0.0.1:3000/api/health
-```
+<details>
+<summary><b>How the admission budgets fit together</b></summary>
+<br>
 
-## Backend Environment
+- **Database** — request and maintenance pools are separate; treat their combined maximum as one per-instance PostgreSQL connection budget.
+- **Passwords** — hashing runs in a bounded Rust worker queue, never holding a database connection.
+- **Tree work** — the recursive budget (default `AERALYTH_DB_POOL_MAX - 2`) is split evenly between interactive browsing and bulk work like trash or delete, so a large delete never blocks navigation.
+- **Uploads** — encrypted files up to 1 MiB are published in batches through the API (≤ 9 MiB per batch); larger files go from the browser straight to the bucket.
+- **Storage** — provider calls have their own bounded queue; overflow sheds early with `503 Retry-After`.
 
-The backend reads these optional environment variables:
+</details>
 
-```text
-AERALYTH_API_HOST=0.0.0.0
-AERALYTH_API_PORT=8080
-DATABASE_URL=postgres://aeralyth:aeralyth@localhost:5432/aeralyth
-AERALYTH_DB_POOL_MAX=8
-AERALYTH_DB_POOL_MIN=2
-AERALYTH_DB_POOL_QUEUE_CAPACITY=64
-AERALYTH_DB_MAINTENANCE_POOL_MAX=2
-AERALYTH_DB_MAINTENANCE_POOL_MIN=1
-AERALYTH_DB_MAINTENANCE_POOL_QUEUE_CAPACITY=16
-AERALYTH_DB_POOL_WAIT_MS=1000
-AERALYTH_DB_CONNECTION_MAX_LIFETIME_SECONDS=1800
-AERALYTH_DB_CONNECTION_LIFETIME_JITTER_SECONDS=600
-AERALYTH_PASSWORD_WORKERS=2
-AERALYTH_PASSWORD_QUEUE_CAPACITY=16
-AERALYTH_LOGIN_ATTEMPTS_PER_ADDRESS_MINUTE=60
-AERALYTH_LOGIN_ATTEMPTS_PER_ACCOUNT_MINUTE=10
-AERALYTH_UPLOAD_CONTROL_CONCURRENCY=8
-AERALYTH_UPLOAD_CONTROL_PER_USER=3
-AERALYTH_RECURSIVE_OPERATION_CONCURRENCY=6
-AERALYTH_RECURSIVE_OPERATION_PER_USER=2
-AERALYTH_RECURSIVE_OPERATION_QUEUE_CAPACITY=24
-AERALYTH_RECURSIVE_OPERATION_PER_USER_QUEUE_CAPACITY=8
-AERALYTH_STORAGE_OPERATION_CONCURRENCY=16
-AERALYTH_STORAGE_OPERATION_PER_USER=8
-AERALYTH_STORAGE_OPERATION_QUEUE_CAPACITY=32
-AERALYTH_STORAGE_OPERATION_PER_USER_QUEUE_CAPACITY=16
-AERALYTH_STORAGE_MAINTENANCE_CONCURRENCY=8
-AERALYTH_COOKIE_SECURE=false
-AERALYTH_STORAGE_BACKEND=s3
-AERALYTH_E2EE_MODE=migrate
-AERALYTH_SHARE_LINK_SECRET=<at-least-32-random-bytes>
-```
+## Deployment
 
-Request and maintenance database pools are deliberately separate. Treat their
-maximum sizes as one per-instance PostgreSQL connection budget when tuning a
-deployment. The small prewarmed minimums avoid cold reconnects; healthy idle
-connections stay pooled, while maximum-lifetime recycling is staggered by the
-configured jitter. Password hashing and verification run in the bounded Rust
-worker queue instead of consuming PostgreSQL connections. Upload control,
-recursive tree work, and storage-provider calls have separate bounded admission
-budgets. Recursive and provider queues absorb ordinary overlap while still
-shedding excess work before it can create unbounded waiters behind lightweight
-routes. The recursive budget defaults to `AERALYTH_DB_POOL_MAX - 2` and is split
-evenly between interactive work (folder browsing, downloads, public share-link
-views) and bulk tree work (trash, restore, delete, archive manifests), so a large
-delete never blocks browsing.
+One image runs **Caddy**, the standalone **Next.js** server, and the **Actix** API. Caddy routes `/api/*` straight to Actix and everything else to Next.js. PostgreSQL and the private S3 bucket stay separate resources.
 
-Encrypted files of up to 1 MiB are published in batches through
-`POST /api/vault/uploads/inline`: the browser sends the ciphertext and signed
-records of many files in one request and the API writes each object to the
-bucket itself, instead of the browser spending an init request, a CORS
-preflight, a storage PUT and a publish request per file. That ciphertext
-therefore passes through the service on its way to the bucket. A batch holds
-one upload-control permit, carries at most 9 MiB, and keeps no more than four
-uploads pending at a time; each file still takes the same reservation, lease,
-and publication steps as a client-driven upload. Larger files continue to go
-from the browser straight to the bucket.
+On [Railway](https://railway.com), migrations run as a pre-deploy command and a deployment only goes live once `/health/ready` passes.
 
-`AERALYTH_COOKIE_SECURE` defaults to `false` for debug builds and `true` for
-release builds.
+| File                                                                                                     | Contents                    |
+| :------------------------------------------------------------------------------------------------------- | :-------------------------- |
+| [`railway.json`](railway.json)                                                                           | Build and deploy settings   |
+| [`Dockerfile`](Dockerfile)                                                                               | The production image        |
+| [`deployment/Caddyfile`](deployment/Caddyfile)                                                           | Ingress routing             |
+| [`deployment/railway-s3-cors.production.json`](deployment/railway-s3-cors.production.json)               | Bucket CORS policy          |
+| [`database/MIGRATIONS.md`](database/MIGRATIONS.md)                                                       | Migration contract          |
 
-`AERALYTH_SHARE_LINK_SECRET` is required in production so active share URLs can
-be shown to their owner again without storing bearer tokens in PostgreSQL.
-Generate it once with `openssl rand -base64 32` and keep it stable; changing it
-does not break links already distributed, but those links can no longer be
-redisplayed in the owner dialog until they are explicitly replaced.
+<details>
+<summary><b>Operational notes</b></summary>
+<br>
 
-For compatible S3 providers, setting
-`AERALYTH_S3_ABORT_INCOMPLETE_MULTIPART_DAYS=7` installs or updates Aeralyth's
-prefix-scoped incomplete-multipart lifecycle rule while preserving unrelated
-rules. The value must remain safely beyond valid upload and reconciliation
-grace windows. Once the provider confirms the rule, Aeralyth retains its state
-repair sweep but reduces the global provider scan from hourly to daily. Railway
-Storage Buckets [do not currently support lifecycle
-configuration](https://docs.railway.com/storage-buckets), so leave this setting
-unset on Railway; the hourly application reconciliation remains the outage
-backstop there.
+- Attach the public domain before applying the origin-restricted bucket CORS policy.
+- On S3 providers that support lifecycle rules, `AERALYTH_S3_ABORT_INCOMPLETE_MULTIPART_DAYS=7` installs a prefix-scoped cleanup rule and relaxes the provider scan from hourly to daily. Railway buckets don't support lifecycle rules, so leave it unset there.
+- Changing `AERALYTH_SHARE_LINK_SECRET` doesn't break existing links, but their owners can no longer re-display them until they're replaced.
+- Set `AERALYTH_ENABLE_NEXT_API_PROXY=true` only when running `next start` without the Caddy ingress.
+- For the durable-tree migration, apply the full chain, then drain older API instances and workers before starting the new API.
 
-During `next dev`, the Next.js frontend proxies browser `/api/*` requests to
-the Actix backend. Override the local target when Actix is not reachable at the
-default:
+</details>
 
-```text
-AERALYTH_API_ORIGIN=http://127.0.0.1:8080
-```
+<br>
 
-Production keeps the same public `/api/*` URLs but routes them through Caddy:
-API and health traffic goes directly to Actix, while page and static traffic
-goes to the standalone Next.js server. The production image reserves port 8081
-for Actix so Caddy can safely bind Railway's public `PORT` even when it is 8080.
-The startup script also selects collision-free internal ports if `PORT` is
-customized to one of the normal internal defaults.
-Caddy resolves the client address from `X-Forwarded-For` only when the request
-arrives from a trusted proxy (`AERALYTH_TRUSTED_PROXY_RANGES`, Railway's private
-ingress range `100.64.0.0/10` by default) and forwards exactly that address to
-Actix. Actix honors `X-Forwarded-For` only from a loopback peer and keys the
-per-address login limit on it; direct connections from any other peer use the
-socket address.
-Set
-`AERALYTH_ENABLE_NEXT_API_PROXY=true` only as an explicit compatibility fallback
-when running `next start` without that ingress router.
-
-## Railway production
-
-The repository includes one production image containing Caddy, the standalone
-Next.js server, and the Actix API. Railway runs migrations as a pre-deploy
-command and activates a deployment only after `/health/ready` succeeds. PostgreSQL
-and the private S3 bucket remain separate Railway resources.
-
-Deployment settings are in [railway.json](railway.json), environment variables
-in [.env.example](.env.example), and the production bucket CORS policy in
-[deployment/railway-s3-cors.production.json](deployment/railway-s3-cors.production.json).
-Attach `cloud.admingod.ch` before applying that origin-restricted bucket policy.
-
-For the durable-tree migration, apply the full migration chain, then drain and
-stop older API instances and maintenance workers before starting the updated
-API. Workers can resume persisted jobs before public traffic switches. Every
-replica and rollback version must honor tree visibility fences while jobs are
-pending or running, including when workers are paused.
+<p align="center">
+  <img src="public/aeralyth_logo.svg" width="28" alt=""><br>
+  <sub>Made for people who'd rather own their cloud.</sub>
+</p>
