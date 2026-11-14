@@ -1308,7 +1308,6 @@ pub async fn setup(
     request: HttpRequest,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let _mutation_permit = state
@@ -1462,7 +1461,6 @@ pub async fn unlock_material(
     state: web::Data<AppState>,
     request: HttpRequest,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     let row = state
         .db
@@ -1544,7 +1542,6 @@ pub async fn account_state(
     state: web::Data<AppState>,
     request: HttpRequest,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     let row = state
         .db
@@ -1578,7 +1575,6 @@ pub async fn rewrap(
     request: HttpRequest,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let _mutation_permit = state
@@ -1650,7 +1646,6 @@ pub async fn rewrap_password(
     request: HttpRequest,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let _mutation_permit = state
@@ -1862,7 +1857,6 @@ pub async fn identity(
     request: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     let username = path.into_inner();
     let row = state
@@ -1908,7 +1902,6 @@ pub async fn trust_identity(
     path: web::Path<String>,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let body =
@@ -1965,7 +1958,6 @@ pub async fn init_upload(
     request: HttpRequest,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let _upload_permit = state
@@ -2345,7 +2337,6 @@ pub async fn presign_content(
     path: web::Path<String>,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let _upload_permit = state
@@ -2464,7 +2455,6 @@ pub async fn presign_part(
     path: web::Path<(String, i32)>,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let _upload_permit = state
@@ -2537,7 +2527,6 @@ pub async fn presign_parts(
     path: web::Path<String>,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let principal = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let _upload_permit = state
@@ -2668,7 +2657,6 @@ pub async fn publish_upload(
     path: web::Path<String>,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let upload = get_upload(&state, &user.id, &path.into_inner())
@@ -2721,7 +2709,6 @@ pub async fn publish_folders_batch(
     request: HttpRequest,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
@@ -2754,7 +2741,6 @@ pub async fn publish_record(
     path: web::Path<String>,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     state.db.release_request_connection().await;
@@ -2869,7 +2855,6 @@ pub async fn metadata_plans(
     request: HttpRequest,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     require_header_csrf(&state, &request).await?;
@@ -2990,9 +2975,6 @@ pub(crate) async fn listing_metadata_plans(
     user: &SessionPrincipal,
     request: &MetadataPlansRequest,
 ) -> Option<Vec<MetadataPlanResponse>> {
-    if !state.config.e2ee_mode.is_enabled() {
-        return None;
-    }
     let plans: Result<Vec<MetadataPlanResponse>> = async {
         require_configured_vault(state, user).await?;
         let metadata_paging::Page {
@@ -3045,7 +3027,6 @@ pub async fn download_plan(
     request: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     let node_id = path.into_inner();
@@ -3081,7 +3062,6 @@ pub async fn download_plans(
     request: HttpRequest,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     require_header_csrf(&state, &request).await?;
@@ -3370,7 +3350,6 @@ pub async fn abort_upload(
     request: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let _upload_permit = state
@@ -3439,7 +3418,6 @@ pub async fn share_plan(
     request: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
@@ -3477,7 +3455,6 @@ pub async fn share_contexts(
     request: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     let _recursive_permit = state.acquire_interactive_operation(&user.id).await?;
@@ -3532,7 +3509,6 @@ pub async fn share_sync_jobs(
     state: web::Data<AppState>,
     request: HttpRequest,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let principal = require_principal(&state, &request).await?;
     let rows = state
         .db
@@ -3578,7 +3554,6 @@ pub async fn publish_share_directory(
     path: web::Path<String>,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let principal = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     state.db.release_request_connection().await;
@@ -3897,7 +3872,6 @@ pub async fn create_share(
     request: HttpRequest,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     state.db.release_request_connection().await;
@@ -4107,7 +4081,6 @@ pub async fn list_shares(
     request: HttpRequest,
     query: web::Query<OwnedSharesQuery>,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     let root_node_id = query
@@ -4232,7 +4205,6 @@ pub async fn pending_epoch_rotation(
     request: HttpRequest,
     path: web::Path<String>,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_configured_vault(&state, &user).await?;
     let _recursive_permit = state.acquire_recursive_operation(&user.id).await?;
@@ -4319,7 +4291,6 @@ pub async fn begin_epoch_rotation(
     path: web::Path<String>,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     state.db.release_request_connection().await;
@@ -4598,7 +4569,6 @@ pub async fn publish_epoch_rotation(
     path: web::Path<(String, i64)>,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     state.db.release_request_connection().await;
@@ -4835,7 +4805,6 @@ pub async fn abort_epoch_rotation(
     request: HttpRequest,
     path: web::Path<(String, i64)>,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     let (share_id, pending_epoch) = path.into_inner();
@@ -7971,13 +7940,6 @@ async fn require_configured_vault(state: &AppState, user: &SessionPrincipal) -> 
         return Err(error::ErrorPreconditionFailed(
             "configure and unlock the encrypted vault first",
         ));
-    }
-    Ok(())
-}
-
-fn require_vault_enabled(state: &AppState) -> Result<()> {
-    if !state.config.e2ee_mode.is_enabled() {
-        return Err(error::ErrorNotFound("encrypted vault is disabled"));
     }
     Ok(())
 }

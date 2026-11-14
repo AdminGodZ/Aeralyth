@@ -5,7 +5,6 @@ use serde::Serialize;
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum E2eeMode {
-    Off,
     Migrate,
     Required,
 }
@@ -13,14 +12,19 @@ pub enum E2eeMode {
 impl E2eeMode {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Off => "off",
             Self::Migrate => "migrate",
             Self::Required => "required",
         }
     }
 
-    pub fn is_enabled(self) -> bool {
-        self != Self::Off
+    /// Whether new plaintext content may be written. It may not, in either
+    /// mode: `migrate` only keeps plaintext from an earlier deployment
+    /// readable until it is converted. The legacy upload and share handlers
+    /// ask this first, so the rest of their bodies no longer runs.
+    pub fn accepts_plaintext_writes(self) -> bool {
+        match self {
+            Self::Migrate | Self::Required => false,
+        }
     }
 }
 
@@ -229,23 +233,15 @@ impl Config {
             None if s3_configured => "s3".to_owned(),
             None => "local".to_owned(),
         };
-        let e2ee_mode = match env::var("AERALYTH_E2EE_MODE")
-            .unwrap_or_else(|_| "off".to_owned())
-            .trim()
-            .to_ascii_lowercase()
-            .as_str()
-        {
-            "off" => E2eeMode::Off,
-            "migrate" => E2eeMode::Migrate,
-            "required" => E2eeMode::Required,
-            value => {
-                return Err(format!("unsupported AERALYTH_E2EE_MODE value: {value}"));
-            }
-        };
+        let e2ee_mode = parse_e2ee_mode(env::var("AERALYTH_E2EE_MODE").ok().as_deref())?;
 
-        if e2ee_mode.is_enabled() && storage_backend != "s3" {
+        // Encrypted uploads go from the browser straight to the bucket, so the
+        // API cannot serve them from local disk. Unit tests load this
+        // configuration without a bucket and swap in their own fixture.
+        if storage_backend != "s3" && !cfg!(test) {
             return Err(
-                "AERALYTH_E2EE_MODE=migrate|required requires S3 object storage".to_owned(),
+                "end-to-end encryption requires S3 object storage; set AERALYTH_STORAGE_BACKEND=s3 with a bucket, endpoint and credentials"
+                    .to_owned(),
             );
         }
         let s3_region = first_env(&["AERALYTH_S3_REGION", "AWS_DEFAULT_REGION", "REGION"])
@@ -387,6 +383,25 @@ impl Config {
     }
 }
 
+/// Stored content is always end-to-end encrypted. The two modes only differ in
+/// whether plaintext left over from before encryption may still be migrated.
+fn parse_e2ee_mode(value: Option<&str>) -> Result<E2eeMode, String> {
+    match value
+        .unwrap_or("migrate")
+        .trim()
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "" | "migrate" => Ok(E2eeMode::Migrate),
+        "required" => Ok(E2eeMode::Required),
+        "off" => Err(
+            "AERALYTH_E2EE_MODE=off is no longer supported: end-to-end encryption cannot be turned off. Use migrate while plaintext from an earlier deployment is being converted, or required"
+                .to_owned(),
+        ),
+        value => Err(format!("unsupported AERALYTH_E2EE_MODE value: {value}")),
+    }
+}
+
 fn first_env(names: &[&str]) -> Option<String> {
     names.iter().find_map(|name| {
         env::var(name)
@@ -456,10 +471,60 @@ fn env_u32(name: &str, default: u32, min: u32, max: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{default_recursive_operation_concurrency, is_railway_bucket_endpoint};
+    use super::{
+        E2eeMode, default_recursive_operation_concurrency, is_railway_bucket_endpoint,
+        parse_e2ee_mode,
+    };
     use crate::state::QueuedMutationLimiter;
     use std::time::Duration;
     use tokio::time::timeout;
+
+    #[test]
+    fn end_to_end_encryption_cannot_be_turned_off() {
+        assert_eq!(parse_e2ee_mode(None), Ok(E2eeMode::Migrate));
+        assert_eq!(parse_e2ee_mode(Some("")), Ok(E2eeMode::Migrate));
+        assert_eq!(parse_e2ee_mode(Some(" Migrate ")), Ok(E2eeMode::Migrate));
+        assert_eq!(parse_e2ee_mode(Some("required")), Ok(E2eeMode::Required));
+        for rejected in ["off", "OFF", "disabled", "false"] {
+            assert!(parse_e2ee_mode(Some(rejected)).is_err(), "{rejected}");
+        }
+        assert!(
+            parse_e2ee_mode(Some("off"))
+                .unwrap_err()
+                .contains("cannot be turned off")
+        );
+        for mode in [E2eeMode::Migrate, E2eeMode::Required] {
+            assert!(!mode.accepts_plaintext_writes());
+        }
+    }
+
+    #[test]
+    fn plaintext_write_handlers_stop_before_doing_any_work() {
+        let files = include_str!("routes/files.rs");
+        for (handler, next) in [
+            (
+                "pub async fn create_folder_manifest(",
+                "pub async fn init_upload(",
+            ),
+            ("pub async fn init_upload(", "pub async fn upload_content("),
+            ("pub async fn share(", "pub async fn unshare("),
+        ] {
+            let body = files
+                .split_once(handler)
+                .and_then(|(_, tail)| tail.split_once(next))
+                .map(|(body, _)| body)
+                .expect("legacy write handlers should remain inspectable");
+            let gate = body
+                .find("if !state.config.e2ee_mode.accepts_plaintext_writes() {")
+                .unwrap_or_else(|| panic!("{handler} must refuse plaintext writes"));
+            for work in ["parse_json_body", "state.db", "path.into_inner()"] {
+                assert!(
+                    body.find(work).is_none_or(|position| position > gate),
+                    "{handler} reaches {work} before refusing"
+                );
+            }
+        }
+    }
 
     #[test]
     fn default_traversal_budget_scales_with_the_request_pool() {

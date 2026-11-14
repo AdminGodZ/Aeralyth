@@ -52,7 +52,7 @@
 | Record integrity   | Ed25519 signatures                    |
 | Upload integrity   | Incremental SHA-256 of the ciphertext |
 
-All crypto runs in a dedicated Web Worker. `AERALYTH_E2EE_MODE` rolls encryption out as `off` → `migrate` → `required`.
+All crypto runs in a dedicated Web Worker. Encryption cannot be turned off: `AERALYTH_E2EE_MODE` only chooses how plaintext from an earlier deployment is handled. `migrate` (the default) converts it as each account signs in, and `required` refuses to start while any remains.
 
 </details>
 
@@ -86,7 +86,7 @@ deployment/      Caddy ingress and production config
 
 ## Quick start
 
-> **Requires** Node.js, Rust (stable), and Docker.
+> **Requires** Node.js, Rust (stable), Docker, and an S3-compatible bucket such as MinIO. The API does not start without one; see [`.env.example`](.env.example) for the `AWS_*` variables.
 
 ```bash
 npm install
@@ -116,13 +116,13 @@ curl http://127.0.0.1:8080/api/health/ready     # API + database readiness
 
 ## Configuration
 
-Everything is optional in development. In production, these matter:
+In development only the S3 settings are required. In production, these matter:
 
 | Variable                            | Purpose                                                                       |
 | :---------------------------------- | :---------------------------------------------------------------------------- |
 | `DATABASE_URL`                      | PostgreSQL connection string                                                  |
 | `AERALYTH_STORAGE_BACKEND=s3`       | Store objects in S3, configured through the standard `AWS_*` variables        |
-| `AERALYTH_E2EE_MODE`                | `off`, `migrate`, or `required` (the last two need S3)                        |
+| `AERALYTH_E2EE_MODE`                | `migrate` (default) or `required`; `off` is rejected at startup               |
 | `AERALYTH_SHARE_LINK_SECRET`        | **Required.** Generate once with `openssl rand -base64 32` and keep it stable |
 | `AERALYTH_BOOTSTRAP_ADMIN_PASSWORD` | First deploy only — replaces the seed password (≥ 32 characters)              |
 | `AERALYTH_COOKIE_SECURE`            | `false` in debug builds; `true` in release, as `__Host-aeralyth_session`      |

@@ -67,7 +67,7 @@ jobs:
       AERALYTH_TEST_CONTAINER: aeralyth-audit-db-suite-20260912
       AERALYTH_TEST_DATABASE_PORT: "55434"
       AERALYTH_DATABASE_INTEGRATION_TESTS: "1"
-      AERALYTH_E2EE_MODE: "off"
+      AERALYTH_E2EE_MODE: migrate
       AERALYTH_COOKIE_SECURE: "false"
       DATABASE_URL: postgres://aeralyth:aeralyth@127.0.0.1:55434/aeralyth
     steps:
@@ -139,7 +139,7 @@ jobs:
       AERALYTH_API_HOST: 127.0.0.1
       AERALYTH_API_PORT: "18080"
       AERALYTH_COOKIE_SECURE: "false"
-      AERALYTH_E2EE_MODE: "off"
+      AERALYTH_E2EE_MODE: migrate
       AERALYTH_DB_POOL_MAX: "8"
       AERALYTH_DB_POOL_MIN: "2"
       AERALYTH_DB_MAINTENANCE_POOL_MAX: "2"

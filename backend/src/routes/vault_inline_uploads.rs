@@ -24,7 +24,7 @@ use super::{
     DecodedNodeRecord, PublishResponse, VaultUpload, VaultUploadInitRequest,
     abort_vault_upload_row, active_signing_identities, bind_single_upload_checksum,
     current_publish_records, encode_bytes, is_binary_publication, read_publication_body,
-    require_configured_vault, require_vault_enabled, run_publication_decode, stage_vault_upload,
+    require_configured_vault, run_publication_decode, stage_vault_upload,
     validate_node_publication_material, validate_record_for_upload,
 };
 use crate::auth::{SessionPrincipal, require_header_csrf, require_principal};
@@ -75,7 +75,6 @@ pub async fn publish_inline_uploads(
     request: HttpRequest,
     body: web::Payload,
 ) -> Result<HttpResponse> {
-    require_vault_enabled(&state)?;
     let user = require_principal(&state, &request).await?;
     require_header_csrf(&state, &request).await?;
     require_configured_vault(&state, &user).await?;

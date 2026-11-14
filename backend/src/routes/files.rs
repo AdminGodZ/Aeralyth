@@ -426,7 +426,7 @@ pub async fn list_files(
     let direction = normalize_sort_direction(query.direction.as_deref(), sort);
     // Metadata plans read the vault tree like the metadata-plans route, so a
     // listing that carries them is admitted as interactive browsing too.
-    let include_plans = query.include_plans && state.config.e2ee_mode.is_enabled();
+    let include_plans = query.include_plans;
     let _recursive_permit = if (query
         .folder
         .as_deref()
@@ -556,7 +556,7 @@ pub async fn create_folder_manifest(
     body: web::Payload,
 ) -> Result<HttpResponse> {
     let actor = require_upload_actor(&state, &request, true).await?;
-    if state.config.e2ee_mode.is_enabled() {
+    if !state.config.e2ee_mode.accepts_plaintext_writes() {
         return Ok(HttpResponse::Conflict()
             .body("plaintext folder manifests are disabled; use the encrypted vault upload API"));
     }
@@ -702,7 +702,7 @@ pub async fn init_upload(
         .try_acquire(&actor.owner_id)
         .map_err(|()| LoadShedError::too_many_requests("upload control capacity is full"))?;
 
-    if state.config.e2ee_mode.is_enabled() {
+    if !state.config.e2ee_mode.accepts_plaintext_writes() {
         return Ok(HttpResponse::Conflict()
             .body("plaintext uploads are disabled; use the encrypted vault upload API"));
     }
@@ -2152,7 +2152,7 @@ pub async fn share(
     let user = require_principal(&state, &request).await?;
     require_csrf(&state, &request, &form.csrf_token).await?;
     let wants_json = request_wants_json(&request);
-    if state.config.e2ee_mode.is_enabled() {
+    if !state.config.e2ee_mode.accepts_plaintext_writes() {
         if wants_json {
             return Err(error::ErrorConflict("encrypt this item before sharing it"));
         }
