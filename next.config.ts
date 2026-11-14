@@ -5,6 +5,7 @@ import { nextApiRewrites } from "./deployment/api-routing";
 const nextConfig: NextConfig = {
   allowedDevOrigins: ["127.0.0.1"],
   devIndicators: false,
+  poweredByHeader: false,
   output: "standalone",
   experimental: {
     // Run PostCSS without the socket-based child-process pool.

@@ -29,7 +29,6 @@ pub struct Config {
     host: String,
     port: u16,
     pub database_url: String,
-    pub database_url_configured: bool,
     pub database_pool_max: usize,
     pub database_pool_min: usize,
     pub database_pool_queue_capacity: usize,
@@ -87,7 +86,6 @@ impl Config {
         let configured_database_url = env::var("DATABASE_URL")
             .ok()
             .filter(|value| !value.trim().is_empty());
-        let database_url_configured = configured_database_url.is_some();
         let database_url = configured_database_url
             .unwrap_or_else(|| "postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth".to_owned());
         let database_pool_max = env_usize("AERALYTH_DB_POOL_MAX", 8, 1, 32);
@@ -289,7 +287,6 @@ impl Config {
             host,
             port,
             database_url,
-            database_url_configured,
             database_pool_max,
             database_pool_min,
             database_pool_queue_capacity,

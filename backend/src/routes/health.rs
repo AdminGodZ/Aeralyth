@@ -10,18 +10,13 @@ struct LiveResponse {
     version: &'static str,
 }
 
+// Readiness is public, so it says only whether the service can take traffic.
+// Pool and configuration detail is on the token-protected metrics endpoint.
 #[derive(Serialize)]
 struct ReadyResponse {
     status: &'static str,
     service: &'static str,
     version: &'static str,
-    database_configured: bool,
-    database_source: &'static str,
-    storage_configured: bool,
-    database_pool_max: usize,
-    database_pool_size: usize,
-    database_pool_available: usize,
-    database_pool_waiting: usize,
 }
 
 pub async fn live() -> HttpResponse {
@@ -37,22 +32,10 @@ pub async fn ready(state: web::Data<AppState>) -> HttpResponse {
         .database_readiness
         .get_or_check(|| async { state.db.ping().await.is_ok() })
         .await;
-    let pool = state.db.status();
     let response = ReadyResponse {
         status: if database_ready { "ok" } else { "unavailable" },
         service: "aeralyth-api",
         version: env!("CARGO_PKG_VERSION"),
-        database_configured: state.config.database_url_configured,
-        database_source: if state.config.database_url_configured {
-            "environment"
-        } else {
-            "local-default"
-        },
-        storage_configured: matches!(state.config.storage_backend.as_str(), "local" | "s3"),
-        database_pool_max: pool.max_size,
-        database_pool_size: pool.size,
-        database_pool_available: pool.available,
-        database_pool_waiting: pool.waiting,
     };
 
     if database_ready {
@@ -71,6 +54,21 @@ mod tests {
     use std::time::Duration;
 
     use crate::state::ReadinessCache;
+
+    #[test]
+    fn readiness_reports_no_pool_or_configuration_detail() {
+        let source = include_str!("health.rs");
+        let response = source
+            .split_once("struct ReadyResponse {")
+            .and_then(|(_, tail)| tail.split_once('}'))
+            .map(|(fields, _)| fields)
+            .expect("readiness response should remain inspectable");
+
+        assert_eq!(response.matches(": ").count(), 3);
+        for field in ["status", "service", "version"] {
+            assert!(response.contains(field));
+        }
+    }
 
     #[test]
     fn liveness_handler_is_dependency_free() {
