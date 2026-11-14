@@ -442,6 +442,10 @@ pub(crate) struct VaultSetupRequest {
     identity: IdentitySetupRequest,
     account_state_record_id: Option<String>,
     encrypted_account_state: Option<String>,
+    /// Proof of the account password: the one-password credential, or the raw
+    /// password of an account that has not been enrolled yet.
+    current_credential: Option<String>,
+    legacy_password: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1319,6 +1323,7 @@ pub async fn setup(
         |body: VaultSetupRequest| validate_setup_material(&body),
     )
     .await?;
+    require_account_password(&state, &user, &material).await?;
 
     let mut client = state.db.get().await.map_err(crate::db::http_error)?;
     let transaction = client
@@ -1405,6 +1410,52 @@ pub async fn setup(
         .map_err(error::ErrorInternalServerError)?;
 
     Ok(HttpResponse::Created().json(VaultMutationResponse { vault_version: 1 }))
+}
+
+/// The first vault decides who can ever read the account's files, and nothing
+/// replaces it afterwards. A session alone must not be enough to create it:
+/// whoever holds a stolen cookie would lock the owner out with their own keys.
+async fn require_account_password(
+    state: &AppState,
+    user: &SessionPrincipal,
+    material: &SetupMaterial,
+) -> Result<()> {
+    let account = state
+        .db
+        .query_opt(
+            "
+                SELECT password_hash, COALESCE(auth_version, 0::smallint) AS auth_version
+                FROM users
+                WHERE id = $1 AND status = 'active'
+                LIMIT 1
+            ",
+            &[&user.id],
+        )
+        .await
+        .map_err(crate::db::http_error)?
+        .ok_or_else(|| error::ErrorUnauthorized("authentication required"))?;
+    let password_hash: String = account.get("password_hash");
+    let candidate = if account.get::<_, i16>("auth_version") == 1 {
+        material.current_credential.as_deref()
+    } else {
+        material.legacy_password.as_deref()
+    };
+    state.db.release_request_connection().await;
+    let Some(candidate) = candidate else {
+        return Err(error::ErrorForbidden("sign in again to set up the vault"));
+    };
+    let verified = state
+        .passwords
+        .verify_candidate(candidate, Some(&password_hash))
+        .await
+        .map_err(|password_error| match password_error {
+            PasswordError::Busy => error::ErrorTooManyRequests("too many password requests"),
+            _ => error::ErrorServiceUnavailable("password check temporarily unavailable"),
+        })?;
+    if !verified {
+        return Err(error::ErrorForbidden("account password is incorrect"));
+    }
+    Ok(())
 }
 
 pub async fn unlock_material(
@@ -8233,6 +8284,8 @@ struct SetupMaterial {
     identity_private_ciphertext: Vec<u8>,
     account_state_record_id: Option<Vec<u8>>,
     encrypted_account_state: Vec<u8>,
+    current_credential: Option<String>,
+    legacy_password: Option<String>,
 }
 
 fn validate_setup_material(body: &VaultSetupRequest) -> Result<SetupMaterial> {
@@ -8245,6 +8298,15 @@ fn validate_setup_material(body: &VaultSetupRequest) -> Result<SetupMaterial> {
     if body.identity.key_version != 1 {
         return Err(error::ErrorBadRequest(
             "the first identity key version must be one",
+        ));
+    }
+    if body
+        .current_credential
+        .as_deref()
+        .is_some_and(|credential| !super::auth::valid_credential(credential))
+    {
+        return Err(error::ErrorBadRequest(
+            "authentication credential is invalid",
         ));
     }
     let material = SetupMaterial {
@@ -8300,6 +8362,11 @@ fn validate_setup_material(body: &VaultSetupRequest) -> Result<SetupMaterial> {
             MAX_ACCOUNT_STATE_CIPHERTEXT,
             "encrypted account state",
         )?,
+        current_credential: body.current_credential.clone(),
+        legacy_password: body
+            .legacy_password
+            .clone()
+            .filter(|password| !password.is_empty()),
     };
     if identity_fingerprint(&material.x25519_public_key, &material.ed25519_public_key)
         != material.fingerprint_sha256
@@ -10837,6 +10904,53 @@ mod account_cpu_tests {
             "accountStateRecordId": encode_bytes([11_u8; 16]),
             "encryptedAccountState": encode_bytes(vec![12_u8; MAX_ACCOUNT_STATE_CIPHERTEXT])
         })
+    }
+
+    #[test]
+    fn setup_carries_the_account_password_proof_it_was_given() {
+        let credential = URL_SAFE_NO_PAD.encode([5_u8; 32]);
+        let with = |field: &str, value: &str| {
+            let mut body = maximum_setup_json();
+            body[field] = serde_json::Value::from(value);
+            validate_setup_material(&serde_json::from_value::<VaultSetupRequest>(body).unwrap())
+        };
+
+        let enrolled = with("currentCredential", &credential).unwrap();
+        assert_eq!(
+            enrolled.current_credential.as_deref(),
+            Some(credential.as_str())
+        );
+        assert!(enrolled.legacy_password.is_none());
+        let legacy = with("legacyPassword", "correct horse").unwrap();
+        assert_eq!(legacy.legacy_password.as_deref(), Some("correct horse"));
+        assert!(legacy.current_credential.is_none());
+
+        assert!(with("currentCredential", "not-a-credential").is_err());
+        assert!(
+            with("legacyPassword", "")
+                .unwrap()
+                .legacy_password
+                .is_none()
+        );
+        let unproven = validate_setup_material(
+            &serde_json::from_value::<VaultSetupRequest>(maximum_setup_json()).unwrap(),
+        )
+        .unwrap();
+        assert!(unproven.current_credential.is_none() && unproven.legacy_password.is_none());
+    }
+
+    #[test]
+    fn a_session_alone_cannot_create_the_first_vault() {
+        let source = include_str!("vault.rs");
+        let setup = source
+            .split_once("pub async fn setup(")
+            .and_then(|(_, tail)| tail.split_once("async fn require_account_password("))
+            .map(|(handler, _)| handler)
+            .expect("vault setup should remain inspectable");
+        let proof = setup
+            .find("require_account_password(&state, &user, &material).await?;")
+            .expect("setup must check the account password");
+        assert!(proof < setup.find("INSERT INTO user_vaults").unwrap());
     }
 
     fn maximum_envelope() -> Bytes {
