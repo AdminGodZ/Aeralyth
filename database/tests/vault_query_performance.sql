@@ -56,7 +56,7 @@ INSERT INTO files (
   id, owner_id, original_name, storage_name, size_bytes, entry_type
 ) VALUES (
   'fil_vault_perf_root',
-  'usr_admingod',
+  'usr_aeralyth',
   'vault-performance-root',
   'vault-performance/root',
   0,
@@ -68,7 +68,7 @@ INSERT INTO files (
 )
 SELECT
   'fil_vault_perf_' || value,
-  'usr_admingod',
+  'usr_aeralyth',
   'node-' || value,
   'vault-performance/node-' || value,
   0,
@@ -80,7 +80,7 @@ INSERT INTO vault_identity_keys (
   fingerprint_sha256, status
 ) VALUES
   (
-    'usr_admingod', 1,
+    'usr_aeralyth', 1,
     digest('vault-perf-owner-x25519', 'sha256'),
     digest('vault-perf-owner-ed25519', 'sha256'),
     digest('vault-perf-owner-fingerprint', 'sha256'),
@@ -97,7 +97,7 @@ INSERT INTO vault_identity_keys (
 INSERT INTO vault_shares (
   id, owner_id, root_node_id, active_epoch, status
 ) VALUES (
-  'shr_vault_perf', 'usr_admingod', 'fil_vault_perf_root', 1, 'active'
+  'shr_vault_perf', 'usr_aeralyth', 'fil_vault_perf_root', 1, 'active'
 );
 
 INSERT INTO vault_share_epochs (share_id, epoch, status, published_at)
@@ -161,7 +161,7 @@ BEGIN
       decode(md5('vault-perf-envelope-' || value), 'hex'),
       'shr_vault_perf',
       1,
-      'usr_admingod',
+      'usr_aeralyth',
       1,
       'usr_vault_perf',
       1,
@@ -324,7 +324,7 @@ INSERT INTO file_uploads (
 SELECT
   'upl_expiry_perf_' || value,
   'fil_expiry_perf_' || value,
-  'usr_admingod',
+  'usr_aeralyth',
   'expiry-' || value,
   'vault-query-performance/file-upload-' || value,
   0,
@@ -348,7 +348,7 @@ INSERT INTO vault_uploads (
 SELECT
   'vup_expiry_perf_' || value,
   'nod_expiry_perf_' || value,
-  'usr_admingod',
+  'usr_aeralyth',
   'folder',
   1,
   decode(md5('vault-expiry-generation-' || value), 'hex'),

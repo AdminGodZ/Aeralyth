@@ -88,7 +88,7 @@ INSERT INTO files (
 )
 SELECT
   'fil_migration_perf_' || lpad(value::text, 6, '0'),
-  'usr_admingod',
+  'usr_aeralyth',
   'migration-node-' || value,
   'migration-performance/node-' || value,
   0,
@@ -106,7 +106,7 @@ INSERT INTO vault_migrations (
 )
 SELECT
   'fil_migration_perf_' || lpad(value::text, 6, '0'),
-  'usr_admingod',
+  'usr_aeralyth',
   'migration-performance/object-' || value,
   CASE
     WHEN value <= 250 THEN 'cleanup_queued'
@@ -133,7 +133,7 @@ BEGIN
            (extract(epoch FROM files.updated_at) * 1000)::bigint AS last_modified
     FROM files
     LEFT JOIN files AS parent ON parent.id = files.parent_id
-    WHERE files.owner_id = 'usr_admingod'
+    WHERE files.owner_id = 'usr_aeralyth'
       AND files.e2ee_state IN ('legacy', 'staged')
       AND (files.parent_id IS NULL OR parent.e2ee_state = 'encrypted')
     ORDER BY files.created_at, files.id
@@ -159,14 +159,14 @@ BEGIN
     EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON, COSTS OFF, TIMING OFF, SUMMARY OFF)
     SELECT
       (SELECT count(*)::bigint FROM files
-       WHERE owner_id = 'usr_admingod' AND e2ee_state = 'legacy') AS legacy_nodes,
+       WHERE owner_id = 'usr_aeralyth' AND e2ee_state = 'legacy') AS legacy_nodes,
       (SELECT count(DISTINCT pending.node_id)::bigint
        FROM (
          SELECT id AS node_id FROM files
-         WHERE owner_id = 'usr_admingod' AND e2ee_state = 'staged'
+         WHERE owner_id = 'usr_aeralyth' AND e2ee_state = 'staged'
          UNION ALL
          SELECT node_id FROM vault_migrations
-         WHERE owner_id = 'usr_admingod' AND state <> 'complete'
+         WHERE owner_id = 'usr_aeralyth' AND state <> 'complete'
        ) AS pending) AS incomplete_nodes
   $explain$
   INTO summary_plan;

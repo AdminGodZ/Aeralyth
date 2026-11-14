@@ -86,7 +86,7 @@ SELECT
   CASE WHEN series % 20 = 0 THEN 'admin' ELSE 'user' END,
   encode(digest(format('admin-scale-token-%s', series), 'sha256'), 'hex'),
   CASE WHEN series % 4 = 0 THEN 'accepted' ELSE 'pending' END,
-  'usr_admingod',
+  'usr_aeralyth',
   timestamptz '2027-01-01 00:00:00+00',
   timestamptz '2025-01-01 00:00:00+00' + series * interval '1 millisecond'
 FROM generate_series(1, :scale_rows::integer) AS series;

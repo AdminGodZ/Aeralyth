@@ -67,8 +67,8 @@ postgres://aeralyth:aeralyth@127.0.0.1:5432/aeralyth
 The local seed creates one admin user for development:
 
 ```text
-username: admingod
-password: admingod
+username: aeralyth
+password: aeralyth
 ```
 
 The production image refuses to migrate or start while any active account

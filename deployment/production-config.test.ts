@@ -213,6 +213,19 @@ describe("Railway production deployment", () => {
     );
     expect(preflight).toContain("role = 'admin'");
     expect(preflight).toContain("production refuses to start");
+    // The seed credential, and the one databases created before the seed
+    // account was renamed may still hold.
+    expect(read("database/init/001_auth.sql")).toContain(
+      "VALUES ('usr_aeralyth', 'aeralyth', crypt('aeralyth', gen_salt('bf')), 'admin')",
+    );
+    const bootstrap = read("database/production/bootstrap_admin.sql");
+    for (const seedPassword of ["aeralyth", "admingod"]) {
+      const seedCheck = `password_hash = crypt('${seedPassword}', password_hash)`;
+      expect(preflight).toContain(seedCheck);
+      expect(bootstrap).toContain(
+        `id = 'usr_${seedPassword}' AND ${seedCheck}`,
+      );
+    }
     expect(read("database/tests/fresh_production_preflight.sh")).toContain(
       "no active administrator",
     );
