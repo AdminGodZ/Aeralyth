@@ -161,6 +161,7 @@ On [Railway](https://railway.com), migrations run as a pre-deploy command and a 
 <br>
 
 - Attach the public domain before applying the origin-restricted bucket CORS policy.
+- Behind Cloudflare, Railway reports Cloudflare's address as the client. Caddy then takes the visitor from `CF-Connecting-IP`, but only when the reported address is inside `AERALYTH_CLOUDFLARE_RANGES` (Cloudflare's published ranges by default); from any other address that header is ignored.
 - On S3 providers that support lifecycle rules, `AERALYTH_S3_ABORT_INCOMPLETE_MULTIPART_DAYS=7` installs a prefix-scoped cleanup rule and relaxes the provider scan from hourly to daily. Railway buckets don't support lifecycle rules, so leave it unset there.
 - Changing `AERALYTH_SHARE_LINK_SECRET` doesn't break existing links, but their owners can no longer re-display them until they're replaced.
 - Set `AERALYTH_ENABLE_NEXT_API_PROXY=true` only when running `next start` without the Caddy ingress.
