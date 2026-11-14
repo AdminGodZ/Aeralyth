@@ -11697,6 +11697,44 @@ mod account_cpu_tests {
             .unwrap()
             .get(0);
         assert!(!configured);
+        // Setup proves the account password, so the account needs a real hash.
+        let credential = URL_SAFE_NO_PAD.encode([5_u8; 32]);
+        let stored_hash = bcrypt::hash(&credential, 4).unwrap();
+        state
+            .db
+            .execute(
+                "UPDATE users SET password_hash = $1 WHERE id = $2",
+                &[&stored_hash, &user],
+            )
+            .await
+            .unwrap();
+        let attempt_setup = |current_credential: Option<String>| {
+            let state = state.clone();
+            let token = token.clone();
+            async move {
+                let mut body = maximum_setup_json();
+                if let Some(current_credential) = current_credential {
+                    body["currentCredential"] = serde_json::Value::from(current_credential);
+                }
+                let (request, mut payload) = actix_test::TestRequest::post()
+                    .app_data(state.clone())
+                    .insert_header((CONTENT_TYPE, "application/json"))
+                    .insert_header(("x-csrf-token", "csrf"))
+                    .cookie(Cookie::new(crate::auth::SESSION_COOKIE, token))
+                    .set_payload(serde_json::to_vec(&body).unwrap())
+                    .to_http_parts();
+                let body = web::Payload::from_request(&request, &mut payload)
+                    .await
+                    .unwrap();
+                match crate::db::scope_request(setup(state, request, body))
+                    .await
+                    .0
+                {
+                    Ok(response) => response.status(),
+                    Err(failure) => failure.as_response_error().status_code(),
+                }
+            }
+        };
         let (resume_tx, resume_rx) = tokio::sync::oneshot::channel();
         let password = async {
             resume_rx.await.unwrap();
@@ -11712,21 +11750,27 @@ mod account_cpu_tests {
             transaction.rollback().await.unwrap();
         };
         let configure = async {
-            let (request, mut payload) = actix_test::TestRequest::post()
-                .app_data(state.clone())
-                .insert_header((CONTENT_TYPE, "application/json"))
-                .insert_header(("x-csrf-token", "csrf"))
-                .cookie(Cookie::new(crate::auth::SESSION_COOKIE, token))
-                .set_payload(serde_json::to_vec(&maximum_setup_json()).unwrap())
-                .to_http_parts();
-            let body = web::Payload::from_request(&request, &mut payload)
+            // A session without the account password cannot create the vault.
+            assert_eq!(attempt_setup(None).await, StatusCode::FORBIDDEN);
+            let wrong_credential = URL_SAFE_NO_PAD.encode([6_u8; 32]);
+            assert_eq!(
+                attempt_setup(Some(wrong_credential)).await,
+                StatusCode::FORBIDDEN
+            );
+            let still_unconfigured: bool = state
+                .db
+                .query_one(
+                    "SELECT NOT EXISTS(SELECT 1 FROM user_vaults WHERE user_id = $1)",
+                    &[&user],
+                )
                 .await
-                .unwrap();
-            let response = crate::db::scope_request(setup(state.clone(), request, body))
-                .await
-                .0
-                .unwrap();
-            assert_eq!(response.status(), StatusCode::CREATED);
+                .unwrap()
+                .get(0);
+            assert!(still_unconfigured);
+            assert_eq!(
+                attempt_setup(Some(credential.clone())).await,
+                StatusCode::CREATED
+            );
             resume_tx.send(()).unwrap();
         };
         tokio::join!(password, configure);
@@ -11736,7 +11780,7 @@ mod account_cpu_tests {
             .await
             .unwrap()
             .get(0);
-        assert_eq!(hash, "original-hash");
+        assert_eq!(hash, stored_hash);
         state
             .db
             .execute("DELETE FROM users WHERE id = $1", &[&user])
