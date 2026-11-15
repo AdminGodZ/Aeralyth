@@ -59,11 +59,11 @@ export function proxy(request: NextRequest) {
 export const config = {
   matcher: [
     {
-      // Skip only what is not a page: the API, build output and the two
-      // public images. Excluding by file suffix would also skip pages such
+      // Skip only what is not a page: the API, build output and the public
+      // images. Excluding by file suffix would also skip pages such
       // as /s/x.png, which then render without any of these headers.
       source:
-        "/((?!api/|_next/static|_next/image|favicon\\.ico$|aeralyth_logo\\.svg$).*)",
+        "/((?!api/|_next/static|_next/image|favicon\\.ico$|aeralyth_logo_(?:light|dark)\\.svg$).*)",
       missing: [
         { type: "header", key: "next-router-prefetch" },
         { type: "header", key: "purpose", value: "prefetch" },

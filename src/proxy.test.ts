@@ -30,7 +30,8 @@ describe("security header proxy matcher", () => {
       "/_next/static/chunks/app.js",
       "/_next/image",
       "/favicon.ico",
-      "/aeralyth_logo.svg",
+      "/aeralyth_logo_light.svg",
+      "/aeralyth_logo_dark.svg",
     ]) {
       expect(runsProxy(pathname), pathname).toBe(false);
     }

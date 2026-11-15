@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="512" height="512">
+<title>Aeralyth</title>
+<defs>
+  <linearGradient id="left-outer" gradientUnits="userSpaceOnUse" x1="30" y1="5" x2="4" y2="58">
+    <stop offset="0" stop-color="#252525"/>
+    <stop offset="1" stop-color="#1e1e1e"/>
+  </linearGradient>
+  <linearGradient id="left-inner" gradientUnits="userSpaceOnUse" x1="30" y1="5" x2="20" y2="58">
+    <stop offset="0" stop-color="#121212"/>
+    <stop offset="1" stop-color="#080808"/>
+  </linearGradient>
+  <linearGradient id="right-inner" gradientUnits="userSpaceOnUse" x1="34" y1="5" x2="44" y2="58">
+    <stop offset="0" stop-color="#313131"/>
+    <stop offset="1" stop-color="#252525"/>
+  </linearGradient>
+  <linearGradient id="right-outer" gradientUnits="userSpaceOnUse" x1="34" y1="5" x2="60" y2="58">
+    <stop offset="0" stop-color="#121212"/>
+    <stop offset="1" stop-color="#000000"/>
+  </linearGradient>
+</defs>
+<g shape-rendering="geometricPrecision" stroke-linejoin="round" stroke-width="0.08">
+  <polygon points="30,5 4,58 12,58" fill="url(#left-outer)" stroke="url(#left-outer)"/>
+  <polygon points="30,5 12,58 20,58" fill="url(#left-inner)" stroke="url(#left-inner)"/>
+  <polygon points="34,5 44,58 52,58" fill="url(#right-inner)" stroke="url(#right-inner)"/>
+  <polygon points="34,5 52,58 60,58" fill="url(#right-outer)" stroke="url(#right-outer)"/>
+  <polygon points="32,30 26,38 32,38" fill="#313131" stroke="#313131"/>
+  <polygon points="32,30 32,38 38,38" fill="#252525" stroke="#252525"/>
+  <polygon points="26,38 32,46 32,38" fill="#1e1e1e" stroke="#1e1e1e"/>
+  <polygon points="32,38 32,46 38,38" fill="#080808" stroke="#080808"/>
+</g>
+</svg>

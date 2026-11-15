@@ -182,7 +182,7 @@ function TopBar({
   return (
     <header className="dashboard-topbar grid min-h-16 grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-3 px-4 py-3 sm:px-6 lg:grid-cols-[minmax(0,1fr)_minmax(20rem,34rem)_minmax(0,1fr)] lg:items-center">
       <div className="col-start-1 row-start-1 flex min-w-0 items-center gap-3">
-        <AeralythLogo className="size-9 lg:hidden" />
+        <AeralythLogo className="size-9 lg:hidden" surface="dark" />
         <div className="min-w-0">
           <p className="text-lg font-medium leading-6">{section.title}</p>
           <p className="truncate text-sm text-muted-foreground">

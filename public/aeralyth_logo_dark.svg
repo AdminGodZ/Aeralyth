@@ -2,20 +2,20 @@
 <title>Aeralyth</title>
 <defs>
   <linearGradient id="left-outer" gradientUnits="userSpaceOnUse" x1="30" y1="5" x2="4" y2="58">
-    <stop offset="0" stop-color="#f7c474"/>
-    <stop offset="1" stop-color="#f4b64d"/>
+    <stop offset="0" stop-color="#ededed"/>
+    <stop offset="1" stop-color="#e6e6e6"/>
   </linearGradient>
   <linearGradient id="left-inner" gradientUnits="userSpaceOnUse" x1="30" y1="5" x2="20" y2="58">
-    <stop offset="0" stop-color="#c8943d"/>
-    <stop offset="1" stop-color="#9d742e"/>
+    <stop offset="0" stop-color="#dadada"/>
+    <stop offset="1" stop-color="#d0d0d0"/>
   </linearGradient>
   <linearGradient id="right-inner" gradientUnits="userSpaceOnUse" x1="34" y1="5" x2="44" y2="58">
-    <stop offset="0" stop-color="#fbdbad"/>
-    <stop offset="1" stop-color="#f7c474"/>
+    <stop offset="0" stop-color="#f9f9f9"/>
+    <stop offset="1" stop-color="#ededed"/>
   </linearGradient>
   <linearGradient id="right-outer" gradientUnits="userSpaceOnUse" x1="34" y1="5" x2="60" y2="58">
-    <stop offset="0" stop-color="#c8943d"/>
-    <stop offset="1" stop-color="#755520"/>
+    <stop offset="0" stop-color="#dadada"/>
+    <stop offset="1" stop-color="#c8c8c8"/>
   </linearGradient>
 </defs>
 <g shape-rendering="geometricPrecision" stroke-linejoin="round" stroke-width="0.08">
@@ -23,9 +23,9 @@
   <polygon points="30,5 12,58 20,58" fill="url(#left-inner)" stroke="url(#left-inner)"/>
   <polygon points="34,5 44,58 52,58" fill="url(#right-inner)" stroke="url(#right-inner)"/>
   <polygon points="34,5 52,58 60,58" fill="url(#right-outer)" stroke="url(#right-outer)"/>
-  <polygon points="32,30 26,38 32,38" fill="#fbdbad" stroke="#fbdbad"/>
-  <polygon points="32,30 32,38 38,38" fill="#f7c474" stroke="#f7c474"/>
-  <polygon points="26,38 32,46 32,38" fill="#f4b64d" stroke="#f4b64d"/>
-  <polygon points="32,38 32,46 38,38" fill="#9d742e" stroke="#9d742e"/>
+  <polygon points="32,30 26,38 32,38" fill="#f9f9f9" stroke="#f9f9f9"/>
+  <polygon points="32,30 32,38 38,38" fill="#ededed" stroke="#ededed"/>
+  <polygon points="26,38 32,46 32,38" fill="#e6e6e6" stroke="#e6e6e6"/>
+  <polygon points="32,38 32,46 38,38" fill="#d0d0d0" stroke="#d0d0d0"/>
 </g>
 </svg>
