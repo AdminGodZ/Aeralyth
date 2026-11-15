@@ -29,8 +29,18 @@ export const metadata: Metadata = {
   },
   description: "A simple, performant, self-hosted cloud.",
   icons: {
-    icon: [{ url: "/aeralyth_logo.svg", type: "image/svg+xml" }],
-    shortcut: [{ url: "/aeralyth_logo.svg", type: "image/svg+xml" }],
+    icon: [
+      {
+        url: "/aeralyth_logo_light.svg",
+        type: "image/svg+xml",
+        media: "(prefers-color-scheme: light)",
+      },
+      {
+        url: "/aeralyth_logo_dark.svg",
+        type: "image/svg+xml",
+        media: "(prefers-color-scheme: dark)",
+      },
+    ],
   },
 };
 

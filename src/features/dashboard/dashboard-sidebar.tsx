@@ -168,7 +168,7 @@ export function DashboardSidebar({
           title={isCollapsed ? "Aeralyth" : undefined}
           className="flex h-10 min-w-0 items-center gap-2.5"
         >
-          <AeralythLogo className="size-7 shrink-0" />
+          <AeralythLogo className="size-7 shrink-0" surface="dark" />
           {!isCollapsed ? (
             <span className="min-w-0 truncate text-lg font-semibold tracking-tight">
               Aeralyth

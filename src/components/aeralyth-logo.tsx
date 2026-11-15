@@ -1,5 +1,3 @@
-import * as React from "react";
-
 import { cn } from "@/lib/utils";
 
 type LogoTone =
@@ -27,22 +25,17 @@ type LogoFacet = {
   fill: LogoTone | LogoGradient;
 };
 
-type AeralythLogoProps = Omit<React.SVGProps<SVGSVGElement>, "children"> & {
-  title?: string;
+type AeralythLogoProps = {
+  className?: string;
+  /**
+   * The surface behind the mark. "theme" follows the light or dark theme;
+   * "dark" is for surfaces that stay dark in both, such as the dashboard.
+   */
+  surface?: "theme" | "dark";
 };
 
-const logoTones: Record<LogoTone, string> = {
-  pale: "color-mix(in oklch, var(--primary) 34%, white)",
-  light: "color-mix(in oklch, var(--primary) 50%, white)",
-  bright: "color-mix(in oklch, var(--primary) 66%, white)",
-  baseLight: "color-mix(in oklch, var(--primary) 82%, white)",
-  base: "var(--primary)",
-  baseDark: "color-mix(in oklch, var(--primary) 86%, black)",
-  deep: "color-mix(in oklch, var(--primary) 72%, black)",
-  shadow: "color-mix(in oklch, var(--primary) 58%, black)",
-};
-
-// Keep in sync with public/aeralyth_logo.svg, which bakes these tones to hex.
+// The mark's geometry and shading, which the login page's LED matrix draws.
+// public/aeralyth_logo_light.svg and aeralyth_logo_dark.svg bake it to greys.
 const logoFacets: LogoFacet[] = [
   {
     id: "left-outer",
@@ -119,69 +112,38 @@ export const aeralythLogoFacets = logoFacets.map((facet) => ({
   to: typeof facet.fill === "string" ? facet.fill : facet.fill.to,
 }));
 
+/**
+ * The monochrome mark: white on dark surfaces, black on light ones. On a
+ * themed surface both files sit in one box so the swap follows the theme
+ * class without a flash, and the caller's classes (size, visibility) apply to
+ * the box. It is decorative: every use sits next to the product name or a
+ * labelled link.
+ */
 export function AeralythLogo({
   className,
-  title,
-  ...props
+  surface = "theme",
 }: AeralythLogoProps) {
-  const idPrefix = React.useId().replaceAll(":", "");
-  const titleId = `${idPrefix}-title`;
-
   return (
-    <svg
-      xmlns="http://www.w3.org/2000/svg"
-      viewBox="0 0 64 64"
-      role={title ? "img" : undefined}
-      aria-hidden={title ? undefined : true}
-      aria-labelledby={title ? titleId : undefined}
-      focusable="false"
-      className={cn("shrink-0", className)}
-      {...props}
+    <span
+      aria-hidden="true"
+      className={cn("inline-block shrink-0 select-none", className)}
     >
-      <title id={titleId}>{title ?? "Aeralyth"}</title>
-      <defs>
-        {logoFacets.map((facet) => {
-          if (typeof facet.fill === "string") {
-            return null;
-          }
-
-          return (
-            <linearGradient
-              key={facet.id}
-              id={`${idPrefix}-${facet.id}`}
-              gradientUnits="userSpaceOnUse"
-              x1={facet.fill.x1}
-              y1={facet.fill.y1}
-              x2={facet.fill.x2}
-              y2={facet.fill.y2}
-            >
-              <stop offset="0" stopColor={logoTones[facet.fill.from]} />
-              <stop offset="1" stopColor={logoTones[facet.fill.to]} />
-            </linearGradient>
-          );
-        })}
-      </defs>
-      <g
-        shapeRendering="geometricPrecision"
-        strokeLinejoin="round"
-        strokeWidth="0.08"
-      >
-        {logoFacets.map((facet) => {
-          const paint =
-            typeof facet.fill === "string"
-              ? logoTones[facet.fill]
-              : `url(#${idPrefix}-${facet.id})`;
-
-          return (
-            <polygon
-              key={facet.id}
-              points={facet.points}
-              fill={paint}
-              stroke={paint}
-            />
-          );
-        })}
-      </g>
-    </svg>
+      {surface === "theme" ? (
+        // biome-ignore lint/performance/noImgElement: a static SVG gains nothing from next/image.
+        <img
+          src="/aeralyth_logo_light.svg"
+          alt=""
+          draggable={false}
+          className="size-full dark:hidden"
+        />
+      ) : null}
+      {/* biome-ignore lint/performance/noImgElement: a static SVG gains nothing from next/image. */}
+      <img
+        src="/aeralyth_logo_dark.svg"
+        alt=""
+        draggable={false}
+        className={cn("size-full", surface === "theme" && "hidden dark:block")}
+      />
+    </span>
   );
 }

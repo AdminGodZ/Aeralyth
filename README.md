@@ -173,6 +173,9 @@ On [Railway](https://railway.com), migrations run as a pre-deploy command and a 
 <br>
 
 <p align="center">
-  <img src="public/aeralyth_logo.svg" width="28" alt=""><br>
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="public/aeralyth_logo_dark.svg">
+    <img src="public/aeralyth_logo_light.svg" width="28" alt="">
+  </picture><br>
   <sub>Made for people who'd rather own their cloud.</sub>
 </p>
