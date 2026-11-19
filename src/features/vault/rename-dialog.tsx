@@ -1,7 +1,7 @@
 "use client";
 
 import { LoaderCircle } from "lucide-react";
-import { useState } from "react";
+import { useRef, useState } from "react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -37,6 +37,19 @@ export function RenameDialog({
   const [name, setName] = useState(itemName);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  const inputRef = useRef<HTMLInputElement>(null);
+  // Until the field is first edited or clicked, every focus selects the base
+  // name, as file managers do. Focus traps that select the whole value on
+  // their own refocus run first, so the selection is applied a frame later.
+  const pristineRef = useRef(true);
+  const selectBaseNameWhilePristine = () => {
+    requestAnimationFrame(() => {
+      const input = inputRef.current;
+      if (pristineRef.current && input && document.activeElement === input) {
+        selectBaseName(input, itemType);
+      }
+    });
+  };
 
   async function submit(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -75,7 +88,14 @@ export function RenameDialog({
         if (!open && !saving) onClose();
       }}
     >
-      <DialogContent>
+      <DialogContent
+        onOpenAutoFocus={(event) => {
+          const input = inputRef.current;
+          if (!input) return;
+          event.preventDefault();
+          input.focus();
+        }}
+      >
         <form className="grid gap-6" onSubmit={submit} noValidate>
           <DialogHeader>
             <DialogTitle>
@@ -96,11 +116,18 @@ export function RenameDialog({
               aria-invalid={error ? true : undefined}
               aria-describedby={error ? "rename-item-error" : undefined}
               onChange={(event) => {
+                pristineRef.current = false;
                 setName(event.target.value);
                 setError(null);
               }}
-              onFocus={(event) => selectBaseName(event.currentTarget, itemType)}
-              autoFocus
+              ref={inputRef}
+              onFocus={selectBaseNameWhilePristine}
+              onPointerDown={() => {
+                pristineRef.current = false;
+              }}
+              onKeyDown={() => {
+                pristineRef.current = false;
+              }}
             />
             {error ? (
               <p
