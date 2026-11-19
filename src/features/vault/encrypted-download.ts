@@ -10,6 +10,7 @@ import type { VaultCryptoClient } from "@/features/vault/vault-client";
 import type { VaultDecryptionStart } from "@/features/vault/vault-messages";
 import { abortReason } from "@/lib/abort";
 import { randomFileToken, triggerBlobDownload } from "@/lib/browser-download";
+import { formatBytes } from "@/lib/format";
 import {
   canStreamDownloads,
   getDownloadWorker,
@@ -70,6 +71,7 @@ export async function downloadEncryptedFile({
   const savePicker = getSaveFilePicker();
   let writable: FileSystemWritableFileStream | null = null;
   let originPrivateDownload: OriginPrivateDownload | null = null;
+  let streamUnavailable = "this browser cannot stream downloads";
   if (savePicker) {
     const handle = await savePicker({
       suggestedName: safeDownloadName(manifest.name),
@@ -79,7 +81,13 @@ export async function downloadEncryptedFile({
     // Streaming through the download worker needs no site storage, so it is
     // not limited by the storage quota the staging fallback below runs into.
     const worker = canStreamDownloads()
-      ? await getDownloadWorker().catch(() => null)
+      ? await getDownloadWorker().catch((error: unknown) => {
+          console.warn("The download worker could not start.", error);
+          streamUnavailable = `the download worker could not start (${
+            error instanceof Error ? error.message : String(error)
+          })`;
+          return null;
+        })
       : null;
     if (worker) {
       await streamDownload({
@@ -97,6 +105,14 @@ export async function downloadEncryptedFile({
       });
       onProgress?.(100);
       return;
+    }
+    // Staging needs the whole file in site storage. Fail before downloading
+    // anything when the browser's quota for the site cannot hold it.
+    const available = await availableSiteStorageBytes();
+    if (available !== null && available < manifest.plaintextBytes) {
+      throw new Error(
+        `This ${formatBytes(manifest.plaintextBytes)} file cannot be saved here: ${streamUnavailable}, and the browser only lets this site keep ${formatBytes(available)} of temporary storage. Reload the page and try again, or use Chrome or Edge.`,
+      );
     }
     originPrivateDownload = await createOriginPrivateDownload();
     writable = originPrivateDownload?.writable ?? null;
@@ -158,6 +174,14 @@ export async function downloadEncryptedFile({
         .catch(() => undefined);
     }
     metrics.finish(signal?.aborted ? "canceled" : "failed");
+    // Some browsers (Brave) report a larger quota than they enforce, so the
+    // up-front check can pass and staging still runs out of room.
+    if (error instanceof DOMException && error.name === "QuotaExceededError") {
+      throw new Error(
+        `This ${formatBytes(manifest.plaintextBytes)} file did not fit in the storage this browser allows the site: ${streamUnavailable}. Reload the page and try again, or use Chrome or Edge.`,
+        { cause: error },
+      );
+    }
     throw error;
   } finally {
     for (const plaintext of plaintextParts) new Uint8Array(plaintext).fill(0);
@@ -471,6 +495,21 @@ async function decryptEncryptedFile({
       metrics.finish(signal?.aborted ? "canceled" : outcome);
   }
   signal?.throwIfAborted();
+}
+
+async function availableSiteStorageBytes(): Promise<number | null> {
+  try {
+    const estimate = await navigator.storage?.estimate?.();
+    if (
+      typeof estimate?.quota !== "number" ||
+      typeof estimate.usage !== "number"
+    ) {
+      return null;
+    }
+    return Math.max(0, estimate.quota - estimate.usage);
+  } catch {
+    return null;
+  }
 }
 
 function getSaveFilePicker(): SaveFilePicker | null {

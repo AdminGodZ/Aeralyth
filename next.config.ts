@@ -14,6 +14,12 @@ const nextConfig: NextConfig = {
   async headers() {
     return [
       {
+        // The download service worker keeps a stable URL, so caches must
+        // revalidate it or a fix reaches browsers (and the CDN) hours late.
+        source: "/download-sw.js",
+        headers: [{ key: "Cache-Control", value: "no-cache" }],
+      },
+      {
         source: "/workers/:asset*",
         headers: [
           {

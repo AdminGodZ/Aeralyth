@@ -222,6 +222,39 @@ describe("encrypted download buffering", () => {
     expect(client.startDecryption).not.toHaveBeenCalled();
   });
 
+  it("fails before downloading when site storage cannot hold the staged file", async () => {
+    const getDirectory = vi.fn();
+    vi.stubGlobal("navigator", {
+      storage: {
+        getDirectory,
+        estimate: async () => ({ quota: 300 * 1024 * 1024, usage: 0 }),
+      },
+    });
+    const fetchMock = vi.fn();
+    vi.stubGlobal("fetch", fetchMock);
+    const client = {
+      startDecryption: vi.fn(),
+    } as unknown as VaultCryptoClient;
+
+    await expect(
+      downloadEncryptedFile({
+        plan: testPlan(1),
+        manifest: {
+          ...manifest,
+          chunkCount: 1,
+          paddedBytes: 1,
+          plaintextBytes: 572 * 1024 * 1024,
+        },
+        client,
+      }),
+    ).rejects.toThrow(
+      "This 572 MB file cannot be saved here: this browser cannot stream downloads, and the browser only lets this site keep 300 MB",
+    );
+    expect(getDirectory).not.toHaveBeenCalled();
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(client.startDecryption).not.toHaveBeenCalled();
+  });
+
   it("streams compatibility downloads through OPFS and removes the temp entry", async () => {
     vi.useFakeTimers();
     const writes: ArrayBuffer[] = [];
