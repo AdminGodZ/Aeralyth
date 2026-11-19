@@ -10,6 +10,11 @@ import type { VaultCryptoClient } from "@/features/vault/vault-client";
 import type { VaultDecryptionStart } from "@/features/vault/vault-messages";
 import { abortReason } from "@/lib/abort";
 import { randomFileToken, triggerBlobDownload } from "@/lib/browser-download";
+import {
+  canStreamDownloads,
+  getDownloadWorker,
+  streamDownload,
+} from "@/lib/stream-download";
 
 type SaveFilePicker = (options: {
   suggestedName: string;
@@ -71,6 +76,28 @@ export async function downloadEncryptedFile({
     });
     writable = await handle.createWritable();
   } else {
+    // Streaming through the download worker needs no site storage, so it is
+    // not limited by the storage quota the staging fallback below runs into.
+    const worker = canStreamDownloads()
+      ? await getDownloadWorker().catch(() => null)
+      : null;
+    if (worker) {
+      await streamDownload({
+        worker,
+        stream: readEncryptedFileStream({
+          plan,
+          manifest,
+          client,
+          signal,
+          onProgress,
+        }),
+        fileName: safeDownloadName(manifest.name),
+        size: manifest.plaintextBytes,
+        signal,
+      });
+      onProgress?.(100);
+      return;
+    }
     originPrivateDownload = await createOriginPrivateDownload();
     writable = originPrivateDownload?.writable ?? null;
     if (!writable && manifest.plaintextBytes > MAX_IN_MEMORY_DOWNLOAD_BYTES) {
