@@ -13,6 +13,7 @@ import {
   Link2,
   ListFilter,
   LockKeyhole,
+  Pencil,
   RotateCcw,
   Share2,
   Star,
@@ -38,10 +39,12 @@ import { FolderDownloadProgressPanel } from "@/features/files/folder-download-pr
 import { applyFileListOverlay } from "@/features/realtime/file-list-overlay";
 import { useRealtimeMutation } from "@/features/realtime/realtime-provider";
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
+import { ImagePreviewDialog } from "@/features/vault/image-preview-dialog";
 import type {
   VaultMetadataPlan,
   VaultMetadataReference,
 } from "@/features/vault/protocol";
+import { RenameDialog } from "@/features/vault/rename-dialog";
 import {
   type FileTreeMutation,
   getVaultDownloadPlan,
@@ -61,6 +64,7 @@ import {
   type VaultNameResolution,
 } from "@/features/vault/vault-name-presentation";
 import { useVault, VAULT_LOCKING_EVENT } from "@/features/vault/vault-provider";
+import { renameVaultNode } from "@/features/vault/vault-rename";
 import { isAbortError } from "@/lib/abort";
 import type { FileEntry, FileSort, FileSortDirection } from "@/lib/api";
 import { formatBytes } from "@/lib/format";
@@ -202,6 +206,8 @@ function useVaultFileListController({
   const favoritePendingIds = favoritePendingIdsRef.current;
   const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set());
   const [shareEntry, setShareEntry] = useState<ResolvedEntry | null>(null);
+  const [previewId, setPreviewId] = useState<string | null>(null);
+  const [renameEntry, setRenameEntry] = useState<ResolvedEntry | null>(null);
 
   // localEntries is an optimistic overlay; server refreshes replace its base.
   // react-doctor-disable-next-line react-doctor/no-mirror-prop-effect
@@ -236,6 +242,10 @@ function useVaultFileListController({
       vaultStateRef.current = "locked";
       folderDownloadAbortRef.current?.abort();
       setFolderDownloadSession(null);
+      setPreviewId(null);
+      setRenameEntry((current) =>
+        current?.e2eeState === "encrypted" ? null : current,
+      );
     };
     window.addEventListener(VAULT_LOCKING_EVENT, cancelForLock);
     return () => window.removeEventListener(VAULT_LOCKING_EVENT, cancelForLock);
@@ -264,6 +274,10 @@ function useVaultFileListController({
         Object.keys(current).length === 0 ? current : {},
       );
       setShareEntry((current) =>
+        current?.e2eeState === "encrypted" ? null : current,
+      );
+      setPreviewId(null);
+      setRenameEntry((current) =>
         current?.e2eeState === "encrypted" ? null : current,
       );
       setSelectedIds((current) => removeEncryptedSelections(current, entries));
@@ -631,6 +645,56 @@ function useVaultFileListController({
     );
   }
 
+  async function rename(entry: ResolvedEntry, name: string): Promise<void> {
+    const endRealtimeMutation = beginRealtimeMutation();
+    try {
+      if (entry.e2eeState === "encrypted") {
+        if (!vault.client || vault.state !== "unlocked") {
+          vault.requestUnlock();
+          throw new Error("Unlock the vault to rename encrypted items.");
+        }
+        const { published, manifest } = await renameVaultNode(
+          { client: vault.client, csrfToken, openNode: vault.openNode },
+          entry.id,
+          name,
+        );
+        // The listing shows the new record at once; the realtime refresh that
+        // follows carries the same record hash.
+        setLocalEntries((current) =>
+          current.map((candidate) =>
+            candidate.id === entry.id
+              ? {
+                  ...candidate,
+                  vaultRecordHash: published.recordHash,
+                  vaultRecordVersion: published.recordVersion,
+                }
+              : candidate,
+          ),
+        );
+        setResolved((current) => ({
+          ...current,
+          [entry.id]: metadataFromResult({
+            status: "ready",
+            nodeId: entry.id,
+            recordHash: published.recordHash,
+            manifest,
+          }),
+        }));
+        return;
+      }
+      const renamed = await requestLegacyRename(entry.id, name, csrfToken);
+      setLocalEntries((current) =>
+        current.map((candidate) =>
+          candidate.id === entry.id
+            ? { ...candidate, name: renamed }
+            : candidate,
+        ),
+      );
+    } finally {
+      endRealtimeMutation();
+    }
+  }
+
   async function download(entry: ResolvedEntry): Promise<void> {
     if (entry.entryType === "folder") {
       if (!entry.resolved || !beginDownload(entry.id)) return;
@@ -763,6 +827,11 @@ function useVaultFileListController({
         mutateEntries(targets, "restore"),
       onShareEntryChange: setShareEntry,
       onSortChange: changeSort,
+      onPreviewIdChange: setPreviewId,
+      previewId,
+      onRename: rename,
+      onRenameEntryChange: setRenameEntry,
+      renameEntry,
       sectionKey,
       selectedIds,
       shareEntry,
@@ -797,6 +866,11 @@ function VaultFileListView({
   onEntrySelectedChange,
   shareEntry,
   currentUserId,
+  previewId,
+  onPreviewIdChange,
+  renameEntry,
+  onRenameEntryChange,
+  onRename,
 }: {
   onAllDisplayedSelectedChange(value: boolean): void;
   sort: FileSort;
@@ -822,7 +896,15 @@ function VaultFileListView({
   onEntrySelectedChange(entryId: string, selected: boolean): void;
   shareEntry: ResolvedEntry | null;
   currentUserId: string;
+  previewId: string | null;
+  onPreviewIdChange(id: string | null): void;
+  renameEntry: ResolvedEntry | null;
+  onRenameEntryChange(entry: ResolvedEntry | null): void;
+  onRename(entry: ResolvedEntry, name: string): Promise<void>;
 }) {
+  const previewableImages = displayed.filter((entry) =>
+    isPreviewableImage(entry, sectionKey),
+  );
   const selectedEntries: ResolvedEntry[] = [];
   let selectableCount = 0;
   let pendingCount = 0;
@@ -879,6 +961,20 @@ function VaultFileListView({
               {selectedCount} {selectedCount === 1 ? "item" : "items"} selected
             </span>
             <div className="-my-1 flex shrink-0 items-center gap-2">
+              {!isTrash &&
+              !isShared &&
+              singleSelectedEntry &&
+              isRenamable(singleSelectedEntry) ? (
+                <Button
+                  type="button"
+                  variant="secondary"
+                  size="sm"
+                  onClick={() => onRenameEntryChange(singleSelectedEntry)}
+                >
+                  <Pencil className="size-4" aria-hidden="true" />
+                  <span className={selectionActionLabel}>Rename</span>
+                </Button>
+              ) : null}
               {!isTrash && !isShared && singleSelectedEntry ? (
                 <Button
                   type="button"
@@ -1048,9 +1144,44 @@ function VaultFileListView({
               onEntrySelectedChange(entry.id, selected)
             }
             onShare={() => onShareEntryChange(entry)}
+            onRename={
+              isRenamable(entry) ? () => onRenameEntryChange(entry) : undefined
+            }
+            onPreview={
+              isPreviewableImage(entry, sectionKey)
+                ? () => onPreviewIdChange(entry.id)
+                : undefined
+            }
           />
         ))}
       </div>
+      {renameEntry ? (
+        <RenameDialog
+          key={renameEntry.id}
+          itemName={renameEntry.name}
+          itemType={renameEntry.entryType}
+          siblingNames={displayed.flatMap((entry) =>
+            entry.id !== renameEntry.id && entry.resolved ? [entry.name] : [],
+          )}
+          onRename={(name) => onRename(renameEntry, name)}
+          onClose={() => onRenameEntryChange(null)}
+        />
+      ) : null}
+      {previewId ? (
+        <ImagePreviewDialog
+          entries={previewableImages}
+          activeId={previewId}
+          downloading={downloadId === previewId}
+          onActiveIdChange={onPreviewIdChange}
+          onClose={() => onPreviewIdChange(null)}
+          onDownload={(target) => {
+            const entry = previewableImages.find(
+              (candidate) => candidate.id === target.id,
+            );
+            if (entry) void onDownload(entry);
+          }}
+        />
+      ) : null}
       {shareEntry?.e2eeState === "encrypted" ? (
         vault.state === "unlocked" ? (
           <VaultShareDialog
@@ -1128,6 +1259,8 @@ function VaultFileRow({
   onPrefetchFolder,
   onSelectedChange,
   onShare,
+  onRename,
+  onPreview,
 }: {
   entry: ResolvedEntry;
   sectionKey: string;
@@ -1142,6 +1275,10 @@ function VaultFileRow({
   onPrefetchFolder(): void;
   onSelectedChange(selected: boolean): void;
   onShare(): void;
+  /** Present for items the current user can rename. */
+  onRename?(): void;
+  /** Present for image files that open in the preview on click. */
+  onPreview?(): void;
 }) {
   const isTrash = sectionKey === "trash";
   const isShared = sectionKey === "shared";
@@ -1189,6 +1326,25 @@ function VaultFileRow({
           <Icon className="size-5 shrink-0 text-primary" aria-hidden="true" />
           <span className="truncate font-medium">{entry.name}</span>
         </Link>
+      ) : onPreview ? (
+        <button
+          type="button"
+          className="group flex min-w-0 items-center gap-3 text-left"
+          onClick={onPreview}
+          aria-label={`Preview ${entry.name}`}
+        >
+          <Icon className="size-5 shrink-0 text-primary" aria-hidden="true" />
+          <span className="min-w-0">
+            <span className="block truncate font-medium group-hover:underline group-hover:underline-offset-4">
+              {entry.name}
+            </span>
+            {isShared && entry.ownerUsername ? (
+              <span className="block truncate text-xs text-muted-foreground">
+                Shared by {entry.ownerUsername}
+              </span>
+            ) : null}
+          </span>
+        </button>
       ) : (
         <div className="flex min-w-0 items-center gap-3">
           <Icon className="size-5 shrink-0 text-primary" aria-hidden="true" />
@@ -1325,6 +1481,12 @@ function VaultFileRow({
                       )}
                       {sharingActionLabel(entry)}
                     </DropdownMenuItem>
+                    {onRename ? (
+                      <DropdownMenuItem onSelect={onRename}>
+                        <Pencil className="size-4" aria-hidden="true" />
+                        Rename
+                      </DropdownMenuItem>
+                    ) : null}
                     <DropdownMenuItem onSelect={onFavorite}>
                       <Star
                         className={
@@ -1393,6 +1555,24 @@ function ActionMenuForm({
   );
 }
 
+/** Owners rename encrypted items once their names are revealed. */
+function isRenamable(entry: ResolvedEntry): boolean {
+  return (
+    entry.resolved &&
+    (entry.e2eeState === "encrypted" || entry.e2eeState === "legacy")
+  );
+}
+
+function isPreviewableImage(entry: ResolvedEntry, sectionKey: string): boolean {
+  return (
+    sectionKey !== "trash" &&
+    entry.entryType === "file" &&
+    entry.resolved &&
+    entry.kind === "Image" &&
+    (entry.e2eeState === "encrypted" || entry.e2eeState === "legacy")
+  );
+}
+
 function getIcon(entry: FileEntry) {
   if (entry.entryType === "folder") return Folder;
   if (entry.kind === "Image") return ImageIcon;
@@ -1413,6 +1593,36 @@ const selectionActionLabel = "sr-only sm:not-sr-only";
 function sharingActionLabel(entry: FileEntry): string {
   if (!hasManagedSharing(entry)) return "Share";
   return entry.e2eeState === "encrypted" ? "Manage sharing" : "Manage link";
+}
+
+async function requestLegacyRename(
+  entryId: string,
+  name: string,
+  csrfToken: string,
+): Promise<string> {
+  const response = await fetch(
+    `/api/files/${encodeURIComponent(entryId)}/rename`,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/json",
+        "X-CSRF-Token": csrfToken,
+      },
+      body: JSON.stringify({ name }),
+    },
+  );
+  if (response.status === 404) throw new Error("This item no longer exists.");
+  if (response.status === 409) {
+    throw new Error(`An item named “${name}” is already here.`);
+  }
+  if (!response.ok) throw new Error("The item could not be renamed.");
+  const payload = (await response.json()) as { name?: unknown };
+  if (typeof payload.name !== "string") {
+    throw new Error("The rename response was invalid.");
+  }
+  return payload.name;
 }
 
 async function requestFavorite(

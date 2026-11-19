@@ -25,9 +25,14 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
+  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Progress } from "@/components/ui/progress";
+import {
+  filesFromClipboard,
+  isPasteUploadTarget,
+} from "@/features/dashboard/clipboard-upload";
 import {
   type FolderUploadResolution,
   normalizeUploadPath,
@@ -1189,6 +1194,36 @@ function useUploadPanelController({
     submitFiles(pending.files, pending.ignoredFiles, pending.resolution, true);
   }
 
+  const handlePaste = useEffectEvent((event: ClipboardEvent) => {
+    if (event.defaultPrevented || !isPasteUploadTarget(event.target)) return;
+    const { files, skippedFolders } = filesFromClipboard(event.clipboardData);
+    if (files.length === 0) {
+      if (skippedFolders > 0) {
+        event.preventDefault();
+        setUploadError("Folders cannot be pasted. Use Upload folder instead.");
+      }
+      return;
+    }
+    event.preventDefault();
+    if (isBusy) {
+      setUploadError(
+        "Wait for the current upload to finish before pasting more files.",
+      );
+      return;
+    }
+    void handleSelection(
+      files.map((file) => ({ file, relativePath: file.name })),
+    );
+  });
+
+  useEffect(() => {
+    // A replacement takes one deliberately chosen file, never a paste.
+    if (replacementFileId) return;
+    const listener = (event: ClipboardEvent) => handlePaste(event);
+    document.addEventListener("paste", listener);
+    return () => document.removeEventListener("paste", listener);
+  }, [replacementFileId]);
+
   function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(event.currentTarget.files ?? []).map((file) => ({
       file,
@@ -1451,6 +1486,10 @@ function UploadPanelView({
               <FolderUp className="size-4" aria-hidden="true" />
               Upload folder
             </DropdownMenuItem>
+            <DropdownMenuSeparator />
+            <p className="px-2 py-1.5 text-xs text-muted-foreground">
+              Or paste files with {pasteShortcutLabel()}
+            </p>
           </DropdownMenuContent>
         </DropdownMenu>
       )}
@@ -1743,6 +1782,14 @@ function FolderUploadDecisionDialog({
       </DialogContent>
     </Dialog>
   );
+}
+
+// The menu content only renders in the browser, after it is opened.
+function pasteShortcutLabel() {
+  return typeof navigator !== "undefined" &&
+    /Mac|iPhone|iPad/u.test(navigator.platform)
+    ? "⌘V"
+    : "Ctrl+V";
 }
 
 function getBrowserRelativePath(file: File) {

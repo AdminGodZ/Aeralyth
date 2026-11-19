@@ -648,6 +648,30 @@ export function publishVaultUpload(
   );
 }
 
+/**
+ * Publishes a node's next record for its current generation, such as a
+ * rename. The server accepts it only on top of the head it was built from.
+ */
+export function publishVaultRecord(
+  csrfToken: string,
+  nodeId: string,
+  record: VaultNodeRecord,
+  signal?: AbortSignal,
+): Promise<VaultPublishResponse> {
+  const payload = encodeNodePublication([], record);
+  return runVaultUploadControl(
+    () =>
+      vaultBinaryMutation(
+        `/api/vault/nodes/${encodeURIComponent(nodeId)}/records`,
+        csrfToken,
+        payload,
+        signal,
+      ),
+    signal,
+    vaultPublishSlots,
+  );
+}
+
 export type VaultInlineUploadResult =
   | { published: VaultPublishResponse; failed?: undefined }
   | { published?: undefined; failed: { status: number; message: string } };
