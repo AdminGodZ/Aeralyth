@@ -34,8 +34,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Skeleton } from "@/components/ui/skeleton";
-import type { FolderArchiveProgress } from "@/features/files/folder-archive";
-import { FolderDownloadProgressPanel } from "@/features/files/folder-download-progress-panel";
+import {
+  type DownloadProgress,
+  DownloadProgressPanel,
+} from "@/features/files/download-progress-panel";
 import { applyFileListOverlay } from "@/features/realtime/file-list-overlay";
 import { useRealtimeMutation } from "@/features/realtime/realtime-provider";
 import { downloadEncryptedFile } from "@/features/vault/encrypted-download";
@@ -116,10 +118,11 @@ type FavoriteResponse = {
   favorite: boolean;
 };
 
-type FolderDownloadSession = {
-  folderId: string;
-  folderName: string;
-  progress: FolderArchiveProgress;
+type DownloadSession = {
+  entryId: string;
+  fileName: string;
+  kind: "file" | "folder";
+  progress: DownloadProgress;
 };
 
 const fileDateFormatter = new Intl.DateTimeFormat("en", {
@@ -140,19 +143,20 @@ type VaultFileListProps = {
 };
 
 export function VaultFileList(props: VaultFileListProps) {
-  const { cancelFolderDownload, folderDownloadSession, viewProps } =
+  const { cancelDownload, downloadSession, viewProps } =
     useVaultFileListController(props);
 
   return (
     <>
       <VaultFileListView {...viewProps} />
-      {folderDownloadSession ? (
+      {downloadSession ? (
         <div className="pointer-events-none fixed inset-x-4 bottom-4 z-40 flex justify-end sm:right-6 sm:bottom-6 sm:left-auto">
           <div className="pointer-events-auto">
-            <FolderDownloadProgressPanel
-              folderName={folderDownloadSession.folderName}
-              progress={folderDownloadSession.progress}
-              onCancel={cancelFolderDownload}
+            <DownloadProgressPanel
+              fileName={downloadSession.fileName}
+              kind={downloadSession.kind}
+              progress={downloadSession.progress}
+              onCancel={cancelDownload}
             />
           </div>
         </div>
@@ -189,9 +193,9 @@ function useVaultFileListController({
   );
   const [downloadId, setDownloadId] = useState<string | null>(null);
   const [downloadError, setDownloadError] = useState<string | null>(null);
-  const [folderDownloadSession, setFolderDownloadSession] =
-    useState<FolderDownloadSession | null>(null);
-  const folderDownloadAbortRef = useRef<AbortController | null>(null);
+  const [downloadSession, setDownloadSession] =
+    useState<DownloadSession | null>(null);
+  const downloadAbortRef = useRef<AbortController | null>(null);
   const activeDownloadIdRef = useRef<string | null>(null);
   const metadataCommitStartedAtRef = useRef<number | null>(null);
   const vaultStateRef = useRef(vault.state);
@@ -231,8 +235,8 @@ function useVaultFileListController({
 
   useEffect(
     () => () => {
-      folderDownloadAbortRef.current?.abort();
-      folderDownloadAbortRef.current = null;
+      downloadAbortRef.current?.abort();
+      downloadAbortRef.current = null;
     },
     [],
   );
@@ -240,8 +244,8 @@ function useVaultFileListController({
   useEffect(() => {
     const cancelForLock = () => {
       vaultStateRef.current = "locked";
-      folderDownloadAbortRef.current?.abort();
-      setFolderDownloadSession(null);
+      downloadAbortRef.current?.abort();
+      setDownloadSession(null);
       setPreviewId(null);
       setRenameEntry((current) =>
         current?.e2eeState === "encrypted" ? null : current,
@@ -254,8 +258,8 @@ function useVaultFileListController({
   useEffect(() => {
     vaultStateRef.current = vault.state;
     if (vault.state === "unlocked") return;
-    folderDownloadAbortRef.current?.abort();
-    setFolderDownloadSession(null);
+    downloadAbortRef.current?.abort();
+    setDownloadSession(null);
   }, [vault.state]);
 
   useEffect(() => {
@@ -699,11 +703,12 @@ function useVaultFileListController({
     if (entry.entryType === "folder") {
       if (!entry.resolved || !beginDownload(entry.id)) return;
       const controller = new AbortController();
-      folderDownloadAbortRef.current = controller;
+      downloadAbortRef.current = controller;
       setDownloadError(null);
-      setFolderDownloadSession({
-        folderId: entry.id,
-        folderName: entry.name,
+      setDownloadSession({
+        entryId: entry.id,
+        fileName: `${entry.name}.zip`,
+        kind: "folder",
         progress: { label: "Reading folder tree…", percentage: null },
       });
       try {
@@ -724,10 +729,11 @@ function useVaultFileListController({
           },
           signal: controller.signal,
           onProgress: (progress) => {
-            if (folderDownloadAbortRef.current !== controller) return;
-            setFolderDownloadSession({
-              folderId: entry.id,
-              folderName: entry.name,
+            if (downloadAbortRef.current !== controller) return;
+            setDownloadSession({
+              entryId: entry.id,
+              fileName: `${entry.name}.zip`,
+              kind: "folder",
               progress,
             });
           },
@@ -741,9 +747,9 @@ function useVaultFileListController({
           );
         }
       } finally {
-        if (folderDownloadAbortRef.current === controller) {
-          folderDownloadAbortRef.current = null;
-          setFolderDownloadSession(null);
+        if (downloadAbortRef.current === controller) {
+          downloadAbortRef.current = null;
+          setDownloadSession(null);
         }
         finishDownload(entry.id);
       }
@@ -756,16 +762,46 @@ function useVaultFileListController({
     )
       return;
     const controller = new AbortController();
-    folderDownloadAbortRef.current = controller;
+    downloadAbortRef.current = controller;
     setDownloadError(null);
+    const report = (progress: DownloadProgress) => {
+      if (downloadAbortRef.current !== controller) return;
+      setDownloadSession({
+        entryId: entry.id,
+        fileName: entry.name,
+        kind: "file",
+        progress,
+      });
+    };
+    report({ label: "Preparing download…", percentage: null });
     try {
       const plan = await getVaultDownloadPlan(entry.id, controller.signal);
       const manifest = await vault.openNode(entry.id, plan, controller.signal);
+      let lastPercentage = -1;
       await downloadEncryptedFile({
         plan,
         manifest,
         client: vault.client,
         signal: controller.signal,
+        onProgress: (value) => {
+          // One state update per whole percent keeps a large file from
+          // re-rendering the list for every 4 MiB chunk.
+          const percentage = Math.floor(value);
+          if (percentage === lastPercentage) return;
+          lastPercentage = percentage;
+          report(
+            // The last percent covers closing the file and handing it to
+            // the browser, which can take a moment for a large download.
+            percentage >= 99
+              ? { label: "Saving…", percentage }
+              : {
+                  label: `Downloading and decrypting… ${formatBytes(
+                    (manifest.plaintextBytes * percentage) / 100,
+                  )} of ${formatBytes(manifest.plaintextBytes)}`,
+                  percentage,
+                },
+          );
+        },
       });
     } catch (failure) {
       if (!isAbortError(failure)) {
@@ -776,16 +812,17 @@ function useVaultFileListController({
         );
       }
     } finally {
-      if (folderDownloadAbortRef.current === controller) {
-        folderDownloadAbortRef.current = null;
+      if (downloadAbortRef.current === controller) {
+        downloadAbortRef.current = null;
+        setDownloadSession(null);
       }
       finishDownload(entry.id);
     }
   }
 
-  function cancelFolderDownload(): void {
-    folderDownloadAbortRef.current?.abort();
-    setFolderDownloadSession(null);
+  function cancelDownload(): void {
+    downloadAbortRef.current?.abort();
+    setDownloadSession(null);
   }
 
   function beginDownload(entryId: string): boolean {
@@ -802,8 +839,8 @@ function useVaultFileListController({
   }
 
   return {
-    cancelFolderDownload,
-    folderDownloadSession,
+    cancelDownload,
+    downloadSession,
     viewProps: {
       csrfToken,
       currentUserId,
@@ -1447,7 +1484,7 @@ function VaultFileRow({
                     onSelect={onDownload}
                   >
                     <Download className="size-4" aria-hidden="true" />
-                    {downloading ? "Decrypting..." : "Download"}
+                    {downloading ? "Downloading…" : "Download"}
                   </DropdownMenuItem>
                 ) : (
                   <DropdownMenuItem asChild disabled={downloadBusy}>

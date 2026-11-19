@@ -1,6 +1,6 @@
 "use client";
 
-import { FolderArchive, LoaderCircle, X } from "lucide-react";
+import { FileDown, FolderArchive, LoaderCircle, X } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import { popupSurfaceClassName } from "@/components/ui/popup-surface";
@@ -8,17 +8,22 @@ import { Progress } from "@/components/ui/progress";
 import type { FolderArchiveProgress } from "@/features/files/folder-archive";
 import { cn } from "@/lib/utils";
 
-export function FolderDownloadProgressPanel({
-  folderName,
+export type DownloadProgress = FolderArchiveProgress;
+
+export function DownloadProgressPanel({
+  fileName,
+  kind,
   progress,
   onCancel,
 }: {
-  folderName: string;
-  progress: FolderArchiveProgress;
+  fileName: string;
+  kind: "file" | "folder";
+  progress: DownloadProgress;
   onCancel(): void;
 }) {
   const percentage = progress.percentage;
   const roundedPercentage = percentage === null ? null : Math.round(percentage);
+  const DoneIcon = kind === "folder" ? FolderArchive : FileDown;
 
   return (
     <div
@@ -28,17 +33,17 @@ export function FolderDownloadProgressPanel({
       )}
       role="status"
       aria-live="polite"
-      aria-label={`Preparing ${folderName} for download`}
+      aria-label={`Preparing ${fileName} for download`}
     >
       <span className="flex size-8 shrink-0 items-center justify-center rounded-full bg-primary/10 text-primary">
         {percentage === 100 ? (
-          <FolderArchive className="size-4" aria-hidden="true" />
+          <DoneIcon className="size-4" aria-hidden="true" />
         ) : (
           <LoaderCircle className="size-4 animate-spin" aria-hidden="true" />
         )}
       </span>
       <div className="min-w-0 flex-1">
-        <p className="truncate text-sm font-medium">{folderName}.zip</p>
+        <p className="truncate text-sm font-medium">{fileName}</p>
         <p className="mt-0.5 truncate text-xs text-muted-foreground">
           {progress.label}
         </p>
@@ -48,8 +53,8 @@ export function FolderDownloadProgressPanel({
             className="h-1 flex-1"
             aria-label={
               roundedPercentage === null
-                ? "Preparing folder download"
-                : `Folder download ${roundedPercentage}% complete`
+                ? "Preparing download"
+                : `Download ${roundedPercentage}% complete`
             }
           />
           <span className="min-w-8 shrink-0 text-right text-xs font-medium tabular-nums text-muted-foreground">
@@ -63,8 +68,8 @@ export function FolderDownloadProgressPanel({
         size="icon-sm"
         className="shrink-0 rounded-lg"
         onClick={onCancel}
-        aria-label="Cancel folder download"
-        title="Cancel folder download"
+        aria-label="Cancel download"
+        title="Cancel download"
       >
         <X className="size-4" aria-hidden="true" />
       </Button>
