@@ -16,6 +16,8 @@ import type {
   VaultMetadataOpenResult,
   VaultOpenPlanResult,
   VaultRecoveryResult,
+  VaultRenameInput,
+  VaultRenameResult,
   VaultResumeResult,
   VaultSetupResult,
   VaultShareDirectoryInput,
@@ -331,6 +333,13 @@ export class VaultCryptoClient {
     ).result;
   }
 
+  async renameNode(input: VaultRenameInput): Promise<VaultRenameResult> {
+    return expectResult(
+      await this.send({ type: "renameNode", input }),
+      "renameNode",
+    ).result;
+  }
+
   async clearShareContextCache(cacheKey: string): Promise<void> {
     expectResult(
       await this.send({ type: "clearShareContextCache", cacheKey }),
@@ -640,6 +649,14 @@ function isExpectedResult(
       );
     case "openPlan":
       return isObject(result) && isObject(result.manifest);
+    case "renameNode":
+      return (
+        isObject(result) &&
+        isObject(result.record) &&
+        isObject(result.manifest) &&
+        Number.isSafeInteger(result.recordVersion) &&
+        typeof result.recordHash === "string"
+      );
     case "finalizeEncryption":
       return (
         isObject(result) &&

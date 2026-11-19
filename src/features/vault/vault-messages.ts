@@ -119,6 +119,11 @@ export type VaultWorkerRequest =
     }
   | {
       id: number;
+      type: "renameNode";
+      input: VaultRenameInput;
+    }
+  | {
+      id: number;
       type: "clearShareContextCache";
       cacheKey: string;
     }
@@ -192,6 +197,23 @@ export type VaultEncryptionComplete = {
   ciphertextLength: number;
   chunkCount: number;
   record: VaultNodeRecord;
+};
+
+/** The owner's current head of a node, and the name its next record carries. */
+export type VaultRenameInput = {
+  plan: VaultMetadataPlan;
+  name: string;
+};
+
+/**
+ * The node's next record: the same generation, node key and ciphertext, with
+ * a re-encrypted manifest and a re-wrapped owner node key for the new version.
+ */
+export type VaultRenameResult = {
+  record: VaultNodeRecord;
+  recordVersion: number;
+  recordHash: string;
+  manifest: VaultManifest;
 };
 
 export type VaultShareDirectoryInput = {
@@ -334,6 +356,7 @@ export type VaultWorkerResult =
   | { type: "finalizeEncryption"; result: VaultEncryptionComplete }
   | { type: "abortEncryption" }
   | { type: "createShareDirectory"; result: VaultShareDirectoryResult }
+  | { type: "renameNode"; result: VaultRenameResult }
   | { type: "clearShareContextCache" }
   | { type: "startDecryption"; result: VaultDecryptionStart }
   | { type: "decryptChunk"; result: VaultDecryptedChunk }

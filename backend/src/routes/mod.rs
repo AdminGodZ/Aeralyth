@@ -162,6 +162,7 @@ pub fn configure(config: &mut web::ServiceConfig) {
                     web::post().to(files::toggle_favorite),
                 )
                 .route("/files/{id}/delete", web::post().to(files::delete))
+                .route("/files/{id}/rename", web::post().to(files::rename))
                 .route("/storage", web::get().to(files::storage))
                 .service(
                     web::scope("/vault")

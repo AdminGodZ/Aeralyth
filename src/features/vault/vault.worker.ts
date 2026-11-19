@@ -92,6 +92,8 @@ import type {
   VaultOpenPlanResult,
   VaultPasswordRewrapResult,
   VaultRecoveryResult,
+  VaultRenameInput,
+  VaultRenameResult,
   VaultResumeResult,
   VaultSetupResult,
   VaultShareDirectoryInput,
@@ -426,6 +428,13 @@ async function dispatch(
         ]),
       };
     }
+    case "renameNode":
+      return {
+        result: {
+          type: "renameNode",
+          result: await renameNode(request.input),
+        },
+      };
     case "clearShareContextCache":
       shareContextCache.delete(request.cacheKey);
       return { result: { type: "clearShareContextCache" } };
@@ -3550,6 +3559,151 @@ function nullableEqualBytes(
 ): boolean {
   if (left === null || right === null) return left === right;
   return equalBytes(left, right);
+}
+
+/**
+ * Builds a node's next record with a new name. The generation, node key and
+ * ciphertext stay as they are, so children wrapped under a folder's node key
+ * and the stored content remain valid; only the manifest is re-encrypted and
+ * the owner wrapper re-sealed for the new record version.
+ */
+async function renameNode(input: VaultRenameInput): Promise<VaultRenameResult> {
+  const sessionGeneration = vaultSessionGeneration;
+  const activeIdentity = requireIdentity();
+  const { plan } = input;
+  if (plan.share) {
+    throw vaultError("NOT_OWNER", "Only the owner can rename this item.");
+  }
+  const name = normalizeName(input.name);
+  const opened = await openAndVerifyPlanSingleFlight(plan);
+  const nodeKey = opened.nodeKey ?? nodeKeys.get(plan.nodeId) ?? null;
+  if (!nodeKey) throw new Error("The owner node key is unavailable.");
+  assertVaultSession(sessionGeneration);
+
+  const current = decodeBootstrap(fromBase64Url(plan.bootstrapCbor));
+  const ownerWrapper = plan.wrappers
+    .map((wrapper) => decodeWrapper(fromBase64Url(wrapper)))
+    .find((wrapper) => wrapper.kind === 1 || wrapper.kind === 2);
+  if (!ownerWrapper || ownerWrapper.nodeId !== plan.nodeId) {
+    throw vaultError(
+      "AUTHENTICATION_FAILED",
+      "No owner node-key wrapper is available.",
+    );
+  }
+
+  const recordVersion = plan.recordVersion + 1;
+  const purpose = nodeWrapperPurpose(ownerWrapper.kind, plan.nodeId);
+  const wrapperId = randomBytes(16);
+  let nodeMaterial: Uint8Array | null = null;
+  let wrapperCiphertext: Uint8Array | null = null;
+  let wrapperBytes: Uint8Array | null = null;
+  let manifestPlaintext: Uint8Array | null = null;
+  let manifestAad: Uint8Array | null = null;
+  let encryptedManifest: Uint8Array | null = null;
+  let completed = false;
+  const parentLease =
+    ownerWrapper.kind === 2 && ownerWrapper.parentNodeId
+      ? pinNodeKey(ownerWrapper.parentNodeId)
+      : null;
+  try {
+    const wrappingKey =
+      ownerWrapper.kind === 1 ? requireRootKey() : (parentLease?.value ?? null);
+    if (!wrappingKey) {
+      throw vaultError(
+        "PARENT_KEY_REQUIRED",
+        `Unlock the parent folder first:${ownerWrapper.parentNodeId ?? ""}`,
+      );
+    }
+    nodeMaterial = await decryptDerivedRecord(
+      wrappingKey,
+      ownerWrapper.wrapperId,
+      purpose,
+      toBase64Url(ownerWrapper.wrapperId),
+      ownerWrapper.recordVersion,
+      ownerWrapper.ciphertext,
+    );
+    if (nodeMaterial.length !== 32) {
+      throw new Error("The node key has an invalid length.");
+    }
+    wrapperCiphertext = await encryptDerivedRecord(
+      wrappingKey,
+      wrapperId,
+      purpose,
+      toBase64Url(wrapperId),
+      recordVersion,
+      nodeMaterial,
+    );
+    assertVaultSession(sessionGeneration);
+    wrapperBytes = encodeWrapper({
+      ...ownerWrapper,
+      wrapperId,
+      recordVersion,
+      ciphertext: wrapperCiphertext,
+    });
+
+    const manifest: VaultManifest = { ...opened.manifest, name };
+    manifestPlaintext = encodeManifest(manifest);
+    manifestAad = encodeRecordAad("manifest", plan.nodeId, recordVersion);
+    const manifestKey = await deriveAesKey(
+      nodeKey,
+      current.generationId,
+      `aeralyth/manifest/v1/${plan.nodeId}/${recordVersion}`,
+    );
+    encryptedManifest = new Uint8Array(
+      await crypto.subtle.encrypt(
+        {
+          name: "AES-GCM",
+          iv: asBufferSource(zeroNonce()),
+          additionalData: asBufferSource(manifestAad),
+          tagLength: 128,
+        },
+        manifestKey,
+        asBufferSource(manifestPlaintext),
+      ),
+    );
+    assertVaultSession(sessionGeneration);
+    const bootstrap: VaultBootstrapRecord = {
+      ...current,
+      manifestIv: zeroNonce(),
+      wrapperIds: [wrapperId],
+      signerKeyVersion: activeIdentity.keyVersion,
+      recordVersion,
+      previousRecordHash: fromBase64Url(plan.recordHash),
+      manifestHash: await sha256(encryptedManifest),
+      wrapperHashes: [await sha256(wrapperBytes)],
+    };
+    const bootstrapCbor = encodeBootstrap(bootstrap);
+    const bootstrapSignature = sodium.crypto_sign_detached(
+      bootstrapCbor,
+      activeIdentity.ed25519PrivateKey,
+    );
+    const recordHash = toBase64Url(
+      await sha256Parts(bootstrapCbor, bootstrapSignature),
+    );
+    assertVaultSession(sessionGeneration);
+    rememberMetadata({
+      status: "ready",
+      nodeId: plan.nodeId,
+      recordHash,
+      manifest,
+    });
+    completed = true;
+    return {
+      record: {
+        bootstrapCbor,
+        bootstrapSignature,
+        encryptedManifest,
+        wrappers: [wrapperBytes],
+      },
+      recordVersion,
+      recordHash,
+      manifest,
+    };
+  } finally {
+    parentLease?.release();
+    wipe(nodeMaterial, wrapperCiphertext, manifestPlaintext, manifestAad);
+    if (!completed) wipe(wrapperId, wrapperBytes, encryptedManifest);
+  }
 }
 
 function containsFixedHash(

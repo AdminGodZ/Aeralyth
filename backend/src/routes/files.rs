@@ -94,6 +94,8 @@ const FOLDER_MANIFEST_JSON_LIMIT: usize = 2 * 1024 * 1024;
 const TREE_MUTATION_BATCH_JSON_LIMIT: usize = 64 * 1024;
 const UPLOAD_CONTROL_JSON_LIMIT: usize = 64 * 1024;
 const UPLOAD_COMPLETION_JSON_LIMIT: usize = 4 * 1024 * 1024;
+const RENAME_JSON_LIMIT: usize = 4 * 1024;
+const MAX_DISPLAY_NAME_CHARS: usize = 180;
 
 #[derive(Deserialize)]
 pub(crate) struct FilesQuery {
@@ -260,6 +262,18 @@ struct TreeMutationBatchResponse {
     completed: Vec<String>,
     missing: Vec<String>,
     deferred: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct RenameRequest {
+    name: String,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RenameResponse {
+    file_id: String,
+    name: String,
 }
 
 #[derive(Serialize)]
@@ -3629,6 +3643,66 @@ fn validate_sha256_checksum(value: &str) -> Result<String> {
     Ok(checksum.to_owned())
 }
 
+/// Renames a file or folder that is not end-to-end encrypted. Encrypted names
+/// live in the vault record and change through a new record publication.
+pub async fn rename(
+    state: web::Data<AppState>,
+    request: HttpRequest,
+    path: web::Path<String>,
+    body: web::Payload,
+) -> Result<HttpResponse> {
+    let user = require_principal(&state, &request).await?;
+    require_header_csrf(&state, &request).await?;
+    let body = parse_json_body::<RenameRequest>(&request, body, RENAME_JSON_LIMIT).await?;
+    let name = validate_rename(&body.name).map_err(error::ErrorBadRequest)?;
+    let file_id = path.into_inner();
+
+    let updated = state
+        .db
+        .query_opt(
+            "
+                UPDATE files
+                SET original_name = $3,
+                    updated_at = now()
+                WHERE id = $1
+                  AND owner_id = $2
+                  AND state = 'active'
+                  AND e2ee_state = 'legacy'
+                RETURNING id
+            ",
+            &[&file_id, &user.id, &name],
+        )
+        .await;
+    match updated {
+        Ok(Some(_)) => Ok(HttpResponse::Ok().json(RenameResponse { file_id, name })),
+        Ok(None) => Ok(HttpResponse::NotFound().finish()),
+        Err(crate::db::DatabaseError::Postgres(failure))
+            if failure.code() == Some(&tokio_postgres::error::SqlState::UNIQUE_VIOLATION) =>
+        {
+            Ok(HttpResponse::Conflict().body("a folder with this name already exists here"))
+        }
+        Err(failure) => Err(crate::db::http_error(failure)),
+    }
+}
+
+/// Accepts a name only as it will be stored; nothing is silently rewritten.
+fn validate_rename(requested: &str) -> std::result::Result<String, &'static str> {
+    let name = requested.trim();
+    if name.is_empty() {
+        return Err("the name is empty");
+    }
+    if matches!(name, "." | "..") {
+        return Err("the name is reserved");
+    }
+    if name.contains(['/', '\\']) || name.chars().any(char::is_control) {
+        return Err("the name contains a path separator or control character");
+    }
+    if name.chars().count() > MAX_DISPLAY_NAME_CHARS {
+        return Err("the name is too long");
+    }
+    Ok(name.to_owned())
+}
+
 fn create_storage_name() -> Result<String> {
     let mut bytes = [0_u8; 24];
     getrandom::fill(&mut bytes).map_err(error::ErrorInternalServerError)?;
@@ -3791,8 +3865,39 @@ mod tests {
         MAX_FOLDER_ARCHIVE_BYTES, MAX_FOLDER_ARCHIVE_ENTRIES, OWNED_FOLDER_CONTEXT_QUERY,
         PlannedFolder, SHARED_FOLDER_CONTEXT_QUERY, UPLOAD_LENGTH_HEADER, UPLOAD_OFFSET_HEADER,
         decode_file_cursor, file_page_from_rows, local_upload_chunk, owned_listing_sql,
-        parse_download_version, plan_folder_manifest, sanitize_upload_path,
+        parse_download_version, plan_folder_manifest, sanitize_upload_path, validate_rename,
     };
+
+    #[test]
+    fn rename_accepts_only_names_it_stores_unchanged() {
+        assert_eq!(
+            validate_rename("  Report 2026.pdf "),
+            Ok("Report 2026.pdf".to_owned())
+        );
+        assert_eq!(validate_rename("Ünïcødé ✓"), Ok("Ünïcødé ✓".to_owned()));
+        for rejected in ["", "   ", ".", "..", "a/b", "a\\b", "tab\there", "nul\0"] {
+            assert!(
+                validate_rename(rejected).is_err(),
+                "{rejected:?} must be rejected"
+            );
+        }
+        assert!(validate_rename(&"x".repeat(180)).is_ok());
+        assert!(validate_rename(&"x".repeat(181)).is_err());
+    }
+
+    #[test]
+    fn rename_only_rewrites_active_legacy_rows_of_the_owner() {
+        let source = include_str!("files.rs");
+        let handler = source
+            .split_once("pub async fn rename(")
+            .and_then(|(_, tail)| tail.split_once("fn validate_rename("))
+            .map(|(handler, _)| handler)
+            .expect("rename handler should remain inspectable");
+        assert!(handler.contains("require_header_csrf(&state, &request)"));
+        assert!(handler.contains("AND owner_id = $2"));
+        assert!(handler.contains("AND state = 'active'"));
+        assert!(handler.contains("AND e2ee_state = 'legacy'"));
+    }
 
     #[test]
     fn folder_archive_authorizes_the_selected_subtree_for_owner_or_active_share() {
