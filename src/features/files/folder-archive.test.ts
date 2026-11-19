@@ -177,7 +177,7 @@ describe("folder archive manifest", () => {
     expect(source).toMatch(
       /import\(\s*"@\/features\/files\/folder-archive"\s*\)/u,
     );
-    expect(source).toContain("folderDownloadAbortRef.current?.abort()");
+    expect(source).toContain("downloadAbortRef.current?.abort()");
     expect(source).toContain("VAULT_LOCKING_EVENT");
     expect(source).toContain("activeDownloadIdRef");
     expect(source).toContain("isUnlocked:");
