@@ -1,6 +1,6 @@
 services:
   postgres:
-    image: postgres:latest
+    image: postgres:18
     container_name: aeralyth-audit-db-suite-20260912
     restart: "no"
     mem_limit: 1g
