@@ -62,8 +62,28 @@ export class VaultWorkerError extends Error {
   }
 }
 
+/**
+ * The parts of a dedicated worker the client uses. Browsers pass a Web Worker;
+ * the MCP server runs the same vault worker on a Node worker thread.
+ */
+export type VaultWorkerPort = {
+  addEventListener(
+    type: "message" | "error" | "messageerror",
+    listener: (event: { data?: unknown }) => void,
+  ): void;
+  postMessage(message: unknown, transfer: Transferable[]): void;
+  terminate(): void;
+};
+
+function startBrowserVaultWorker(): VaultWorkerPort {
+  return new Worker(VAULT_WORKER_URL, {
+    type: "module",
+    name: "aeralyth-vault",
+  });
+}
+
 export class VaultCryptoClient {
-  private readonly worker: Worker;
+  private readonly worker: VaultWorkerPort;
   private readonly pending = new Map<number, PendingRequest>();
   private nextId = 1;
   private closed = false;
@@ -71,19 +91,17 @@ export class VaultCryptoClient {
 
   constructor(
     private readonly onFatalError?: (error: VaultWorkerError) => void,
+    startWorker: () => VaultWorkerPort = startBrowserVaultWorker,
   ) {
     try {
-      this.worker = new Worker(VAULT_WORKER_URL, {
-        type: "module",
-        name: "aeralyth-vault",
-      });
+      this.worker = startWorker();
     } catch {
       throw new VaultWorkerError(
         "The vault worker could not start. Reload the page and unlock the vault again.",
         "WORKER_UNAVAILABLE",
       );
     }
-    this.worker.addEventListener("message", (event: MessageEvent<unknown>) => {
+    this.worker.addEventListener("message", (event) => {
       const response = event.data;
       if (this.closed) return;
       if (!isWorkerResponse(response)) {

@@ -22,7 +22,8 @@
   <a href="#architecture">Architecture</a> ·
   <a href="#quick-start">Quick start</a> ·
   <a href="#configuration">Configuration</a> ·
-  <a href="#deployment">Deployment</a>
+  <a href="#deployment">Deployment</a> ·
+  <a href="#agent-access-mcp">Agent access</a>
 </p>
 
 <br>
@@ -169,6 +170,35 @@ On [Railway](https://railway.com), migrations run as a pre-deploy command and a 
 - For the durable-tree migration, apply the full chain, then drain older API instances and workers before starting the new API.
 
 </details>
+
+<br>
+
+## Agent access (MCP)
+
+AI agents such as Claude Code and Claude Desktop can work with your vault through an [MCP](https://modelcontextprotocol.io) server that runs on your own machine. It is a full vault client: it signs in, unlocks the vault in a worker thread and encrypts and decrypts locally, so Aeralyth still only ever sees ciphertext. The agent can do whatever your account can, except delete permanently.
+
+| Tool                                    | What it does                                                               |
+| :-------------------------------------- | :------------------------------------------------------------------------- |
+| `list_folder`, `search`                 | Browse and find items by their decrypted names, including shared and trash |
+| `read_file`                             | Read text, or see PNG, JPEG, GIF and WebP images                           |
+| `download_file`, `upload`               | Move files or whole folders between the vault and this computer            |
+| `write_file`, `create_folder`, `rename` | Create and change items; replacing a file needs `overwrite`                |
+| `move_to_trash`, `restore_from_trash`   | Trash and restore; nothing is deleted permanently                          |
+
+```bash
+npm install && npm run mcp:build      # → .mcp-build/aeralyth-mcp.mjs (Node.js 22+)
+
+# Keep the password in the macOS keychain instead of a config file
+security add-generic-password -a "$USER" -s aeralyth-mcp -w
+
+claude mcp add aeralyth --scope user \
+  -e AERALYTH_URL=https://your-aeralyth.example \
+  -e AERALYTH_USERNAME=you \
+  -e AERALYTH_PASSWORD_COMMAND='security find-generic-password -s aeralyth-mcp -w' \
+  -- node "$PWD/.mcp-build/aeralyth-mcp.mjs"
+```
+
+For Claude Desktop or any other client, run the same `node …/aeralyth-mcp.mjs` command with those three variables. `AERALYTH_PASSWORD` works in place of the command where no keychain is available. The account's vault must already exist: sign in once in a browser first, which also hands you the recovery key.
 
 <br>
 
