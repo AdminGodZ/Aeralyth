@@ -29,6 +29,17 @@ export function putStorageObject({
   signal: AbortSignal;
   onProgress?(sentBytes: number): void;
 }): Promise<StoragePutResponse> {
+  // Outside a browser (the MCP server runs on Node) there is no XHR; fetch
+  // sends the same request and reports progress once storage accepts it.
+  if (typeof XMLHttpRequest === "undefined") {
+    return putStorageObjectWithFetch({
+      url,
+      body,
+      headers,
+      signal,
+      onProgress,
+    });
+  }
   return new Promise((resolve, reject) => {
     if (signal.aborted) {
       reject(abortReason(signal, ABORT_MESSAGE));
@@ -81,4 +92,50 @@ export function putStorageObject({
     signal.addEventListener("abort", abortRequest, { once: true });
     request.send(asBufferSource(body));
   });
+}
+
+async function putStorageObjectWithFetch({
+  url,
+  body,
+  headers,
+  signal,
+  onProgress,
+}: {
+  url: string;
+  body: Uint8Array;
+  headers: Record<string, string>;
+  signal: AbortSignal;
+  onProgress?(sentBytes: number): void;
+}): Promise<StoragePutResponse> {
+  if (signal.aborted) throw abortReason(signal, ABORT_MESSAGE);
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: "PUT",
+      headers,
+      body: asBufferSource(body),
+      signal,
+    });
+  } catch {
+    if (signal.aborted) throw abortReason(signal, ABORT_MESSAGE);
+    throw new UploadRequestError({
+      message: "The storage service could not be reached.",
+      networkFailure: true,
+    });
+  }
+  if (response.status < 200 || response.status >= 300) {
+    throw new UploadRequestError({
+      message: `Storage upload failed with status ${response.status}.`,
+      networkFailure: false,
+      responseBody: await response.text().catch(() => ""),
+      retryAfter: response.headers.get("Retry-After"),
+      status: response.status,
+    });
+  }
+  await response.body?.cancel().catch(() => undefined);
+  onProgress?.(body.byteLength);
+  return {
+    status: response.status,
+    getResponseHeader: (name) => response.headers.get(name),
+  };
 }

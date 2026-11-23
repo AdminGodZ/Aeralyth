@@ -51,6 +51,7 @@
     "db:bench:auth-principal": "bash database/tests/auth_principal_benchmark.sh",
     "build": "next build",
     "prebuild": "npm run worker:build",
+    "mcp:build": "node scripts/build-mcp.mjs",
     "worker:build": "node scripts/write-zip-assets.mjs && npm run worker:zip && npm run worker:checksum && npm run worker:vault && node scripts/write-worker-assets.mjs",
     "worker:checksum": "esbuild src/features/dashboard/upload-checksum.worker.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=.worker-build/upload-checksum.worker.js --minify --legal-comments=eof --sourcemap=external --sources-content=false --metafile=.worker-build/upload-checksum.meta.json",
     "worker:zip": "esbuild src/features/dashboard/folder-zip.worker.ts --bundle --format=esm --platform=browser --target=es2022 --outfile=.worker-build/folder-zip.worker.js --minify --legal-comments=eof --sourcemap=external --sources-content=false --metafile=.worker-build/folder-zip.meta.json",

@@ -128,4 +128,77 @@ describe("putStorageObject", () => {
     ).rejects.toBe(reason);
     expect(xhr.requests).toHaveLength(0);
   });
+  it("falls back to fetch where there is no XMLHttpRequest", async () => {
+    vi.stubGlobal("XMLHttpRequest", undefined);
+    const fetchMock = vi.fn(
+      async (_url: RequestInfo | URL, init?: RequestInit) =>
+        new Response(null, {
+          status: init?.method === "PUT" ? 200 : 500,
+          headers: { ETag: '"etag-1"' },
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const onProgress = vi.fn();
+    const body = new Uint8Array(4).fill(1);
+
+    const response = await putStorageObject({
+      url: "https://storage.invalid/part-1",
+      body,
+      headers: { "Content-Type": "application/octet-stream" },
+      signal: new AbortController().signal,
+      onProgress,
+    });
+
+    expect(fetchMock).toHaveBeenCalledOnce();
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe("https://storage.invalid/part-1");
+    expect(init).toMatchObject({
+      method: "PUT",
+      headers: { "Content-Type": "application/octet-stream" },
+    });
+    expect(response.status).toBe(200);
+    expect(response.getResponseHeader("etag")).toBe('"etag-1"');
+    expect(onProgress).toHaveBeenCalledWith(4);
+  });
+
+  it("classifies fetch fallback refusals and transport failures like XHR ones", async () => {
+    vi.stubGlobal("XMLHttpRequest", undefined);
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(
+        async () =>
+          new Response("slow down", {
+            status: 503,
+            headers: { "Retry-After": "2" },
+          }),
+      ),
+    );
+    const refused = putStorageObject({
+      url: "https://storage.invalid/part-1",
+      body: new Uint8Array(1),
+      headers: {},
+      signal: new AbortController().signal,
+    });
+    await expect(refused).rejects.toMatchObject({
+      status: 503,
+      responseBody: "slow down",
+      retryAfter: "2",
+      networkFailure: false,
+    });
+
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async () => {
+        throw new TypeError("fetch failed");
+      }),
+    );
+    const unreachable = putStorageObject({
+      url: "https://storage.invalid/part-1",
+      body: new Uint8Array(1),
+      headers: {},
+      signal: new AbortController().signal,
+    });
+    await expect(unreachable).rejects.toBeInstanceOf(UploadRequestError);
+    await expect(unreachable).rejects.toMatchObject({ networkFailure: true });
+  });
 });
