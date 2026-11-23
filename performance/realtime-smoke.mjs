@@ -129,8 +129,25 @@ try {
   sql(`INSERT INTO users (id, username, password_hash, role) VALUES ('${owner}', '${owner}', 'unused-test-password', 'user'), ('${other}', '${other}', 'unused-test-password', 'user');
     INSERT INTO sessions (id, user_id, token_hash, csrf_token, expires_at) VALUES
     ('${owner}', '${owner}', decode('${hash(token)}', 'hex'), '${prefix}', now() + interval '1 hour'),
-    ('${other}', '${other}', decode('${hash(otherToken)}', 'hex'), '${prefix}', now() + interval '1 hour');
-    SELECT realtime_dispatch();`);
+    ('${other}', '${other}', decode('${hash(otherToken)}', 'hex'), '${prefix}', now() + interval '1 hour');`);
+  // The fixture's own inserts queue profile and security changes. Publish them
+  // before any stream opens, or they reach the first stream as an extra
+  // security change next to the profile edit it waits for. realtime_dispatch()
+  // returns 0 without publishing while the API's dispatcher holds its lock, so
+  // wait until both users' outbox rows are committed as events.
+  const setupDeadline = performance.now() + 5000;
+  while (
+    sql(`SELECT realtime_dispatch();
+      SELECT count(*) FROM realtime_outbox WHERE user_id IN ('${owner}', '${other}');`)
+      .split("\n")
+      .at(-1) !== "0"
+  ) {
+    assert.ok(
+      performance.now() < setupDeadline,
+      "fixture changes were not published",
+    );
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
   assert.equal((await fetch(`${origin}/api/events`)).status, 401);
   assert.equal((await fetch(`${origin}/api/events/sync`)).status, 401);
   assert.equal((await sync(token, "invalid")).status, 400);
