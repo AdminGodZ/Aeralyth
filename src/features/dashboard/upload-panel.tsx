@@ -25,7 +25,6 @@ import {
   DropdownMenu,
   DropdownMenuContent,
   DropdownMenuItem,
-  DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Progress } from "@/components/ui/progress";
@@ -1486,10 +1485,6 @@ function UploadPanelView({
               <FolderUp className="size-4" aria-hidden="true" />
               Upload folder
             </DropdownMenuItem>
-            <DropdownMenuSeparator />
-            <p className="px-2 py-1.5 text-xs text-muted-foreground">
-              Or paste files with {pasteShortcutLabel()}
-            </p>
           </DropdownMenuContent>
         </DropdownMenu>
       )}
@@ -1782,14 +1777,6 @@ function FolderUploadDecisionDialog({
       </DialogContent>
     </Dialog>
   );
-}
-
-// The menu content only renders in the browser, after it is opened.
-function pasteShortcutLabel() {
-  return typeof navigator !== "undefined" &&
-    /Mac|iPhone|iPad/u.test(navigator.platform)
-    ? "⌘V"
-    : "Ctrl+V";
 }
 
 function getBrowserRelativePath(file: File) {
